@@ -29,14 +29,40 @@ const info = (arch = "amd64") => ({
   },
 });
 type Layer = Record<string, string | Uint8Array> | Uint8Array;
-const compressions = ["gzip", "zstd"] as const;
-const formats = ["tar", ...compressions] as const;
-type Format = (typeof formats)[number];
+type Compression = "gzip" | "zstd";
+type Format = "tar" | Compression;
+const compressions: Compression[] = ["gzip", "zstd"];
+const formats: Format[] = ["tar", ...compressions];
 const mediaTypes = {
   tar: "application/vnd.oci.image.layer.v1.tar",
   gzip: "application/vnd.oci.image.layer.v1.tar+gzip",
   zstd: "application/vnd.oci.image.layer.v1.tar+zstd",
 };
+type Descriptor = { mediaType: string | undefined; digest: string; size: number };
+type Manifest = {
+  schemaVersion: number;
+  mediaType: string;
+  config: Descriptor;
+  layers: Descriptor[];
+};
+type Legacy = { Config: string; Layers: string[] };
+type Index = { manifests: Descriptor[] };
+function need<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("fixture value missing");
+  return value;
+}
+function flipByte(bytes: Uint8Array, index: number, mask: number) {
+  bytes[index] = need(bytes.at(index)) ^ mask;
+}
+// Awaits a promise that must reject and returns the Error for message assertions.
+async function rejection(promise: Promise<unknown>) {
+  const error = await promise.then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  if (!(error instanceof Error)) throw new Error("expected a rejection with an Error");
+  return error;
+}
 function concat(...parts: Uint8Array[]) {
   const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
   let offset = 0;
@@ -46,11 +72,12 @@ function concat(...parts: Uint8Array[]) {
   }
   return bytes;
 }
-async function compressed(layer: Layer, format: (typeof compressions)[number]) {
-  const bytes = layer instanceof Uint8Array ? layer : await new Bun.Archive(layer).bytes();
+async function compressed(layer: Layer, format: Compression) {
+  const bytes =
+    layer instanceof Uint8Array ? new Uint8Array(layer) : await new Bun.Archive(layer).bytes();
   return format === "gzip" ? Bun.gzipSync(bytes) : Bun.zstdCompressSync(bytes);
 }
-async function encoded(layer: Layer, format: (typeof formats)[number]) {
+async function encoded(layer: Layer, format: Format) {
   return format === "tar"
     ? layer instanceof Uint8Array
       ? layer
@@ -75,7 +102,7 @@ async function saved(
   config: object | Uint8Array = {},
   metadata = info(),
   format: Format | Format[] = "tar",
-  modify?: (manifest: any, legacy: any[]) => void,
+  modify?: (manifest: Manifest, legacy: Legacy[]) => void,
   modifyArchive?: (entries: Record<string, string | Uint8Array>) => void,
 ) {
   const entries: Record<string, string | Uint8Array> = {};
@@ -89,12 +116,14 @@ async function saved(
     config instanceof Uint8Array ? config : JSON.stringify(config),
     "application/vnd.oci.image.config.v1+json",
   );
-  const descriptors = [];
+  const descriptors: Descriptor[] = [];
   for (const [index, layer] of layers.entries()) {
     const bytes = layer instanceof Uint8Array ? layer : await new Bun.Archive(layer).bytes();
-    descriptors.push(blob(bytes, mediaTypes[typeof format === "string" ? format : format[index]]));
+    descriptors.push(
+      blob(bytes, mediaTypes[typeof format === "string" ? format : need(format[index])]),
+    );
   }
-  const manifest = {
+  const manifest: Manifest = {
     schemaVersion: 2,
     mediaType: "application/vnd.oci.image.manifest.v1+json",
     config: configDescriptor,
@@ -140,7 +169,7 @@ test.each(supportedLayerTypes)(
   "declared layer media type %s selects its codec",
   async (mediaType, format) => {
     await saved([await encoded({ ok: "ok" }, format)], {}, info(), format, (manifest) => {
-      manifest.layers[0].mediaType = mediaType;
+      need(manifest.layers[0]).mediaType = mediaType;
     });
   },
 );
@@ -148,7 +177,7 @@ test("Docker schema2 manifest descriptors use declared gzip layers", async () =>
   await saved([await compressed({ ok: "ok" }, "gzip")], {}, info(), "gzip", (manifest) => {
     manifest.mediaType = "application/vnd.docker.distribution.manifest.v2+json";
     manifest.config.mediaType = "application/vnd.docker.container.image.v1+json";
-    manifest.layers[0].mediaType = "application/vnd.docker.image.rootfs.diff.tar.gzip";
+    need(manifest.layers[0]).mediaType = "application/vnd.docker.image.rootfs.diff.tar.gzip";
   });
 });
 test("mixed declared codecs and duplicate layer references remain ordered", async () => {
@@ -164,9 +193,11 @@ test.each(formats)("unknown or missing media type never falls back to %s magic",
   const secret = "ghp_" + "a".repeat(36);
   const bytes = await encoded({ ok: "ok" }, format);
   for (const mediaType of [undefined, "application/vnd.example.layer.tar+gzip", secret]) {
-    const error = await saved([bytes], {}, info(), format, (manifest) => {
-      manifest.layers[0].mediaType = mediaType;
-    }).catch((error) => error);
+    const error = await rejection(
+      saved([bytes], {}, info(), format, (manifest) => {
+        need(manifest.layers[0]).mediaType = mediaType;
+      }),
+    );
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toContain("unsupported layer media type");
     expect(error.message).toContain("magic=");
@@ -178,36 +209,37 @@ const mismatchedCodecs = formats.flatMap((actual) =>
   formats.filter((declared) => declared !== actual).map((declared) => [actual, declared] as const),
 );
 test.each(mismatchedCodecs)("reject %s bytes declared as %s", async (actual, declared) => {
-  await expect(saved([await encoded({ ok: "ok" }, actual)], {}, info(), declared)).rejects.toThrow(
-    declared === "tar" ? "layer archive listing failed" : "layer decompression failed",
-  );
+  expect(
+    (await rejection(saved([await encoded({ ok: "ok" }, actual)], {}, info(), declared))).message,
+  ).toContain(declared === "tar" ? "layer archive listing failed" : "layer decompression failed");
 });
-const metadataMutations: [string, (manifest: any, legacy: any[]) => void, string][] = [
+const metadataMutations: [string, (manifest: Manifest, legacy: Legacy[]) => void, string][] = [
   [
     "config reference",
     (_m, legacy) => {
-      legacy[0].Config = "wrong-config";
+      need(legacy[0]).Config = "wrong-config";
     },
     "references disagree",
   ],
   [
     "layer order",
     (_m, legacy) => {
-      legacy[0].Layers.reverse();
+      need(legacy[0]).Layers.reverse();
     },
     "references disagree",
   ],
   [
     "missing legacy layer",
     (_m, legacy) => {
-      legacy[0].Layers.pop();
+      need(legacy[0]).Layers.pop();
     },
     "references disagree",
   ],
   [
     "extra legacy layer",
     (_m, legacy) => {
-      legacy[0].Layers.push(legacy[0].Layers[0]);
+      const layers = need(legacy[0]).Layers;
+      layers.push(need(layers[0]));
     },
     "references disagree",
   ],
@@ -235,7 +267,7 @@ const metadataMutations: [string, (manifest: any, legacy: any[]) => void, string
   [
     "layer size",
     (m) => {
-      m.layers[0].size += 1;
+      need(m.layers[0]).size += 1;
     },
     "descriptor content mismatch",
   ],
@@ -249,34 +281,37 @@ const metadataMutations: [string, (manifest: any, legacy: any[]) => void, string
   [
     "invalid digest",
     (m) => {
-      m.layers[0].digest = "sha256:not-a-digest";
+      need(m.layers[0]).digest = "sha256:not-a-digest";
     },
     "invalid saved image descriptor digest",
   ],
 ];
 test.each(metadataMutations)("reject OCI metadata mismatch: %s", async (_name, mutate, message) => {
-  await expect(
-    saved([{ first: "ok" }, { second: "ok" }], {}, info(), "tar", mutate),
-  ).rejects.toThrow(message);
+  expect(
+    (await rejection(saved([{ first: "ok" }, { second: "ok" }], {}, info(), "tar", mutate)))
+      .message,
+  ).toContain(message);
 });
 test.each(["manifest", "config", "layer"] as const)(
   "reject corrupted %s descriptor content",
   async (target) => {
-    await expect(
-      saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
-        const index = JSON.parse(entries["index.json"] as string);
-        const manifestName = "blobs/sha256/" + index.manifests[0].digest.slice(7);
-        const manifest = JSON.parse(new TextDecoder().decode(entries[manifestName] as Uint8Array));
-        const name =
-          target === "manifest"
-            ? manifestName
-            : "blobs/sha256/" +
-              (target === "config" ? manifest.config.digest : manifest.layers[0].digest).slice(7);
-        const bytes = (entries[name] as Uint8Array).slice();
-        bytes[0] ^= 1;
-        entries[name] = bytes;
-      }),
-    ).rejects.toThrow("descriptor content mismatch");
+    const corrupt = (entries: Record<string, string | Uint8Array>) => {
+      const index = JSON.parse(entries["index.json"] as string) as Index;
+      const manifestName = "blobs/sha256/" + need(index.manifests[0]).digest.slice(7);
+      const manifest = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+          entries[manifestName] as Uint8Array,
+        ),
+      ) as Manifest;
+      const descriptor = target === "config" ? manifest.config : need(manifest.layers[0]);
+      const name =
+        target === "manifest" ? manifestName : "blobs/sha256/" + descriptor.digest.slice(7);
+      const bytes = (entries[name] as Uint8Array).slice();
+      flipByte(bytes, 0, 1);
+      entries[name] = bytes;
+    };
+    const error = await rejection(saved([{ ok: "ok" }], {}, info(), "tar", undefined, corrupt));
+    expect(error.message).toContain("descriptor content mismatch");
   },
 );
 const archiveMutations: [string, (entries: Record<string, string | Uint8Array>) => void, string][] =
@@ -306,7 +341,7 @@ const archiveMutations: [string, (entries: Record<string, string | Uint8Array>) 
     [
       "empty index",
       (entries) => {
-        const index = JSON.parse(entries["index.json"] as string);
+        const index = JSON.parse(entries["index.json"] as string) as Index;
         index.manifests = [];
         entries["index.json"] = JSON.stringify(index);
       },
@@ -315,8 +350,8 @@ const archiveMutations: [string, (entries: Record<string, string | Uint8Array>) 
     [
       "multiple manifests",
       (entries) => {
-        const index = JSON.parse(entries["index.json"] as string);
-        index.manifests.push(index.manifests[0]);
+        const index = JSON.parse(entries["index.json"] as string) as Index;
+        index.manifests.push(need(index.manifests[0]));
         entries["index.json"] = JSON.stringify(index);
       },
       "expected one saved image OCI manifest",
@@ -324,8 +359,8 @@ const archiveMutations: [string, (entries: Record<string, string | Uint8Array>) 
     [
       "index descriptor size",
       (entries) => {
-        const index = JSON.parse(entries["index.json"] as string);
-        index.manifests[0].size += 1;
+        const index = JSON.parse(entries["index.json"] as string) as Index;
+        need(index.manifests[0]).size += 1;
         entries["index.json"] = JSON.stringify(index);
       },
       "descriptor content mismatch",
@@ -333,23 +368,25 @@ const archiveMutations: [string, (entries: Record<string, string | Uint8Array>) 
     [
       "index/manifest media type",
       (entries) => {
-        const index = JSON.parse(entries["index.json"] as string);
-        index.manifests[0].mediaType = "application/vnd.docker.distribution.manifest.v2+json";
+        const index = JSON.parse(entries["index.json"] as string) as Index;
+        need(index.manifests[0]).mediaType = "application/vnd.docker.distribution.manifest.v2+json";
         entries["index.json"] = JSON.stringify(index);
       },
       "invalid saved image OCI manifest",
     ],
   ];
 test.each(archiveMutations)("reject saved archive metadata: %s", async (_name, mutate, message) => {
-  await expect(saved([{ ok: "ok" }], {}, info(), "tar", undefined, mutate)).rejects.toThrow(
-    message,
-  );
+  expect(
+    (await rejection(saved([{ ok: "ok" }], {}, info(), "tar", undefined, mutate))).message,
+  ).toContain(message);
 });
 test("malformed metadata diagnostics withhold private input", async () => {
   const secret = "ghp_" + "a".repeat(36);
-  const error = await saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
-    entries["index.json"] = secret;
-  }).catch((error) => error);
+  const error = await rejection(
+    saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
+      entries["index.json"] = secret;
+    }),
+  );
   expect(error).toBeInstanceOf(Error);
   expect(error.message).toContain("invalid saved image metadata; content withheld");
   expect(error.message).not.toContain(secret);
@@ -358,11 +395,15 @@ const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
 test.each(["manifest.json", "oci-layout", "index.json"])(
   "reject a leading BOM in saved %s",
   async (name) => {
-    await expect(
-      saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
-        entries[name] = concat(bom, new TextEncoder().encode(entries[name] as string));
-      }),
-    ).rejects.toThrow("invalid saved image metadata; content withheld");
+    expect(
+      (
+        await rejection(
+          saved([{ ok: "ok" }], {}, info(), "tar", undefined, (entries) => {
+            entries[name] = concat(bom, new TextEncoder().encode(entries[name] as string));
+          }),
+        )
+      ).message,
+    ).toContain("invalid saved image metadata; content withheld");
   },
 );
 test.each([
@@ -370,7 +411,7 @@ test.each([
   ["invalid UTF-8", new Uint8Array([0x7b, 0xff, 0x7d])],
   ["non-JSON text", new TextEncoder().encode("not json")],
 ])("reject image config with %s", async (_name, config) => {
-  await expect(saved([{ ok: "ok" }], config)).rejects.toThrow(
+  expect((await rejection(saved([{ ok: "ok" }], config))).message).toContain(
     "invalid saved image metadata; content withheld",
   );
 });
@@ -393,13 +434,13 @@ test.each([
 ])("reject image inspection with %s", async (_name, bytes, message) => {
   await saved([{ ok: "ok" }]);
   await writeFile(join(root, "info.json"), bytes);
-  await expect(
-    scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64"),
-  ).rejects.toThrow(message);
+  expect(
+    (await rejection(scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64"))).message,
+  ).toContain(message);
 });
 test.each(compressions)("reject truncated %s layer", async (format) => {
   const bytes = await compressed({ ok: "ok" }, format);
-  await expect(saved([bytes.subarray(0, 8)], {}, info(), format)).rejects.toThrow(
+  expect((await rejection(saved([bytes.subarray(0, 8)], {}, info(), format))).message).toContain(
     "layer decompression failed",
   );
 });
@@ -408,7 +449,9 @@ test.each(compressions)("reject trailing garbage after %s layer", async (format)
   const corrupt = new Uint8Array(bytes.length + 4);
   corrupt.set(bytes);
   corrupt.set([1, 2, 3, 4], bytes.length);
-  await expect(saved([corrupt], {}, info(), format)).rejects.toThrow("layer decompression failed");
+  expect((await rejection(saved([corrupt], {}, info(), format))).message).toContain(
+    "layer decompression failed",
+  );
 });
 test.each(compressions)(
   "reject NUL padding and credential tails after %s layer",
@@ -420,7 +463,7 @@ test.each(compressions)(
       new Uint8Array([0, 1, 2, 3, 4]),
       new TextEncoder().encode("\0" + secret),
     ]) {
-      const error = await saved([concat(layer, tail)], {}, info(), format).catch((error) => error);
+      const error = await rejection(saved([concat(layer, tail)], {}, info(), format));
       expect(error).toBeInstanceOf(Error);
       expect(error.message).toContain("layer decompression failed");
       expect(error.message).not.toContain(secret);
@@ -430,7 +473,7 @@ test.each(compressions)(
 test.each(formats)("reject env symlink after EOF in concatenated %s archives", async (format) => {
   const first = await encoded({ ok: "ok" }, format);
   const second = await encoded(await envSymlinkLayer(), format);
-  await expect(saved([concat(first, second)], {}, info(), format)).rejects.toThrow(
+  expect((await rejection(saved([concat(first, second)], {}, info(), format))).message).toContain(
     "environment file",
   );
 });
@@ -445,27 +488,30 @@ test.each(formats)("scan valid concatenated %s archives", async (format) => {
 test.each(formats)("reject credential after EOF in concatenated %s archives", async (format) => {
   const first = await encoded({ ok: "ok" }, format);
   const second = await encoded({ token: "ghp_" + "a".repeat(36) }, format);
-  await expect(saved([concat(first, second)], {}, info(), format)).rejects.toThrow(
+  expect((await rejection(saved([concat(first, second)], {}, info(), format))).message).toContain(
     "credential/DB URL pattern found",
   );
 });
 test.each(formats)("reject malformed decoded tail after EOF in %s layer", async (format) => {
   const bytes = await new Bun.Archive({ ok: "ok" }).bytes();
   for (const tail of [new TextEncoder().encode("bad tail"), new Uint8Array(512).fill(1)]) {
-    await expect(
-      saved([await encoded(concat(bytes, tail), format)], {}, info(), format),
-    ).rejects.toThrow("layer archive listing failed");
+    expect(
+      (await rejection(saved([await encoded(concat(bytes, tail), format)], {}, info(), format)))
+        .message,
+    ).toContain("layer archive listing failed");
   }
 });
 test.each(compressions)("reject corrupt %s layer checksum/frame", async (format) => {
   const bytes = await compressed({ ok: "ok" }, format);
-  bytes[bytes.length - 1] ^= 0xff;
-  await expect(saved([bytes], {}, info(), format)).rejects.toThrow("layer decompression failed");
+  flipByte(bytes, bytes.length - 1, 0xff);
+  expect((await rejection(saved([bytes], {}, info(), format))).message).toContain(
+    "layer decompression failed",
+  );
 });
 test("unknown layer format fails with bounded safe diagnostics", async () => {
   const bytes = new Uint8Array([1, 2, 3, 4]);
   const layerName = "blobs/sha256/" + new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-  const error = await saved([bytes]).catch((error) => error);
+  const error = await rejection(saved([bytes]));
   expect(error).toBeInstanceOf(Error);
   expect(error.message).toContain("layer archive listing failed");
   expect(error.message).toContain(`layer 0 (${layerName})`);
@@ -476,15 +522,11 @@ test("unknown layer format fails with bounded safe diagnostics", async () => {
 });
 test("layer identity never echoes an untrusted credential-bearing path", async () => {
   const secret = "ghp_" + "a".repeat(36);
-  const error = await saved(
-    [new Uint8Array([1, 2, 3, 4])],
-    {},
-    info(),
-    "tar",
-    (_manifest, legacy) => {
-      legacy[0].Layers[0] = secret;
-    },
-  ).catch((error) => error);
+  const error = await rejection(
+    saved([new Uint8Array([1, 2, 3, 4])], {}, info(), "tar", (_manifest, legacy) => {
+      need(legacy[0]).Layers[0] = secret;
+    }),
+  );
   expect(error).toBeInstanceOf(Error);
   expect(error.message).toContain("references disagree");
   expect(error.message).toContain("content withheld");
@@ -525,12 +567,9 @@ test.each(["tar", ...compressions] as const)(
     ]);
     expect(await listing.exited).not.toBe(0);
     expect(stderr).toContain(secret); // Prove that GNU tar itself emits the fixture credential.
-    const error = await saved(
-      [format === "tar" ? broken : await compressed(broken, format)],
-      {},
-      info(),
-      format,
-    ).catch((error) => error);
+    const error = await rejection(
+      saved([format === "tar" ? broken : await compressed(broken, format)], {}, info(), format),
+    );
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toContain("layer archive listing failed");
     expect(error.message).toContain("stderr prefix:");
@@ -541,80 +580,114 @@ test.each(["tar", ...compressions] as const)(
   },
 );
 test("reject mismatched architecture", () => {
-  expect(() => verifyMetadata(info(), "arm64")).toThrow("native Linux");
+  expect(() => {
+    verifyMetadata(info(), "arm64");
+  }).toThrow("native Linux");
 });
 test("reject root default", () => {
   const metadata = info();
   metadata.Config.User = "0:0";
-  expect(() => verifyMetadata(metadata, "amd64")).toThrow("1000:1000");
+  expect(() => {
+    verifyMetadata(metadata, "amd64");
+  }).toThrow("1000:1000");
 });
 test("reject missing source label", () => {
   const metadata = info();
   metadata.Config.Labels["org.opencontainers.image.source"] = "";
-  expect(() => verifyMetadata(metadata, "amd64")).toThrow("source label");
+  expect(() => {
+    verifyMetadata(metadata, "amd64");
+  }).toThrow("source label");
 });
 test("reject sensitive env key", () => {
   const metadata = info();
   metadata.Config.Env.push("GITHUB_TOKEN=arbitrary-value");
-  expect(() => verifyMetadata(metadata, "amd64")).toThrow("environment key");
+  expect(() => {
+    verifyMetadata(metadata, "amd64");
+  }).toThrow("environment key");
 });
 test("reject DB configuration in history", async () => {
-  await expect(
-    saved([{ ok: "ok" }], { history: [{ created_by: "ENV URL=postgresql://host/db" }] }),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved([{ ok: "ok" }], { history: [{ created_by: "ENV URL=postgresql://host/db" }] }),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test("reject deleted lower-layer credential", async () => {
-  await expect(
-    saved([{ "tmp/token": "ghp_" + "a".repeat(36) }, { "tmp/.wh.token": "" }]),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (await rejection(saved([{ "tmp/token": "ghp_" + "a".repeat(36) }, { "tmp/.wh.token": "" }])))
+      .message,
+  ).toContain("content withheld");
 });
 test.each(compressions)("reject deleted credential in a %s lower layer", async (format) => {
-  await expect(
-    saved(
-      [
-        await compressed({ "tmp/token": "ghp_" + "a".repeat(36) }, format),
-        await compressed({ "tmp/.wh.token": "" }, format),
-      ],
-      {},
-      info(),
-      format,
-    ),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved(
+          [
+            await compressed({ "tmp/token": "ghp_" + "a".repeat(36) }, format),
+            await compressed({ "tmp/.wh.token": "" }, format),
+          ],
+          {},
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test.each(compressions)("reject DB config with %s layers", async (format) => {
-  await expect(
-    saved(
-      [await compressed({ ok: "ok" }, format)],
-      {
-        history: [{ created_by: "ENV URL=postgresql://host/db" }],
-      },
-      info(),
-      format,
-    ),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved(
+          [await compressed({ ok: "ok" }, format)],
+          {
+            history: [{ created_by: "ENV URL=postgresql://host/db" }],
+          },
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test.each(compressions)("reject env file in a %s layer", async (format) => {
-  await expect(
-    saved([await compressed({ "home/ci/.env.production": "KEY=x" }, format)], {}, info(), format),
-  ).rejects.toThrow("environment file");
+  expect(
+    (
+      await rejection(
+        saved(
+          [await compressed({ "home/ci/.env.production": "KEY=x" }, format)],
+          {},
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("environment file");
 });
 test.each(compressions)("reject DB URL in %s text", async (format) => {
-  await expect(
-    saved(
-      [await compressed({ "etc/app.conf": "URL=redis://private-host:6379" }, format)],
-      {},
-      info(),
-      format,
-    ),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved(
+          [await compressed({ "etc/app.conf": "URL=redis://private-host:6379" }, format)],
+          {},
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test.each(["root/.env", "home/ci/.env.production"])("reject env file %s", async (name) => {
-  await expect(saved([{ [name]: "KEY=x" }])).rejects.toThrow("environment file");
+  expect((await rejection(saved([{ [name]: "KEY=x" }]))).message).toContain("environment file");
 });
 test("reject DB URL in text", async () => {
-  await expect(saved([{ "etc/app.conf": "URL=redis://private-host:6379" }])).rejects.toThrow(
-    "content withheld",
-  );
+  expect(
+    (await rejection(saved([{ "etc/app.conf": "URL=redis://private-host:6379" }]))).message,
+  ).toContain("content withheld");
 });
 test("allow compiled protocol literals", async () => {
   await saved([
@@ -622,14 +695,19 @@ test("allow compiled protocol literals", async () => {
   ]);
 });
 test("reject token in a binary", async () => {
-  await expect(
-    saved([{ "usr/bin/tool": new TextEncoder().encode("\0ghp_" + "a".repeat(36)) }]),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved([{ "usr/bin/tool": new TextEncoder().encode("\0ghp_" + "a".repeat(36)) }]),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test("reject token across stream boundary", async () => {
-  await expect(
-    saved([{ "tmp/text": "x".repeat(64 * 1024 - 2) + "ghp_" + "a".repeat(36) }]),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (await rejection(saved([{ "tmp/text": "x".repeat(64 * 1024 - 2) + "ghp_" + "a".repeat(36) }])))
+      .message,
+  ).toContain("content withheld");
 });
 test.each(compressions)("scan binary literals and credentials in %s layers", async (format) => {
   await saved(
@@ -638,32 +716,41 @@ test.each(compressions)("scan binary literals and credentials in %s layers", asy
     info(),
     format,
   );
-  await expect(
-    saved(
-      [await compressed({ tool: new TextEncoder().encode("\0ghp_" + "a".repeat(36)) }, format)],
-      {},
-      info(),
-      format,
-    ),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved(
+          [await compressed({ tool: new TextEncoder().encode("\0ghp_" + "a".repeat(36)) }, format)],
+          {},
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test.each(compressions)("reject token across a %s stream boundary", async (format) => {
-  await expect(
-    saved(
-      [await compressed({ text: "x".repeat(64 * 1024 - 2) + "ghp_" + "a".repeat(36) }, format)],
-      {},
-      info(),
-      format,
-    ),
-  ).rejects.toThrow("content withheld");
+  expect(
+    (
+      await rejection(
+        saved(
+          [await compressed({ text: "x".repeat(64 * 1024 - 2) + "ghp_" + "a".repeat(36) }, format)],
+          {},
+          info(),
+          format,
+        ),
+      )
+    ).message,
+  ).toContain("content withheld");
 });
 test.each(formats)("reject env symlink in %s layer", async (format) => {
-  await expect(
-    saved([await encoded(await envSymlinkLayer(), format)], {}, info(), format),
-  ).rejects.toThrow("environment file");
+  expect(
+    (await rejection(saved([await encoded(await envSymlinkLayer(), format)], {}, info(), format)))
+      .message,
+  ).toContain("environment file");
 });
 test("reject missing saved layers", async () => {
-  await expect(saved([])).rejects.toThrow("saved image");
+  expect((await rejection(saved([]))).message).toContain("saved image");
 });
 test("summary includes apt timing, cache and actual size", () => {
   const result = buildSummary(
@@ -675,123 +762,160 @@ test("summary includes apt timing, cache and actual size", () => {
   expect(result).toContain("123 bytes");
 });
 
-const workflow: any = Bun.YAML.parse(
+type Step = {
+  uses?: string;
+  run?: string;
+  if?: string;
+  env?: Record<string, string>;
+  "continue-on-error"?: boolean;
+};
+type Job = {
+  if?: string;
+  permissions?: Record<string, string>;
+  strategy?: { matrix: { arch: string[] } };
+  steps: Step[];
+};
+type Workflow = {
+  on: { push: { branches: string[]; paths: string[] }; pull_request: { paths: string[] } };
+  permissions: Record<string, string>;
+  jobs: { build: Job; push: Job; "push-manifest": Job };
+};
+const workflow = Bun.YAML.parse(
   await Bun.file(new URL("../../.github/workflows/ci-base-image.yml", import.meta.url)).text(),
-);
+) as Workflow;
 test("current workflow obeys publication policy", () => {
   verifyWorkflow(workflow);
 });
-const mutations: [string, (data: any) => void][] = [
+const mutations: [string, (data: Workflow) => void, string][] = [
   [
     "default write",
     (d) => {
       d.permissions.packages = "write";
     },
+    "read-only default permissions required",
   ],
   [
     "PR write",
     (d) => {
       d.jobs.build.permissions = { packages: "write" };
     },
+    "invalid job token permissions",
   ],
   [
     "unguarded push",
     (d) => {
       d.jobs.push.if = "always()";
     },
+    "invalid publication/build condition",
   ],
   [
     "unguarded manifest",
     (d) => {
       d.jobs["push-manifest"].if = "always()";
     },
+    "invalid publication/build condition",
   ],
   [
     "contents write",
     (d) => {
-      d.jobs["push-manifest"].permissions.contents = "write";
+      need(d.jobs["push-manifest"].permissions).contents = "write";
     },
+    "invalid job token permissions",
   ],
   [
     "any branch",
     (d) => {
       d.on.push.branches = ["*"];
     },
+    "push must target main",
   ],
   [
     "unrelated filter",
     (d) => {
       d.on.pull_request.paths = ["other/**"];
     },
+    "image edits must trigger builds",
   ],
   [
     "only x64",
     (d) => {
-      d.jobs.build.strategy.matrix.arch = ["amd64"];
+      need(d.jobs.build.strategy).matrix.arch = ["amd64"];
     },
+    "both images/architectures must build natively",
   ],
   [
     "new action",
     (d) => {
       d.jobs.build.steps.push({ uses: "docker/setup-qemu-action@v3" });
     },
+    "no new actions allowed",
   ],
   [
     "ignore failure",
     (d) => {
       d.jobs.build.steps.push({ run: "true", "continue-on-error": true });
     },
+    "steps must fail closed",
   ],
   [
     "inline token",
     (d) => {
       d.jobs.build.steps.push({ run: "echo '${{ github.token }}'" });
     },
+    "token must use github.token via env",
   ],
   [
     "secrets token",
     (d) => {
-      d.jobs.build.steps[2].env.GHCR_TOKEN = "${{ secrets.GITHUB_TOKEN }}";
+      need(need(d.jobs.build.steps[2]).env).GHCR_TOKEN = "${{ secrets.GITHUB_TOKEN }}";
     },
+    "token must use github.token via env",
   ],
   [
     "skip native build",
     (d) => {
-      d.jobs.build.steps[3].if = "false";
+      need(d.jobs.build.steps[3]).if = "false";
     },
+    "native build step may not be skipped",
   ],
   [
     "inline Python",
     (d) => {
       d.jobs.build.steps.push({ run: "python3 -c 'print(1)'" });
     },
+    "no new Python, gha cache or QEMU",
   ],
   [
     "gha cache",
     (d) => {
       d.jobs.build.steps.push({ run: "docker buildx build --cache-to type=gha ." });
     },
+    "no new Python, gha cache or QEMU",
   ],
 ];
-test.each(mutations)("reject workflow mutation: %s", (_name, mutate) => {
+test.each(mutations)("reject workflow mutation: %s", (_name, mutate, message) => {
   const data = structuredClone(workflow);
   mutate(data);
-  expect(() => verifyWorkflow(data)).toThrow();
+  expect(() => {
+    verifyWorkflow(data);
+  }).toThrow(message);
 });
 // A scalar is not a list: substring matches on a string and per-character
 // iteration over a step string must not satisfy the list policies.
-const scalarMutations: [string, (data: any) => void, string][] = [
+const scalarMutations: [string, (data: Workflow) => void, string][] = [
   [
     "trigger paths as one string",
     (d) => {
-      d.on.push.paths = "docker/ci-base/** .github/workflows/ci-base-image.yml tools/ci/**";
+      const push: Record<string, unknown> = d.on.push;
+      push.paths = "docker/ci-base/** .github/workflows/ci-base-image.yml tools/ci/**";
     },
     "image edits must trigger builds",
   ],
   [
     "job steps as one string",
     (d) => {
-      d.jobs.build.steps = "run: python3 -c 'print(1)'";
+      const build: Record<string, unknown> = d.jobs.build;
+      build.steps = "run: python3 -c 'print(1)'";
     },
     "image job steps must be a list",
   ],
@@ -799,7 +923,9 @@ const scalarMutations: [string, (data: any) => void, string][] = [
 test.each(scalarMutations)("reject scalar workflow list: %s", (_name, mutate, message) => {
   const data = structuredClone(workflow);
   mutate(data);
-  expect(() => verifyWorkflow(data)).toThrow(message);
+  expect(() => {
+    verifyWorkflow(data);
+  }).toThrow(message);
 });
 const digest = "sha256:" + "a".repeat(64),
   second = "sha256:" + "b".repeat(64);
