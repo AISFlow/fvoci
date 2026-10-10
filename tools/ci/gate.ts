@@ -8,6 +8,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { parseArgv, type OptionSpec } from "./argv.ts";
 import { evaluateGate } from "./gate/evaluate.ts";
 import { RUST_WORKFLOW_FILE } from "./gate/matrix.ts";
 import type { EventFile } from "./gate/opt-in.ts";
@@ -20,74 +21,21 @@ const USAGE = `usage: gate.ts [-h] --workflow {${WORKFLOWS.join(",")}} [--needs-
 type Args = { workflow: Workflow; needsJson: string | undefined; testedSha: string };
 type Parsed = { kind: "args"; args: Args } | { kind: "help" } | { kind: "error"; message: string };
 
-const OPTIONS = {
-  "--workflow": "workflow",
-  "--needs-json": "needsJson",
-  "--tested-sha": "testedSha",
-};
-type OptionName = keyof typeof OPTIONS;
-
-const LONG_OPTIONS = [...Object.keys(OPTIONS), "--help"];
-
-// The planner's argparse CLI accepts a unique prefix of a long option.
-function resolveOption(name: string): string | { error: string } | null {
-  if (name === "-h" || LONG_OPTIONS.includes(name)) return name;
-  if (!name.startsWith("--") || name === "--") return null;
-  const matches = LONG_OPTIONS.filter((option) => option.startsWith(name));
-  if (matches.length > 1) {
-    return { error: `ambiguous option: ${name} could match ${matches.join(", ")}` };
-  }
-  return matches[0] ?? null;
-}
-
-// argparse refuses an option-like token as a value; negative numbers and
-// tokens containing a space are values.
-function looksLikeOption(token: string): boolean {
-  return (
-    token.startsWith("-") &&
-    token !== "-" &&
-    !/^-\d+$|^-\d*\.\d+$/.test(token) &&
-    !token.includes(" ")
-  );
-}
+const OPTIONS: readonly OptionSpec[] = [
+  { flag: "--workflow", dest: "workflow", required: true, choices: WORKFLOWS },
+  { flag: "--needs-json", dest: "needsJson" },
+  { flag: "--tested-sha", dest: "testedSha", required: true },
+];
 
 export function parseArgs(argv: readonly string[]): Parsed {
-  const values: Partial<Record<(typeof OPTIONS)[OptionName], string>> = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i] as string;
-    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
-    const option = looksLikeOption(arg) ? resolveOption(eq > 0 ? arg.slice(0, eq) : arg) : null;
-    if (option === null) return { kind: "error", message: `unrecognized arguments: ${arg}` };
-    if (typeof option === "object") return { kind: "error", message: option.error };
-    if (option === "-h" || option === "--help") return { kind: "help" };
-    let value: string | undefined;
-    if (eq > 0) value = arg.slice(eq + 1);
-    else if (i + 1 < argv.length && !looksLikeOption(argv[i + 1] as string)) value = argv[++i];
-    if (value === undefined) {
-      return { kind: "error", message: `argument ${option}: expected one argument` };
-    }
-    values[OPTIONS[option as OptionName]] = value;
+  const parsed = parseArgv(argv, OPTIONS);
+  if (parsed.kind !== "values") return parsed;
+  const { workflow, needsJson, testedSha } = parsed.values;
+  // The parser enforces required options and choices.
+  if (workflow === undefined || !isWorkflow(workflow) || testedSha === undefined) {
+    throw new Error("parseArgv returned incomplete values");
   }
-  const missing = (["--workflow", "--tested-sha"] as const).filter(
-    (name) => values[OPTIONS[name]] === undefined,
-  );
-  if (missing.length > 0) {
-    return {
-      kind: "error",
-      message: `the following arguments are required: ${missing.join(", ")}`,
-    };
-  }
-  const workflow = values.workflow as string;
-  if (!isWorkflow(workflow)) {
-    return {
-      kind: "error",
-      message: `argument --workflow: invalid choice: '${workflow}' (choose from ${WORKFLOWS.join(", ")})`,
-    };
-  }
-  return {
-    kind: "args",
-    args: { workflow, needsJson: values.needsJson, testedSha: values.testedSha as string },
-  };
+  return { kind: "args", args: { workflow, needsJson, testedSha } };
 }
 
 // Strict UTF-8 that keeps a byte order mark, so a BOM-prefixed file is malformed JSON.

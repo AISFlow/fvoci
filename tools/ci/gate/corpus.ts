@@ -31,7 +31,7 @@ export type GateCase = {
   /** NEEDS_JSON environment value, when set. */
   needsEnv?: string;
   /** Exit code, and the exact stderr unless the case is a usage error. */
-  expect: { code: number; stderr?: string };
+  expect: { code: number; stderr?: string; help?: true };
   /** Why the Python planner reports this case differently, when it does. */
   knownDifference?: string;
 };
@@ -897,60 +897,116 @@ function optInCases(): GateCase[] {
 function usageCases(): GateCase[] {
   const valid = needs(plan("documents"), "documents");
   const usage = { code: 2 };
-  const c = (name: string, argv: string[]): GateCase => ({
+  const docs = (needsJson: string, tested = SHA_A) => [
+    "--workflow",
+    "documents",
+    "--needs-json",
+    needsJson,
+    "--tested-sha",
+    tested,
+  ];
+  const c = (name: string, argv: string[], expect: GateCase["expect"] = usage): GateCase => ({
     name: `usage/${name}`,
     argv,
     eventName: "pull_request",
     event: "{}",
-    expect: usage,
+    expect,
   });
+  const help = { code: 0, help: true } as const;
+  // argparse quirks the gate deliberately does not reproduce (all stricter).
+  const strict = (name: string, argv: string[], why: string): GateCase => ({
+    ...c(name, argv),
+    knownDifference: `planner: argparse ${why}; gate refuses it (exit 2)`,
+  });
+  const dashValue =
+    "accepts a value starting with - when it looks like a negative number or has a space";
   return [
+    // Each --workflow occurrence is checked where it occurs.
+    c("invalid-then-valid-workflow", ["--workflow", "bogus", ...docs(valid)]),
+    c("valid-then-invalid-workflow", [...docs(valid), "--workflow", "bogus"]),
+    c("invalid-workflow-equals", ["--workflow=bogus", ...docs(valid)]),
+    c("invalid-workflow", ["--workflow", "release", "--needs-json", valid, "--tested-sha", SHA_A]),
+    c("invalid-workflow-before-help", ["--workflow", "bogus", "--help"]),
+    c("help-before-invalid-workflow", ["--help", "--workflow", "bogus"], help),
+    c("short-help", ["-h"], help),
+    c("last-wins", ["--workflow", "web", ...docs(valid)], ok()),
+    c(
+      "equals-form",
+      ["--workflow=documents", `--needs-json=${valid}`, `--tested-sha=${SHA_A}`],
+      ok(),
+    ),
+    // Help takes no attached value.
+    c("help-equals-value", [...docs(valid), "--help=bad"]),
+    c("help-equals-empty", [...docs(valid), "--help="]),
+    c("short-help-equals", [...docs(valid), "-h=x"]),
+    c("short-help-dash-tail", [...docs(valid), "-h-x"]),
+    strict("short-help-tail", [...docs(valid), "-hbad"], "treats -hbad as -h plus extras"),
+    strict(
+      "short-help-tail-before-invalid",
+      ["-hbad", "--workflow", "bogus"],
+      "treats -hbad as -h plus extras",
+    ),
+    strict("short-help-twice", [...docs(valid), "-hh"], "treats -hh as -h -h"),
+    // No abbreviations.
+    strict("help-prefix", ["--he"], "expands --he to --help"),
+    strict(
+      "prefix-options",
+      ["--w", "documents", "--n", valid, "--t", SHA_A],
+      "expands unique prefixes",
+    ),
+    strict(
+      "prefix-abbreviations",
+      ["--work", "documents", "--needs", valid, `--tested=${SHA_A}`],
+      "expands unique prefixes",
+    ),
+    c("tested-prefix-missing-value", [
+      "--workflow",
+      "documents",
+      "--needs-json",
+      valid,
+      "--tested",
+    ]),
+    // A value starting with - is a missing value.
+    strict("negative-prefix", docs("-1x"), dashValue),
+    strict("negative-number", docs("-1"), dashValue),
+    strict("negative-decimal-prefix", docs("-.1x"), dashValue),
+    strict("negative-arabic-indic", docs("-١"), dashValue),
+    strict("negative-fullwidth", docs("-１.２"), dashValue),
+    strict("negative-final-newline", docs("-1\n"), dashValue),
+    strict("negative-astral-digit", docs(valid, "-\u{1d7ce}"), dashValue),
+    strict("value-with-space", docs("-x y"), dashValue),
+    strict("lone-dash-value", docs("-"), "accepts - as a value"),
+    strict(
+      "negative-explicit",
+      ["--workflow", "documents", "--needs-json=-1x", "--tested-sha", SHA_A],
+      "accepts --opt=-value",
+    ),
+    strict("negative-then-valid-needs", ["--needs-json", "-1", ...docs(valid)], dashValue),
+    c("superscript-value", docs("-²")),
+    c("dot-letter-value", docs("-.x")),
+    c("short-option-value", docs("-h")),
+    c("unknown-option-value", docs("-x")),
+    c("long-option-value", docs("--bad")),
+    c("option-as-value", ["--workflow", "documents", "--needs-json", "--tested-sha", SHA_A]),
+    c("option-as-sha", ["--tested-sha", "--workflow", "documents", "--needs-json", valid]),
+    c("double-dash-value", docs("--")),
+    c("empty-value", docs(""), fail("needs json missing")),
+    c(
+      "tested-equals",
+      ["--workflow", "documents", "--needs-json", valid, `--tested-sha=${SHA_A}`],
+      ok(),
+    ),
+    // Other usage errors.
     c("no-args", []),
     c("missing-workflow", ["--needs-json", valid, "--tested-sha", SHA_A]),
     c("missing-tested-sha", ["--workflow", "documents", "--needs-json", valid]),
-    c("invalid-workflow", ["--workflow", "release", "--needs-json", valid, "--tested-sha", SHA_A]),
-    c("unknown-flag", [...gateArgv("documents", valid), "--extra"]),
-    c("positional", [...gateArgv("documents", valid), "x"]),
     c("missing-value", ["--workflow", "documents", "--tested-sha"]),
-    c("option-as-value", ["--workflow", "documents", "--needs-json", "--tested-sha", SHA_A]),
-    c("option-as-sha", ["--tested-sha", "--workflow", "documents", "--needs-json", valid]),
-    c("bare-double-dash", [...gateArgv("documents", valid), "--"]),
-    c("single-dash-unknown", [...gateArgv("documents", valid), "-x"]),
-    {
-      name: "usage/prefix-abbreviations",
-      argv: ["--work", "documents", "--needs", valid, "--tested=" + SHA_A],
-      eventName: "pull_request",
-      event: "{}",
-      expect: ok(),
-    },
-    {
-      name: "usage/negative-number-value",
-      argv: ["--workflow", "documents", "--needs-json", "-1", "--tested-sha", SHA_A],
-      eventName: "pull_request",
-      event: "{}",
-      expect: fail("needs error NEEDS_TYPE"),
-    },
-    {
-      name: "usage/value-with-space",
-      argv: ["--workflow", "documents", "--needs-json", "-x y", "--tested-sha", SHA_A],
-      eventName: "pull_request",
-      event: "{}",
-      expect: fail("needs error NEEDS_MALFORMED"),
-    },
-    {
-      name: "usage/equals-form",
-      argv: ["--workflow=documents", `--needs-json=${valid}`, `--tested-sha=${SHA_A}`],
-      eventName: "pull_request",
-      event: "{}",
-      expect: ok(),
-    },
-    {
-      name: "usage/last-wins",
-      argv: ["--workflow", "web", ...gateArgv("documents", valid)],
-      eventName: "pull_request",
-      event: "{}",
-      expect: ok(),
-    },
+    c("unknown-flag", [...docs(valid), "--extra"]),
+    c("positional", [...docs(valid), "x"]),
+    c("bare-double-dash", [...docs(valid), "--"]),
+    c("trailing-double-dash", [...docs(valid), "--", "x"]),
+    c("single-dash-unknown", [...docs(valid), "-x"]),
+    c("empty-long-option", [...docs(valid), "--=x"]),
   ];
 }
 

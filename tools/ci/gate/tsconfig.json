@@ -18,5 +18,5 @@
     "skipLibCheck": true,
     "types": ["bun", "node"]
   },
-  "include": ["../gate.ts", "./**/*.ts"]
+  "include": ["../gate.ts", "../argv.ts", "../argv.test.ts", "./**/*.ts"]
 }

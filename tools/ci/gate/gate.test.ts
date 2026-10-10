@@ -52,6 +52,23 @@ describe("corpus", () => {
       "needs/reason-code-trailing-newline",
       "needs/tested-sha-trailing-newline",
       "opt-in/nan-event",
+      "usage/short-help-tail",
+      "usage/short-help-tail-before-invalid",
+      "usage/short-help-twice",
+      "usage/help-prefix",
+      "usage/prefix-options",
+      "usage/prefix-abbreviations",
+      "usage/negative-prefix",
+      "usage/negative-number",
+      "usage/negative-decimal-prefix",
+      "usage/negative-arabic-indic",
+      "usage/negative-fullwidth",
+      "usage/negative-final-newline",
+      "usage/negative-astral-digit",
+      "usage/value-with-space",
+      "usage/lone-dash-value",
+      "usage/negative-explicit",
+      "usage/negative-then-valid-needs",
     ]);
   });
 
@@ -68,7 +85,10 @@ describe("corpus", () => {
       const { argv, env } = materialize(testCase, writeEvent);
       const run = runGate(argv, env);
       expect(run.code, `${testCase.name}: ${run.stderr}`).toBe(testCase.expect.code);
-      if (testCase.expect.code === 0) {
+      if (testCase.expect.help) {
+        expect(run.stdout, testCase.name).toStartWith("usage: gate.ts ");
+        expect(run.stderr, testCase.name).toBe("");
+      } else if (testCase.expect.code === 0) {
         expect(run.stdout, testCase.name).toBe("gate: ok\n");
         expect(run.stderr, testCase.name).toBe("");
       } else {
