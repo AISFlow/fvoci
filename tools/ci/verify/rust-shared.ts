@@ -9,6 +9,8 @@ export type VerifyContext = {
   workflows: Record<string, unknown>;
   /** The CLI loader's error for a discovered file it left out of workflows. */
   loadErrors?: Readonly<Record<string, string>>;
+  /** The CLI loader's text of each discovered file, parsed into workflows. */
+  texts?: Readonly<Record<string, string>>;
 };
 export type Result<T> = [T, null] | [null, string];
 

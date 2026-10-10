@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { contextFromTexts } from "./load.ts";
 import type { Mapping } from "./py.ts";
 import {
   WEB_COLLAB_LANES,
@@ -342,4 +345,18 @@ test("raw job scalar lookup is exact and fails closed", () => {
   expect(rawJobScalar(source, "missing", "timeout-minutes")).toBeNull();
   expect(rawJobScalar("jobs: {a: {timeout-minutes: 7}}\n", "a", "timeout-minutes")).toBeNull();
   expect(verifyWebBrowserBudgetJobs(realJobs("web.yml"), null)).toEqual([BUDGET_ERROR]);
+});
+
+test("the budget scalar comes from the context text, not the file on disk", () => {
+  const source = readFileSync(join(ROOT, ".github/workflows/web.yml"), "utf8");
+  const marker = "\n    timeout-minutes: 20\n";
+  const start = source.indexOf("  workspace-browser-shard:\n");
+  expect(source.indexOf(marker, start)).toBeGreaterThan(start);
+  const at = source.indexOf(marker, start);
+  const text =
+    source.slice(0, at) + "\n    timeout-minutes: 20.0\n" + source.slice(at + marker.length);
+  expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": text }))).toEqual([
+    BUDGET_ERROR,
+  ]);
+  expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": source }))).toEqual([]);
 });

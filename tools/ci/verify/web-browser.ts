@@ -49,7 +49,12 @@ export function verifyWebBrowserBudgetJobs(jobs: Mapping, rawBudget: string | nu
 export function verifyWebBrowserBudget(ctx: VerifyContext): string[] {
   const jobs = webWorkflowJobs(ctx);
   if (jobs === null) return [];
-  const source = readUtf8(join(ctx.root, ".github", "workflows", WEB_WORKFLOW_FILE));
+  // The parsed jobs and the raw scalar must come from the same text.
+  const texts = ctx.texts;
+  const source =
+    texts !== undefined && Object.hasOwn(texts, WEB_WORKFLOW_FILE)
+      ? (texts[WEB_WORKFLOW_FILE] ?? null)
+      : readUtf8(join(ctx.root, ".github", "workflows", WEB_WORKFLOW_FILE));
   const raw =
     source === null ? null : rawJobScalar(source, "workspace-browser-shard", "timeout-minutes");
   return verifyWebBrowserBudgetJobs(jobs, raw);
