@@ -250,6 +250,7 @@ describe("selected sqlite driver body", () => {
       const receipt = receiptOf(fixture.run);
       expect(receipt.final_exit_code).toBe(0);
       expect(receipt.cleanup_errors).toEqual([]);
+      expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
       expect(receipt.actual_browser_tests).toBe(flow === "off" ? 8 : 1);
       expect(receipt.actual_migration_rows).toEqual(realMigrations());
       expect(laneRetirement(fixture.run, "sqlite", flow, SOURCE, TREE, OWNER, 0).qualified).toBe(

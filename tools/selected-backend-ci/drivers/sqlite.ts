@@ -38,7 +38,6 @@ import {
   identityGone,
   inodeOf,
   inputCheck,
-  list,
   now,
   ownedRows,
   portClosed,
@@ -625,7 +624,11 @@ function restartContext(state: State, browserInputs: Browser, seam: Seam): Resta
 export function finalize(state: State, seam: Seam): Promise<number> {
   return cleanupScope(async () => {
     const { receipt, name, run } = state;
-    const cleanupErrors: unknown[] = [...list(receipt, "diagnostic_errors")];
+    // Read only: a pass never gains an empty diagnostic_errors member.
+    const diagnostics = receipt.diagnostic_errors;
+    const cleanupErrors: unknown[] = Array.isArray(diagnostics)
+      ? [...(diagnostics as unknown[])]
+      : [];
     const attempt = <T>(label: string, operation: () => T | Promise<T>) =>
       cleanupAttempt(receipt, cleanupErrors, label, operation);
     const exec = (args: string[]) => seam.command(args, { required: false });

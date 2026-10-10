@@ -167,6 +167,7 @@ describe("selected install driver body", () => {
     expect(receipt.actual_tests).toBe(4);
     expect(receipt.actual_owned_process_receipts).toBe(15);
     expect(receipt.cleanup_errors).toEqual([]);
+    expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
     expect(receipt.final_source).toBe(SOURCE);
     expect(laneRetirement(fixture.run, "install", "on", SOURCE, TREE, OWNER, 0).qualified).toBe(
       true,
