@@ -8,7 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -657,6 +657,7 @@ fn run_command(command: &[String], child_env: &[(&str, String)]) -> Outcome {
     let mut child = Command::new(&command[0]);
     child
         .args(&command[1..])
+        .process_group(0)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -701,7 +702,13 @@ fn supervise(mut child: std::process::Child) -> i32 {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(sig) = take_signal() {
                     if pid > 0 {
-                        unsafe { kill(pid, sig) };
+                        unsafe {
+                            // The command is its own process group, so this also
+                            // stops descendants such as a shell's `sleep`.
+                            if kill(-pid, sig) != 0 {
+                                kill(pid, sig);
+                            }
+                        }
                     }
                     let _ = rx.recv();
                     return signal_exit_i32(sig);
@@ -1402,7 +1409,7 @@ esac
             "meili".to_string(),
             "bash".to_string(),
             "-c".to_string(),
-            format!("touch '{marker_path}'; trap 'exit 0' TERM INT; while :; do sleep 1; done"),
+            format!("touch '{marker_path}'; exec sleep 60"),
         ]);
         watcher.join().unwrap();
         assert_eq!(outcome.code, 143, "{}", outcome.stderr);

@@ -36,6 +36,6 @@ The first missing-`docker` attempt in that log is not evidence: `PATH` hid `bash
 | Env-file name | `mktemp` suffix `fvoci-pg-env.XXXXXX` / `fvoci-minio-env.XXXXXX` | `fvoci-pg-env.{run id}` / `fvoci-minio-env.{run id}` | mode `0600`, body, and every other `docker` argument matched after the path was normalized |
 | Readiness deadline | `sleep 1` can run past the 30s mark | stop at 30s | the 25-line MinIO timeout text still matched |
 | Unused Meilisearch `ROOT` | assigned and unused | not assigned | no child, docker, or status difference |
-| Interrupt | `trap` then `exit 130` / `exit 143` | handler forwards the signal to the command, then exits 130 / 143 | both SIGTERM runs exited 143 and removed the container; the command was not left running |
+| Interrupt | `trap` then `exit 130` / `exit 143` | the command runs in its own process group; the handler signals that group, then exits 130 / 143 | both SIGTERM runs exited 143 and removed the container; the command was not left running |
 
 The default PostgreSQL command was not executed in the comparison, because that starts `scripts/run-db-tests.sh`. Both implementations select that script from the repository root.
