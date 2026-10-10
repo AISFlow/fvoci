@@ -1,8 +1,8 @@
 // Git reads the planner trusts: exact SHAs, merge bases, parents and the
 // strict -z name-status diff. Every failure is a reason code, never a guess.
 
-// Python `re.match("^...$")` also accepts one trailing newline.
-export const SHA_RE = /^[0-9a-f]{40}\n?$/;
+// Exactly 40 lowercase hex characters; a trailing newline is not a SHA.
+export const SHA_RE = /^[0-9a-f]{40}$/;
 
 export function validateSha(ref: string): boolean {
   return SHA_RE.test(ref);

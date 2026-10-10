@@ -234,10 +234,7 @@ describe("event payloads", () => {
     ]) {
       expect(mergeGroupShas(ev(bad)), bad).toEqual([null, null]);
     }
-    expect(mergeGroupShas(ev(`{"merge_group":{"base_sha":"${SHA_A}\\n"}}`))).toEqual([
-      `${SHA_A}\n`,
-      null,
-    ]);
+    expect(mergeGroupShas(ev(`{"merge_group":{"base_sha":"${SHA_A}\\n"}}`))).toEqual([null, null]);
   });
 
   test("pull_request and push values are carried as given; impossible shapes refuse", () => {
