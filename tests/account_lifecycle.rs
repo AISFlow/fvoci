@@ -8,6 +8,8 @@
 
 #[path = "support/project_harness.rs"]
 mod project_harness;
+#[path = "support/zip_check.rs"]
+mod zip_check;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -2117,24 +2119,6 @@ struct ZipEntry {
     data: Vec<u8>,
 }
 
-/// Independent reader: CPython's zipfile tests every entry's CRC.
-fn external_zip_check(bytes: &[u8]) {
-    let path = std::env::temp_dir().join(format!("fvoci-export-{}.zip", Uuid::now_v7()));
-    std::fs::write(&path, bytes).unwrap();
-    let output = std::process::Command::new("python3")
-        .args(["-m", "zipfile", "-t"])
-        .arg(&path)
-        .output()
-        .expect("python3 is required for the external zip check");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        output.status.success(),
-        "python3 -m zipfile -t failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 /// Central-directory reader for the stored archives the export writes.
 fn read_zip(bytes: &[u8]) -> Vec<ZipEntry> {
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
@@ -2300,7 +2284,7 @@ async fn export_streams_profile_comments_and_attachments() {
         res.headers["content-disposition"],
         "attachment; filename=\"fvoci-export.zip\""
     );
-    external_zip_check(&res.bytes);
+    zip_check::external_zip_check(&res.bytes);
     let entries = read_zip(&res.bytes);
     // Small JSON entries carry their sizes up front; streamed ones use descriptors.
     let flags: Vec<usize> = entries.iter().map(|e| e.flags).collect();
@@ -2377,7 +2361,7 @@ async fn export_streams_profile_comments_and_attachments() {
         peer(71),
     )
     .await;
-    external_zip_check(&res.bytes);
+    zip_check::external_zip_check(&res.bytes);
     let entries = read_zip(&res.bytes);
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1].data, b"[]\n");
@@ -2541,7 +2525,7 @@ async fn export_skips_only_objects_the_recheck_proves_missing() {
         assert_eq!(status, StatusCode::OK, "{label}");
         match body {
             Ok(bytes) if skipped => {
-                external_zip_check(&bytes);
+                zip_check::external_zip_check(&bytes);
                 let entries = read_zip(&bytes);
                 let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
                 assert_eq!(
