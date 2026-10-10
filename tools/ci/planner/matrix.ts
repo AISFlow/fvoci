@@ -68,17 +68,54 @@ export function postgresMatrixInclude(eventName: string, rows: readonly Map<stri
   return rows.filter((row) => postgresMatrixRowRuns(eventName, row));
 }
 
+// Policy, not derived from the catalog it checks: PG 16, 17 and 18 on x64 and
+// PG 18 on ARM64, each split into shards a, b and c (12 rows).
+const POSTGRES_PLATFORMS = [
+  ["16", "ubuntu-26.04"],
+  ["17", "ubuntu-26.04"],
+  ["18", "ubuntu-26.04"],
+  ["18", "ubuntu-26.04-arm"],
+] as const;
+const POSTGRES_SHARDS = ["a", "b", "c"] as const;
+export const POSTGRES_ROW_KEYS: readonly string[] = POSTGRES_PLATFORMS.flatMap(([major, runner]) =>
+  POSTGRES_SHARDS.map((shard) => `${major}/${runner}/${shard}`),
+);
+
+const rowKey = (row: Map<string, PyValue>): string | null => {
+  const [major, runner, shard] = [row.get("pg_major"), row.get("runner"), row.get("shard")];
+  return typeof major === "string" && typeof runner === "string" && typeof shard === "string"
+    ? `${major}/${runner}/${shard}`
+    : null;
+};
+
+/** The catalog must hold every policy row exactly once and nothing else. */
+export function postgresCatalogError(rows: readonly Map<string, PyValue>[]): string | null {
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  for (const row of rows) {
+    const key = rowKey(row);
+    if (key === null)
+      return "rust: postgres matrix catalog row needs string pg_major, runner and shard";
+    if (seen.has(key)) problems.push(`duplicate ${key}`);
+    else if (!POSTGRES_ROW_KEYS.includes(key)) problems.push(`unexpected ${key}`);
+    seen.add(key);
+  }
+  for (const key of POSTGRES_ROW_KEYS) if (!seen.has(key)) problems.push(`missing ${key}`);
+  if (problems.length === 0) return null;
+  return `rust: postgres matrix catalog must hold exactly the ${String(POSTGRES_ROW_KEYS.length)} policy rows (${problems.join(", ")})`;
+}
+
 /**
- * The `strategy.matrix` JSON line for this event. An event that would run no
- * row is refused: an empty matrix is never a green postgres lane.
+ * The `strategy.matrix` JSON line for this event: the PR rows (3) or the
+ * full catalog (12). A catalog that would shrink either set is refused.
  */
 export function postgresMatrixJson(
   eventName: string,
   rows: readonly Map<string, PyValue>[],
 ): { json: string; error: null } | { json: null; error: string } {
+  const error = postgresCatalogError(rows);
+  if (error !== null) return { json: null, error };
   const include = postgresMatrixInclude(eventName, rows);
-  if (include.length === 0)
-    return { json: null, error: `rust: postgres matrix has no rows for ${eventName}` };
   return { json: pyDumps(new Map([["include", include]]), { compact: true }), error: null };
 }
 

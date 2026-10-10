@@ -86,13 +86,46 @@ describe("postgres matrix", () => {
     expect(Array.isArray(parsed.include)).toBe(true);
   });
 
-  test("an event that would run no row is refused", () => {
-    const x64Only = realRows().filter((row) => row.get("pg_major") !== "18");
-    expect(postgresMatrixJson("pull_request", x64Only)).toEqual({
-      json: null,
-      error: "rust: postgres matrix has no rows for pull_request",
-    });
-    expect(postgresMatrixJson("merge_group", x64Only).error).toBeNull();
+  test("a catalog that would shrink, grow or repeat a row is refused for every event", () => {
+    const rows = realRows();
+    const without = (check: string) => rows.filter((row) => row.get("check") !== check);
+    const renamed = (check: string, field: string, value: string) =>
+      rows.map((row) => (row.get("check") === check ? new Map([...row, [field, value]]) : row));
+    const cases: [string, Row[], string][] = [
+      ["drop PG18 x64 c", without("postgres-c"), "missing 18/ubuntu-26.04/c"],
+      ["drop PG17 x64 b", without("postgres-pg17-b"), "missing 17/ubuntu-26.04/b"],
+      [
+        "drop every PG18 row",
+        rows.filter((r) => r.get("pg_major") !== "18"),
+        "missing 18/ubuntu-26.04/a",
+      ],
+      ["duplicate a row", [...rows, rows[0] as Row], "duplicate 18/ubuntu-26.04/a"],
+      [
+        "extra major",
+        [...rows, new Map([...(rows[0] as Row), ["pg_major", "19"]])],
+        "unexpected 19/ubuntu-26.04/a",
+      ],
+      ["move a shard", renamed("postgres-b", "shard", "d"), "missing 18/ubuntu-26.04/b"],
+      [
+        "PG16 on arm",
+        renamed("postgres-pg16", "runner", "ubuntu-26.04-arm"),
+        "unexpected 16/ubuntu-26.04-arm/a",
+      ],
+    ];
+    for (const [label, catalog, problem] of cases) {
+      for (const eventName of ["pull_request", "merge_group", "push", "workflow_dispatch"]) {
+        const out = postgresMatrixJson(eventName, catalog);
+        expect(out.json, `${label} ${eventName}`).toBeNull();
+        expect(out.error ?? "", label).toStartWith(
+          "rust: postgres matrix catalog must hold exactly the 12 policy rows (",
+        );
+        expect(out.error ?? "", label).toContain(problem);
+      }
+    }
+    const untyped = rows.map((row, i) => (i === 0 ? new Map([...row, ["pg_major", null]]) : row));
+    expect(postgresMatrixJson("push", untyped).error).toBe(
+      "rust: postgres matrix catalog row needs string pg_major, runner and shard",
+    );
   });
 
   test("catalog problems are named", () => {

@@ -306,19 +306,32 @@ describe("plan CLI", () => {
       git(work, "checkout", "-q", "--", ".github/workflows/web.yml");
 
       const rust = join(work, ".github/workflows/rust.yml");
-      writeFileSync(
-        rust,
-        readFileSync(rust, "utf8").replaceAll('"pg_major": "18"', '"pg_major": "19"'),
+      // Drop the PG18 x64 shard c row: the plan must refuse, never emit 2 or 11 rows.
+      const text = readFileSync(rust, "utf8");
+      const start = text.indexOf(
+        '          {\n            "runner": "ubuntu-26.04",\n            "pg_major": "18"',
+        text.indexOf('"check": "postgres",'),
       );
+      const end = text.indexOf("          },\n", start) + "          },\n".length;
+      expect(text.slice(start, end)).toContain('"check": "postgres-c"');
+      writeFileSync(rust, text.slice(0, start) + text.slice(end));
       const docs = fx.branch({ "README.md": "x\n" });
       const m = fx.merge(fx.base, docs);
       writeFileSync(join(m.work, ".github/workflows/rust.yml"), readFileSync(rust, "utf8"));
-      const empty = await cli(m.work, "rust", "pull_request", prEvent(fx.base, docs), m.tested);
-      expect(empty).toMatchObject({
-        code: 1,
-        stderr: "plan: rust: postgres matrix has no rows for pull_request\n",
-        output: null,
-      });
+      const group = { merge_group: { base_sha: fx.base, head_sha: m.tested } };
+      for (const [eventName, event] of [
+        ["pull_request", prEvent(fx.base, docs)],
+        ["merge_group", group],
+      ] as const) {
+        const shrunk = await cli(m.work, "rust", eventName, event, m.tested);
+        expect(shrunk, eventName).toMatchObject({
+          code: 1,
+          stderr:
+            "plan: rust: postgres matrix catalog must hold exactly the 12 policy rows (missing 18/ubuntu-26.04/c)\n",
+          plan: null,
+          output: null,
+        });
+      }
     },
     TIMEOUT,
   );
