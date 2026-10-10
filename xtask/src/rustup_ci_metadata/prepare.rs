@@ -229,13 +229,15 @@ fn open_at(directory: &File, name: &CStr, flags: libc::c_int, mode: u32) -> io::
 /// write and before success, so a replaced directory refuses instead of
 /// redirecting receipts. At the same points every receipt written so far must
 /// still be the private single-link file holding the written bytes, and the
-/// directory must hold nothing else.
+/// directory must hold nothing else. Each leaf's descriptor stays open until
+/// preparation returns, which keeps its inode allocated, so a file created
+/// after an unlink cannot reuse the inode number and pass as the receipt.
 struct Receipts<'a> {
     output: &'a Path,
     owner: Owner,
     directory: File,
     identity: Identity,
-    written: Vec<(&'static str, Identity, Vec<u8>)>,
+    written: Vec<(&'static str, File, Identity, Vec<u8>)>,
 }
 
 impl<'a> Receipts<'a> {
@@ -294,7 +296,7 @@ impl<'a> Receipts<'a> {
             && fs::symlink_metadata(self.output).is_ok_and(|info| identity(&info) == self.identity)
             && identity(&self.directory.metadata()?) == self.identity;
         require(bound, "receipt-directory-race")?;
-        for (name, written, raw) in &self.written {
+        for (name, held, written, raw) in &self.written {
             let leaf = CString::new(*name).expect("receipt names have no NUL");
             // `O_NONBLOCK`: a FIFO swapped in for the leaf opens at once and
             // refuses on its identity before any read.
@@ -311,8 +313,11 @@ impl<'a> Receipts<'a> {
                 }
                 _ => error.into(),
             })?;
+            // The name and the held descriptor are both the written inode,
+            // still a private single-link regular file.
             require(
-                identity(&stream.metadata()?) == *written
+                identity(&held.metadata()?) == *written
+                    && identity(&stream.metadata()?) == *written
                     && read_upto(&mut stream, raw.len() as u64 + 1)? == *raw,
                 "receipt-leaf-race",
             )?;
@@ -325,7 +330,7 @@ impl<'a> Receipts<'a> {
         let expected: BTreeSet<OsString> = self
             .written
             .iter()
-            .map(|(name, _, _)| OsString::from(name))
+            .map(|(name, _, _, _)| OsString::from(name))
             .collect();
         require(names == expected, "receipt-directory-race")
     }
@@ -351,7 +356,8 @@ impl<'a> Receipts<'a> {
         self.directory.sync_all()?;
         // The identity checked before the write, so a link or mode change
         // made while writing refuses later instead of becoming the baseline.
-        self.written.push((name, identity(&info), raw.to_vec()));
+        self.written
+            .push((name, stream, identity(&info), raw.to_vec()));
         Ok(())
     }
 }
