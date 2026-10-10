@@ -1,0 +1,1684 @@
+{
+  "usage/none": {
+    "exit": 2
+  },
+  "usage/help": {
+    "exit": 2
+  },
+  "usage/manifest extra": {
+    "exit": 2
+  },
+  "usage/check": {
+    "exit": 2
+  },
+  "usage/check a b": {
+    "exit": 2
+  },
+  "usage/self-test x": {
+    "exit": 2
+  },
+  "usage/--self-test": {
+    "exit": 2
+  },
+  "manifest/unset": {
+    "exit": 0,
+    "stdout": "{\"configured\": false, \"note\": \"ENCRYPTION_KEYS was not set; nothing could be sealed with it. Restore runs fvoci-migrate --verify-secrets regardless.\"}\n",
+    "stderr": ""
+  },
+  "manifest/empty both": {
+    "exit": 0,
+    "stdout": "{\"configured\": false, \"note\": \"ENCRYPTION_KEYS was not set; nothing could be sealed with it. Restore runs fvoci-migrate --verify-secrets regardless.\"}\n",
+    "stderr": ""
+  },
+  "manifest/whitespace both": {
+    "exit": 0,
+    "stdout": "{\"configured\": false, \"note\": \"ENCRYPTION_KEYS was not set; nothing could be sealed with it. Restore runs fvoci-migrate --verify-secrets regardless.\"}\n",
+    "stderr": ""
+  },
+  "manifest/keys only": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID must be set together\n"
+  },
+  "manifest/active only": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID must be set together\n"
+  },
+  "manifest/one key": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/padded values": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/python-only whitespace strip": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/bom is not whitespace": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "manifest/ideographic space strip": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/upper hex": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"6997db79e0acc46b6bf22ebeef0c2c2b5015744cb912bc0bb5cf2fa2eca63dbb\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"9bb49ffd370e54d52eeae36cec5baf6d426b2a746c36d2fc0721a2e6fb4ddaea\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/integer-like ids keep text order": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"f96950920ba73f067419a6b4d8668ed3d43c65b37b92eafc1ad4e1b6e67a1c0b\", \"activeKeyId\": \"2\", \"keyFingerprints\": {\"-a\": \"699d6ff431db32648c2f62d324db0a5d6f0e448f31c60847e133fd40155f0787\", \"10\": \"23d678e5bb240656a5269191b61bd829c869f2af23059aba179c3d825902bc0f\", \"2\": \"55287ac1734e17ae8270386314a2ef5b15d6d8060b1c5b66645c28de0f9a9b36\", \"Z\": \"49e5802073340ffc637de12d58b8882dfa7a165ab1b4b33b3930c187cc06eee0\", \"_b\": \"aebc63e93e3c31bb23a43e1c774893ff828274dcec2aed9e85ee97ff02dcf05d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/proto id": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"07e5d5d9ed34ae4e97ae312f01be7332b6a0e5da16a6b1f8896ecefe4a1cdeff\", \"activeKeyId\": \"__proto__\", \"keyFingerprints\": {\"__proto__\": \"a1e087db287dfd95b474b3732a11ded86e496cedcee691666a87f0cd9f80d44e\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/duplicate id last wins": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/id with final newline": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"456ebd79700ab86b18eb9ff3268c1b791a2b4c8388ed806048f892e0f614fa1c\", \"activeKeyId\": \"k2\", \"keyFingerprints\": {\"k1\\n\": \"077ccb3fbd556ea05e6218e0d5b9df5bec25f7753e74c6f2f37dccd0abd3d187\", \"k2\": \"83195e191ec182ebce48dbd6f8840fc83ccc435ac301a15e89a4f9f9fca39e7d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/hex with final newline": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"182dcd509b6bc6555010f965ef58f3e705bd4b5972f48941c519f0ce8b68d340\", \"activeKeyId\": \"k1\", \"keyFingerprints\": {\"k1\": \"5374af567119c75e9c59842bbc10951829358d8de8316286a025fdc344baba93\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/32 keys": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"8cf9a1f8c7206b3de71c805e0c3d2adb84e027210c234e733380cb1c241d9da4\", \"activeKeyId\": \"id0\", \"keyFingerprints\": {\"id0\": \"431cd62793496ac069b11606dd330b1d2b19f881c347d75ff8f64634cba6d0d8\", \"id1\": \"ca530d943020d49684041fe0d6b742abf408b3db408c4696f337f3d3dbd50f89\", \"id10\": \"b46c4387973430a3cf9f4c5adf7d50ed902a0b5fc020af6f091af3277a71b931\", \"id11\": \"13f10cfc8737df5a98dc8d13d3bd40fc0655228181c7ce2b0646d9698fab03e9\", \"id12\": \"52fb9b9cd0999548fee4520dbd6109d76911cd0438a2397db439dba1e5501c9e\", \"id13\": \"2c78979053fa38ee3958abedba864e40c11f9174a73fb1717c6ee19179e0c478\", \"id14\": \"18372e8bef89a138feebe93bf4b4d88c4c5673a3e905bc898130eba2e1a5a279\", \"id15\": \"2ff8f1b5b5f76923c4646f69340de9c9cbd0174e7c03a11d7a3c4ce0d5521441\", \"id16\": \"fdd7416b4cccc25ac5f11bfcd511da9fe3987d7a22dfface4dd823f686def429\", \"id17\": \"f4206776634e1ca34529b34b537a83ac9448f1b4a40a772c98b2320ebe1c0597\", \"id18\": \"43d4aad33c9b64e90f484046d7c0b365dbec09d897f5dcaef1f10492ab2d7a34\", \"id19\": \"72bb2e3a564747e2fee7e40827a21fd0cc8721b859f149ba247dbc91b0f0a372\", \"id2\": \"29426d5b1bddc91ef2b5a06bd51d7715868c25bf6f4be491d1eebad7075df9ee\", \"id20\": \"793340d528200e8522ff08c4ea4467e1576dab961e2f573ec958ff8db1eee785\", \"id21\": \"5a12582f5918f957162156f8ae52b54b579aaa3847847b1885171c5192eaa55b\", \"id22\": \"3308cd82f59a8f10b7cc48d97479adc9c391ee0394ce04fc7524c0e954321345\", \"id23\": \"e3fb1846ade6c8296d2bd4d8e6c6a18642f90082de7d5fb576cd32b732259c32\", \"id24\": \"4adc89fa99c367cc36a469d0ab76c63233a252046d8a81e76c4e9dd856e69e22\", \"id25\": \"52903193664b66905fec38bee5803d583ae6ece657e3bf12808cf8bbb28cb4c7\", \"id26\": \"f084074943cd192f3a05a235c0eb8c37f6a45052d323753605ed35bbe97d3457\", \"id27\": \"7f28891c696249b6aef8cacf8cc8487adf1f0e7927215372570541fe39d977dd\", \"id28\": \"c7e0e6bb004ff75d1e1af02b1a1aaa66942c8d19f6edf1436451ba6361b6c13e\", \"id29\": \"141c00d5ecdd4dbbe674dcbb4be29e8b3dd10102bcf9d90245aa5b5093ae2770\", \"id3\": \"46a14b62be55e85bfd26867f0be7235294704db7bd256a663299feaaf73055b4\", \"id30\": \"d093418e9c065bc06e7a567d3055663109f30b0f82f08fc1a70bfc65b9a8af90\", \"id31\": \"dc1482d32c632e62cfabd74e21579e3f7cf697766ac0caa087e686926917740c\", \"id4\": \"c4be7409fdcc0769945e3e80d7fe53966e0fcb2bb0f303c0378310837fc56408\", \"id5\": \"76515fc20f4a83b37a1550e3fb8a7ff67f5f1338d21da23afe55c40f020c32e1\", \"id6\": \"d70609052ad6f677a809dd72a601bf1b808e5413d3fc21d21032d39abfd07188\", \"id7\": \"d63ad018cbebab0452c188a59dd725b9b0a9e100a93e4237ce44d96299d2fe22\", \"id8\": \"4e237cbf73135a699deac1e562ee83e7d0548dceb1b866f02d755ba33318343b\", \"id9\": \"6ab64a44f2479b5e70f5131015ec62b3f1219c9978a51028d5509e4fdb031b39\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/33 keys": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS must have 1-32 keys\n"
+  },
+  "manifest/32-char id": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"fb4038461b455a7a8cdb445c4630ef83e270ca30a611f99412295589521f33a1\", \"activeKeyId\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"keyFingerprints\": {\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\": \"728b3994405f1c91b09d5b1517afb7fd806ff701cb6f23784410988e71e5be6a\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "manifest/33-char id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_KEYS key id\n"
+  },
+  "manifest/33-char active": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "manifest/bad active": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "manifest/active missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_ACTIVE_KEY_ID is not in ENCRYPTION_KEYS\n"
+  },
+  "manifest/empty object": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS must have 1-32 keys\n"
+  },
+  "manifest/array": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS must have 1-32 keys\n"
+  },
+  "manifest/string json": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS must have 1-32 keys\n"
+  },
+  "manifest/not json": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_KEYS json\n"
+  },
+  "manifest/short hex": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS keys must be 64-char hex\n"
+  },
+  "manifest/65 hex": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS keys must be 64-char hex\n"
+  },
+  "manifest/non-string value": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS keys must be 64-char hex\n"
+  },
+  "manifest/null value": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS keys must be 64-char hex\n"
+  },
+  "manifest/bad id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "manifest/unicode id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_KEYS key id\n"
+  },
+  "manifest/bad id before bad hex": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "invalid ENCRYPTION_KEYS key id\n"
+  },
+  "manifest/bad hex before bad id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS keys must be 64-char hex\n"
+  },
+  "manifest/integer id bad hex after bad id": {
+    "exit": 1
+  },
+  "manifest/NaN json": {
+    "exit": 1
+  },
+  "check/same ring": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "check/same ring other order and case": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "check/superset other active": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "check/missing id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): k1\n"
+  },
+  "check/changed key": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): k1\n"
+  },
+  "check/missing and changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): k1\nENCRYPTION_KEYS has a different key for id(s): k2\n"
+  },
+  "check/renamed id": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): k1\n"
+  },
+  "check/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: k1, k2); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "check/bad env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID must be set together\n"
+  },
+  "check/not configured, unset env": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "check/not configured, set env": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "check/configured missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys entry is malformed\n"
+  },
+  "check/configured not bool": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys entry is malformed\n"
+  },
+  "check/not an object": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys entry is malformed\n"
+  },
+  "check/array": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys entry is malformed\n"
+  },
+  "check/fingerprints missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys.keyFingerprints is missing\n"
+  },
+  "check/fingerprints empty": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys.keyFingerprints is missing\n"
+  },
+  "check/fingerprints array": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "backup manifest encryptionKeys.keyFingerprints is missing\n"
+  },
+  "check/fingerprint number": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): k1\n"
+  },
+  "check/fingerprint null": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): k1\n"
+  },
+  "check/fingerprint uppercase": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): k1\n"
+  },
+  "check/id order by code point": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): -a, 10, 2, ～, 😀\n"
+  },
+  "check/unset env lists ids": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 10, 9, a, b); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "check/file missing": {
+    "exit": 1
+  },
+  "check/file not json": {
+    "exit": 1
+  },
+  "check/file not json and bad env": {
+    "exit": 1
+  },
+  "check/lone surrogate id with unset env": {
+    "exit": 1
+  },
+  "check/non-ascii fingerprint": {
+    "exit": 1
+  },
+  "generated/0/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"5d4afdbd9f42cf4b434847ffe561c57c0fb0ec0a997cc029dbcbc43e10120a19\", \"activeKeyId\": \"ON\", \"keyFingerprints\": {\"7ohTsrl\": \"4606bef8ec29266ea815d1d05d2bc30f15cc5319c02aa6102e4b8b4acfe493ec\", \"ON\": \"ce1cadb7ef272ea268c4dbec60e2a634fca01e58f6f073ef06cfbfe45bdad639\", \"us1eeh3u\": \"56e7af8198c833fd69e68e4afcffa770f84e01a93e33a55128db39fde41ce62b\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/0/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/0/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/0/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): us1eeh3u\n"
+  },
+  "generated/0/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): us1eeh3u\n"
+  },
+  "generated/0/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): us1eeh3u\n"
+  },
+  "generated/0/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 7ohTsrl, ON, us1eeh3u); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/1/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"e6a43e3418087ef357685756a7877bfeeb58ddab60ba47ce8b4a85d2d0641a10\", \"activeKeyId\": \"ec3ai-UZ\", \"keyFingerprints\": {\"NSYfYT9i\": \"245274fa6e596f14760cef3867eb14ed22759f58690c69aa65d932b1ebf09087\", \"QcsO3T\": \"e0a12f0303f741e2902d5d8902fd61668c97f7065f0c1da724a69a3e663dde9e\", \"SRj\": \"e4decf4873797166cf0729e2f543906127b9bd99287ca35b0a3bce19f0928ce9\", \"ec3ai-UZ\": \"34c1f316dc1523ec7d88b233ad610e3a2c8902a25d5bec773886ccc7944086c5\", \"fyHr2kthYpNnoCzKJmj8jK\": \"ffba48213b9165d8be13e9054e094f6c0dc25cdfbc02f1f8eebe6825a1a70c15\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/1/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/1/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/1/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): NSYfYT9i\n"
+  },
+  "generated/1/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): NSYfYT9i\n"
+  },
+  "generated/1/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): NSYfYT9i\n"
+  },
+  "generated/1/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: NSYfYT9i, QcsO3T, SRj, ec3ai-UZ, fyHr2kthYpNnoCzKJmj8jK); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/2/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"cffd3209cc2a42d81435d045ec1a27bf1396ed764650fb551a29c342710f256c\", \"activeKeyId\": \"8_TVomLcpMJLzvwnNREp\", \"keyFingerprints\": {\"8_TVomLcpMJLzvwnNREp\": \"fff046d77b7427512a1b71e09976329e4774c13af204a1071bac64263ab664f5\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/2/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/2/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/2/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): 8_TVomLcpMJLzvwnNREp\n"
+  },
+  "generated/2/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 8_TVomLcpMJLzvwnNREp\n"
+  },
+  "generated/2/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 8_TVomLcpMJLzvwnNREp); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/3/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"49b783cd966785a270e3268a507b335f26bd6b37ce735c1cfbaa2831e87239a6\", \"activeKeyId\": \"9ZPZ8bDQTh\", \"keyFingerprints\": {\"9ZPZ8bDQTh\": \"babac419b8b144310e66a0d7815249c9fb021c056435c005158d0fe511f72c62\", \"SwR_Eqvy9OwjaU1McrdkfJ\": \"b6ca60b9474ae47240004de1681f0f4cd0db6f0471bd8a27cd07664e52c2b3b4\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/3/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/3/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/3/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): SwR_Eqvy9OwjaU1McrdkfJ\n"
+  },
+  "generated/3/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): SwR_Eqvy9OwjaU1McrdkfJ\n"
+  },
+  "generated/3/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): SwR_Eqvy9OwjaU1McrdkfJ\n"
+  },
+  "generated/3/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 9ZPZ8bDQTh, SwR_Eqvy9OwjaU1McrdkfJ); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/4/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"8c4473a4eea83b835cb9d5f5ceb336b0405b0455b7c6d55aa846c9c2974d4c0a\", \"activeKeyId\": \"OjdxKsW7zdZP2P6Pd\", \"keyFingerprints\": {\"Cux\": \"e223cf47bdc6dd0b6d1d9f9840817c42a171eae510728d9b77556449d3126329\", \"I\": \"b2c7cf14878871a4c5007474f702ac299d1d30690a13ab82db7431edfb7ef188\", \"OjdxKsW7zdZP2P6Pd\": \"f3716fa34abd85dc69b11bd7059d850a21753549dc2b15344c184409693004c2\", \"QwDK5TXX3GNhPkXhdRxNMTc-XAl\": \"6a0ba9d6936698c58cf2e93e61f49bd04f0326ed14c81a3d153270f489426985\", \"SbFhOvpzmpb-LvpST-J8yHrKK7Nd\": \"58b21aae7ff4545b4bbd7b6eeb4cacd691a3fbe3d693236bb19c6eda75a4adf4\", \"d4ha0oGGeQVUGUp5\": \"4566bbca20c516d68966bdfe38c995a48b54fd3c39043e831bbad56160a5eed9\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/4/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/4/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/4/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): I\n"
+  },
+  "generated/4/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): I\n"
+  },
+  "generated/4/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): I\n"
+  },
+  "generated/4/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: Cux, I, OjdxKsW7zdZP2P6Pd, QwDK5TXX3GNhPkXhdRxNMTc-XAl, SbFhOvpzmpb-LvpST-J8yHrKK7Nd, d4ha0oGGeQVUGUp5); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/5/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"9920a74ab11b8c6a80bf3eb05d22d0606ff79417b717f220af138158accbd67d\", \"activeKeyId\": \"cD9c5oLRqRJ72ObKUEwFe27GU5ftn9f\", \"keyFingerprints\": {\"cD9c5oLRqRJ72ObKUEwFe27GU5ftn9f\": \"ff96662bdced7572d11987b08cf469f2048b2dd13c68a025418550afba43a26e\", \"hx\": \"f7cb6d170a41d4b1a8e2af8e9334024fbb7724c20b77b9ce1408ba73492e75df\", \"ksUeaviJrDxsCDiszR6eCcJ\": \"6f8687a396f67e3ad65140c3c0e6be3ff573f09263fa05338ea35d9d7e58e79d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/5/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/5/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/5/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): hx\n"
+  },
+  "generated/5/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): hx\n"
+  },
+  "generated/5/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): hx\n"
+  },
+  "generated/5/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: cD9c5oLRqRJ72ObKUEwFe27GU5ftn9f, hx, ksUeaviJrDxsCDiszR6eCcJ); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/6/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"3778ebe0c21fa71dc0b9dcba13b2e260127db0f0b788b5601945cc8220654d92\", \"activeKeyId\": \"BoZ04rbR3MX\", \"keyFingerprints\": {\"BoZ04rbR3MX\": \"1dbd784a3d0d07a52cdd0801b2d89b25e45b67447038b1deae18ae31c2db5168\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/6/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/6/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/6/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): BoZ04rbR3MX\n"
+  },
+  "generated/6/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): BoZ04rbR3MX\n"
+  },
+  "generated/6/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: BoZ04rbR3MX); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/7/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"f616ad1c0bc87bcc76590a8e5d8381e990839615e30bb9f8fdfa1ff32a0a57c4\", \"activeKeyId\": \"UKTRHycNubIQmT988sQw\", \"keyFingerprints\": {\"UKTRHycNubIQmT988sQw\": \"1cceeb4bebbe577674896b6f19d680f266707a762b83c4bc9335630e9e0a277e\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/7/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/7/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/7/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): UKTRHycNubIQmT988sQw\n"
+  },
+  "generated/7/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): UKTRHycNubIQmT988sQw\n"
+  },
+  "generated/7/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: UKTRHycNubIQmT988sQw); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/8/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"e178c19c87a8baf6faeebb21e7014f3a7d5a714cb494e2012f5cd3b069f1f6c8\", \"activeKeyId\": \"YJ\", \"keyFingerprints\": {\"YJ\": \"a8d374b8f0b15ec2141133b81677e09c0af5820be4a833c3f566e01402d8f28f\", \"glYXrzr4NlK7x\": \"d4f57e2f3056a434ef49b1b0dcdfb7bbef7ebea2de9e0b73b5d23f92d3a1edd4\", \"r\": \"018bc476ba195084f412a30310185772aa72bbd51153366935f6b6b133aab3fc\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/8/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/8/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/8/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): glYXrzr4NlK7x\n"
+  },
+  "generated/8/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): glYXrzr4NlK7x\n"
+  },
+  "generated/8/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): glYXrzr4NlK7x\n"
+  },
+  "generated/8/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: YJ, glYXrzr4NlK7x, r); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/9/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"52b0a9eaf1cb05f6afe4586a6d8b6c5b6e2e8867267457fd7b3cfe5fc7c7d437\", \"activeKeyId\": \"gdG\", \"keyFingerprints\": {\"-WH\": \"671145cb41f0e3fd71369d2f118b3059099dfe0d4a167e68742124567e6c3378\", \"2fQKUmLQW7Qc-2mfw9tuS5MOIKjNOB-P\": \"98b91c109eada7bc9fc9beac7734e0fdcb79d971c8244b43bb02477f7eedac9b\", \"752Yai8RPUM9StZcZPZivpnBc\": \"50e3bd5f08e977d1dcc89d45eb322a69bbf76f60095c2e48622442d69165c110\", \"CKj\": \"0a1203f58303628df9ab0e1b9844c8aa5daa7c1fc88ff49f548fa59cd516cc84\", \"F07-_E_SBJEQ6Zj3eiiygW\": \"aee81f6c53f0ac26043b2ac050da11c3bb69bd49ff8f5c5575823ac0c1e9cb2f\", \"H\": \"4aa0251c56a1fd900652e401ee7ce4ec48ae62953e70e262844e9decd6cae66e\", \"JEg\": \"3fa4f4bb3276e238ab4101d1f52518efbc925ddeaa8d1eaf2c531ea4652d04fb\", \"JprtTngrZA6ofrlIE\": \"93a97690bcc4a56def8d0300a2ffcbd75cde391fc47f1fb3993045a0af0dbcbb\", \"L4UXXQe\": \"da44b218795ee94c78227ffe530ccfda6531321435c7f374f44fbb9d1d45f7f3\", \"N4N0EYaOzJ5ma5Pcm0N\": \"ae8632a66687f4216e94412bd89054296906e1bd601c182dfb948065f531aaa3\", \"QQ0aIvzXigSmPacwLvnSyK6TSBtlT3\": \"e2659b5f8dd740ac49b20a10ffb662d920b724a642a1bcc1e902e273ec02a731\", \"TdAMZxjBhI\": \"3eb50429e7853cade421981562f2adb6056a9379e397c30ac50b1ee5822379bb\", \"VLr--h\": \"d7ae37ccdd38151aff31b5b70ad790cf30f0fdac9f56886fadbf6de9c0b379fb\", \"VczqEoM8GXT4dEpQhByelah\": \"3294974a101b06b38bd9c885eca93048579392b1794796924d047449d1c63e97\", \"Z3\": \"a5c542180e255aaa5e8d4aa04095deb10d82c27e232c6cf0f75e2e41a0eddcef\", \"_\": \"dfd339fbe7039799a0759a746fa06f1c7a119a5aa39635961a0dac4fdbc10fcb\", \"cyJT\": \"2fe2e5cf44860cc1e1106841d58b2777d2e9346a9b8b7cb5e6ce0bbf21e0c685\", \"gdG\": \"2905f487a4368729790a782ba5b1b5a7e12c911cf5c45de714ed4b4837a0f092\", \"h8ljU7Ir0ENxBPyUNGdCpF3\": \"05cb935fe456a03b5ae49c86bebc02396c045285e7e59f6bf424dd534c1ed2cd\", \"k-42SxyF_A6H34hHVyxqbXl6uspS3\": \"e2593f7f27ca9e6f363d3fd45e00dcb5beef02ff6ca2ead11cd3787d82e1bfab\", \"mQ56Bngy9\": \"d85801c36b60e2ff0453a96b162af7118767928b6863aad068a5e055ae59d0cc\", \"mRBFvj3inlR\": \"e53b3956e8d9c69b4768379e2672ace81813c4efd8a6904e60759694def67edd\", \"oOv4Mxv5bMKvJO\": \"592745382272aa13beeda0e0adb240414cf2d38797069d7112cf9d417acf40d0\", \"qNW\": \"84a891581cf313566c317f371a8ca61578988076581be05dd7cedb1b465b6ac3\", \"ql\": \"568c60b9b19b29a0c08f40609a6ed5404ef29f7f1af562115f2dabb6d254655b\", \"t0rj1\": \"d62fe761dec07f1e31fe137cb47e35ffdaf158074d1f80d7cdeb0ac038a4aad8\", \"uVYw4Woe3_c\": \"8c6d12154392777c306dc40694c637804e6f52f03f2c602839bca721971adc47\", \"xnKv4Jfz5-3FEVM1KIQ\": \"362dab8157bc2dffea79ee953b431313b89d607c0a6053c074919e64d59d69ab\", \"yiBRhfGWmQV0p0JMWofSUv1YAZ\": \"e0b2ef7f03b8898764107594fa728cca9e0f45fbabd916fb23645e868c3cbe45\", \"z\": \"ef2bc499a9d14e90767ea73a0822bd93c28971b1bd77bae05d130e5b5f5e205b\", \"zEXcm-9v1AtLsp\": \"bd4a4e1e7e6a77ee9132127a77878a3d308e0538dea96c9993e6b6d70472f030\", \"zTIasj3WmBTfDxPNMq\": \"87736d7bccb3556eb851f8144cf97dd3a08748833301e1beed06b758b6b24c6b\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/9/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/9/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): VczqEoM8GXT4dEpQhByelah\n"
+  },
+  "generated/9/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): VczqEoM8GXT4dEpQhByelah\n"
+  },
+  "generated/9/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): VczqEoM8GXT4dEpQhByelah\n"
+  },
+  "generated/9/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: -WH, 2fQKUmLQW7Qc-2mfw9tuS5MOIKjNOB-P, 752Yai8RPUM9StZcZPZivpnBc, CKj, F07-_E_SBJEQ6Zj3eiiygW, H, JEg, JprtTngrZA6ofrlIE, L4UXXQe, N4N0EYaOzJ5ma5Pcm0N, QQ0aIvzXigSmPacwLvnSyK6TSBtlT3, TdAMZxjBhI, VLr--h, VczqEoM8GXT4dEpQhByelah, Z3, _, cyJT, gdG, h8ljU7Ir0ENxBPyUNGdCpF3, k-42SxyF_A6H34hHVyxqbXl6uspS3, mQ56Bngy9, mRBFvj3inlR, oOv4Mxv5bMKvJO, qNW, ql, t0rj1, uVYw4Woe3_c, xnKv4Jfz5-3FEVM1KIQ, yiBRhfGWmQV0p0JMWofSUv1YAZ, z, zEXcm-9v1AtLsp, zTIasj3WmBTfDxPNMq); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/10/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"73b59658f003a4229c351c5715e21b9ba25507d48d74f97a9b1cee99f9fa1e06\", \"activeKeyId\": \"4lBUld8qrbxEpcj98v\", \"keyFingerprints\": {\"0b0\": \"77a1bc38394da6c7fb508efcd5284104f9857117430971109a4bff8ad332bff7\", \"4lBUld8qrbxEpcj98v\": \"cb9601c696a2abd5ea6889c297b42a8e9e13d6040a2004a349bb4860794b3901\", \"Fh0llFJeAc7RMBSu_X0hpcIJAdF_\": \"6474f26213b27ea0d768accfa44baae08171b80d82bded20a9a475dba7981b93\", \"p9qEHUaxtbP\": \"ac51fc30c3f312cd949dce214ba748ceaa28f38edbaaf2271da4c03c5c12cd69\", \"pU9H55\": \"5ab2e9d83444f45c96cc6d391aa72834db5d1c860aefc9bcb05c186a5eeb87aa\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/10/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/10/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/10/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): pU9H55\n"
+  },
+  "generated/10/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): pU9H55\n"
+  },
+  "generated/10/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): pU9H55\n"
+  },
+  "generated/10/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 0b0, 4lBUld8qrbxEpcj98v, Fh0llFJeAc7RMBSu_X0hpcIJAdF_, p9qEHUaxtbP, pU9H55); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/11/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"52b455c865ec5ccf8b4026e3e217c8aa1f27e97e62a72e980ef5ab7947f38624\", \"activeKeyId\": \"jH-CO5ebtyleFfr0xM0XBm_4\", \"keyFingerprints\": {\"jH-CO5ebtyleFfr0xM0XBm_4\": \"97833ff4af5674559a16b654ae659585328793e93ae182a3d54e7adf927b44fa\", \"s\": \"75e70ebe0710c28b6026f095f110b2137d823b5e743c5a8df72f0d69171bf225\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/11/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/11/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/11/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): s\n"
+  },
+  "generated/11/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): s\n"
+  },
+  "generated/11/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): s\n"
+  },
+  "generated/11/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: jH-CO5ebtyleFfr0xM0XBm_4, s); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/12/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"0ecfe164967d7ad2e33ecac809b9e4d91c6d04d80eac9c81003f284bf83db508\", \"activeKeyId\": \"d7il\", \"keyFingerprints\": {\"276QiBZ2GRj\": \"0acf5f93dc73dea0843da540533f0285f775950ce905a08b7479a5ca18981c36\", \"J\": \"ce51f590479ee49aa1137a2b90d50fc0b6923e330dc66891b277dd6183b3f950\", \"SWSTabXhFW9ro8\": \"b881d0d8e627627f61a12efa4cfda6c0b8ce146551350ccf7c5c2b880a01e576\", \"VxkavFqTqZFvuIg3iCsq8NltnrAF16\": \"6d1b98c720fa3f4aa6189b849de37ecb3fac0cfa3542b62fd652658bca4d6937\", \"d7il\": \"4b6589d682e8e09437ff116943397e60a83ca11dae5ef66c5724081e56bdf7a3\", \"l\": \"278a2dab121332d328ab6139ebf1583335647ee1071d4b6fb8eb47f61fa0281e\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/12/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/12/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/12/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): SWSTabXhFW9ro8\n"
+  },
+  "generated/12/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): SWSTabXhFW9ro8\n"
+  },
+  "generated/12/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): SWSTabXhFW9ro8\n"
+  },
+  "generated/12/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 276QiBZ2GRj, J, SWSTabXhFW9ro8, VxkavFqTqZFvuIg3iCsq8NltnrAF16, d7il, l); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/13/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"1d9ab09430c0b8ff8aa54a4c07ce63601ef477f7aa828498e3ded854936cfa61\", \"activeKeyId\": \"_bHjMl1nvvPjK17gh1elEJoFiPjQE\", \"keyFingerprints\": {\"_bHjMl1nvvPjK17gh1elEJoFiPjQE\": \"c93ed0b414373a99e0897946c645e5bb2d9286fb30d7f958411c0c57d3308ef6\", \"a6ey_GW\": \"9693c7059ba22cdffbdf5d6836fc196895c8cac0a0c0eef31d7dab716b278ced\", \"s\": \"5cfe89726d2a7cac54e269089424aa8a5fc5fad036484d0665bf57a0201821f0\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/13/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/13/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/13/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): a6ey_GW\n"
+  },
+  "generated/13/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): a6ey_GW\n"
+  },
+  "generated/13/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): a6ey_GW\n"
+  },
+  "generated/13/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: _bHjMl1nvvPjK17gh1elEJoFiPjQE, a6ey_GW, s); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/14/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"98ace21613fa14a6c404f3009b2fc48579499b360ad8e2c05a8850726e612d6c\", \"activeKeyId\": \"bVgGCcd4aU-M3QvuV\", \"keyFingerprints\": {\"I\": \"87b675f42bda2b6d3a104ba1d1ca6fed671bdd0677dfb6badbe5892ac6e5bac4\", \"Uj\": \"4f04645b01051a83525a1a8a2a2f9c7f472014aad4644fbec77553e0dbb12815\", \"bVgGCcd4aU-M3QvuV\": \"b6095f7a7dd83a2dcb5b39ac67aeb2b406f04f78a618bc7eb85e0b12d20016f7\", \"i7LVl_tp3CFH\": \"c8bb38b62f97fc41151d2d2f1d80429ae908d65fbfb7238201189cc5f2057157\", \"kD8xcisTyq1fAV-hMGp-\": \"21bd5fb42e0a8a8055e4c3ca1d242f4aa6f6d50050d8ab9d38a10e5a158a9728\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/14/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/14/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/14/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Uj\n"
+  },
+  "generated/14/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): Uj\n"
+  },
+  "generated/14/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Uj\n"
+  },
+  "generated/14/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: I, Uj, bVgGCcd4aU-M3QvuV, i7LVl_tp3CFH, kD8xcisTyq1fAV-hMGp-); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/15/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"8af8bfa143187f186028962df5283ea40c47eef9c9962c3ebc3a344017cf4775\", \"activeKeyId\": \"XD2R\", \"keyFingerprints\": {\"2F7JD5a8l99lI9EkdV\": \"6aa22adbf20c3f58fc9c019adeb815b2adb4046ea26eaea17e61bf1e5d0f6af3\", \"Kh4L8u7\": \"a7c0ea4b7696e4dc2b86ee1b799e09c60dabf44a6d793a8a2c517fce416a2a80\", \"XD2R\": \"9c85acf187d6c471fb6587dce544b19e83d9a428db67cff6f2d2bfd57c40dd81\", \"n\": \"7d1bec47057a8daef10d0955caa72895eef626f83039a9e024cce34f9e08f5c7\", \"z025wM\": \"79abd26a279efeb8f505dfd9d11b08a8792d4a26dc5c5c6b3d1eaaf6a6ce21eb\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/15/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/15/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/15/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): XD2R\n"
+  },
+  "generated/15/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): XD2R\n"
+  },
+  "generated/15/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): XD2R\n"
+  },
+  "generated/15/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 2F7JD5a8l99lI9EkdV, Kh4L8u7, XD2R, n, z025wM); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/16/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"1df264f973a82800f0a2ed8a4cf4a430bfaa727884586cc07131c013a9ed1387\", \"activeKeyId\": \"UQhmgZfWwStsyc\", \"keyFingerprints\": {\"12zR1w\": \"fa6a5ec7d41f89e399d9210155154b92181fbd339a24614d720e6c9141f4d35d\", \"JgsmEGxS-\": \"6b1dd53442170b3487d769a67f7bf6781311fc7bd54863b643bcde8f1125bbb2\", \"UQhmgZfWwStsyc\": \"c7d6a5ace8d8afe58c3d1eec5ad38a78b00bc0059a9979863d22f39dcc082730\", \"hZ\": \"71e0364750945f44a4b5710921ddeb1ce1c649956c5264144c6f9b0f2ed78dc0\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/16/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/16/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/16/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): hZ\n"
+  },
+  "generated/16/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): hZ\n"
+  },
+  "generated/16/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): hZ\n"
+  },
+  "generated/16/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 12zR1w, JgsmEGxS-, UQhmgZfWwStsyc, hZ); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/17/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"233b49586c360eeffc4796e9be04f11ab4f6784a029e35a39d959570b466ed06\", \"activeKeyId\": \"xV\", \"keyFingerprints\": {\"9JQq5aZHt1IRF9WHCrXftiTYMRA32O\": \"91d31e45aac0498178d26742d6ed9ca1593e44d01f8559c14b0d07136aa35ab0\", \"JSOEfFdpo\": \"af80bf927c2e52849be98e45460b3021c5bd512bb5d7768f9b204b58742e1421\", \"Y\": \"825cfdb56ffabff2fd171b17e7e959852c7fe2735037ddf4066db231bf629b31\", \"Z\": \"15c8e8b6fb9903767b534c5afe7bb2da48841d9cbd6d4b13909048a13039c0c4\", \"sX7L8xYURT6iB8oJC\": \"ea82ac43d843c8c9330f5a1ab2d06dc5e302e1068cec981f7c1d57252b6b49af\", \"xV\": \"9a502acf3258cec37dc3ad30e96b9b396e651ffebb71baeb611e735ef5ba545d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/17/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/17/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/17/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): JSOEfFdpo\n"
+  },
+  "generated/17/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): JSOEfFdpo\n"
+  },
+  "generated/17/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): JSOEfFdpo\n"
+  },
+  "generated/17/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 9JQq5aZHt1IRF9WHCrXftiTYMRA32O, JSOEfFdpo, Y, Z, sX7L8xYURT6iB8oJC, xV); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/18/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"e42a82f60e24cee96a8da9ca853075319edbe1e49e43ddd2c91ae49178994065\", \"activeKeyId\": \"EK4Labhb4pGV5P7sWou\", \"keyFingerprints\": {\"5jI0bBMmFhtTl9wTV\": \"8936b948cb2b124bac975e9b7cda75904915a3246471f2d747ed21367b34a807\", \"70DLrgRydAOcYs7RBqNO2jSu6taeGY2\": \"fd38081405ca067b30493a8ce367287f4219f250056d255abcab8ed721f9338b\", \"EK4Labhb4pGV5P7sWou\": \"701c3e2ed216f8364463da43fc958ba3afd4b2d41972721add27e726466d4810\", \"QlJ0QoSSvV\": \"f864f0b48524af2261b437078dccebbb78870bdc61db6d6d09688e3d6b61ee14\", \"az\": \"7328ac6ea454b187705947422abb8d5710a5e4f3254ac07e1aede11d1a8c1757\", \"bq\": \"a0d381e80db6927fa4246aff4aa91736c4cbae3c3062786deccb01ca65cb0b8b\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/18/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/18/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/18/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 5jI0bBMmFhtTl9wTV\n"
+  },
+  "generated/18/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): 5jI0bBMmFhtTl9wTV\n"
+  },
+  "generated/18/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 5jI0bBMmFhtTl9wTV\n"
+  },
+  "generated/18/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 5jI0bBMmFhtTl9wTV, 70DLrgRydAOcYs7RBqNO2jSu6taeGY2, EK4Labhb4pGV5P7sWou, QlJ0QoSSvV, az, bq); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/19/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"f8877c3f8a76024cf237da5ab54e4c2eae2426e9537631561abb2af7294882b3\", \"activeKeyId\": \"x6\", \"keyFingerprints\": {\"-qNA1ZtN8\": \"7cd393bbf5c17555468e0c15f1e1c5c1f3e19cd6400cf361767aa7bab2b69803\", \"1\": \"157614567e539352b0a7d25654f02b99bc8359e28536d5354a5cf211401a6e24\", \"3A0oXj9qYvhEHuy_\": \"dba1c91853c0b69b70f1db345f03ba8bb11aab2e0f800951a941a24505b25d23\", \"6lWo7wqaNfzBvAoicQbZrFbYUAY\": \"75e7d1091b5465cfb5511440d89d48b213b25e5a1c67395b231829dcb168f8f9\", \"CjBQG\": \"6ec2dc9cf3a4eecb8b24a00392b62cce54f459dd91353892a4629ec57e17daf0\", \"J\": \"0666ab4e4c97a3afe7d837d9e4726fc75b11bf4200a6b5b4a70a0ee28e5d3f68\", \"JtLkUB\": \"2e699e8fc61f16a857b0f341a46b62587370ef0552513a517de743afb457e5f0\", \"Jy\": \"4b769ddb4dd9649ccc64628646f5e3ac4fec09fde5dca43e8055780a4d386c5f\", \"K\": \"09cfbc7dbd67337c9e4ea737c02aed89ae745eb7ee1e32198b2f5a9cc0251e05\", \"L\": \"095829fa5790698c5ccc10ba0c604e3a20c0f9f9518338cdea6f0c5b578aa1f5\", \"Lh9YRahIymceXIS6\": \"e016e0635abb36bdae32176628e8d4760e216060ab16ba08c667a7ba3910dbae\", \"NBJhSypEFJfc0Ct\": \"a92135d04ea2c12719a16e6c8fa8c083bcb81f01e3c9b2bfa9a44b33a08e9cc9\", \"OyRU1kVs\": \"d99d098b83d790aff825e57c68ffa0f41e97f1ea0eed25f9603f3b685ba3d42a\", \"P\": \"11b10dbee268d4715801246aafa72ff08c698e24049cd8cb8ce479953026ad72\", \"P4jL3T6n6BuQ4p9EIqk_pTSNQ1FJtsU\": \"4ac8bc4881c0024243795ac5bf24d3f7bfb3ec9d6b73362d2b3947b2de859bea\", \"Q\": \"80d2dc354592548b4b14fe680670bf346cdf2a9bf1c5657730568140432352c6\", \"T\": \"b19e3da3ec1b7ac69925105714f915e9e15e73b7f299a90cc36033a1ac3dbcac\", \"UfjOCdT6x\": \"207dd764625ccbcffda4411e3f08b437a004968caa690a03acbb1a352f41c865\", \"UxyAu4_oCQTZlEjMxn7lRClGFm16TY4M\": \"4c9541ce669598832375986c14f9b415a68da837d71b8d13b9004b496d66e9b6\", \"bR\": \"2c480ba23b577479b1589f955183764c1c9fa5b73c769a1c3aea3d3a0c0caf6f\", \"c\": \"e2fd1fbe405c4ad1787a80917ef2fa366ebaaa5bc72028d11507f4dcb75a1853\", \"e\": \"de60af150b5f8812eec6be2f8695c1b33d39bd81f434daa4268c6fd915177295\", \"eL9Ggb28KQYxH5Wg984IA\": \"0dbd06835c6891685b38e6fd48febfe5b83e6c96df2321ece36346342a8e9959\", \"ex7BqP\": \"a57c84e62f574b0f7bad73dc41d82e881e3891b0a1ffd906aab99b02dadcb704\", \"gQvNAkK9V\": \"d11fec189b39929b8f6632f65d18e9b90070708d9c0a996bbd168ca98963c15f\", \"gfHhL3s35LFwa\": \"02e0a8c7ec4f8f4c7831a550c250444d57e3f912ab000e8131337ff7a86167b9\", \"jxHlEjLqpnUuT125hrNSBgIAha_-e\": \"5014336ba877dd419e496cbd10460004b2f8dcba73045b4cbac25cf54d91b957\", \"qM0\": \"14be406f2e3fb0c40a397c2eca4ee478ad0f4ce92108de2b83e665c989cee824\", \"r\": \"2f71157e151ebddc3b76cd87c7abff787d8f6842673430d45c3d5971e7f27d65\", \"t\": \"05d6dfb3b374e3545cd6e0378fa31ff848924df392180c550a0ba9d8a280918a\", \"x6\": \"01893dec18e4756fd7ff59cbfa85a09a8ec05609130e4477eaf98c832d7b7ee3\", \"z\": \"dd17824a26efc4569b868d5dacfaf9d70f2d50e31b7a706b8ee61d677f798e6f\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/19/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/19/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): K\n"
+  },
+  "generated/19/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): K\n"
+  },
+  "generated/19/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): K\n"
+  },
+  "generated/19/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: -qNA1ZtN8, 1, 3A0oXj9qYvhEHuy_, 6lWo7wqaNfzBvAoicQbZrFbYUAY, CjBQG, J, JtLkUB, Jy, K, L, Lh9YRahIymceXIS6, NBJhSypEFJfc0Ct, OyRU1kVs, P, P4jL3T6n6BuQ4p9EIqk_pTSNQ1FJtsU, Q, T, UfjOCdT6x, UxyAu4_oCQTZlEjMxn7lRClGFm16TY4M, bR, c, e, eL9Ggb28KQYxH5Wg984IA, ex7BqP, gQvNAkK9V, gfHhL3s35LFwa, jxHlEjLqpnUuT125hrNSBgIAha_-e, qM0, r, t, x6, z); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/20/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"964a71ee6d8ca82737ce3166772000d8bd39395578123c3b35e2aa627cc31fd2\", \"activeKeyId\": \"FX\", \"keyFingerprints\": {\"FX\": \"73ea58276a1f2d8f521632c77993be7bf018eab864d74b35c6d00ce3af1e6622\", \"P\": \"f2cca7316c87e3b68d77c81779bf03c6731b6712c4e5c04330d4bcb695bed03d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/20/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/20/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/20/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): FX\n"
+  },
+  "generated/20/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): FX\n"
+  },
+  "generated/20/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): FX\n"
+  },
+  "generated/20/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: FX, P); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/21/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"c1b9f7cec75f7875ad82823756f5d9c7b5daad6562066508339901aed10bac84\", \"activeKeyId\": \"8ADeAAdTiDmgvwIWfCH\", \"keyFingerprints\": {\"-TFUobwYzq6ygpcJ5KgrlNmvQ3\": \"327b0975d789fe42b01a5300c08532b141d2a4d30db545b96f1eb455cfbbfc10\", \"8ADeAAdTiDmgvwIWfCH\": \"488c8c1c11daf73b0d45e5661373e7e198798c748551d1e913ca7685f6c856f9\", \"C6oikC\": \"563e72a8808978b21ccf889efab90ea8637281b70888ddb484c802590257abe6\", \"JPrDSo3tXHeyNRyqV88\": \"05a882a7beb0076a7f13d658688ff7151abc2b991c835b89495fad4f0b985716\", \"TrgxQKnx-eR1IyGT2QUbHD\": \"a0be90964b2b9421db67ba0ecd06afd2c3663223f1ad85f273fcbf748dccbf4a\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/21/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/21/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/21/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 8ADeAAdTiDmgvwIWfCH\n"
+  },
+  "generated/21/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): 8ADeAAdTiDmgvwIWfCH\n"
+  },
+  "generated/21/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 8ADeAAdTiDmgvwIWfCH\n"
+  },
+  "generated/21/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: -TFUobwYzq6ygpcJ5KgrlNmvQ3, 8ADeAAdTiDmgvwIWfCH, C6oikC, JPrDSo3tXHeyNRyqV88, TrgxQKnx-eR1IyGT2QUbHD); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/22/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"d458812f8451feb3e6262378f61146616105699c09bfd0a596ccfe1ab7b42c7c\", \"activeKeyId\": \"kDlOjQV2UN\", \"keyFingerprints\": {\"06MN51TUpAaHkMUCwmPHBxB-z\": \"92e7ceccbddbde0c2ecaa92ff693dc90a8b622950026924819e02ba1fcc18474\", \"FQB-M\": \"5874786ac99131ead3d8ab3b6cde0e4d389c02b547a2a7a5e306afce14269ca4\", \"Z-UymXFir0bwl008jLGM50y1\": \"a299f6e076039494342f44f7dfa7f35aff5add0dc762ba1ba4883eb84416d6fa\", \"eRd7Pl\": \"ef5cd59c193ce79aba30c16a114609e460a9a9ea0e73438d0052ab1bdcf5fb74\", \"kDlOjQV2UN\": \"c6d161812a2dad0d064aa14703944300f0b056403e69de03cef5c1d7cafc0c1b\", \"uESk1sVhieVgvwiwJ2-I4au\": \"14de684a421f2cd3d042cb2b7b04a575ff08929fb01a9e84f3a8811bf2526765\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/22/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/22/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/22/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): kDlOjQV2UN\n"
+  },
+  "generated/22/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): kDlOjQV2UN\n"
+  },
+  "generated/22/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): kDlOjQV2UN\n"
+  },
+  "generated/22/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 06MN51TUpAaHkMUCwmPHBxB-z, FQB-M, Z-UymXFir0bwl008jLGM50y1, eRd7Pl, kDlOjQV2UN, uESk1sVhieVgvwiwJ2-I4au); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/23/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"a43cda2f4a980d93f9b348f0da203df8527507a3ba629b6d2ee41ef9d6839b7f\", \"activeKeyId\": \"H\", \"keyFingerprints\": {\"H\": \"1b72962545f7295cc9d57dba7b698d5cdf868c440109bb6ee0038c43cadbf1b4\", \"Q3Ku3NTMuS15Qw0rrBgsnhy\": \"d43390390916bce0e16cba7d2b3ea804294de96dba7f96035c0bab82ef941151\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/23/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/23/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/23/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Q3Ku3NTMuS15Qw0rrBgsnhy\n"
+  },
+  "generated/23/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): Q3Ku3NTMuS15Qw0rrBgsnhy\n"
+  },
+  "generated/23/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Q3Ku3NTMuS15Qw0rrBgsnhy\n"
+  },
+  "generated/23/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: H, Q3Ku3NTMuS15Qw0rrBgsnhy); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/24/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"d9eed735d0482d766ad8a213eb9861807ef2f8d1136f0331d0a00d306e39be1e\", \"activeKeyId\": \"YbKdTj4wF\", \"keyFingerprints\": {\"YbKdTj4wF\": \"a6eb1e5d934dcab5765d2ce917f95bc541858444624b8b7034bf1343dbac768c\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/24/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/24/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/24/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): YbKdTj4wF\n"
+  },
+  "generated/24/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): YbKdTj4wF\n"
+  },
+  "generated/24/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: YbKdTj4wF); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/25/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"ad1ae5bb482a77c8d72222e3ca712cb91364c189e9e659ae23a4058b9610638b\", \"activeKeyId\": \"MjrwaJ6\", \"keyFingerprints\": {\"30o\": \"2e0c979618f8de19d1444c43afd41c01b704f699bf8eb253633760ea133b2137\", \"IwqqbLwjZO4BdYs25Q1\": \"2ae67c8ac8bb9fd76f624307adbec8af0ab85437c4e3b3630b1880a2cd6fd206\", \"MjrwaJ6\": \"95808299a851339a7df1993d71b6b8cba8e83a22ffc133a532e4deb71631120d\", \"Vl\": \"c1ba5ed07dfd251eee682bbd20d3ea9556ba440f31ab43895b5b5f10e487f467\", \"hIDMUQxZ5hV0-XQPT7qV3XRw\": \"e574bdbd545c44df91901d05688925f59fecda9848df1d07ca2a8dcbd0d211d4\", \"yLLL\": \"1e838b5208936e70c960c9ae69b4786f049d8a6338271b5c8d4f36f8eaebd899\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/25/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/25/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/25/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): MjrwaJ6\n"
+  },
+  "generated/25/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): MjrwaJ6\n"
+  },
+  "generated/25/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): MjrwaJ6\n"
+  },
+  "generated/25/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 30o, IwqqbLwjZO4BdYs25Q1, MjrwaJ6, Vl, hIDMUQxZ5hV0-XQPT7qV3XRw, yLLL); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/26/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"c5202f5f3cedac2296e5121122b9c8826451910836125f0bbbf1de33d449525c\", \"activeKeyId\": \"flSwJw7Xm\", \"keyFingerprints\": {\"9\": \"e072823754c22388fc6eaf883a38dbe508ae9626d8e67faa8d7ac8dbe6d8ca07\", \"Jj0m0axPNCv3\": \"4b3e18a183e55bb1d1ef2d5aece75d1129f8e004d8d5e0d6a69abb12ffafbead\", \"NqPp\": \"d5179306de7d910df9165aa5504a9ca578a32063ecf00236ba1d17fa94e37848\", \"flSwJw7Xm\": \"c7f4b6f5d12a9f4a3097bc57c7c5bf9c33348e4455487bf5e8e07358803be0fc\", \"lcsAHD\": \"6c04153109912da4fbc4cce7ec23309d0c2cce5690924d88ecb77b356a00de59\", \"mXjcALjGsYdU5RQX\": \"1ee42bb6aedbedc34b206fa1af89fbccef9d9623e3a818159c1733597403cd04\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/26/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/26/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/26/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): flSwJw7Xm\n"
+  },
+  "generated/26/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): flSwJw7Xm\n"
+  },
+  "generated/26/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): flSwJw7Xm\n"
+  },
+  "generated/26/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 9, Jj0m0axPNCv3, NqPp, flSwJw7Xm, lcsAHD, mXjcALjGsYdU5RQX); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/27/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"a9575abfe74eaed219a60217de91b6d8f22763a756b26c478a8edf5f19c37216\", \"activeKeyId\": \"tDS7JgyWiPrF7pSuzNNGP6\", \"keyFingerprints\": {\"Cnu\": \"193cd51cdd566867489968daef75bced83e671bf6b1ade4d5c46eec9ac91a59e\", \"d8mmSxyRkqat5N\": \"7888675d2f891a92fcd1790bb6c96c47e6135e0e555954bb1ae8f03245afec40\", \"m3Y0i9gYpIzav6\": \"ea6bdb8770b384226054c2c380a98fca5ab9eab8cd0c8d69fcb9e37aa57e6fd9\", \"tDS7JgyWiPrF7pSuzNNGP6\": \"6c9b69b84c4204ae93b391316caef695175eae6de9322b4f27fd8890aa6b4c41\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/27/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/27/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/27/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): tDS7JgyWiPrF7pSuzNNGP6\n"
+  },
+  "generated/27/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): tDS7JgyWiPrF7pSuzNNGP6\n"
+  },
+  "generated/27/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): tDS7JgyWiPrF7pSuzNNGP6\n"
+  },
+  "generated/27/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: Cnu, d8mmSxyRkqat5N, m3Y0i9gYpIzav6, tDS7JgyWiPrF7pSuzNNGP6); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/28/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"1ee29fc9d85561a3248f29c6b39ef1c0f6b2fd4b2933803542e37ceff7fb8c1e\", \"activeKeyId\": \"OVJ_XjXQqEHZN9IsKTPt\", \"keyFingerprints\": {\"8\": \"5a160aed2783d7126e5294a7ce1359eb1c30c05830e6819f60639dab57d5dad4\", \"BIL0JvRChb\": \"4444252ea9d1174de6f2353ee1fb85fb251759430a8e2e0bc9ada3a3195e7a4c\", \"JgLs_yLQPK48ERZGEsoAVxB\": \"191073359380ae292134e4c2c12007c793f501f949e689c3dd0112fb22a7f3a6\", \"OVJ_XjXQqEHZN9IsKTPt\": \"fa9a069e7d86f9b0c1ec8d7da56ace6cf1ded20cd5637836bc435d89ce20f06c\", \"nb\": \"ae4ed13eb6e0e20bd58a89c5cc1ac591168a5b8339cd7bc00b69568fb3fd76a8\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/28/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/28/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/28/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 8\n"
+  },
+  "generated/28/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): 8\n"
+  },
+  "generated/28/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): 8\n"
+  },
+  "generated/28/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 8, BIL0JvRChb, JgLs_yLQPK48ERZGEsoAVxB, OVJ_XjXQqEHZN9IsKTPt, nb); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/29/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"9947b20476bcd66dafd11c27ba68e0938cec579c3e83ab9686a9eb3deaa33fd4\", \"activeKeyId\": \"HbkKexry\", \"keyFingerprints\": {\"3B\": \"132ff08946397577e028b3b30093c3081d27f53a1466b8e448b7709c0c42e627\", \"6W3FMKNF4DqQ_EF_woHKtZNnF6eQ\": \"3865bf5116e304ff56aaebaf1a841923e584a2cbfa1f42b4fc0e235603922776\", \"8wdblRqrHff1pG_2zKJhxZVVv4rc_L0\": \"947e05a0cdc5786431d0fc3695fdb633942d6df33c948608577f2b8d1b51b79b\", \"90Ca8KMYH1TbYfMNfNItCIr-Rh\": \"ebc25481a564aa3fa5770f787e9b0bac663ae1d88938f2d436cbbe5ae142012f\", \"A3LNNTbi0zKZi\": \"f927e574e7c8c1902781306b2e68ea6106cc216555ffbf423fd5eda702eb8b8b\", \"A6Sz7Aut32pSRXQeCiCWzw\": \"2edc9caf5bea37dce0a1cca2972b0279755737422ce15d4313eaf3f4e8f7ad3a\", \"C\": \"9b2abc3204005dc11e89eaf40956a2c02f736acead28651b6e810b25e2487863\", \"Djgo3vRjfCiHCNMT7PAOHJ\": \"b6b9420214b6354eb70fb0eeb8a9c6c217473b25e5bca81c23a1d1adbafe1831\", \"FWK\": \"babdfa0b13506075c9bf28894012d035bf44b19d7ccd556c76ec294a3d1d4be7\", \"GWQvM1U0OYZmU8EC6oXzBd2uYG4OP\": \"9921100ae206bded1b48d0462164d50758256160d2c3bb79c82bc9f500203905\", \"HbkKexry\": \"cd06e0e9717e235bb417bc70fcc59e940427fda60f830ccfef8c26d0149d9ae4\", \"JLw\": \"6018d73a92e6a24476fcb2be704c330616ef9d79d2426dcb0b59b348cad32257\", \"N\": \"2777d0caabd0831f05fba3e2deb40e87df2f72201bfd753ef9b03e2715144420\", \"O24Uk\": \"459f329b9120914e1d3850dd592affcdf81956a7f72ccd7d4536c79cfee7f327\", \"PUn8\": \"8a5b7fa4b1cfa282838fca65bb638e7d4d257f5750445b36d2b3ea376f749f29\", \"R3RLwuG2l9VOQlwFn\": \"ae44bd5c2b4b9fb28636a8330b1234ac030ccc8e9e34b2003084a0f2f5581bb4\", \"TYLhWoPFLA98MtPxSGEOHun9_ZVJLEF\": \"7dd3a10925c44c7779d4fda06736e955b0a45b0d26d08ef27ce6c2e542df4eb9\", \"Uc\": \"6006045a13b37fbe42cf6651e21414c22beb1b26e6d36f347fb82bcfcfd3ca4a\", \"_\": \"17eccba1ef3f7abce74114f526ac503415695d00835eba1b201c37832454baf5\", \"byRPS77KcxkY\": \"52d65e884224a1f1e6583c44478b0a528525178bb75b1bf5136d77b9333a136f\", \"d0Mx6h5e0_A5eIOIdO2Wpn6d5S\": \"a74a336cea3ee4abfde1df1552a53a399712e987f285257813f8ffc5c0da0943\", \"dUk_xMdOuv4U\": \"cbe8e8e715fba7b09ca2cd7deea2df57766025927e9b797d94c4582b78d795fe\", \"dZ9AAkfJy4rpzJ03nXkAwyEdm7u7S4IB\": \"358b9356c6f89356e742d78d05d50bc5ccd07c2d7c447be6e2dbb6eb82787b05\", \"iOrO\": \"4d075771d704e3fb491cfcf3919ab247021c5bedc11a5caa2934ca189a81ac28\", \"isA4KSmkdlmPFK9h0c6I4LwWJjyN5Evk\": \"c3ecb14ff16a22a28cd6aec72f6d61a5ca42ac2d48b3f68524287a5965553795\", \"k\": \"7f425b7331bf2e5e8597495b35ada435fd0b3dd95e41f662c83caf897796d764\", \"kH9qEJC49gs7RkVUT6y5\": \"8d97788a318b64d794a4b32062b006b920898ce53630db03a835a31f9715f92a\", \"kuB90aqKxqnVUDZ0RzoIQKAdhWKi\": \"0929217a8945b3a3c2a86c825790598ed0037b2cb4d228b5599374f549fb868a\", \"lHcQFihS0yS\": \"80e507e61758e960ffe3586761d2f2efc0a8075bcbc424565b3b510da47c100b\", \"mNahJxzPo200NGQ-xzcxAwpQ\": \"bb9d07b7f5746d5d738b5f085170ccbe759c3ab827a79aa07a4f8518ebc0a09e\", \"w1ijzVSOawVmTxY\": \"adc18ae00288f7d7c5fe4a6e78158619b74b0cfdf0ac6809d3f0d1d92425f5da\", \"zRlY3uMTzXg\": \"bf46558218f82e9d7055f4816635fcb1edc35f38fac96da7508888ce61ffa31b\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/29/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/29/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): A6Sz7Aut32pSRXQeCiCWzw\n"
+  },
+  "generated/29/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): A6Sz7Aut32pSRXQeCiCWzw\n"
+  },
+  "generated/29/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): A6Sz7Aut32pSRXQeCiCWzw\n"
+  },
+  "generated/29/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 3B, 6W3FMKNF4DqQ_EF_woHKtZNnF6eQ, 8wdblRqrHff1pG_2zKJhxZVVv4rc_L0, 90Ca8KMYH1TbYfMNfNItCIr-Rh, A3LNNTbi0zKZi, A6Sz7Aut32pSRXQeCiCWzw, C, Djgo3vRjfCiHCNMT7PAOHJ, FWK, GWQvM1U0OYZmU8EC6oXzBd2uYG4OP, HbkKexry, JLw, N, O24Uk, PUn8, R3RLwuG2l9VOQlwFn, TYLhWoPFLA98MtPxSGEOHun9_ZVJLEF, Uc, _, byRPS77KcxkY, d0Mx6h5e0_A5eIOIdO2Wpn6d5S, dUk_xMdOuv4U, dZ9AAkfJy4rpzJ03nXkAwyEdm7u7S4IB, iOrO, isA4KSmkdlmPFK9h0c6I4LwWJjyN5Evk, k, kH9qEJC49gs7RkVUT6y5, kuB90aqKxqnVUDZ0RzoIQKAdhWKi, lHcQFihS0yS, mNahJxzPo200NGQ-xzcxAwpQ, w1ijzVSOawVmTxY, zRlY3uMTzXg); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/30/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"d3f6df524f6c6803d94ccaf2fd22ecdb160258ead3310540d577fa1cf863980f\", \"activeKeyId\": \"CBeoxBe9J8wHZPbNkfQ7fBZFP\", \"keyFingerprints\": {\"CBeoxBe9J8wHZPbNkfQ7fBZFP\": \"ba4c3b8e224bbd44d0b0e08897e3907aba9e457cce5c15bcc9f3328f54a87101\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/30/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/30/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/30/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): CBeoxBe9J8wHZPbNkfQ7fBZFP\n"
+  },
+  "generated/30/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): CBeoxBe9J8wHZPbNkfQ7fBZFP\n"
+  },
+  "generated/30/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: CBeoxBe9J8wHZPbNkfQ7fBZFP); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/31/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"32b12ac389a8e639eb696c0ac3ab5dc4b5a062cab83f1eea2f6d8722ac7803a7\", \"activeKeyId\": \"QgjCWv2CfqcexKbUKv_m\", \"keyFingerprints\": {\"3JN1XKKcZgWijV9SrLR_\": \"15ea27c227e57431278ed36e6fa7039d7fd8e9817c57c05c37d5c628401136e9\", \"C02pn6fAu2Xl-g_KV7umOK9s3hqE\": \"4f92d605afee34495c3dccbad6205713465e3a4dd3f883fb288e55bda9ace910\", \"L1Ladcn99Dxwy6YgFn\": \"aafd7f35ea3e58a4c8415ecc34c9fddfcaef16bce902eeda44c928edbc0d339b\", \"QgjCWv2CfqcexKbUKv_m\": \"2d9ded0eb9f86f9b96c11f72b6561ec181ba0e3bc7171fda4568a9e886850ae1\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/31/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/31/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/31/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): L1Ladcn99Dxwy6YgFn\n"
+  },
+  "generated/31/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): L1Ladcn99Dxwy6YgFn\n"
+  },
+  "generated/31/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): L1Ladcn99Dxwy6YgFn\n"
+  },
+  "generated/31/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 3JN1XKKcZgWijV9SrLR_, C02pn6fAu2Xl-g_KV7umOK9s3hqE, L1Ladcn99Dxwy6YgFn, QgjCWv2CfqcexKbUKv_m); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/32/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"5116db5081a5d06c12b424dcd5d0619ecd2a8f5f9e69e9e78fa11540eec87b83\", \"activeKeyId\": \"VXh28s5Kct4\", \"keyFingerprints\": {\"TWEY\": \"714e82297ad9ec7866f0980ab9992b0ca7ab2cff1921d469d172c2f62565de22\", \"VXh28s5Kct4\": \"c42c4a2ed40f0cdaf36cfb67a203df187f0e09400d80829cb613c8622c636ecc\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/32/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/32/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/32/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): TWEY\n"
+  },
+  "generated/32/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): TWEY\n"
+  },
+  "generated/32/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): TWEY\n"
+  },
+  "generated/32/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: TWEY, VXh28s5Kct4); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/33/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"56f5b77fb58fe8d19524b2afbb653746406727f92c40adf7c150c08405371637\", \"activeKeyId\": \"P\", \"keyFingerprints\": {\"P\": \"369801efa6b41dc6869690b328149e7f505dc38ccd0e7b5040ccb24531e79960\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/33/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/33/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/33/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): P\n"
+  },
+  "generated/33/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): P\n"
+  },
+  "generated/33/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: P); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/34/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"13b5f1c84b053675a0df268c0e2616641ccc9459693172d6da714787936362b2\", \"activeKeyId\": \"CQc8\", \"keyFingerprints\": {\"0sGXNQRQFK\": \"249dc43f1d2c62cd9b1d6bd80a5cd1f5d440f6ea8992366cb7734e8bf3c323dd\", \"CQc8\": \"d027eeabce6f66498c624497476471393b4f38c945a5663b711941866bc0187e\", \"EW\": \"9e8e900b2fbf1b6c25a308e6d369c538d481b05a9aade5032393c9d2651e8fea\", \"F\": \"b5a588bd45e6e9fd9eaabdb3acb8d07a426986886ea9e4cd9ccda16b0e1f6b30\", \"Ih\": \"1b333a2afdd8363e50101cb7dfcc49c2ae0dac14b8b969a59254a2188b7a0e87\", \"ia88loDwuwRg\": \"050b322d826416a7dc0d2133d0c1e07fde3404909fe936fbb6fdf3dacf6a078d\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/34/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/34/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/34/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Ih\n"
+  },
+  "generated/34/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): Ih\n"
+  },
+  "generated/34/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): Ih\n"
+  },
+  "generated/34/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 0sGXNQRQFK, CQc8, EW, F, Ih, ia88loDwuwRg); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/35/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"22d4118d1f571ecadde7d5b98aca53d510fabecb401c0e564e502b0c4b40351b\", \"activeKeyId\": \"qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a\", \"keyFingerprints\": {\"8Es\": \"75ef20ceacb84d488bb8c97f30081e40572b3421d61f24a7eab13d7eea35fba1\", \"UfxhVIuhFLBfAGI1nXi4DVYBZ2uU\": \"9bccdbf6db82b59d453d301bc7d12901d0ef7ac6db8781742b4b6fb2ae0f6b29\", \"qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a\": \"f47fba98e4f15e015b8d0c79d67966220c68c48a4d65070a443580edc54bb9fa\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/35/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/35/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/35/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a\n"
+  },
+  "generated/35/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a\n"
+  },
+  "generated/35/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a\n"
+  },
+  "generated/35/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 8Es, UfxhVIuhFLBfAGI1nXi4DVYBZ2uU, qlrGF54aWLFkr5TF-BhZX06VE8Sxc4a); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/36/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"e87501bfd8afff815339072add7fafa2c7569367088c34ecd88bd1d72f73a525\", \"activeKeyId\": \"iRW\", \"keyFingerprints\": {\"iRW\": \"f4f67dff0329750e090fe3816072f969c8613a3b303796d623ad6b4dbc733ec7\", \"pjFX\": \"522f32669eef79c12f34e9b7086cbc9259daae24e20ee0c7c19be190cf0d56fd\", \"pztkk9COmGTEH8gQ25Eas7t6tkFmZK\": \"13da2a15aad153b60376c91a14e5c87bce067e0cdeb3e6247dace71d749d6212\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/36/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/36/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/36/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): pjFX\n"
+  },
+  "generated/36/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): pjFX\n"
+  },
+  "generated/36/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): pjFX\n"
+  },
+  "generated/36/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: iRW, pjFX, pztkk9COmGTEH8gQ25Eas7t6tkFmZK); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/37/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"7c520ab9f6b728713099102df19b911660fce39a1405756129e43159e14b5a4f\", \"activeKeyId\": \"MICE78aNuI8rv\", \"keyFingerprints\": {\"3\": \"daabe42ac4600a19c71f2dcb8ffa62032bdd210e133f4c125929a3f44ce86aa3\", \"FvjfRAM3lO9VARnxLGnBWu0Sngg\": \"c55e035a2c9f8fb4c5092b15a8a1a5f6c75e2aff2f9169a7734e6ce64a6aacb7\", \"MICE78aNuI8rv\": \"3561d94bfa3499562e6864c8b33175ed3cb28432b1aa2d51312fa7564504eaaa\", \"lMRSOIwSSWgQ8xwvEk848T12z\": \"05753df8216cb1d4d6f7e40f69af43a6aa09edb49edca79d95b4d62aecd08479\", \"qnx2B04m70J2WXZEO\": \"de6cd3d301ac589e71b442fb064c39be72e52359d0b22299cd0da1145e8d7fbb\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/37/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/37/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/37/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): MICE78aNuI8rv\n"
+  },
+  "generated/37/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): MICE78aNuI8rv\n"
+  },
+  "generated/37/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): MICE78aNuI8rv\n"
+  },
+  "generated/37/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 3, FvjfRAM3lO9VARnxLGnBWu0Sngg, MICE78aNuI8rv, lMRSOIwSSWgQ8xwvEk848T12z, qnx2B04m70J2WXZEO); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/38/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"b349c0507283ffa309793c4a94b31ed688e6aa31d9f314365b032749e5e017f5\", \"activeKeyId\": \"drq91HgPfXBzRIT\", \"keyFingerprints\": {\"6\": \"657ae13687b33c712bc9e8ed924d55545ce382179c3f57c8b9ff0940b2cdd996\", \"drq91HgPfXBzRIT\": \"9fe0cb04ed586e1ab434a78d8a6cb88d84e9cb7867e3ba74a7f90cb79c28fca9\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/38/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/38/superset": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/38/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): drq91HgPfXBzRIT\n"
+  },
+  "generated/38/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): drq91HgPfXBzRIT\n"
+  },
+  "generated/38/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): drq91HgPfXBzRIT\n"
+  },
+  "generated/38/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 6, drq91HgPfXBzRIT); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  },
+  "generated/39/manifest": {
+    "exit": 0,
+    "stdout": "{\"configured\": true, \"fingerprint\": \"386d0a71677e69380283dda89ca7d930ec6fd9149800d11be22811e60263a27d\", \"activeKeyId\": \"9k\", \"keyFingerprints\": {\"22upu6HfWZRvs\": \"2164aac495d3feb017a80f61ebc29d220ebb04fbcdb56013830c604f715a281c\", \"3v6\": \"e237271e8b229b61da79ae8c3d5cc90f6c088c6762b6548de2f2330b1a64abe2\", \"4TUfNwNhFZ8mWhAChs-mD7Jyvh\": \"91af8858fd41f0dc0526d9861d97bae12d58f79c80a6010022a12a8ed0c0da95\", \"4ivsF_yfP04J_eD0O8rZ\": \"4fe002c31bec4013ab0d9a1933ef589f5400289e47499843bb3a97b6c85bce8c\", \"5AD4BYfXnlrG28su1uI_9fcJ0L\": \"b41a3412aee0f1a448ac6829691ea753e868238ff3d37934effad338073c8079\", \"9k\": \"8bb1a60df9d1aa05aa9e8bd6686a88c1c3c028d710e4f80809ea4e3e3b8cbcd5\", \"B5opKD97CUDWZd\": \"af71276448f9fcecf77b73619a02bfb574ca4434a10762b07b1ed95a8d1ce4a1\", \"CNcRjHN5WGY-fMjHvjBf7CG0X\": \"acb012a8eac2bc32a7e83e74280483fd8a49e86891a2d6475f1e0138992b4d8a\", \"CRojP9tX17toD2Ny6a\": \"fda8ace9a3503f0e88d1874bbb511d92030c2b60e291634c7dc14dbc6b7e664d\", \"D\": \"4888735327833f80d0ff91a227a92258f2e2190fb6e580a48070f8dabb083989\", \"I3ocJtGGf\": \"8abbd10f55c6a0367ac323374addc870f86e554c9738489b9ea928afe0c1ebec\", \"K\": \"a3af6520b4a0c7c22676423d76013763f39485795398e69788cc3a806424e993\", \"KdX2JpYMBMEjdHsdEYh\": \"35de761fe2c5229eed3bcec940274e2c6b63e409e9cd06bd7085bc26a700ee5a\", \"LBMAz_8PX1L079BB\": \"3b16a5799654601d9f6f8f6d75eeda6e38e5b1849d5b77048cc8785e1670c415\", \"MElxFUvUv4WZZt4s8iZ\": \"9e198a66dfbfc10064d95954e6cc300281f48f9cf92e4152449f0255671e1def\", \"O\": \"90974ee6827a20be06f034959cd46de4ad5c8e2f011cb86e8ce2f36360397398\", \"O3\": \"6d7f909165ebf21004daf18f54e5debfddfbabe90b286b1a7482d87586100ad9\", \"P\": \"cb474342295f5956f2313d28fb69fa8e0f3924b24c7d97c147237776e849936d\", \"P2nlFNXwkwQ8\": \"26d220090f953140c932fc078b1a1a176ae3557cd5ce569f216841df510fe20f\", \"PHNPBkOamilnAec\": \"e82369e317f466a9125e18b018f36f728bd95a84fda4493b3c0ee27f73bc8dbd\", \"QXDV9rhg2o2i0g3nU\": \"c5cff408bc536395b874311838c0751a57ce23a37ebb6221f0e5d32d68000ac9\", \"R\": \"7260755ba79ddd44d1743cd109046ddec5a729958d48fa4b67e1f8022555407f\", \"ROjXlpeEo_kbSKxbKpZ\": \"a7dbf827863231133cfbc65461fff97935e5d9fd08e319add7e0c1086716c2f0\", \"cS\": \"fa51d2f38d8134a795645be86e2bc17d1f96fe41c89d494aca4a3c2da57958b3\", \"cUbUD5MsXWVI0zRVHAastyOZ\": \"e2a6594d2696abcda66f65430451f799cd40c702ff43e8aa5eba268b8dbb2f74\", \"j\": \"5818fb60a2d8a33e6fb060dc2f2fa604da08fc70ccca45b585188e964e247a14\", \"jFJDFZzB4UMaNq\": \"00b9c8268bf1f774346f14cdf5a91cdcb55c1aa12d352fcc3f4e03126bf43bb7\", \"kR47jjAKoiO7zj_M\": \"a5ca71a05d32671ec36bf21a8db7e7a9adc055e52313560214f3f0b4cc5177ba\", \"lp1RvaeHLwNCOXLDO1aJiG\": \"b0bc40fabe9d5f63d2feb14db6f7b15f8126ef0c1201f66c56c797d14dfd36d5\", \"n\": \"ccbc185eb42fb61c4c8c88acd03dede6d83eea3cf51797a86cfd4e8846dbea76\", \"q7o3XBnWKeEPT3HN1Zz\": \"b89704df458858821615ce945718ced8a1c46eb517defc47ce537dae18fd0e7a\", \"uAm\": \"8c0b220858b804044412686660c501de6f13394b7b3a0ff9c8b414cefce8d469\"}, \"note\": \"Per key id HMAC-SHA256(key, label||id); keys are not stored. Restore needs every key id listed here with the same key (extra keys are fine) and then opens every sealed secret (fvoci-migrate --verify-secrets).\"}\n",
+    "stderr": ""
+  },
+  "generated/39/same": {
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "generated/39/missing": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): cUbUD5MsXWVI0zRVHAastyOZ\n"
+  },
+  "generated/39/changed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS has a different key for id(s): cUbUD5MsXWVI0zRVHAastyOZ\n"
+  },
+  "generated/39/renamed": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "ENCRYPTION_KEYS lacks backed-up key id(s): cUbUD5MsXWVI0zRVHAastyOZ\n"
+  },
+  "generated/39/unset env": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "the backed-up install had ENCRYPTION_KEYS (key ids: 22upu6HfWZRvs, 3v6, 4TUfNwNhFZ8mWhAChs-mD7Jyvh, 4ivsF_yfP04J_eD0O8rZ, 5AD4BYfXnlrG28su1uI_9fcJ0L, 9k, B5opKD97CUDWZd, CNcRjHN5WGY-fMjHvjBf7CG0X, CRojP9tX17toD2Ny6a, D, I3ocJtGGf, K, KdX2JpYMBMEjdHsdEYh, LBMAz_8PX1L079BB, MElxFUvUv4WZZt4s8iZ, O, O3, P, P2nlFNXwkwQ8, PHNPBkOamilnAec, QXDV9rhg2o2i0g3nU, R, ROjXlpeEo_kbSKxbKpZ, cS, cUbUD5MsXWVI0zRVHAastyOZ, j, jFJDFZzB4UMaNq, kR47jjAKoiO7zj_M, lp1RvaeHLwNCOXLDO1aJiG, n, q7o3XBnWKeEPT3HN1Zz, uAm); set ENCRYPTION_KEYS and ENCRYPTION_ACTIVE_KEY_ID\n"
+  }
+}
