@@ -1,6 +1,6 @@
-// Black-box checks of scripts/perf/perf-inner.sh with stub docker, migrate,
-// server, curl and bun: the database URLs it hands to fvoci-migrate and the
-// run metadata JSON it writes.
+// Black-box checks of scripts/perf/perf-inner.sh and the perf-inner.ts it runs,
+// with stub docker, migrate, server, curl and Playwright launch: the database
+// URLs it hands to fvoci-migrate and the run metadata JSON it writes.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
@@ -14,6 +14,30 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { buildDbUrls, Refusal, renderRunJson, utcTimestamp } from "./perf-inner.ts";
+
+describe("perf-inner.ts data steps", () => {
+  test("utcTimestamp keeps microseconds and the +00:00 offset", () => {
+    expect(utcTimestamp(Date.UTC(2026, 9, 10, 1, 2, 3, 4) + 0.567)).toBe(
+      "2026-10-10T01:02:03.004567+00:00",
+    );
+    expect(utcTimestamp(Date.UTC(2026, 0, 1))).toBe("2026-01-01T00:00:00.000000+00:00");
+  });
+
+  test("renderRunJson keeps the indent=1 layout without a trailing newline", () => {
+    expect(renderRunJson("T", "18.3")).toBe(
+      '{\n "dataset_run_started": "T",\n "postgres_server_version": "18.3",\n' +
+        ' "network": "loopback 127.0.0.1",\n "server": "release fvoci-server (source build)"\n}',
+    );
+  });
+
+  test("refuses generated names that would need percent-encoding", () => {
+    const admin = "postgres://u:p@127.0.0.1:5432/postgres";
+    expect(() => buildDbUrls(admin, "db", "role", "pass word")).toThrow(Refusal);
+    expect(() => buildDbUrls(admin, "db/x", "role", "pw")).toThrow("DB_NAME");
+    expect(buildDbUrls(admin, "db", "role", "pw").app).toBe("postgres://role:pw@127.0.0.1:5432/db");
+  });
+});
 
 const SCRIPT = resolve(import.meta.dir, "../../scripts/perf/perf-inner.sh");
 let work = "";
@@ -44,7 +68,12 @@ case "$*" in *"SHOW server_version"*) printf '%s\\n' "$STUB_PG_VERSION" ;; esac`
     "echo 'fvoci-server listening on http://127.0.0.1:9'; exec sleep 60",
   );
   stub(join(work, "bin/curl"), "exit 0");
-  stub(join(work, "bin/bun"), "exit 0");
+  // Like the web-e2e fixture: only the Playwright launch is faked.
+  stub(
+    join(work, "bin/bun"),
+    `[ "$1 $2 $3 $4 $5" = "--bun x --no-install playwright test" ] && exit 0
+exec '${process.execPath}' "$@"`,
+  );
 });
 
 afterEach(() => {
@@ -99,15 +128,14 @@ describe("perf-inner database URLs", () => {
   for (const [url, hostPort] of [
     ["postgres://u:p@DB.Example:6543/postgres", "db\\.example:6543"],
     ["postgres://u:p@localhost/postgres", "localhost:5432"],
-    ["postgres://u:p@:5432", "127\\.0\\.0\\.1:5432"],
     ["postgres://u:p@127.0.0.1:05432/postgres", "127\\.0\\.0\\.1:5432"],
     ["postgres://u:p@127.0.0.1:65535/postgres", "127\\.0\\.0\\.1:65535"],
     ["postgres://u:p@127.0.0.1:1/postgres", "127\\.0\\.0\\.1:1"],
     ["postgres://u:p@[::1]:5432/postgres", "\\[::1\\]:5432"],
     ["postgres://u:p@[::1]/postgres", "\\[::1\\]:5432"],
-    ["postgres://u:p@[::FFFF:192.0.2.1]:5432/postgres", "\\[::ffff:192\\.0\\.2\\.1\\]:5432"],
+    ["postgres://u:p@[::FFFF:192.0.2.1]:5432/postgres", "\\[::ffff:c000:201\\]:5432"],
     ["postgres://u:p@[1:2:3:4:5:6:7:8]:5432/postgres", "\\[1:2:3:4:5:6:7:8\\]:5432"],
-    ["postgres://u:p@[1:2:3:4:5:6:7::]:5432/postgres", "\\[1:2:3:4:5:6:7::\\]:5432"],
+    ["postgres://u:p@[1:2:3:4:5:6:7::]:5432/postgres", "\\[1:2:3:4:5:6:7:0\\]:5432"],
   ] as const) {
     test(`app URL host and port for ${url}`, () => {
       const r = runInner(url);
@@ -120,22 +148,25 @@ describe("perf-inner database URLs", () => {
     ["empty", "", "TEST_DATABASE_URL"],
     ["space", "postgres://u:p@127.0.0.1:5432/post gres", "is not a printable ASCII URL"],
     ["non-ASCII host", "postgres://u:p@hö:5432/postgres", "is not a printable ASCII URL"],
-    ["non-numeric port", "postgres://u:p@127.0.0.1:abc/postgres", "has an invalid port"],
+    ["non-numeric port", "postgres://u:p@127.0.0.1:abc/postgres", "is not a valid URL"],
     ["port 0", "postgres://u:p@127.0.0.1:0/postgres", "has a port outside 1-65535"],
-    ["port 65536", "postgres://u:p@127.0.0.1:65536/postgres", "has a port outside 1-65535"],
-    ["huge port", "postgres://u:p@127.0.0.1:99999999999999999999/postgres", "outside 1-65535"],
-    ["non-IP bracket", "postgres://u:p@[abc]:5432/postgres", "has an invalid IPv6 literal"],
-    ["IPv4 in brackets", "postgres://u:p@[192.0.2.1]:5432/postgres", "invalid IPv6 literal"],
-    ["two ::", "postgres://u:p@[1::2::3]:5432/postgres", "has an invalid IPv6 literal"],
-    ["nine groups", "postgres://u:p@[1:2:3:4:5:6:7:8:9]/postgres", "invalid IPv6 literal"],
-    ["eight groups and ::", "postgres://u:p@[1:2:3:4:5:6:7::8]/postgres", "invalid IPv6 literal"],
-    ["long group", "postgres://u:p@[::12345]/postgres", "has an invalid IPv6 literal"],
-    ["bad IPv4 tail", "postgres://u:p@[::ffff:1.2.3.256]/postgres", "invalid IPv6 literal"],
-    ["zone ID", "postgres://u:p@[fe80::1%25eth0]:5432/postgres", "invalid IPv6 literal"],
-    ["unclosed bracket", "postgres://u:p@[::1:5432/postgres", "has an unclosed IPv6 bracket"],
-    ["text after bracket", "postgres://u:p@[::1]x:5432/postgres", "has text after its IPv6"],
-    ["stray bracket", "postgres://u:p@h]:5432/postgres", "has a bracket in its host"],
+    ["port 65536", "postgres://u:p@127.0.0.1:65536/postgres", "is not a valid URL"],
+    ["huge port", "postgres://u:p@127.0.0.1:99999999999999999999/postgres", "is not a valid URL"],
+    ["non-IP bracket", "postgres://u:p@[abc]:5432/postgres", "is not a valid URL"],
+    ["IPv4 in brackets", "postgres://u:p@[192.0.2.1]:5432/postgres", "is not a valid URL"],
+    ["two ::", "postgres://u:p@[1::2::3]:5432/postgres", "is not a valid URL"],
+    ["nine groups", "postgres://u:p@[1:2:3:4:5:6:7:8:9]/postgres", "is not a valid URL"],
+    ["eight groups and ::", "postgres://u:p@[1:2:3:4:5:6:7::8]/postgres", "is not a valid URL"],
+    ["long group", "postgres://u:p@[::12345]/postgres", "is not a valid URL"],
+    ["bad IPv4 tail", "postgres://u:p@[::ffff:1.2.3.256]/postgres", "is not a valid URL"],
+    ["zone ID", "postgres://u:p@[fe80::1%25eth0]:5432/postgres", "is not a valid URL"],
+    ["unclosed bracket", "postgres://u:p@[::1:5432/postgres", "is not a valid URL"],
+    ["text after bracket", "postgres://u:p@[::1]x:5432/postgres", "is not a valid URL"],
+    ["stray bracket", "postgres://u:p@h]:5432/postgres", "is not a valid URL"],
     ["userinfo bracket", "postgres://u[:p@127.0.0.1:5432/postgres", "bracket in its userinfo"],
+    ["empty host", "postgres://u:p@:5432", "is not a valid URL"],
+    ["forbidden host character", "postgres://u:p@h^x:5432/postgres", "is not a valid URL"],
+    ["IPvFuture", "postgres://u:p@[v1.fe]:5432/postgres", "is not a valid URL"],
   ] as const) {
     test(`refuses a malformed admin URL (${label}) before creating anything`, () => {
       const r = runInner(url);
