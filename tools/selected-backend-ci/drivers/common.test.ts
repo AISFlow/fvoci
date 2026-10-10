@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -22,6 +22,7 @@ import {
   field,
   frameLine,
   identityGone,
+  killTree,
   knownBrowserCheckpoint,
   knownOnBrowserTest,
   lines,
@@ -315,6 +316,59 @@ for (const [shape, target, grace, cleaned] of [
       rmSync(directory, { recursive: true });
     }
   });
+// The tree keeps forking long-lived children while it reaps short-lived ones,
+// so /proc children changes under a walk that reads it before the parent has
+// stopped. Every process of the tree inherits the token in its environment,
+// which survives exec.
+test("killTree leaves no process of a forking tree alive", async () => {
+  const token = `fvoci-kill-tree-${randomUUID()}`;
+  const marked = () =>
+    readdirSync("/proc")
+      .filter((entry) => /^[0-9]+$/.test(entry))
+      .map(Number)
+      .filter((pid) => {
+        try {
+          return (
+            readFileSync(`/proc/${String(pid)}/environ`, "latin1").includes(token) && alive(pid)
+          );
+        } catch (error) {
+          // Gone, or another user's process.
+          if (["ENOENT", "ESRCH", "EACCES"].includes(String((error as NodeJS.ErrnoException).code)))
+            return false;
+          throw error;
+        }
+      });
+  const loop = Bun.spawn(
+    [
+      "bash",
+      "-c",
+      'long=0; while :; do if [ "$long" -lt 300 ]; then sleep 60 & long=$((long + 1)); ' +
+        '[ "$long" -eq 30 ] && echo ready; fi; /bin/true & done',
+    ],
+    {
+      env: { ...process.env, FVOCI_KILL_TREE_TOKEN: token },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "inherit",
+    },
+  );
+  try {
+    expect(decode((await loop.stdout.getReader().read()).value ?? new Uint8Array())).toBe(
+      "ready\n",
+    );
+    killTree(loop.pid);
+    expect(marked()).toEqual([]);
+    await loop.exited;
+    expect(loop.signalCode).toBe("SIGKILL");
+  } finally {
+    for (const pid of [loop.pid, ...marked()])
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+  }
+});
 
 describe("Docker process identities", () => {
   const top =

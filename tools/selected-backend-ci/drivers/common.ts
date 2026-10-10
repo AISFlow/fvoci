@@ -1,7 +1,7 @@
 // Lane-driver primitives shared by the selected backend drivers: owned
 // commands, Docker process identities, the first-failure packet and the
 // cleanup ledger. Receipts keep the field names the runner already reads.
-import { deepEquals, spawn, type Subprocess } from "bun";
+import { deepEquals, sleepSync, spawn, type Subprocess } from "bun";
 import { strict as assert } from "node:assert";
 import {
   closeSync,
@@ -132,14 +132,49 @@ const childPids = (pid: number) =>
         .map(integer),
     ),
   );
-// SIGKILL a process and all its descendants. Each process is stopped before
-// its children are read: once SIGSTOP is pending a fork cannot complete, and
-// a stopped parent cannot reap, so the list is whole and no listed pid can be
-// reused before the SIGKILL. A step that fails does not stop the others, so
-// every process that was stopped is also killed; the first failure is thrown
-// afterwards.
+// /proc/<pid>[/task/<tid>]/stat, or undefined once the process has gone.
+const statText = (path: string): string | undefined => {
+  try {
+    return readFileSync(path, "latin1");
+  } catch (error) {
+    if (!gone(error)) throw error;
+    return undefined;
+  }
+};
+// The state letter follows "(comm) ".
+const state = (stat: string) => stat.charAt(stat.lastIndexOf(")") + 2);
+// The start time tells a process from a later one reusing its pid.
+const startedAt = (pid: number) => {
+  const stat = statText(`/proc/${String(pid)}/stat`);
+  return stat === undefined ? undefined : startTicks(stat);
+};
+const until = (done: () => boolean, deadline: number) => {
+  while (!done()) {
+    if (performance.now() >= deadline) return false;
+    sleepSync(1);
+  }
+  return true;
+};
+// How long the whole walk may wait for SIGSTOPped processes to stop, and the
+// SIGKILLed ones to die, before that wait is given up. Bounds on a kernel
+// state change, not timing allowances.
+const stopBound = 500;
+const deathBound = 1000;
+// SIGKILL a process and all its descendants, and return once every one of
+// them is dead. /proc children is only whole while its process cannot fork
+// or reap, so each process is SIGSTOPped and the walk waits until all its
+// threads have stopped before reading it; one that does not stop within the
+// bound is read anyway (its pending signal already fails its forks) and then
+// SIGKILLed. Passes repeat until one adds no pid. A stopped parent cannot
+// reap, so a listed pid is not reused before its SIGKILL; the start time is
+// still checked before each signal. A step that fails does not stop the
+// others; the first failure is thrown after the rest, and a process left
+// alive is a failure. A child that exits between being listed and being
+// stopped hands its own children to init, out of reach of this walk.
 export function killTree(pid: number): void {
-  const tree = [pid];
+  const tree = new Map([[pid, startedAt(pid)]]);
+  const order = [pid];
+  const stopped = new Set<number>();
   let failure: Error | undefined;
   const attempt = (step: () => void) => {
     try {
@@ -148,17 +183,66 @@ export function killTree(pid: number): void {
       failure ??= error instanceof Error ? error : new Error(String(error));
     }
   };
-  for (let index = 0; index < tree.length; index += 1) {
-    const current = tree[index] as number;
+  const same = (member: number) => {
+    const ticks = tree.get(member);
+    return ticks !== undefined && startedAt(member) === ticks;
+  };
+  const signal = (member: number, name: NodeJS.Signals) => {
+    if (same(member)) signalled(member, name);
+  };
+  // Every thread has stopped (T, or t under a tracer) or died, or the
+  // process has gone.
+  const halted = (member: number) =>
+    !same(member) ||
+    listed(() => readdirSync(`/proc/${String(member)}/task`)).every((task) =>
+      "TtZX".includes(state(statText(`/proc/${String(member)}/task/${task}/stat`) ?? "() X")),
+    );
+  const stopDeadline = performance.now() + stopBound;
+  const stop = (member: number) => {
+    stopped.add(member);
+    let done = false;
     attempt(() => {
-      signalled(current, "SIGSTOP");
-      tree.push(...childPids(current));
+      signal(member, "SIGSTOP");
+      done = until(() => halted(member), stopDeadline);
     });
+    return done;
+  };
+  for (let grew = true; grew;) {
+    grew = false;
+    for (let index = 0; index < order.length; index += 1) {
+      const member = order[index] as number;
+      const late = !stopped.has(member) && !stop(member);
+      attempt(() => {
+        for (const child of childPids(member))
+          if (!tree.has(child)) {
+            tree.set(child, startedAt(child));
+            order.push(child);
+            grew = true;
+          }
+      });
+      if (late)
+        attempt(() => {
+          signal(member, "SIGKILL");
+        });
+    }
   }
-  for (const member of tree)
+  // Descendants first: their stopped parents cannot reap them meanwhile.
+  for (const member of [...order].reverse())
     attempt(() => {
-      signalled(member, "SIGKILL");
+      signal(member, "SIGKILL");
     });
+  const dead = (member: number) => {
+    const stat = statText(`/proc/${String(member)}/stat`);
+    return (
+      stat === undefined || startTicks(stat) !== tree.get(member) || "ZX".includes(state(stat))
+    );
+  };
+  const deathDeadline = performance.now() + deathBound;
+  attempt(() => {
+    const alive = order.filter((member) => !until(() => dead(member), deathDeadline));
+    if (alive.length > 0)
+      throw new Error(`owned process tree outlived SIGKILL: ${alive.join(" ")}`);
+  });
   if (failure) throw failure;
 }
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;

@@ -174,7 +174,7 @@ describe("wrapper environment and identifiers", () => {
       ]);
       expect(options.log).toBe(join(run, "owned-meili-and-tracer.log"));
       expect(options.required).toBe(false);
-      // The wrapper owns the Meilisearch container; an interrupt never SIGKILLs it.
+      // The wrapper owns the Meilisearch container; an interrupt waits, within its grace, for its EXIT trap.
       expect(options.waitOnInterrupt).toBe(true);
       return Promise.resolve({ returncode: 3, stdout: "", stderr: "" });
     });
@@ -532,7 +532,7 @@ describe("parent finalization", () => {
             expect(args.slice(2, 5)).toEqual(postgresDriverCommand());
             expect(args.slice(5)).toEqual(["--pg-ready", run]);
             expect(options.env?.FVOCI_ROOT_RUN_OWNER).toBe(OWNER);
-            // The wrapper owns the PostgreSQL container; an interrupt never SIGKILLs it.
+            // The wrapper owns the PostgreSQL container; an interrupt waits, within its grace, for its EXIT trap.
             expect(options.waitOnInterrupt).toBe(true);
             // A group ^C starts both levels' timers; the outer one must outlast the Meili one.
             expect(options.interruptGrace).toBeGreaterThan(wrapperInterruptGrace);
