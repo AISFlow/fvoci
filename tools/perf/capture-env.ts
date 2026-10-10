@@ -80,15 +80,22 @@ export function renderEnvironment(p: Probes): string {
 
 export type ProbeResult = { ok: true; out: string } | { ok: false; reason: string };
 
+export interface ProbeOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
+
 // A probe failure (spawn error, timeout, signal, non-zero exit) is recorded,
 // never turned into an empty or partial value.
-export function probe(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS): ProbeResult {
+export function probe(cmd: string[], options: ProbeOptions = {}): ProbeResult {
   const [file, ...args] = cmd;
   if (file === undefined) throw new Error("empty command");
   const result = spawnSync(file, args, {
-    cwd,
+    cwd: options.cwd,
+    env: options.env,
     encoding: "utf8",
-    timeout: timeoutMs,
+    timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
     killSignal: "SIGKILL",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
@@ -100,15 +107,29 @@ export function probe(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_M
   return { ok: true, out: result.stdout.trim() };
 }
 
-export function run(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS): string {
-  const result = probe(cmd, cwd, timeoutMs);
+export function run(cmd: string[], options: ProbeOptions = {}): string {
+  const result = probe(cmd, options);
   return result.ok ? result.out : `unavailable: ${result.reason}`;
 }
 
-export function collect(root: string, server: string, collab: string): Probes {
-  const status = probe(["git", "status", "--porcelain"], root);
+// Playwright children never inherit the Bun test runner's worker marker.
+export function playwrightEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const rest = { ...env };
+  delete rest.JEST_WORKER_ID;
+  return rest;
+}
+
+// This process is the Bun the perf run uses (capture-env.sh execs `bun` from
+// PATH), so Bun children re-launch it instead of looking `bun` up again.
+export function collect(
+  root: string,
+  server: string,
+  collab: string,
+  bun: string = process.execPath,
+): Probes {
+  const status = probe(["git", "status", "--porcelain"], { cwd: root });
   return {
-    gitHead: run(["git", "rev-parse", "HEAD"], root),
+    gitHead: run(["git", "rev-parse", "HEAD"], { cwd: root }),
     gitStatus: status.ok ? status.out : null,
     kernel: os.release(),
     osRelease: readFileSync("/etc/os-release", "utf8"),
@@ -118,11 +139,11 @@ export function collect(root: string, server: string, collab: string): Probes {
     loadavg: os.loadavg(),
     dockerServer: run(["docker", "version", "--format", "{{.Server.Version}}"]),
     dockerInfo: run(["docker", "info", "--format", "{{.NCPU}} cpus {{.MemTotal}} bytes"]),
-    bun: run(["bun", "--version"]),
-    playwright: run(
-      ["bun", "--bun", "x", "--no-install", "playwright", "--version"],
-      join(root, "apps/web"),
-    ),
+    bun: run([bun, "--version"]),
+    playwright: run([bun, "--bun", "x", "--no-install", "playwright", "--version"], {
+      cwd: join(root, "apps/web"),
+      env: playwrightEnv(process.env),
+    }),
     serverBytes: statSync(server).size,
     collabBytes: statSync(collab).size,
     rustc: run(["rustc", "--version"]),

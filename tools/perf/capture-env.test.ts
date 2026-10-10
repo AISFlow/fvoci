@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +16,7 @@ import {
   lineCount,
   memTotal,
   osName,
+  playwrightEnv,
   renderEnvironment,
   run,
   type Probes,
@@ -123,15 +132,67 @@ describe("run", () => {
   });
 
   test("records a timeout as unavailable", () => {
-    expect(run(["sleep", "5"], undefined, 100)).toBe("unavailable: ETIMEDOUT");
+    expect(run(["sleep", "5"], { timeoutMs: 100 })).toBe("unavailable: ETIMEDOUT");
   });
 
   test("runs in the requested directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "capture-env-"));
     try {
       writeFileSync(join(dir, "marker"), "");
-      expect(run(["ls"], dir)).toBe("marker");
+      expect(run(["ls"], { cwd: dir })).toBe("marker");
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Bun and Playwright children", () => {
+  test("playwrightEnv drops only JEST_WORKER_ID", () => {
+    expect(playwrightEnv({ JEST_WORKER_ID: "3", PATH: "/bin", HOME: "/h" })).toEqual({
+      PATH: "/bin",
+      HOME: "/h",
+    });
+  });
+
+  test("the Playwright probe re-launches the given Bun without JEST_WORKER_ID", () => {
+    const dir = mkdtempSync(join(tmpdir(), "capture-env-"));
+    const saved = process.env.JEST_WORKER_ID;
+    try {
+      mkdirSync(join(dir, "apps/web"), { recursive: true });
+      writeFileSync(join(dir, "server"), "x");
+      const fake = join(dir, "fake-bun");
+      writeFileSync(
+        fake,
+        `#!/bin/sh\necho "$* jest=\${JEST_WORKER_ID-unset}" >>'${dir}/calls'\necho 9.9.9\n`,
+      );
+      chmodSync(fake, 0o755);
+      process.env.JEST_WORKER_ID = "7";
+      const record = collect(dir, join(dir, "server"), join(dir, "server"), fake);
+      expect(record.bun).toBe("9.9.9");
+      expect(readFileSync(join(dir, "calls"), "utf8").trimEnd().split("\n")).toEqual([
+        "--version jest=7",
+        "--bun x --no-install playwright --version jest=unset",
+      ]);
+    } finally {
+      if (saved === undefined) delete process.env.JEST_WORKER_ID;
+      else process.env.JEST_WORKER_ID = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("by default Bun children use process.execPath, not a PATH lookup", () => {
+    const dir = mkdtempSync(join(tmpdir(), "capture-env-"));
+    const savedPath = process.env.PATH;
+    try {
+      writeFileSync(join(dir, "server"), "x");
+      writeFileSync(join(dir, "bun"), `#!/bin/sh\ntouch '${dir}/path-bun-used'\n`);
+      chmodSync(join(dir, "bun"), 0o755);
+      process.env.PATH = `${dir}:${savedPath ?? ""}`;
+      const record = collect(dir, join(dir, "server"), join(dir, "server"));
+      expect(existsSync(join(dir, "path-bun-used"))).toBe(false);
+      expect(record.bun).toBe(Bun.version);
+    } finally {
+      process.env.PATH = savedPath;
       rmSync(dir, { recursive: true, force: true });
     }
   });

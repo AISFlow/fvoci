@@ -32,25 +32,73 @@ startup_failure() {
 DB_NAME="fvoci_perf_$(openssl rand -hex 8)"
 ROLE_NAME="fvoci_app_${DB_NAME}"
 ROLE_PASSWORD="$(openssl rand -hex 16)"
+refuse_admin_url() {
+  echo "TEST_DATABASE_URL $1" >&2
+  exit 1
+}
+# 1-4 hex digit groups joined by ':' (possibly none); prints the group count.
+ipv6_groups() {
+  [[ -z "$1" ]] && { echo 0; return; }
+  [[ "$1" =~ ^[0-9a-f]{1,4}(:[0-9a-f]{1,4})*$ ]] || return 1
+  local colons="${1//[!:]/}"
+  echo $((${#colons} + 1))
+}
+# An IPv6 address, optionally ending in dotted IPv4, without zone ID.
+valid_ipv6() {
+  local addr="$1" last octet total left right
+  [[ "$addr" == *:* ]] || return 1
+  last="${addr##*:}"
+  if [[ "$last" == *.* ]]; then
+    [[ "$last" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
+    for octet in "${BASH_REMATCH[@]:1}"; do ((octet <= 255)) || return 1; done
+    addr="${addr%"$last"}0:0"
+  fi
+  if [[ "$addr" == *::* ]]; then
+    right="${addr#*::}"
+    [[ "$right" != *::* ]] || return 1
+    left="$(ipv6_groups "${addr%%::*}")" && right="$(ipv6_groups "$right")" || return 1
+    ((left + right <= 7))
+  else
+    total="$(ipv6_groups "$addr")" || return 1
+    ((total == 8))
+  fi
+}
 # Admin URL: TEST_DATABASE_URL with only its path replaced. App URL: the same
 # host and port with the app role. ROLE_NAME and ROLE_PASSWORD are generated
-# above from [0-9a-z_] only, so they need no percent-encoding.
+# above from [0-9a-z_] only, so they need no percent-encoding. A malformed
+# admin URL is refused here, before anything is created.
+printable_ascii_url() {
+  local LC_ALL=C
+  [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*://[!-~]*$ ]]
+}
+printable_ascii_url "$TEST_DATABASE_URL" || refuse_admin_url "is not a printable ASCII URL"
 admin_scheme="${TEST_DATABASE_URL%%://*}"
-[[ "$admin_scheme" != "$TEST_DATABASE_URL" ]] || { echo "TEST_DATABASE_URL is not a URL" >&2; exit 1; }
 admin_rest="${TEST_DATABASE_URL#*://}"
 admin_netloc="${admin_rest%%[/?#]*}"
 admin_tail="${admin_rest#"$admin_netloc"}"
 admin_path="${admin_tail%%[?#]*}"
 admin_hostport="${admin_netloc##*@}"
+[[ "${admin_netloc%"$admin_hostport"}" != *[][]* ]] || refuse_admin_url "has a bracket in its userinfo"
 if [[ "$admin_hostport" == \[* ]]; then
   admin_host="${admin_hostport%%]*}]"
+  [[ "$admin_host" != "$admin_hostport]" ]] || refuse_admin_url "has an unclosed IPv6 bracket"
+  admin_host="${admin_host,,}"
+  valid_ipv6 "${admin_host:1:-1}" || refuse_admin_url "has an invalid IPv6 literal"
+  admin_port="${admin_hostport#*]}"
+  [[ -z "$admin_port" || "$admin_port" == :* ]] || refuse_admin_url "has text after its IPv6 literal"
 else
   admin_host="${admin_hostport%%:*}"
+  [[ "$admin_host" != *[][]* ]] || refuse_admin_url "has a bracket in its host"
+  admin_port="${admin_hostport#"$admin_host"}"
+  admin_host="${admin_host,,}"
 fi
-admin_port="${admin_hostport#"$admin_host"}"
 admin_port="${admin_port#:}"
-[[ "$admin_port" =~ ^[0-9]*$ ]] || { echo "TEST_DATABASE_URL has an invalid port" >&2; exit 1; }
-admin_host="${admin_host,,}"
+if [[ -n "$admin_port" ]]; then
+  [[ "$admin_port" =~ ^[0-9]+$ ]] || refuse_admin_url "has an invalid port"
+  admin_port="${admin_port#"${admin_port%%[!0]*}"}"
+  ((${#admin_port} <= 5 && ${admin_port:-0} >= 1 && ${admin_port:-0} <= 65535)) \
+    || refuse_admin_url "has a port outside 1-65535"
+fi
 export DATABASE_URL="$admin_scheme://$admin_netloc/$DB_NAME${admin_tail#"$admin_path"}"
 export DATABASE_APP_URL="postgres://$ROLE_NAME:$ROLE_PASSWORD@${admin_host:-127.0.0.1}:${admin_port:-5432}/$DB_NAME"
 psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
@@ -91,9 +139,27 @@ if [[ -n "${FVOCI_PERF_GREP:-}" ]]; then
   GREP_ARGS=(--grep "$FVOCI_PERF_GREP")
   [[ -n "$TAG" ]] || { echo "FVOCI_PERF_GREP requires FVOCI_PERF_TAG" >&2; exit 1; }
 fi
-# PG_VERSION has no whitespace left; escape the JSON-significant characters.
-pg_version_json="${PG_VERSION//\\/\\\\}"
-pg_version_json="${pg_version_json//\"/\\\"}"
+# Prints $1 as a JSON string body: '"', '\' and every C0 control character
+# escaped. Non-ASCII bytes are refused instead of guessing their encoding.
+json_string_body() {
+  local LC_ALL=C s="$1" out="" c code i
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    printf -v code '%d' "'$c"
+    if ((code < 0 || code > 127)); then
+      return 1
+    elif [[ "$c" == '"' || "$c" == "\\" ]]; then
+      out+="\\$c"
+    elif ((code < 32)); then
+      printf -v c '\\u%04x' "$code"
+      out+="$c"
+    else
+      out+="$c"
+    fi
+  done
+  printf '%s' "$out"
+}
+pg_version_json="$(json_string_body "$PG_VERSION")" || { echo "server_version is not ASCII" >&2; exit 1; }
 printf '{\n "dataset_run_started": "%s",\n "postgres_server_version": "%s",\n "network": "loopback 127.0.0.1",\n "server": "release fvoci-server (source build)"\n}' \
   "$(date -u +%Y-%m-%dT%H:%M:%S.%6N+00:00)" "$pg_version_json" >"$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json"
 
