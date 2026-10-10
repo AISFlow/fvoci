@@ -64,6 +64,7 @@ import {
   trapInterrupts,
   treeHashes,
   waitFor,
+  wrapperInterruptGrace,
   writeJson,
 } from "./common.ts";
 import type { Child, Command, Json, Receipt, Row } from "./common.ts";
@@ -384,6 +385,8 @@ export async function parent(run: string, facts: ParentFacts, seam: ParentSeam):
         required: false,
         env: environment,
         waitOnInterrupt: true,
+        // Outlasts the Meili wrapper nested inside it, whose own grace is the default.
+        interruptGrace: 2 * wrapperInterruptGrace,
       },
     );
     code = result.returncode;
@@ -1382,6 +1385,15 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
 const compareTuples = (a: [string, string], b: [string, string]) =>
   a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0;
 
+// --pg-ready: the Meili wrapper owns the Meilisearch container, so an
+// interrupt waits for its EXIT trap instead of SIGKILLing it.
+export const meiliWrapper = (run: string, owned: Command) =>
+  owned(["bash", meiliScript, ...postgresDriverCommand(), "--inside", run], {
+    log: join(run, "owned-meili-and-tracer.log"),
+    required: false,
+    waitOnInterrupt: true,
+  });
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   assertNoEnvFile();
   const runs = env("FVOCI_CI_SELECTED_RUNS");
@@ -1423,11 +1435,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (mode === "--pg-ready") {
     write(join(run, "fixture-pg-ready.json"), await fixtureInfo("pg"));
     trapInterrupts();
-    const result = await command(
-      ["bash", meiliScript, ...postgresDriverCommand(), "--inside", run],
-      { log: join(run, "owned-meili-and-tracer.log"), required: false, waitOnInterrupt: true },
-    );
-    return result.returncode;
+    return (await meiliWrapper(run, command)).returncode;
   }
   return inside(lane, run);
 }

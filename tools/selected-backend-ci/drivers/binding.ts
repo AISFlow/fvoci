@@ -249,7 +249,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(basename(run).startsWith("root-current-" + lane + "-"));
   const disk = statfsSync(runs);
   assert.ok(
-    disk.bavail * disk.bsize >= 20_000_000_000,
+    disk.bavail * disk.frsize >= 20_000_000_000,
     "root heavy start floor is20GB; source preparation grants no cleanup",
   );
   const before = referenced(m.sourceInputsBefore) as Inputs;
