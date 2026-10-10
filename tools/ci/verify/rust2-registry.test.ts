@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { contextFromTexts } from "./load.ts";
 import { pyRepr, pySplitlines, pyStrip, type Mapping } from "./py.ts";
 import {
   collaborationScriptInventory,
@@ -565,4 +566,13 @@ test("target extraction and validation share Python whitespace", () => {
   expect(validateMatrixTestsFragment("--test\ufeffa")).toBe(
     "rust: postgres matrix tests must be --test NAME pairs only",
   );
+});
+
+test("a rust.yml the CLI loader refused is reported as its load error", () => {
+  for (const text of ["jobs: [1, 2\n", "- not a mapping\n"]) {
+    const ctx = contextFromTexts(ROOT, { "rust.yml": text });
+    const loadError = ctx.loadErrors["rust.yml"];
+    expect(loadError).toStartWith("rust.yml: ");
+    expect(verifyRustSuiteRegistry(ctx)).toEqual([`rust: ${loadError}`]);
+  }
 });

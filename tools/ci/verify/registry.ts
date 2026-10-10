@@ -63,6 +63,23 @@ export const GATE_NEEDS_JSON_EXPR = "${{ toJSON(needs) }}";
 export const GATE_TESTED_SHA_EXPR = "${{ github.sha }}";
 const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
+/**
+ * The jobs of a gated workflow whose own checks may run (the rust binary
+ * handoff, the web checks): the file parsed to a mapping with a non-empty jobs
+ * mapping of valid job ids. Otherwise the registry reports the problem and
+ * those checks stay silent, as in the original.
+ */
+export function gatedWorkflowJobs(
+  ctx: { workflows: Readonly<Record<string, unknown>> },
+  file: string,
+): Mapping | null {
+  const data = get(ctx.workflows, file);
+  if (!isMapping(data)) return null;
+  const jobs = get(data, "jobs");
+  if (!isMapping(jobs) || Object.keys(jobs).length === 0) return null;
+  return Object.keys(jobs).every((id) => JOB_ID_RE.test(id)) ? jobs : null;
+}
+
 // The planner and gate invocations every gated workflow must carry. Moving the
 // planner to another runtime changes only this table.
 const REQUIREMENTS_FILE = "scripts/ci_selection_requirements.txt";
