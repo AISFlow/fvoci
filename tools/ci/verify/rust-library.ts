@@ -1,6 +1,8 @@
 // Selected SQLite library cohort: the exact filters the fast job must execute and
 // the per-test result rule. A zero-match Cargo run or an ignored test is not execution.
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   type Mapping,
   type VerifyContext,
@@ -13,63 +15,25 @@ import {
 } from "./rust-common.ts";
 
 export const RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)";
-// Order is part of the contract: the slice pins below bind each accepted cohort.
-export const RUST_SELECTED_LIBRARY_FILTERS: readonly string[] = [
-  "db::stars::selected_star_read_finish_tests::star_read_cleanup_retains_refusal_and_driver_without_returning_rows",
-  "db::groups::selected_group_read_finish_tests::group_read_cleanup_retains_refusal_and_driver_without_returning_rows",
-  "streams::events::selected_access_read_tests::sqlite_access_role_change_targets_and_wrong_workspace",
-  "streams::events::selected_access_read_tests::sqlite_access_counter_retention_rollback_and_inflight_writer",
-  "streams::events::selected_access_read_tests::sqlite_access_current_credential_membership_workspace_and_cursor_denials",
-  "streams::events::selected_access_read_tests::access_cleanup_uncertainty_withholds_observation_and_retains_driver_cause",
-  "http::routes::stars::selected_list_access_http_tests::sqlite_http_stars_nonempty_dtos_order_current_acl_and_pat_kinds",
-  "http::routes::stars::selected_list_access_http_tests::sqlite_http_groups_order_member_authority_pat_and_cross_tenant",
-  "http::routes::stars::selected_list_access_http_tests::sqlite_http_lists_recheck_current_credential_and_propagate_sql_fault",
-  "http::routes::stars::selected_list_access_http_tests::sqlite_http_access_role_change_bystander_and_read_error_end_real_body",
-  "http::routes::stars::selected_list_access_http_tests::sqlite_http_access_stream_current_revocation_close_drop_and_guard",
-  "db::project_documents::selected_create_finish_tests::project_create_rollback_retains_domain_and_driver_causes",
-  "db::project_documents::selected_create_backend_tests::sqlite_project_create_current_authority_and_parent_denials",
-  "db::project_documents::selected_create_backend_tests::sqlite_project_create_queued_writer_rechecks_credential_and_permission",
-  "db::project_documents::selected_create_backend_tests::sqlite_project_create_fk_publication_and_commit_failures_then_healthy_create",
-  "http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_literal_request_metadata_number_order_and_publication",
-  "http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_input_origin_current_authority_and_pat_scope_denials",
-  "http::routes::project_documents::selected_create_http_tests::sqlite_http_project_create_real_fk_refusal_is_500_without_partial_effects",
-  "db::projects::selected_project_read_tests::sqlite_project_reads_literal_counts_workflow_and_binary_order",
-  "db::projects::selected_project_read_tests::sqlite_project_reads_private_group_guest_and_current_authority",
-  "db::projects::selected_project_read_tests::sqlite_project_reads_driver_failure_rolls_back_and_healthy_retry",
-  "db::projects::selected_project_read_tests::project_read_cleanup_failure_withholds_rows_and_retains_typed_causes",
-  "db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_unicode_search_past_page_limit_and_assignment_counts",
-  "db::document_tags::selected_tag_pool_tests::sqlite_tag_pool_current_authority_fault_and_healthy_retry",
-  "db::document_tags::selected_tag_pool_tests::tag_pool_cleanup_failure_withholds_rows_and_retains_typed_causes",
-  "http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_literal_project_workflow_tag_and_members",
-  "http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_pat_scopes_tenant_and_document_count_disclosure",
-  "http::routes::projects::selected_pending_get_http_tests::sqlite_http_pending_gets_current_denials_fault_and_healthy_retry",
-  "db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_literal_status_and_archived_view",
-  "db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_current_grants_tenant_and_credential_denials",
-  "db::project_documents::selected_metadata_backend_tests::sqlite_project_metadata_driver_error_and_healthy_retry",
-  "http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_cookie_pat_literal_and_current_denials",
-  "http::routes::project_documents::selected_create_http_tests::sqlite_http_project_metadata_driver_error_and_healthy_retry",
-  "db::labels::selected_project_read_tests::selected_labels_read_nonempty_order_current_grants_and_credential_refusals",
-  "db::milestones::selected_project_read_tests::selected_milestones_read_nonempty_order_current_grants_and_credential_refusals",
-  "db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_stable_concurrent_mapping_and_private_slug_collision",
-  "db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_current_credentials_mapping_and_queued_writer_denials",
-  "db::workspace::selected_personal_workspace_tests::sqlite_personal_bootstrap_event_audit_and_commit_fk_failures_then_healthy_retry",
-  "db::workspace::selected_personal_workspace_tests::personal_bootstrap_rollback_cleanup_retains_domain_and_driver_causes",
-  "db::quota::selected_seat_admission_tests::sqlite_seat_admission_exact_billable_predicate_limit_existing_and_unlimited",
-  "db::quota::selected_seat_admission_tests::sqlite_seat_admission_writer_context_driver_failure_and_healthy_retry",
-  "db::quota::selected_seat_admission_tests::quota_context_restore_failure_retains_original_refusal_or_driver",
-  "http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_cookie_origin_session_only_and_stable_replay",
-  "http::routes::workspaces::selected_personal_bootstrap_http_tests::sqlite_http_personal_bootstrap_seat_limit_and_publication_failure_then_healthy_retry",
-  "db::workspace::selected_member_removal_tests::sqlite_member_removal_literal_effects_current_access_and_healthy_owner",
-  "db::workspace::selected_member_removal_tests::sqlite_member_removal_domain_matrix_tenant_and_queued_actor_revocation",
-  "db::workspace::selected_member_removal_tests::sqlite_member_removal_event_audit_deferred_fk_rollback_and_healthy_progress",
-  "db::workspace::selected_member_removal_tests::sqlite_member_removal_concurrent_owners_private_leads_single_winner",
-  "db::workspace::selected_member_removal_tests::member_removal_rollback_cleanup_retains_domain_and_driver_causes",
-  "db::projects::selected_member_removal_lead_tests::sqlite_workspace_removal_private_archived_direct_group_and_writer_scope",
-  "db::invitations::selected_member_removal_invitation_tests::sqlite_pending_inviter_roles_scope_accepted_and_empty_set",
-  "db::collections::selected_member_removal_view_tests::sqlite_shared_view_transfer_scope_version_overflow_rollback_and_healthy_progress",
-  "http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_cookie_origin_pat_tenant_and_literal_success",
-  "http::routes::workspaces::selected_personal_bootstrap_http_tests::member_removal::sqlite_http_member_delete_audit_rollback_private_lead_refusal_and_healthy_progress",
-];
+// The list `xtask selected-library` runs, one exact libtest name per LF-terminated
+// line. Order is part of the contract: the slice pins below bind each accepted cohort.
+export const RUST_SELECTED_LIBRARY_FILTERS_FILE = "xtask/selected-library-filters.txt";
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** The filter file under `root`, or null when it is unreadable, not UTF-8 or not LF-terminated. */
+export function readSelectedLibraryFilters(root: string): string[] | null {
+  let text: string;
+  try {
+    text = UTF8.decode(readFileSync(join(root, RUST_SELECTED_LIBRARY_FILTERS_FILE)));
+  } catch {
+    return null;
+  }
+  return text.endsWith("\n") ? text.slice(0, -1).split("\n") : null;
+}
+
+// The verifier checkout's own list; the workflow check reads the tree it verifies.
+export const RUST_SELECTED_LIBRARY_FILTERS: readonly string[] =
+  readSelectedLibraryFilters(resolve(import.meta.dir, "../../..")) ?? [];
 
 // [name, start, end) slices of the table and the sha256 of their "\n"-joined UTF-8 text.
 export const RUST_SELECTED_LIBRARY_SLICE_PINS: readonly (readonly [
@@ -204,5 +168,11 @@ export function verifySelectedLibraryExecution(
 
 export function verifySelectedLibraryExecutionCtx(ctx: VerifyContext): string[] {
   const jobs = rustJobs(ctx);
-  return jobs ? verifySelectedLibraryExecution(jobs) : [];
+  if (!jobs) return [];
+  const filters = readSelectedLibraryFilters(ctx.root);
+  if (filters) return verifySelectedLibraryExecution(jobs, filters);
+  return [
+    `rust: selected library filters must be the LF-terminated UTF-8 file ${RUST_SELECTED_LIBRARY_FILTERS_FILE}`,
+    ...verifySelectedLibraryExecution(jobs, []),
+  ];
 }

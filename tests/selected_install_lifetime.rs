@@ -303,14 +303,27 @@ impl OwnedProcess {
     fn text(&self) -> String {
         self.logs.lock().unwrap().join("\n")
     }
-    fn signal(&self) {
-        // Same maintained OS command used by existing process integration
-        // fixtures; target is this owned unreaped PID, never a group/foreign PID.
-        let result = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status()
-            .unwrap();
-        assert!(result.success());
+    fn signal(&mut self) {
+        // Target is this owned PID (`--start` execs the server in place),
+        // never a group/foreign PID; it spawns no room helpers here. The
+        // check proves it is still unreaped (only this handle reaps), so the
+        // PID cannot have been recycled.
+        let exited = self.child.try_wait().unwrap();
+        assert!(
+            exited.is_none(),
+            "owned process already ended before SIGTERM: {}; {}",
+            exited.unwrap(),
+            self.text()
+        );
+        let pid = libc::pid_t::try_from(self.child.id()).unwrap();
+        // SAFETY: kill(2) takes plain integers and touches no memory.
+        let sent = unsafe { libc::kill(pid, libc::SIGTERM) };
+        assert_eq!(
+            sent,
+            0,
+            "SIGTERM to owned pid {pid}: {}",
+            std::io::Error::last_os_error()
+        );
     }
     async fn line(&mut self, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -364,12 +377,29 @@ impl Drop for OwnedProcess {
         if self.status.is_none() {
             // Exceptional fixture cleanup is forceful and labelled; it cannot
             // satisfy a graceful finish assertion or hide the original panic.
-            let _ = self.child.kill();
-            self.status = self.child.wait().ok();
+            let mut failure = self
+                .child
+                .kill()
+                .err()
+                .map(|error| format!("SIGKILL owned pid {}: {error}", self.child.id()));
+            match self.child.wait() {
+                Ok(status) => self.status = Some(status),
+                Err(error) => {
+                    failure.get_or_insert(format!("reap owned pid {}: {error}", self.child.id()));
+                }
+            }
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
             let _ = std::fs::write(&self.report, json!({"pid":self.child.id(),"kind":"exceptional-force-reap","status":self.status.map(|status| status.to_string()),"stderr":self.text(),"readerStarted":self.reader_started,"readerJoined":self.reader_started && self.reader.is_none()}).to_string());
+            if let Some(failure) = failure {
+                // A second panic while unwinding would abort and hide the first.
+                if std::thread::panicking() {
+                    eprintln!("{failure}");
+                } else {
+                    panic!("{failure}");
+                }
+            }
         }
     }
 }

@@ -49,10 +49,11 @@ pub fn archive_root() -> String {
 
 /// Every source, manifest and lockfile compiled into this binary. Adding a
 /// module to `src/` requires listing it here (checked by a test).
-const SOURCES: [(&str, &[u8]); 16] = [
+const SOURCES: [(&str, &[u8]); 26] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     ("Cargo.lock", include_bytes!("../Cargo.lock")),
     ("src/args.rs", include_bytes!("args.rs")),
+    ("src/ci_fixture.rs", include_bytes!("ci_fixture.rs")),
     ("src/host.rs", include_bytes!("host.rs")),
     ("src/install_image.rs", include_bytes!("install_image.rs")),
     ("src/lib.rs", include_bytes!("lib.rs")),
@@ -66,6 +67,42 @@ const SOURCES: [(&str, &[u8]); 16] = [
     (
         "src/rust_binaries_cohort.rs",
         include_bytes!("rust_binaries_cohort.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/guard.rs",
+        include_bytes!("rustup_ci_metadata/guard.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/json.rs",
+        include_bytes!("rustup_ci_metadata/json.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/mod.rs",
+        include_bytes!("rustup_ci_metadata/mod.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/prepare.rs",
+        include_bytes!("rustup_ci_metadata/prepare.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/prepare/tests.rs",
+        include_bytes!("rustup_ci_metadata/prepare/tests.rs"),
+    ),
+    (
+        "src/rustup_ci_metadata/scope.rs",
+        include_bytes!("rustup_ci_metadata/scope.rs"),
+    ),
+    (
+        "src/schema_baseline.rs",
+        include_bytes!("schema_baseline.rs"),
+    ),
+    (
+        "src/selected_install.rs",
+        include_bytes!("selected_install.rs"),
+    ),
+    (
+        "src/selected_library.rs",
+        include_bytes!("selected_library.rs"),
     ),
     ("src/shell.rs", include_bytes!("shell.rs")),
     ("src/sqlite.rs", include_bytes!("sqlite.rs")),
@@ -104,11 +141,20 @@ mod tests {
 
     #[test]
     fn identity_sources_cover_every_module() {
+        fn files(dir: &std::path::Path, prefix: &str, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+                if entry.file_type().unwrap().is_dir() {
+                    files(&entry.path(), &name, found);
+                } else {
+                    found.push(name);
+                }
+            }
+        }
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| format!("src/{}", e.unwrap().file_name().to_string_lossy()))
-            .collect();
+        let mut on_disk = Vec::new();
+        files(&dir, "src", &mut on_disk);
         on_disk.sort();
         let listed: Vec<String> = SOURCES
             .iter()

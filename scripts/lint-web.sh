@@ -8,7 +8,8 @@ if [[ $# == 0 || $1 == -* ]]; then
   set -- 'apps/web/**/*.{js,mjs,cjs,ts,tsx,vue}' \
     'packages/editor/**/*.{js,mjs,cjs,ts,tsx,vue}' 'packages/i18n/**/*.{js,mjs,cjs,ts,tsx,vue}' \
     'scripts/**/*.mjs' 'scripts/run-selected-backend-e2e.ts' scripts/eslint-fixtures.test.ts \
-    'tools/selected-backend-ci/**/*.ts' tools/ci/workflows.test.ts tools/ci/planner.test.ts 'tools/web-e2e/**/*.ts' \
+    'tools/selected-backend-ci/**/*.ts' 'tools/ci/**/*.ts' 'tools/web-e2e/**/*.ts' \
+    'tools/oracle/**/*.ts' 'tools/perf/**/*.ts' 'tools/release/**/*.ts' 'tools/turso/**/*.ts' \
     'tools/install-smoke/**/*.ts' \
     'scripts/schema-baseline/*.ts' eslint.config.mjs "$@"
 fi

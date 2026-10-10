@@ -3,20 +3,12 @@
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
+import { gatedWorkflowJobs } from "./registry.ts";
 import { readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
-const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*\n?$/;
-
-// The original runs the web checks only once web.yml parsed to a mapping
-// with a non-empty jobs mapping of valid job ids; otherwise other checks
-// report the problem and these stay silent.
 export function webWorkflowJobs(ctx: VerifyContext): Mapping | null {
-  const data = ctx.workflows[WEB_WORKFLOW_FILE];
-  if (!isMapping(data)) return null;
-  const jobs = get(data, "jobs");
-  if (!isMapping(jobs) || Object.keys(jobs).length === 0) return null;
-  return Object.keys(jobs).every((id) => JOB_ID_RE.test(id)) ? jobs : null;
+  return gatedWorkflowJobs(ctx, WEB_WORKFLOW_FILE);
 }
 
 // Raw source text of the block-style scalar `jobs.<jobId>.<key>`, or null when
@@ -49,7 +41,12 @@ export function verifyWebBrowserBudgetJobs(jobs: Mapping, rawBudget: string | nu
 export function verifyWebBrowserBudget(ctx: VerifyContext): string[] {
   const jobs = webWorkflowJobs(ctx);
   if (jobs === null) return [];
-  const source = readUtf8(join(ctx.root, ".github", "workflows", WEB_WORKFLOW_FILE));
+  // The parsed jobs and the raw scalar must come from the same text.
+  const texts = ctx.texts;
+  const source =
+    texts !== undefined && Object.hasOwn(texts, WEB_WORKFLOW_FILE)
+      ? (texts[WEB_WORKFLOW_FILE] ?? null)
+      : readUtf8(join(ctx.root, ".github", "workflows", WEB_WORKFLOW_FILE));
   const raw =
     source === null ? null : rawJobScalar(source, "workspace-browser-shard", "timeout-minutes");
   return verifyWebBrowserBudgetJobs(jobs, raw);

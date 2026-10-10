@@ -8,6 +8,8 @@ import { dbIntegrationTargets, rootDbIntegrationRegistryTargets } from "./rust-c
 import { verifyRustBinaryHandoff, verifyRustBinaryHandoffCtx } from "./rust-handoff.ts";
 import {
   RUST_SELECTED_LIBRARY_FILTERS,
+  RUST_SELECTED_LIBRARY_FILTERS_FILE,
+  readSelectedLibraryFilters,
   selectedLibraryResultError,
   verifySelectedLibraryExecution,
   verifySelectedLibraryExecutionCtx,
@@ -259,6 +261,48 @@ describe("selected library", () => {
     expect(selectedLibraryResultError("missing::filter", 0, success("missing::filter"))).toBe(
       "rust: unregistered selected library filter",
     );
+  });
+
+  test("the workflow check reads the runner's filter file from the verified tree", () => {
+    const workflow = fresh();
+    const text = RUST_SELECTED_LIBRARY_FILTERS.join("\n") + "\n";
+    const unreadable = `rust: selected library filters must be the LF-terminated UTF-8 file ${RUST_SELECTED_LIBRARY_FILTERS_FILE}`;
+    const registry =
+      "rust: selected library registry must retain all54 exact filters (original44 prefix and member10)";
+    const dir = mkdtempSync(join(tmpdir(), "rust1-filters-"));
+    const check = (body?: string | Uint8Array) => {
+      rmSync(join(dir, "xtask"), { recursive: true, force: true });
+      if (body !== undefined) {
+        mkdirSync(join(dir, "xtask"));
+        writeFileSync(join(dir, RUST_SELECTED_LIBRARY_FILTERS_FILE), body);
+      }
+      return verifySelectedLibraryExecutionCtx({
+        root: dir,
+        workflows: { [RUST_WORKFLOW_FILE]: workflow },
+      });
+    };
+    try {
+      expect(readSelectedLibraryFilters(root)).toEqual([...RUST_SELECTED_LIBRARY_FILTERS]);
+      expect(check(text)).toEqual([]);
+      for (const body of [undefined, text.slice(0, -1), new Uint8Array([0x61, 0xff, 0x0a])]) {
+        expect(check(body)).toEqual([unreadable, registry]);
+      }
+      const filter = RUST_SELECTED_LIBRARY_FILTERS[20] ?? "";
+      expect(filter).not.toBe("");
+      const renamed = text.replace(`${filter}\n`, "db::renamed::test\n");
+      for (const body of [
+        renamed,
+        "\ufeff" + text,
+        text.replaceAll("\n", "\r\n"),
+        text + "\n",
+        text + text,
+        text.split("\n").slice(1).join("\n"),
+      ]) {
+        expect(check(body)).toEqual([registry]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("registry removal, reorder, duplicate and unknown filters fail the slice pins", () => {

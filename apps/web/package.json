@@ -5,11 +5,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
-    "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json && bun run typecheck:selected-backend-ci && bun run typecheck:ci-tests && bun run typecheck:schema-baseline",
+    "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json && bun run typecheck:selected-backend-ci && bun run typecheck:ci-tests && bun run typecheck:schema-baseline && bun run typecheck:tools",
     "typecheck:selected-backend-ci": "tsc -p ../../tools/selected-backend-ci/tsconfig.json",
     "typecheck:ci-tests": "tsc -p ../../tools/ci/tsconfig.json",
     "typecheck:schema-baseline": "tsc -p ../../scripts/schema-baseline/tsconfig.json",
-    "test": "bun test --parallel --timeout=60000 ./src ../../tools/ci/workflows.test.ts && bun test --parallel --timeout=60000 ../../tools/selected-backend-ci",
+    "typecheck:tools": "tsc -p ../../tools/ci/planner/tsconfig.json && tsc -p ../../tools/ci/gate/tsconfig.json && tsc -p ../../tools/ci/verify/tsconfig.registry.json && tsc -p ../../tools/ci/verify/tsconfig.rust1.json && tsc -p ../../tools/ci/verify/tsconfig.rust2.json && tsc -p ../../tools/oracle/tsconfig.json && tsc -p ../../tools/perf/tsconfig.json && tsc -p ../../tools/release/tsconfig.json && tsc -p ../../tools/turso/tsconfig.guard.json && tsc -p ../../tools/turso/tsconfig.ui.json",
+    "test": "bun test --parallel --timeout=60000 ./src ../../tools/ci/workflows.test.ts && bun test --parallel --timeout=60000 ../../tools/selected-backend-ci && bun test --parallel --timeout=60000 ../../tools/ci/planner/ ../../tools/ci/gate/ ../../tools/ci/verify/ ../../tools/ci/argv.test.ts ../../tools/ci/ci-base-image.test.ts ../../tools/ci/seal-archive.test.ts ../../tools/oracle/ ../../tools/perf/ ../../tools/release/ ../../tools/turso/",
     "test:e2e": "playwright test"
   },
   "dependencies": {
