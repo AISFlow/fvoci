@@ -220,6 +220,7 @@ STUB
 cat >"$FAKE_BIN/openssl" <<'STUB'
 #!/usr/bin/env bash
 [[ "$1 $2" == "rand -hex" ]] || { echo "unexpected openssl $*" >&2; exit 2; }
+[[ -z "${FVOCI_TEST_OPENSSL_FAIL:-}" ]] || { echo "simulated openssl failure" >&2; exit 1; }
 echo 00112233445566778899aabbccddeeff
 STUB
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/openssl"
@@ -356,6 +357,18 @@ fi
 
 if run_runner ignored >/dev/null 2>&1; then
   echo "expected runner failure when admission test is ignored in log" >&2
+  exit 1
+fi
+
+# A start that fails before creating a container removes nothing, not even a
+# container name inherited from a parent wrapper's environment.
+fresh_run
+status=0
+FVOCI_TEST_MEILI_CONTAINER=parent-meili FVOCI_TEST_OPENSSL_FAIL=1 FVOCI_TEST_CARGO_MODE=pass \
+  bash "$RUN" >/dev/null 2>"$RUNNER_STDERR" || status=$?
+if [[ "$status" -eq 0 ]] || [[ -s "$INVOCATIONS" ]] || grep -q '^rm ' "$DOCKER_CALLS"; then
+  echo "expected failed Meilisearch start to fail the runner, run no cargo and remove nothing (status ${status})" >&2
+  cat "$DOCKER_CALLS" >&2
   exit 1
 fi
 

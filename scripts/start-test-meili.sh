@@ -7,11 +7,17 @@
 # Official CE v1.53.2 digest from .github/workflows/rust.yml
 FVOCI_TEST_MEILI_IMAGE="getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9"
 
+# Set (not exported) only by this shell's fvoci_test_meili_start: stop never
+# removes a container name inherited from a parent environment.
+_fvoci_test_meili_owned=""
+
 fvoci_test_meili_stop() {
-  [[ -n "${FVOCI_TEST_MEILI_CONTAINER:-}" ]] || return 0
+  [[ -n "$_fvoci_test_meili_owned" ]] || return 0
+  local container="$_fvoci_test_meili_owned"
+  _fvoci_test_meili_owned=""
   # -v is defensive: the pinned image declares no VOLUME today (its data stays
   # in the container layer), but an image that did would leak one per run.
-  docker rm -f -v "$FVOCI_TEST_MEILI_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f -v "$container" >/dev/null 2>&1 || true
 }
 
 # Starts the container and exports FVOCI_MEILI_URL, FVOCI_MEILI_KEY,
@@ -29,6 +35,7 @@ fvoci_test_meili_start() {
   run_id="$(openssl rand -hex 16)" || return 1
   master_key="$(openssl rand -hex 16)" || return 1
   export FVOCI_TEST_MEILI_CONTAINER="fvoci-rust-test-meili-${run_id}"
+  _fvoci_test_meili_owned="$FVOCI_TEST_MEILI_CONTAINER"
 
   cid="$(docker run -d --rm \
     --name "$FVOCI_TEST_MEILI_CONTAINER" \
@@ -50,6 +57,10 @@ fvoci_test_meili_start() {
   done
 
   port="$(docker port "$cid" 7700 | head -1 | awk -F: '{print $NF}')" || return 1
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "meilisearch published no host port for 7700" >&2
+    return 1
+  fi
   export FVOCI_MEILI_URL="http://127.0.0.1:${port}"
   export FVOCI_MEILI_KEY="$master_key"
   export MEILI_MASTER_KEY="$master_key"

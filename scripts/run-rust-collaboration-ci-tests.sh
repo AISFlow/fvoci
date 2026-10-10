@@ -49,7 +49,8 @@ report_failure() {
   local label="$1" status="$2" log="$3"
   echo "collaboration: ${label} exited ${status}; logs: ${log}.stdout.log ${log}.stderr.log" >&2
   # shellcheck disable=SC2016 # literal backticks in cargo's summary
-  grep -E '^error:|^[[:space:]]+`--test [^`]+`' "${log}.stderr.log" >&2 || true
+  grep -E '^error: ([0-9]+ targets? failed|test failed|could not compile)|^[[:space:]]+`--test [^`]+`$' \
+    "${log}.stderr.log" >&2 || true
 }
 
 cd "$ROOT"
@@ -101,6 +102,9 @@ fi
 # A cargo failure (e.g. a compile error or crash before the admission line
 # printed) keeps its own status; the admission check decides only when both
 # cargo invocations succeeded. It reads both stdout logs: one pass per run.
+if [[ -z "${RUNNER_TEMP:-}" ]]; then
+  echo "collaboration: logs in ${LOG_DIR}" >&2
+fi
 admission=0
 verify_native_admission_log "$PARALLEL_LOG.stdout.log" "$SERIAL_LOG.stdout.log" || admission=$?
 if [[ "$status" -ne 0 ]]; then
