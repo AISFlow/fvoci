@@ -108,7 +108,10 @@ export function indexPlatforms(
     if (platforms.has(key) || (key !== "linux/amd64" && key !== "linux/arm64")) {
       throw new Fail(`${where}: unexpected or repeated platform ${key}`);
     }
-    if (typeof record.digest !== "string") throw new Fail(`${where}: ${key} has no digest`);
+    if (typeof record.digest !== "string" || !DIGEST.test(record.digest)) {
+      // Printed into $GITHUB_OUTPUT by the workflow: only a well-formed digest may pass.
+      throw new Fail(`${where}: ${key} digest ${repr(record.digest)} is not sha256:<64 hex>`);
+    }
     platforms.set(key, record.digest);
   }
   const amd64 = platforms.get("linux/amd64");

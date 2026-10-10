@@ -466,6 +466,24 @@ describe("describe", () => {
     });
   });
 
+  test("refuses a platform digest that could inject step outputs", async () => {
+    const fake = new FakeRegistry();
+    const body = JSON.stringify({
+      mediaType: OCI_INDEX,
+      manifests: [
+        { digest: "sha256:" + "1".repeat(64), platform: { os: "linux", architecture: "amd64" } },
+        { digest: "x\nindex_digest=evil", platform: { os: "linux", architecture: "arm64" } },
+      ],
+    });
+    const digest = fake.add(OCI_INDEX, body);
+    const result = await run(["describe", "--image", IMAGE, "--digest", digest], fake.client);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(
+      "linux/arm64 digest 'x\\nindex_digest=evil' is not sha256:<64 hex>",
+    );
+  });
+
   test("refuses a platform manifest and a missing digest", async () => {
     const { fake, amd64 } = seeded();
     const single = await run(["describe", "--image", IMAGE, "--digest", amd64], fake.client);
