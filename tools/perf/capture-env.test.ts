@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  collect,
   cpuModel,
   lineCount,
   memTotal,
@@ -27,7 +28,7 @@ const probes: Probes = {
   playwright: "Version 1.63.0",
   serverBytes: 10,
   collabBytes: 20,
-  rustc: "unavailable: FileNotFoundError",
+  rustc: "unavailable: ENOENT",
 };
 
 describe("renderEnvironment", () => {
@@ -62,7 +63,7 @@ describe("renderEnvironment", () => {
       cpu_model: "AMD EPYC: 7B13",
       mem_total: "16384000 kB",
       loadavg_at_start: [0.5, 1.25, 2],
-      rustc: "unavailable: FileNotFoundError",
+      rustc: "unavailable: ENOENT",
     });
   });
 
@@ -82,20 +83,47 @@ describe("field parsers", () => {
     expect(memTotal("MemFree: 1 kB")).toBeNull();
     expect(lineCount("")).toBe(0);
     expect(lineCount("one")).toBe(1);
+    expect(lineCount(null)).toBeNull();
   });
 });
 
 describe("run", () => {
-  test("keeps trimmed stdout of a failing command", () => {
-    expect(run(["sh", "-c", "echo '  out  '; echo err >&2; exit 3"])).toBe("out");
+  test("keeps trimmed stdout of a successful command", () => {
+    expect(run(["sh", "-c", "echo '  out  '; echo err >&2"])).toBe("out");
+  });
+
+  test("records a non-zero exit as unavailable, not as its partial stdout", () => {
+    expect(run(["sh", "-c", "echo partial; exit 3"])).toBe("unavailable: exit 3");
+  });
+
+  test("records death by signal as unavailable", () => {
+    expect(run(["sh", "-c", "kill -TERM $$"])).toBe("unavailable: signal SIGTERM");
+  });
+
+  test("a failed git status gives no dirty-path count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "capture-env-"));
+    try {
+      writeFileSync(join(dir, "server"), "12345");
+      const text = renderEnvironment(collect(dir, join(dir, "server"), join(dir, "server")));
+      const record = JSON.parse(text) as Record<string, unknown>;
+      expect(record.git_dirty_paths).toBeNull();
+      expect(record.git_head).toBe("unavailable: exit 128");
+      expect(record.server_binary_bytes).toBe(5);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing binary fails the capture", () => {
+    expect(() => collect("/", "/nonexistent/fvoci-server", "/nonexistent/collab")).toThrow();
   });
 
   test("records a missing executable as unavailable", () => {
-    expect(run(["fvoci-no-such-command-for-capture-env"])).toBe("unavailable: FileNotFoundError");
+    expect(run(["fvoci-no-such-command-for-capture-env"])).toBe("unavailable: ENOENT");
   });
 
   test("records a timeout as unavailable", () => {
-    expect(run(["sleep", "5"], undefined, 100)).toBe("unavailable: TimeoutExpired");
+    expect(run(["sleep", "5"], undefined, 100)).toBe("unavailable: ETIMEDOUT");
   });
 
   test("runs in the requested directory", () => {

@@ -13,7 +13,7 @@ const COMMAND_TIMEOUT_MS = 30_000;
 // Raw probe results; every command result is trimmed stdout or "unavailable: <reason>".
 export interface Probes {
   gitHead: string;
-  gitStatus: string;
+  gitStatus: string | null;
   kernel: string;
   osRelease: string;
   lscpu: string;
@@ -48,7 +48,9 @@ export function memTotal(meminfo: string): string | null {
   return fieldAfter(meminfo, "MemTotal", ":")?.trim() ?? null;
 }
 
-export function lineCount(text: string): number {
+// null when `git status` itself failed: an unknown count is not a clean tree.
+export function lineCount(text: string | null): number | null {
+  if (text === null) return null;
   return text === "" ? 0 : text.split(/\r\n|\r|\n/).length;
 }
 
@@ -76,19 +78,11 @@ export function renderEnvironment(p: Probes): string {
   return `${JSON.stringify(record, null, 1)}\n`;
 }
 
-const UNAVAILABLE: Record<string, string> = {
-  ENOENT: "FileNotFoundError",
-  EACCES: "PermissionError",
-  ETIMEDOUT: "TimeoutExpired",
-};
+export type ProbeResult = { ok: true; out: string } | { ok: false; reason: string };
 
-// A probe failure is recorded, not hidden; a non-zero exit keeps its stdout.
-export function unavailable(error: Error & { code?: string }): string {
-  const code = error.code ?? error.name;
-  return `unavailable: ${UNAVAILABLE[code] ?? code}`;
-}
-
-export function run(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS): string {
+// A probe failure (spawn error, timeout, signal, non-zero exit) is recorded,
+// never turned into an empty or partial value.
+export function probe(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS): ProbeResult {
   const [file, ...args] = cmd;
   if (file === undefined) throw new Error("empty command");
   const result = spawnSync(file, args, {
@@ -99,14 +93,23 @@ export function run(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS)
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error) return unavailable(result.error);
-  return result.stdout.trim();
+  const error: NodeJS.ErrnoException | undefined = result.error;
+  if (error) return { ok: false, reason: error.code ?? error.name };
+  if (result.signal) return { ok: false, reason: `signal ${result.signal}` };
+  if (result.status !== 0) return { ok: false, reason: `exit ${String(result.status)}` };
+  return { ok: true, out: result.stdout.trim() };
+}
+
+export function run(cmd: string[], cwd?: string, timeoutMs = COMMAND_TIMEOUT_MS): string {
+  const result = probe(cmd, cwd, timeoutMs);
+  return result.ok ? result.out : `unavailable: ${result.reason}`;
 }
 
 export function collect(root: string, server: string, collab: string): Probes {
+  const status = probe(["git", "status", "--porcelain"], root);
   return {
     gitHead: run(["git", "rev-parse", "HEAD"], root),
-    gitStatus: run(["git", "status", "--porcelain"], root),
+    gitStatus: status.ok ? status.out : null,
     kernel: os.release(),
     osRelease: readFileSync("/etc/os-release", "utf8"),
     lscpu: run(["lscpu"]),
