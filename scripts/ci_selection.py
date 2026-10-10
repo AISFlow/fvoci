@@ -708,9 +708,10 @@ def build_plan(
             "full", sanitize_reason_code(f"FULL_EVENT_{event_name.upper()}"), frozenset()
         )
     elif event_name not in KNOWN_EVENTS:
-        # Unknown events stay full and selectable. A fatal here would fail the
-        # required gate even when every job succeeded.
+        # Unknown events still select the full job set. plan_ok stays false so
+        # the required gate does not accept the run.
         decision = SelectionDecision("full", "FULL_EVENT_UNKNOWN", frozenset())
+        plan_ok = False
     elif force_full_reason:
         decision = SelectionDecision("full", sanitize_reason_code(force_full_reason), frozenset())
     elif paths is None:
@@ -869,7 +870,7 @@ def resolve_selection_inputs(
 
 
 def write_github_outputs(
-    plan: dict, output_path: Path | None, *, postgres_exclude: str | None = None
+    plan: dict, output_path: Path | None, *, postgres_matrix: str | None = None
 ) -> None:
     if output_path is None:
         return
@@ -892,13 +893,14 @@ def write_github_outputs(
         handle.write("plan_json<<PLAN_EOF\n")
         handle.write(payload + "\n")
         handle.write("PLAN_EOF\n")
-        if postgres_exclude is not None:
-            parsed = json.loads(postgres_exclude)
-            if not isinstance(parsed, list) or "\n" in postgres_exclude:
-                raise ValueError("postgres_exclude must be one JSON array line")
-            handle.write("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n")
-            handle.write(postgres_exclude + "\n")
-            handle.write("POSTGRES_EXCLUDE_EOF\n")
+        if postgres_matrix is not None:
+            parsed = json.loads(postgres_matrix)
+            include = parsed.get("include") if isinstance(parsed, dict) else None
+            if not isinstance(parsed, dict) or set(parsed) != {"include"} or not isinstance(include, list) or "\n" in postgres_matrix:
+                raise ValueError("postgres_matrix must be one JSON object line with include")
+            handle.write("postgres_matrix<<POSTGRES_MATRIX_EOF\n")
+            handle.write(postgres_matrix + "\n")
+            handle.write("POSTGRES_MATRIX_EOF\n")
 
 
 def _load_yaml_mapping(path: Path) -> tuple[dict | None, str | None]:
@@ -1246,19 +1248,20 @@ def _rust_workflow_jobs(repo_root: Path) -> tuple[dict | None, str | None]:
 
 
 def _postgres_matrix_rows(postgres_job: dict) -> tuple[list[dict] | None, str | None]:
-    strategy = postgres_job.get("strategy")
-    if not isinstance(strategy, dict):
-        return None, "rust: postgres job strategy missing"
-    matrix = strategy.get("matrix")
-    if not isinstance(matrix, dict):
-        return None, "rust: postgres job matrix missing"
-    include = matrix.get("include")
+    env = postgres_job.get("env")
+    raw = env.get(POSTGRES_MATRIX_CATALOG_ENV) if isinstance(env, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "rust: postgres matrix catalog missing"
+    try:
+        include = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "rust: postgres matrix catalog is not JSON"
     if not isinstance(include, list) or not include:
-        return None, "rust: postgres job matrix.include missing"
+        return None, "rust: postgres matrix catalog must be a non-empty list"
     rows: list[dict] = []
     for row in include:
         if not isinstance(row, dict):
-            return None, "rust: postgres matrix.include row must be a mapping"
+            return None, "rust: postgres matrix catalog row must be a mapping"
         rows.append(row)
     return rows, None
 
@@ -1294,8 +1297,9 @@ RUST_POSTGRES_IMAGES = {
     "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
     "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
 }
-POSTGRES_MATRIX_EXCLUDE_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}"
-POSTGRES_EXCLUDE_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_exclude }}"
+POSTGRES_MATRIX_CATALOG_ENV = "FVOCI_POSTGRES_MATRIX_CATALOG"
+POSTGRES_MATRIX_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}"
+POSTGRES_MATRIX_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_matrix }}"
 
 
 def postgres_matrix_row_runs(event_name: str, row: dict) -> bool:
@@ -1305,20 +1309,12 @@ def postgres_matrix_row_runs(event_name: str, row: dict) -> bool:
     return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
 
 
-def postgres_exclude_entries(event_name: str, rows: list[dict]) -> list[dict]:
-    excluded: list[dict] = []
-    for row in rows:
-        if postgres_matrix_row_runs(event_name, row):
-            continue
-        check = row.get("check")
-        if not isinstance(check, str) or not check:
-            raise ValueError("postgres matrix row missing check")
-        excluded.append({"check": check})
-    return excluded
+def postgres_matrix_include(event_name: str, rows: list[dict]) -> list[dict]:
+    return [row for row in rows if postgres_matrix_row_runs(event_name, row)]
 
 
-def postgres_exclude_json(event_name: str, rows: list[dict]) -> str:
-    return json.dumps(postgres_exclude_entries(event_name, rows), separators=(",", ":"))
+def postgres_matrix_json(event_name: str, rows: list[dict]) -> str:
+    return json.dumps({"include": postgres_matrix_include(event_name, rows)}, separators=(",", ":"))
 RUST_POSTGRES_BUILD_CACHE_KEY = (
     "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"
     "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-"
@@ -1470,11 +1466,11 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
     strategy = job.get("strategy", {})
     if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False:
         errors.append("rust: PostgreSQL budget must run every selected matrix row")
-    matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
-    if not isinstance(matrix, dict) or set(matrix) != {"include", "exclude"}:
-        errors.append("rust: PostgreSQL budget matrix must use explicit include rows and the plan exclude expression")
-    elif matrix.get("exclude") != POSTGRES_MATRIX_EXCLUDE_EXPR:
-        errors.append("rust: PostgreSQL budget exclude must be the plan postgres_exclude expression")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if matrix != POSTGRES_MATRIX_EXPR:
+        errors.append(
+            "rust: PostgreSQL budget matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix)"
+        )
     rows, err = _postgres_matrix_rows(job)
     if err:
         return errors + [err]
@@ -2189,7 +2185,11 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                 if runner == "${{ matrix.runner }}":
                     strategy = job.get("strategy")
                     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-                    rows = matrix.get("include", []) if isinstance(matrix, dict) else []
+                    if matrix == POSTGRES_MATRIX_EXPR:
+                        catalog_rows, _catalog_err = _postgres_matrix_rows(job)
+                        rows = catalog_rows or []
+                    else:
+                        rows = matrix.get("include", []) if isinstance(matrix, dict) else []
                     runners = [row.get("runner") for row in rows if isinstance(row, dict)]
                 if not runners or any(not isinstance(label, str) or label not in RUST_POSTGRES_RUNNER_ARCH for label in runners):
                     errors.append(f"{path.name}: {job_id} requires explicit Ubuntu 26.04 runners")
@@ -2283,10 +2283,12 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                     key = select_output_key(job)
                     if key not in outputs:
                         errors.append(f"{workflow}: missing selector output {key}")
-                if workflow == "rust" and outputs.get("postgres_exclude") != POSTGRES_EXCLUDE_OUTPUT_EXPR:
+                if workflow == "rust" and outputs.get("postgres_matrix") != POSTGRES_MATRIX_OUTPUT_EXPR:
                     errors.append(
-                        f"{workflow}: {PLAN_JOB_ID} must publish postgres_exclude from the plan step"
+                        f"{workflow}: {PLAN_JOB_ID} must publish postgres_matrix from the plan step"
                     )
+                if workflow == "rust" and "postgres_exclude" in outputs:
+                    errors.append(f"{workflow}: {PLAN_JOB_ID} must not publish postgres_exclude")
             plan_runs = "\n".join(_run_scripts(plan_job))
             if REQUIREMENTS_FILE not in plan_runs:
                 errors.append(
@@ -2661,7 +2663,7 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         force_full_reason=resolved.force_full_reason,
         opt_in_inputs=opt_ins,
     )
-    postgres_exclude = None
+    postgres_matrix = None
     if args.workflow == "rust":
         jobs, jobs_err = _rust_workflow_jobs(args.repo_root)
         rows: list[dict] | None = None
@@ -2675,9 +2677,9 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         if rows_err or rows is None:
             print(f"plan: {rows_err or 'postgres rows missing'}", file=sys.stderr)
             return 1
-        postgres_exclude = postgres_exclude_json(event_name, rows)
+        postgres_matrix = postgres_matrix_json(event_name, rows)
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    write_github_outputs(plan, args.github_output, postgres_exclude=postgres_exclude)
+    write_github_outputs(plan, args.github_output, postgres_matrix=postgres_matrix)
     print(json.dumps({"mode": plan["mode"], "reason_code": plan["reason_code"]}))
     return 0
 

@@ -494,7 +494,7 @@ class PlanSelectionTest(unittest.TestCase):
             )
             self.assertEqual(plan["mode"], "full", event_name)
             self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
-            self.assertTrue(plan["plan_ok"], event_name)
+            self.assertFalse(plan["plan_ok"], event_name)
             self.assertTrue(plan["jobs"]["web-checks"]["selected"], event_name)
 
     def test_parent_mismatch_cannot_narrow(self) -> None:
@@ -1517,6 +1517,17 @@ class RustBinaryArtifactTest(unittest.TestCase):
         self.assertEqual(gate._gate(web, "web", {j: "skipped" if j == "workspace-browser-build" else "success" for j in SEL.WORKFLOW_JOBS["web"]}), 1)
 
 
+def postgres_catalog_rows(job: dict) -> list[dict]:
+    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+    if not isinstance(rows, list):
+        raise AssertionError("postgres matrix catalog must be a list")
+    return rows
+
+
+def store_postgres_catalog(job: dict, rows: list[dict]) -> None:
+    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
+
+
 class RustSuiteRegistryFixture:
     """Minimal tree with real rust.yml wiring and a trimmed Cargo [[test]] registry."""
 
@@ -1582,7 +1593,9 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
         job = jobs["postgres"]
-        rows = job["strategy"]["matrix"]["include"]
+        rows, row_err = SEL._postgres_matrix_rows(job)
+        self.assertIsNone(row_err)
+        assert rows is not None
         self.assertEqual(len(rows), 12)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
                               ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")):
@@ -1598,7 +1611,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(len(a | b | c), 44)
                 self.assertFalse(a & b or a & c or b & c)
                 self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
-        self.assertEqual(job["strategy"]["matrix"]["exclude"], SEL.POSTGRES_MATRIX_EXCLUDE_EXPR)
+        self.assertEqual(job["strategy"]["matrix"], SEL.POSTGRES_MATRIX_EXPR)
         self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
         self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
@@ -1641,8 +1654,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
             with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
                 fx.write_cargo()
                 def change(data: dict) -> None:
-                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
-                    rows = matrix["include"]
+                    job = data["jobs"]["postgres"]
+                    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
                     c = next(row for row in rows if row["shard"] == "c" and row["pg_major"] == "16")
                     a = next(row for row in rows if row["shard"] == "a" and row["pg_major"] == "16")
                     if mutation == "missing-c": rows.remove(c)
@@ -1651,16 +1664,19 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "wrong-major": c["pg_major"] = "17"
                     elif mutation == "wrong-pin": c["postgres_image"] = "postgres:16"
                     elif mutation == "duplicate-check": c["check"] = a["check"]
-                    elif mutation == "extra-dimension": matrix["exclude"] = [dict(c)]
+                    elif mutation == "extra-dimension":
+                        job["strategy"]["matrix"] = {"include": rows, "exclude": []}
+                        return
                     elif mutation == "duplicate-target": c["tests"] += " --test task_integration"
                     elif mutation == "duplicate-across-shards": a["tests"] += " --test task_integration"
                     elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
                     elif mutation == "c-filter": c["tests"] += " -- --skip failing"
                     else: c["continue-on-error"] = True
+                    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
 
-    def test_postgres_exclude_follows_event_and_rejects_check_mutations(self) -> None:
+    def test_postgres_matrix_follows_event_and_rejects_check_mutations(self) -> None:
         jobs, err = SEL._rust_workflow_jobs(ROOT)
         self.assertIsNone(err)
         rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
@@ -1670,13 +1686,29 @@ class RustSuiteRegistryTest(unittest.TestCase):
         def representative(row: dict) -> bool:
             return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
 
-        kept = [row["check"] for row in rows if representative(row)]
-        excluded = [{"check": row["check"]} for row in rows if not representative(row)]
-        self.assertEqual(kept, ["postgres", "postgres-c", "postgres-b"])
+        kept = [row for row in rows if representative(row)]
+        self.assertEqual([row["check"] for row in kept], ["postgres", "postgres-c", "postgres-b"])
         self.assertEqual(len(rows) - len(kept), 9)
-        self.assertEqual(json.loads(SEL.postgres_exclude_json("pull_request", rows)), excluded)
+        self.assertEqual(json.loads(SEL.postgres_matrix_json("pull_request", rows)), {"include": kept})
         for event_name in ("push", "merge_group", "workflow_dispatch", "schedule", "", "pull_request_target"):
-            self.assertEqual(SEL.postgres_exclude_json(event_name, rows), "[]", event_name)
+            self.assertEqual(
+                json.loads(SEL.postgres_matrix_json(event_name, rows)),
+                {"include": rows},
+                event_name,
+            )
+        for event_name in ("schedule", "", "pull_request_target"):
+            plan = SEL.build_plan(
+                workflow="rust",
+                event_name=event_name,
+                base_sha=None,
+                head_sha=None,
+                merge_base_sha=None,
+                tested_sha="a" * 40,
+                paths=["src/lib.rs"],
+            )
+            self.assertFalse(plan["plan_ok"], event_name)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertTrue(plan["jobs"]["postgres"]["selected"], event_name)
 
         def holds(fn, matrix_rows: list[dict]) -> bool:
             ran = {row["check"] for row in matrix_rows if fn("pull_request", row)}
@@ -1716,21 +1748,22 @@ class RustSuiteRegistryTest(unittest.TestCase):
             self.assertNotIn('event_name != "pull_request"', mutated, label)
             self.assertFalse(holds(compiled(mutated), rows), label)
 
-        for mutation in ("drop-exclude", "static-exclude", "invert-event"):
+        for mutation in ("static-include", "exclude-object", "exclude-output"):
             with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
                 fx.write_cargo()
 
                 def change(data: dict, mutation: str = mutation) -> None:
-                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
-                    if mutation == "drop-exclude":
-                        del matrix["exclude"]
-                    elif mutation == "static-exclude":
-                        matrix["exclude"] = [{"check": "postgres-arm64"}]
+                    job = data["jobs"]["postgres"]
+                    catalog = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+                    if mutation == "static-include":
+                        job["strategy"]["matrix"] = {"include": catalog, "exclude": []}
+                    elif mutation == "exclude-object":
+                        job["strategy"]["matrix"] = {
+                            "include": catalog,
+                            "exclude": "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}",
+                        }
                     else:
-                        matrix["exclude"] = (
-                            "${{ fromJSON(github.event_name == 'pull_request' && '[]' "
-                            "|| needs.ci-plan.outputs.postgres_exclude) }}"
-                        )
+                        job["strategy"]["matrix"] = "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}"
 
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
@@ -1787,8 +1820,11 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(names, set()); self.assertIsNotNone(err)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04-arm", "18")):
             bad = copy.deepcopy(jobs)
-            bad["postgres"]["strategy"]["matrix"]["include"] = [row for row in bad["postgres"]["strategy"]["matrix"]["include"]
-                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")]
+            catalog = json.loads(bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+            bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps([
+                row for row in catalog
+                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")
+            ])
             self.assertIsNotNone(SEL.schema_baseline_inventory(bad)[1])
 
     def test_schema_target_omission_is_a_registry_failure(self) -> None:
@@ -1902,7 +1938,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
             step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
             self.assertIn('prefix="fvoci-selected-install-", dir="/run"', step["run"])
             self.assertEqual(jobs["native-arm64"]["steps"][-1]["run"].strip(), SEL.RUST_NATIVE_ARM64_RUN)
-            rows = jobs["postgres"]["strategy"]["matrix"]["include"]
+            rows = postgres_catalog_rows(jobs["postgres"])
             self.assertEqual(
                 sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
                 ["ubuntu-26.04", "ubuntu-26.04-arm"],
@@ -1934,8 +1970,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
                         helper = next(item for item in steps if item.get("name") == "Validate and restore finished postgres executables (no rebuild fallback)")
                         helper["run"] = helper["run"].replace('--cohort postgres ', '--cohort helper ')
                     else:
-                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
+                        rows = postgres_catalog_rows(job)
+                        row = next(row for row in rows if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
                         row["pg_major"] = "17"
+                        store_postgres_catalog(job, rows)
                 fx.mutate_rust_workflow(weaken)
                 errors = SEL.verify_rust_suite_registry(fx.root)
                 self.assertTrue(errors, "selected install actual execution must be mandatory")
@@ -1945,9 +1983,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["selected_install_lifetime"])
             def duplicate(data: dict) -> None:
-                for row in data["jobs"]["postgres"]["strategy"]["matrix"]["include"]:
+                job = data["jobs"]["postgres"]
+                rows = postgres_catalog_rows(job)
+                for row in rows:
                     if row["shard"] == "b":
                         row["tests"] += " --test selected_install_lifetime"
+                store_postgres_catalog(job, rows)
             fx.mutate_rust_workflow(duplicate)
             errors = SEL.verify_rust_suite_registry(fx.root)
         self.assertIn("assigned to multiple CI buckets: selected_install_lifetime", "\n".join(errors))
@@ -1963,10 +2004,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_arm64_row_omission_fails(self) -> None:
         def drop_search_meili_on_arm(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             for row in rows:
                 if row.get("runner") == "ubuntu-26.04-arm":
                     row["tests"] = row["tests"].replace(" --test search_meili", "")
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2224,8 +2267,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_matrix_tests_no_run_fragment_fails(self) -> None:
         def poison_matrix_tests(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             rows[0]["tests"] = "--no-run --test db_integration"
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2655,8 +2700,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 self.assertIsNone(err)
                 job = data["jobs"]["postgres"]
                 if mutation == "missing-c":
-                    rows = job["strategy"]["matrix"]["include"]
+                    rows = postgres_catalog_rows(job)
                     rows.remove(next(row for row in rows if row["shard"] == "c"))
+                    store_postgres_catalog(job, rows)
                     needle = "all twelve"
                 elif mutation == "missing-gate":
                     data["jobs"]["rust-ci-gate"]["needs"].remove("postgres")
@@ -3819,7 +3865,7 @@ class MergeGroupPlanTest(unittest.TestCase):
             self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
             self.assertTrue(plan["plan_ok"])
             assert_full_selection(self, "web", plan, "merge_group")
-            self.assertNotIn("postgres_exclude", plan)
+            self.assertNotIn("postgres_matrix", plan)
 
     def test_missing_or_invalid_merge_group_fields_stay_full(self) -> None:
         with PrCheckoutFixture() as fx:
@@ -3885,13 +3931,13 @@ class MergeGroupPlanTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
                 self.assertEqual(plan["mode"], "full", event_name)
                 self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
-                self.assertTrue(plan["plan_ok"], event_name)
+                self.assertFalse(plan["plan_ok"], event_name)
                 self.assertIsNone(plan["base_sha"], event_name)
                 self.assertIsNone(plan["head_sha"], event_name)
                 assert_full_selection(self, "install", plan, event_name)
-                self.assertNotIn("postgres_exclude<<", text, event_name)
+                self.assertNotIn("postgres_matrix<<", text, event_name)
 
-    def test_rust_plan_exclude_is_event_scoped_and_outside_plan_json(self) -> None:
+    def test_rust_plan_matrix_is_event_scoped_and_outside_plan_json(self) -> None:
         with PrCheckoutFixture() as fx:
             fx.clone_work()
             tested = git_sha(fx.work)
@@ -3900,8 +3946,11 @@ class MergeGroupPlanTest(unittest.TestCase):
             rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
             self.assertIsNone(row_err)
             assert rows is not None
-            reduced = SEL.postgres_exclude_json("pull_request", rows)
-            self.assertNotEqual(reduced, "[]")
+            reduced = SEL.postgres_matrix_json("pull_request", rows)
+            full = SEL.postgres_matrix_json("push", rows)
+            self.assertEqual(len(json.loads(reduced)["include"]), 3)
+            self.assertEqual(len(json.loads(full)["include"]), 12)
+            self.assertNotEqual(reduced, full)
             pr_payload = {
                 "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
                 "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
@@ -3910,8 +3959,10 @@ class MergeGroupPlanTest(unittest.TestCase):
                 fx, workflow="rust", event_name="pull_request", payload=pr_payload, tested=tested
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(plan["plan_ok"])
+            self.assertNotIn("postgres_matrix", plan)
             self.assertNotIn("postgres_exclude", plan)
-            self.assertIn(f"postgres_exclude<<POSTGRES_EXCLUDE_EOF\n{reduced}\nPOSTGRES_EXCLUDE_EOF\n", text)
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{reduced}\nPOSTGRES_MATRIX_EOF\n", text)
             mg_payload = {
                 "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
                 "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
@@ -3922,9 +3973,10 @@ class MergeGroupPlanTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(plan["base_sha"], "a" * 40)
             self.assertEqual(plan["head_sha"], "b" * 40)
-            self.assertIn("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n[]\nPOSTGRES_EXCLUDE_EOF\n", text)
-            for event_name in ("push", "workflow_dispatch", "schedule"):
-                proc, _plan_body, text = self._plan(
+            self.assertTrue(plan["plan_ok"])
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
+            for event_name in ("push", "workflow_dispatch"):
+                proc, plan_body, text = self._plan(
                     fx,
                     workflow="rust",
                     event_name=event_name,
@@ -3932,7 +3984,20 @@ class MergeGroupPlanTest(unittest.TestCase):
                     tested=tested,
                 )
                 self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
-                self.assertIn("postgres_exclude<<POSTGRES_EXCLUDE_EOF\n[]\nPOSTGRES_EXCLUDE_EOF\n", text, event_name)
+                self.assertTrue(plan_body["plan_ok"], event_name)
+                self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text, event_name)
+            proc, plan, text = self._plan(
+                fx,
+                workflow="rust",
+                event_name="schedule",
+                payload={"before": "e" * 40, "after": tested, "ref": "refs/heads/main"},
+                tested=tested,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(plan["plan_ok"])
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN")
+            assert_full_selection(self, "rust", plan, "schedule")
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
 
     def test_required_gate_names_match_under_every_event(self) -> None:
         rust = (ROOT / ".github/workflows/rust.yml").read_text(encoding="utf-8")
