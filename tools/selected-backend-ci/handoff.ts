@@ -14,6 +14,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   statSync,
@@ -104,12 +105,25 @@ const jobs = (): readonly [string, string] =>
     ? ["workspace-browser-build", "workspace-browser-shard"]
     : ["collaboration-build", "collaboration-flow"];
 
-// An absolute path whose existing part has no symlink or relative component.
+// An absolute lexical path whose existing part has no symlink. Missing parents
+// (a fresh consumer's target/debug or apps/web/dist) are allowed, as Python's
+// Path.resolve() allowed them; install creates them.
 function physicalPath(path: string): string {
   assert.ok(isAbsolute(path) && resolve(path) === path, "nonphysical handoff path");
-  const existing = existsSync(path) ? path : dirname(path);
+  let existing = path;
+  while (!existsSync(existing)) {
+    assert.ok(!lstatOrNull(existing), "dangling handoff path");
+    existing = dirname(existing);
+  }
   assert.equal(realpathSync(existing), existing, "nonphysical handoff path");
   return path;
+}
+function lstatOrNull(path: string) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
 }
 export function regular(path: string): string {
   physicalPath(path);
@@ -231,20 +245,32 @@ export function paths(): { output: string; packet: string } {
 }
 
 // Bounded hash-only evidence; never serialize paths, status or env values.
+// Python json.dumps(sort_keys=True, separators=(",", ":")) bytes: keys in code
+// point order and non-ASCII as lowercase \\uXXXX UTF-16 escapes.
+const codePoints = (a: string, b: string) => {
+  const x = Array.from(a, (c) => c.codePointAt(0) ?? 0),
+    y = Array.from(b, (c) => c.codePointAt(0) ?? 0);
+  for (let i = 0; i < Math.min(x.length, y.length); i++)
+    if (x[i] !== y[i]) return (x[i] ?? 0) - (y[i] ?? 0);
+  return x.length - y.length;
+};
+const ascii = (text: string) =>
+  text.replace(/[\u0080-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   if (value && typeof value === "object")
     return (
       "{" +
       Object.keys(value)
-        .sort()
+        .sort(codePoints)
         .map(
-          (key) => JSON.stringify(key) + ":" + canonical((value as Record<string, unknown>)[key]),
+          (key) =>
+            ascii(JSON.stringify(key)) + ":" + canonical((value as Record<string, unknown>)[key]),
         )
         .join(",") +
       "}"
     );
-  return JSON.stringify(value ?? null);
+  return ascii(JSON.stringify(value ?? null));
 }
 const fingerprint = (value: unknown) => digest(canonical(value));
 const fieldOf = (value: HandoffInputs, field: string): unknown =>
@@ -648,6 +674,20 @@ export async function members(
   keep: (name: string) => boolean = () => false,
   sink?: (member: Omit<Member, "sha256" | "data">, chunk: Buffer) => void,
 ): Promise<Member[]> {
+  // Plain POSIX/GNU tar only, as Python tarfile.open(mode="r:") required: the
+  // first header carries the ustar magic. node-tar would gunzip transparently.
+  const head = Buffer.alloc(512),
+    fd = openSync(archive, "r");
+  try {
+    assert.equal(readSync(fd, head, 0, 512, 0), 512, "refused tar member: short archive");
+  } finally {
+    closeSync(fd);
+  }
+  assert.equal(
+    head.subarray(257, 262).toString("latin1"),
+    "ustar",
+    "refused tar member: not plain tar",
+  );
   const result: Member[] = [];
   const parser = new Parser({
     strict: true,
@@ -754,6 +794,7 @@ export async function consume(h: HostFacts = host): Promise<void> {
     if (!existsSync(entry.path)) {
       // An empty member emits no data chunk.
       assert.equal(entry.bytes, 0);
+      mkdirSync(dirname(entry.path), { recursive: true });
       const fd = openSync(entry.path, "wx", 0o600);
       fchmodSync(fd, entry.mode);
       closeSync(fd);

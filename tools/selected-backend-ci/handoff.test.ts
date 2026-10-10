@@ -467,6 +467,42 @@ describe.serial("collaboration build packet", () => {
     expect(existsSync(f.packet)).toBe(false);
   });
 
+  test("a fresh consumer without target directories installs the packet", async () => {
+    transfer();
+    // A fresh checkout restores only Cargo downloads: no target/ yet.
+    rmSync(f.target, { recursive: true, force: true });
+    rmSync(join(f.root, "crates/collab-engine/target"), { recursive: true, force: true });
+    await consume(f.host);
+    expect(Object.keys((get("handoff-consumed.json") as Consumed).received)).toHaveLength(23);
+  });
+  test("a symlinked missing destination parent is refused", async () => {
+    transfer();
+    rmSync(f.target, { recursive: true, force: true });
+    symlinkSync(join(f.root, "elsewhere"), f.target);
+    await assert.rejects(consume(f.host));
+    expect(existsSync(join(f.root, "elsewhere"))).toBe(false);
+  });
+  test("a gzip payload is refused even with a matching digest", async () => {
+    const manifest = transfer();
+    const archive = join(f.packet, "payload.tar");
+    writeFileSync(archive, Bun.gzipSync(readFileSync(archive)));
+    manifest.payload_sha256 = sha(archive);
+    changeManifest(manifest);
+    await assert.rejects(consume(f.host), { message: /not plain tar/ });
+    expect(existsSync(join(f.output, "before.json"))).toBe(false);
+  });
+  test("input fingerprints are the Python json.dumps bytes for non-ASCII keys", () => {
+    const before = fixtureInputs();
+    const current = { ...before, tracked: { "한글.ts": "x" } };
+    inputDiagnostics(f.output, before, before, current);
+    const fields = (
+      get("handoff-input-current-safe.json") as { fields: Record<string, { sha256: string }> }
+    ).fields;
+    // python3 -c 'json.dumps({"한글.ts": "x"}, sort_keys=True, separators=(",", ":"))'
+    expect(fields.tracked?.sha256).toBe(
+      "367d47b24ff50e8c960e1964edea96587de56a2c27e9c76a74b14306d51ea385",
+    );
+  });
   test("exact current packet is admitted and installed", async () => {
     transfer();
     admit(f.host);
@@ -799,6 +835,14 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
 
+  test("a fresh shard without target or dist directories installs the packet", async () => {
+    const assets = distFiles(f.host);
+    browserTransfer();
+    for (const path of [f.target, f.dist, join(f.root, "crates/collab-engine/target")])
+      rmSync(path, { recursive: true, force: true });
+    await consume(f.host);
+    expect(distFiles(f.host)).toEqual(assets);
+  });
   test("exact input and asset hashes are equal without a consumer build", async () => {
     const before = buildInputs(f.host),
       assets = distFiles(f.host);
