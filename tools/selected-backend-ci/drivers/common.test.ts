@@ -1,15 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { parseJson } from "../io.ts";
+import { parseJson, sha } from "../io.ts";
 import {
   attachmentJson,
   command,
   decode,
   failureCheckpoint,
+  fileSha,
   field,
   frameLine,
   identityGone,
@@ -251,6 +260,32 @@ describe("owned commands", () => {
   });
 });
 
+for (const target of ["group", "direct"] as const)
+  test(`a ${target} SIGINT lets an owned fixture wrapper run its EXIT cleanup`, async () => {
+    const directory = temporary();
+    try {
+      const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
+      // Its own process group: a group interrupt reaches the wrapper like a
+      // terminal ^C; a direct one reaches the driver alone and is forwarded.
+      const child = Bun.spawn([process.execPath, fixture, directory, target], {
+        stdout: "pipe",
+        stderr: "inherit",
+        detached: true,
+      });
+      const log = join(directory, "wrapper.log");
+      while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
+      process.kill(target === "group" ? -child.pid : child.pid, "SIGINT");
+      const output = await new Response(child.stdout).text();
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({
+        error: "KeyboardInterrupt",
+      });
+      expect(existsSync(join(directory, "cleaned"))).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  });
+
 describe("Docker process identities", () => {
   const top =
     (stdout: string): Command =>
@@ -316,6 +351,20 @@ describe("encodings", () => {
     expect(attachmentJson(Buffer.from('{"a":1}').toString("base64"))).toEqual({ a: 1 });
     for (const body of ["eyJhIjoxfQ", "eyJhIjo xfQ==", 7, "eyJh\nIjoxfQ=="])
       expect(() => attachmentJson(body)).toThrow();
+  });
+  test("fileSha is io.ts sha across the reused buffer boundary", () => {
+    const directory = temporary();
+    try {
+      for (const size of [0, 1, 1048575, 1048576, 1048577, 3 * 1048576 + 7]) {
+        const path = join(directory, String(size));
+        writeFileSync(path, Buffer.alloc(size, size % 251));
+        expect(fileSha(path)).toBe(sha(path));
+      }
+      // A short file after a long one must not hash the long one's tail.
+      expect(fileSha(join(directory, "1"))).toBe(sha(join(directory, "1")));
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
   });
   test("a required JSON member refuses when absent, even as undefined", () => {
     expect(field({ a: null }, "a")).toBeNull();

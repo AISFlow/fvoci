@@ -10,10 +10,12 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative } from "node:path";
@@ -49,14 +51,15 @@ export function errorFacts(error: unknown): { type: string; message: string } {
 // flight is killed and reaped, the first failure is recorded and every cleanup
 // step still runs. A later SIGINT aborts only the cleanup command in flight,
 // which records that step as a cleanup error.
-const inFlight = new Set<AbortController>();
+// What each in-flight owned command does on SIGINT.
+const inFlight = new Set<() => void>();
 let interrupted = false,
   cleanupDepth = 0;
 export const interruptError = () => named("KeyboardInterrupt", "selected driver interrupted");
 export function trapInterrupts(): void {
   process.on("SIGINT", () => {
     interrupted = true;
-    for (const controller of inFlight) controller.abort(interruptError());
+    for (const interrupt of inFlight) interrupt();
   });
 }
 export function checkInterrupt(): void {
@@ -82,13 +85,24 @@ export interface CommandOptions {
   env?: Environment;
   cwd?: string;
   input?: string;
+  // The child is a fixture wrapper whose EXIT trap removes what it owns. On
+  // SIGINT it is not killed: it gets SIGINT (as from a process-group ^C) and
+  // is waited for, so its cleanup runs; the interrupt is then raised as for
+  // any other owned command (Python: KeyboardInterrupt out of subprocess.run).
+  waitOnInterrupt?: boolean;
 }
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
 // stdout and stderr go to one truncated log, or are captured as strict UTF-8.
 export const command: Command = async (args, options = {}) => {
   checkInterrupt();
   const controller = new AbortController();
-  inFlight.add(controller);
+  let forward = () => {
+    controller.abort(interruptError());
+  };
+  const interrupt = () => {
+    forward();
+  };
+  inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
   try {
     const child = spawn(args, {
@@ -97,9 +111,13 @@ export const command: Command = async (args, options = {}) => {
       stdin: options.input === undefined ? "inherit" : new TextEncoder().encode(options.input),
       stdout: fd ?? "pipe",
       stderr: fd ?? "pipe",
-      signal: controller.signal,
-      killSignal: "SIGKILL",
+      ...(options.waitOnInterrupt ? {} : { signal: controller.signal, killSignal: "SIGKILL" }),
     });
+    if (options.waitOnInterrupt)
+      forward = () => {
+        controller.abort(interruptError());
+        child.kill("SIGINT");
+      };
     const [stdout, stderr] = await Promise.all([
       child.stdout instanceof ReadableStream ? new Response(child.stdout).bytes() : null,
       child.stderr instanceof ReadableStream ? new Response(child.stderr).bytes() : null,
@@ -120,7 +138,7 @@ export const command: Command = async (args, options = {}) => {
       stderr: stderr ? decode(stderr) : "",
     };
   } finally {
-    inFlight.delete(controller);
+    inFlight.delete(interrupt);
     if (fd !== undefined) closeSync(fd);
   }
 };
@@ -228,8 +246,28 @@ export function failureDigest(value: unknown): string {
 }
 
 // rglob('*') + is_file(): symlinked files count, dangling links do not.
+// The same SHA-256 hex as io.ts sha, through one reused buffer: io.ts allocates
+// 1 MiB per file, and an input closure is ~130k mostly small files (25 s per
+// pass against 3 s here; the Python driver took 6 s).
+const hashBuffer = new Uint8Array(1048576);
+export function fileSha(path: string): string {
+  const fd = openSync(path, "r"),
+    hash = createHash("sha256");
+  try {
+    for (;;) {
+      const n = readSync(fd, hashBuffer);
+      if (!n) break;
+      hash.update(hashBuffer.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
+}
 export const treeHashes = (directory: string) =>
-  Object.fromEntries(files(directory, true).map((path) => [relative(directory, path), sha(path)]));
+  Object.fromEntries(
+    files(directory, true).map((path) => [relative(directory, path), fileSha(path)]),
+  );
 
 export async function inputCheck(
   before: Inputs,
@@ -247,7 +285,9 @@ export async function inputCheck(
   const listed = (await git("ls-files", "-z")).stdout.split("\0").slice(0, -1);
   assert.ok(deepEquals(new Set(listed), new Set(Object.keys(before.tracked))));
   const hashes = (names: string[], base: string | null) =>
-    Object.fromEntries(names.map((name) => [name, sha(base === null ? name : join(base, name))]));
+    Object.fromEntries(
+      names.map((name) => [name, fileSha(base === null ? name : join(base, name))]),
+    );
   const tracked = hashes(Object.keys(before.tracked), root),
     external = hashes(Object.keys(before.external), null),
     untracked = hashes(Object.keys(before.untracked), root);
