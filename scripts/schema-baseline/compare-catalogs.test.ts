@@ -335,6 +335,11 @@ function diverge(old: unknown, fresh: unknown) {
   return invoke({ "a.json": JSON.stringify(old), "b.json": JSON.stringify(fresh) }, UNREPORTED);
 }
 
+function appRole(cat: Catalog) {
+  if (!cat.app_role) throw new Error("missing app_role");
+  return cat.app_role;
+}
+
 function ledgerTable(cat: Catalog) {
   const found = cat.tables.find((item) => item.name === "schema_migrations");
   if (!found) throw new Error("missing ledger");
@@ -612,7 +617,7 @@ caseTest("non ledger grant differences still fail", () => {
     privilege: string;
     grantable: string;
   }>;
-  fresh.app_role!.table_privileges = privileges.filter(
+  appRole(fresh).table_privileges = privileges.filter(
     (item) => !(item.table === "users" && item.privilege === "SELECT" && item.grantable === "NO"),
   );
   result = run(OLD_ROLE, fresh);
@@ -624,7 +629,7 @@ caseTest("non ledger grant differences still fail", () => {
   expect(result.rc).toBe(1);
   expect(result.out).toContain("app_role.routine_privileges");
   fresh = structuredClone(NEW_ROLE);
-  fresh.app_role!.sequence_usage = false;
+  appRole(fresh).sequence_usage = false;
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("DIFF app_role.sequence_usage");
@@ -673,13 +678,16 @@ caseTest("missing or unexpected metadata fails", () => {
   expect(result.rc).toBe(1);
   expect(result.out).toContain("metadata keys");
   fresh = structuredClone(NEW_ROLE);
-  fresh.app_role!.note = "x";
+  appRole(fresh).note = "x";
   result = run(OLD_ROLE, fresh);
   expect(result.rc).toBe(1);
   expect(result.out).toContain("missing/unexpected");
   for (const field of ["grantable", "grantor", "schema"]) {
     fresh = structuredClone(NEW_ROLE);
-    delete (fresh.app_role?.column_privileges as Array<Record<string, unknown>>)[0][field];
+    Reflect.deleteProperty(
+      (fresh.app_role?.column_privileges as Array<Record<string, unknown>>)[0],
+      field,
+    );
     result = run(OLD_ROLE, fresh);
     expect(result.rc, field).toBe(1);
     expect(result.out, field).toContain("metadata keys differ");

@@ -159,12 +159,19 @@ function hex(value: number, width: number): string {
   return value.toString(16).padStart(width, "0");
 }
 
+// The code point of one character from string iteration, which is never empty.
+function codePointOf(ch: string | undefined): number {
+  const codePoint = ch?.codePointAt(0);
+  if (codePoint === undefined) throw new Error("code point of an empty character");
+  return codePoint;
+}
+
 function cmpStr(left: string, right: string): number {
-  const leftPoints = [...left];
-  const rightPoints = [...right];
+  const leftPoints = Array.from(left);
+  const rightPoints = Array.from(right);
   const count = Math.min(leftPoints.length, rightPoints.length);
   for (let i = 0; i < count; i++) {
-    const diff = leftPoints[i].codePointAt(0)! - rightPoints[i].codePointAt(0)!;
+    const diff = codePointOf(leftPoints[i]) - codePointOf(rightPoints[i]);
     if (diff) return diff;
   }
   return leftPoints.length - rightPoints.length;
@@ -174,7 +181,7 @@ function pyStrRepr(value: string): string {
   const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
   let out = quote;
   for (const ch of value) {
-    const codePoint = ch.codePointAt(0)!;
+    const codePoint = codePointOf(ch);
     if (ch === "\\" || ch === quote) out += `\\${ch}`;
     else if (ch === "\t") out += "\\t";
     else if (ch === "\n") out += "\\n";
@@ -191,7 +198,7 @@ function pyStrRepr(value: string): string {
 function jsonEscape(value: string): string {
   let out = '"';
   for (const ch of value) {
-    const codePoint = ch.codePointAt(0)!;
+    const codePoint = codePointOf(ch);
     if (ch === '"') out += '\\"';
     else if (ch === "\\") out += "\\\\";
     else if (ch === "\b") out += "\\b";
@@ -317,7 +324,7 @@ function roundSig(
 function formatDigits(digits: bigint, sig: number, exp10: number): string {
   const body = digits.toString().padStart(sig, "0");
   if (exp10 >= 16 || exp10 <= -5) {
-    const mantissa = body.length === 1 ? body : `${body[0]}.${body.slice(1)}`;
+    const mantissa = body.length === 1 ? body : `${body.slice(0, 1)}.${body.slice(1)}`;
     const sign = exp10 < 0 ? "-" : "+";
     return `${mantissa}e${sign}${Math.abs(exp10).toString().padStart(2, "0")}`;
   }
@@ -343,7 +350,7 @@ function pyFloatRepr(n: number): string {
     const text = sign + formatDigits(rounded.digits, sig, rounded.exp10);
     if (Object.is(Number(text), n)) return text;
   }
-  throw new Fail(1, `ValueError: cannot render float ${n}\n`);
+  throw new Fail(1, `ValueError: cannot render float ${String(n)}\n`);
 }
 
 function pyRepr(value: Value): string {
@@ -670,7 +677,7 @@ class JsonParser {
     this.i++;
     let out = "";
     while (this.i < this.s.length) {
-      const ch = this.s[this.i];
+      const ch = this.s.charAt(this.i);
       if (ch === '"') {
         this.i++;
         return out;
@@ -693,8 +700,9 @@ class JsonParser {
         r: "\r",
         t: "\t",
       };
-      if (esc in simple) {
-        out += simple[esc];
+      const replacement = simple[esc];
+      if (replacement !== undefined) {
+        out += replacement;
         this.i += 2;
         continue;
       }
@@ -745,7 +753,7 @@ class JsonParser {
       const digits = token.startsWith("-") ? token.length - 1 : token.length;
       if (digits > 4300) {
         throw new ParseError(
-          `Exceeds the limit (4300 digits) for integer string conversion: value has ${digits} digits; use sys.set_int_max_str_digits() to increase the limit`,
+          `Exceeds the limit (4300 digits) for integer string conversion: value has ${String(digits)} digits; use sys.set_int_max_str_digits() to increase the limit`,
         );
       }
       return { k: "int", v: BigInt(token) };
@@ -766,7 +774,7 @@ class JsonParser {
 
   private skip() {
     while (this.i < this.s.length) {
-      const ch = this.s[this.i];
+      const ch = this.s.charAt(this.i);
       if (ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t") break;
       this.i++;
     }
@@ -950,11 +958,11 @@ const PYTHON_SPACE = new Set<number>([
 ]);
 
 function pythonStrip(value: string): string {
-  const chars = [...value];
+  const chars = Array.from(value);
   let start = 0;
   let end = chars.length;
-  while (start < end && PYTHON_SPACE.has(chars[start].codePointAt(0)!)) start++;
-  while (end > start && PYTHON_SPACE.has(chars[end - 1].codePointAt(0)!)) end--;
+  while (start < end && PYTHON_SPACE.has(codePointOf(chars[start]))) start++;
+  while (end > start && PYTHON_SPACE.has(codePointOf(chars[end - 1]))) end--;
   return chars.slice(start, end).join("");
 }
 
@@ -980,7 +988,7 @@ function parseAcl(
 }
 
 function coversOwnerPrivileges(privs: string): boolean {
-  return [..."arwdD"].every((ch) => privs.includes(ch));
+  return Array.from("arwdD").every((ch) => privs.includes(ch));
 }
 
 function columnMap(table: Value): Map<string, Value> {
@@ -1013,8 +1021,11 @@ function validateLedgerTableIdentity(
   const oldColumns = columnMap(oldTable);
   const newColumns = columnMap(newTable);
   for (const name of [...oldColumns.keys()].filter((key) => newColumns.has(key)).sort(cmpStr)) {
-    const oldAcl = getOrNull(oldColumns.get(name)!, "acl");
-    const newAcl = getOrNull(newColumns.get(name)!, "acl");
+    const oldColumn = oldColumns.get(name);
+    const newColumn = newColumns.get(name);
+    if (oldColumn === undefined || newColumn === undefined) continue;
+    const oldAcl = getOrNull(oldColumn, "acl");
+    const newAcl = getOrNull(newColumn, "acl");
     if (!pyEq(oldAcl, newAcl))
       problems.push(
         `LEDGER TABLE column ${name} acl differs: old=${pyRepr(oldAcl)} new=${pyRepr(newAcl)}`,
@@ -1024,8 +1035,10 @@ function validateLedgerTableIdentity(
     ["old", oldColumns],
     ["new", newColumns],
   ] as const) {
-    for (const name of [...columns.keys()].sort(cmpStr)) {
-      const acl = getOrNull(columns.get(name)!, "acl");
+    for (const [name, column] of [...columns.entries()].sort((left, right) =>
+      cmpStr(left[0], right[0]),
+    )) {
+      const acl = getOrNull(column, "acl");
       if (acl.k !== "null")
         problems.push(
           `LEDGER TABLE ${side} column ${name} carries a column acl ${pyRepr(acl)}; the normal ledger has none`,
@@ -1297,7 +1310,7 @@ function compare(
   const newLedger = onlyLedger(newTables);
   if (oldLedger.length !== 1 || newLedger.length !== 1) {
     report.push(
-      `MISSING ledger table ${LEDGER_TABLE} on one side (old=${oldLedger.length} new=${newLedger.length})`,
+      `MISSING ledger table ${LEDGER_TABLE} on one side (old=${String(oldLedger.length)} new=${String(newLedger.length)})`,
     );
   }
   report.push(
@@ -1400,7 +1413,7 @@ function compare(
       "# Catalog comparison",
       `old: ${oldPath}`,
       `new: ${newPath}`,
-      `semantic differences: ${semantic.length}`,
+      `semantic differences: ${String(semantic.length)}`,
       "",
       ...report,
       "",
@@ -1412,10 +1425,7 @@ function compare(
 }
 
 function ioFail(error: unknown, path: string): Fail {
-  const code =
-    typeof error === "object" && error && "code" in error
-      ? String((error as { code: string }).code)
-      : "";
+  const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
   const shown = pyStrRepr(path);
   if (code === "ENOENT")
     return new Fail(1, `FileNotFoundError: [Errno 2] No such file or directory: ${shown}\n`);
