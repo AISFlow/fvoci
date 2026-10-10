@@ -77,9 +77,13 @@ import type {
   Reference,
 } from "./types.ts";
 
-// The modules a local lease binds: the runner entry and the lane drivers.
+// The modules a local lease binds: the runner and the lane drivers.
 const leaseModules = [
   "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",

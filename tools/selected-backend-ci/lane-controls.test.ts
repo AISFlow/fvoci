@@ -20,8 +20,9 @@ import { join } from "node:path";
 import process from "node:process";
 import { identity, localAllocation, registeredModules } from "./admission.ts";
 import { qualifyArtifacts } from "./build.ts";
-import { engineFeaturesMatch, validateOffReport } from "./drivers/binding.ts";
+import { bindingModule, engineFeaturesMatch, validateOffReport } from "./drivers/binding.ts";
 import { failureDigest } from "./drivers/common.ts";
+import { restartHelper } from "./drivers/restart.ts";
 import { checkpointPrefix, preparationSteps } from "./drivers/sqlite.ts";
 import { call, digest, gid, parseJson, read, root, sha, uid, write } from "./io.ts";
 import {
@@ -31,6 +32,7 @@ import {
   ownershipReturn,
   publicFailureFields,
   run,
+  selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
 import type {
@@ -74,19 +76,25 @@ async function withEnvironment<T>(
     Object.assign(process.env, old);
   }
 }
+// The refusal message of a rejected promise, or "accepted".
+const refusal = (promise: Promise<unknown>) =>
+  promise.then(
+    () => "accepted",
+    (error: unknown) => (error instanceof Error ? error.message : "thrown"),
+  );
 // Everything a body writes to stdout, and what it returned or threw.
 async function stdoutOf<T>(
   body: () => T | Promise<T>,
 ): Promise<{ value?: T; error?: unknown; stdout: string }> {
   const original = process.stdout.write.bind(process.stdout);
   let stdout = "";
-  process.stdout.write = ((chunk: string | Uint8Array) => {
+  process.stdout.write = (chunk: string | Uint8Array) => {
     stdout +=
       typeof chunk === "string"
         ? chunk
         : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(chunk);
     return true;
-  }) as typeof process.stdout.write;
+  };
   try {
     return { value: await body(), stdout };
   } catch (error) {
@@ -670,11 +678,15 @@ describe("selected launcher", () => {
       expect(driver.endsWith("tools/selected-backend-ci/drivers/" + grant.lane + ".ts")).toBe(true);
       expect(grant.flow).toBe(manifest.flow);
       expect(grant.exclusiveCIJob && grant.currentCIJobConfirmed).toBe(true);
-      expect(Object.keys(environment).filter((key) => key.startsWith("PYTHON"))).toEqual([]);
+      expect(
+        Object.keys(environment).filter(
+          (key) => key.startsWith("PYTHON") && environment[key] !== process.env[key],
+        ),
+      ).toEqual([]);
       seen.push(grant.lane + "/" + grant.flow);
       return execute(driver, environment, log, signal);
     };
-    // The runner adds no Python name; the job's own environment is not under test.
+    // The runner adds or changes no PYTHON* name; the job's own names pass through.
     await withEnvironment({ ...ci, PYTHONDONTWRITEBYTECODE: undefined }, async () => {
       expect(await run(output, boundary, [uid(), gid()])).toBe(0);
     });
@@ -692,7 +704,7 @@ describe("selected launcher", () => {
       return 0;
     };
     await withEnvironment(ci, async () => {
-      await expect(run(output, boundary, [uid(), gid()])).rejects.toThrow(
+      expect(await refusal(run(output, boundary, [uid(), gid()]))).toContain(
         "admitted browser mismatch",
       );
     });
@@ -799,18 +811,22 @@ describe("local lease", () => {
   }
   const admitted = (env: Record<string, string | undefined>) =>
     withEnvironment(env, () => localAllocation("run", [uid(), gid()]));
-  test("the valid lease is admitted and binds the runner and lane driver modules", async () => {
+  test("the valid lease is admitted", async () => {
     const { grant, env } = lease();
     expect(await admitted(env)).toEqual(grant);
-    expect(Object.keys(grant.registrationHashes)).toEqual([
-      "scripts/run-selected-backend-e2e.ts",
-      "tools/selected-backend-ci/drivers/common.ts",
-      "tools/selected-backend-ci/drivers/binding.ts",
-      "tools/selected-backend-ci/drivers/restart.ts",
-      "tools/selected-backend-ci/drivers/install.ts",
-      "tools/selected-backend-ci/drivers/postgres.ts",
-      "tools/selected-backend-ci/drivers/sqlite.ts",
-    ]);
+  });
+  // The lease binds every module the runner launches or hashes into a grant.
+  test("the lease binds each lane driver, the binding and restart modules and the runner", () => {
+    const relative = (path: string) => path.slice(root.length + 1);
+    for (const path of [
+      ...selectedRuns.map(([lane]) => laneDriver(lane)),
+      bindingModule,
+      restartHelper,
+      join(root, "scripts/run-selected-backend-e2e.ts"),
+      join(import.meta.dir, "runtime.ts"),
+      join(import.meta.dir, "admission.ts"),
+    ])
+      expect<readonly string[]>(registeredModules).toContain(relative(path));
   });
   for (const name of registeredModules)
     for (const fault of ["changed", "missing"] as const)
@@ -819,7 +835,7 @@ describe("local lease", () => {
           if (fault === "changed") grant.registrationHashes[name] = "0".repeat(64);
           else Reflect.deleteProperty(grant.registrationHashes, name);
         });
-        await expect(admitted(env)).rejects.toThrow();
+        expect(await refusal(admitted(env))).toBe("unregistered module " + name);
       });
   for (const [field, value] of [
     ["worktree", "/foreign"],
@@ -835,13 +851,13 @@ describe("local lease", () => {
       const { env } = lease((grant) => {
         (grant as unknown as Record<string, unknown>)[field] = value;
       });
-      await expect(admitted(env)).rejects.toThrow();
+      expect(await refusal(admitted(env))).not.toBe("accepted");
     });
   for (const mode of [0o640, 0o644, 0o700])
     test("a lease file with mode " + mode.toString(8) + " is refused", async () => {
       const { path, env } = lease();
       chmodSync(path, mode);
-      await expect(admitted(env)).rejects.toThrow();
+      expect(await refusal(admitted(env))).not.toBe("accepted");
     });
   test.skipIf(!linux)("a lease file owned by another uid or root is refused", async () => {
     for (const owner of ["1001:1001", "0:0"]) {
@@ -849,7 +865,7 @@ describe("local lease", () => {
       expect(spawnSync(["sudo", "-n", "chown", owner, path]).exitCode).toBe(0);
       try {
         expect(statSync(path).uid).not.toBe(uid());
-        await expect(admitted(env)).rejects.toThrow();
+        expect(await refusal(admitted(env))).not.toBe("accepted");
       } finally {
         spawnSync(["sudo", "-n", "chown", `${String(uid())}:${String(gid())}`, path]);
       }
@@ -859,10 +875,12 @@ describe("local lease", () => {
     const { path, output, env } = lease();
     const link = join(output, "link.json");
     symlinkSync(path, link);
-    await expect(admitted({ ...env, FVOCI_SELECTED_LOCAL_ALLOCATION: link })).rejects.toThrow();
-    await expect(
-      admitted({ ...env, FVOCI_SELECTED_LOCAL_ALLOCATION: undefined }),
-    ).rejects.toThrow();
+    expect(await refusal(admitted({ ...env, FVOCI_SELECTED_LOCAL_ALLOCATION: link }))).not.toBe(
+      "accepted",
+    );
+    expect(
+      await refusal(admitted({ ...env, FVOCI_SELECTED_LOCAL_ALLOCATION: undefined })),
+    ).not.toBe("accepted");
   });
   for (const [key, value] of [
     ["CI", "true"],
@@ -873,7 +891,7 @@ describe("local lease", () => {
   ] as const)
     test(`a CI job cannot fall back to a valid lease: ${key}`, async () => {
       const { env } = lease();
-      await expect(admitted({ ...env, [key]: value })).rejects.toThrow();
+      expect(await refusal(admitted({ ...env, [key]: value }))).not.toBe("accepted");
     });
   test("without an execution mode the runner never consumes a local lease", async () => {
     const { env, output } = lease();

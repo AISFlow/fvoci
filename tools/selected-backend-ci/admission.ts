@@ -94,13 +94,21 @@ export function localAllocation(
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),
   );
   for (const name of registeredModules)
-    assert.ok(grant.registrationHashes[name] === sha(join(root, name)), "unregistered module");
+    assert.ok(
+      grant.registrationHashes[name] === sha(join(root, name)),
+      "unregistered module " + name,
+    );
   return grant;
 }
-// The runner entry and lane driver modules a local lease is issued for,
-// repo-relative; the lease producer hashes the same files.
+// The runner and lane driver modules a local lease is issued for: the CLI
+// entry, the modules that admit, build, write grants and launch the lanes,
+// and the drivers. Repo-relative; the lease producer hashes the same files.
 export const registeredModules = [
   "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",

@@ -468,7 +468,8 @@ export interface RunBoundary {
 // The lane drivers run on this Bun without .env autoload; each refuses to start
 // without `--no-env-file`.
 export const driverCommand = bunDriver;
-export const laneDriver = (lane: Lane) => join(root, "tools/selected-backend-ci/drivers", lane + ".ts");
+export const laneDriver = (lane: Lane) =>
+  join(root, "tools/selected-backend-ci/drivers", lane + ".ts");
 const runBoundary: RunBoundary = {
   identity,
   access: runtimeAccess,
