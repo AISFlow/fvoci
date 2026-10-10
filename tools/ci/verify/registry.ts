@@ -82,32 +82,64 @@ export function gatedWorkflowJobs(
 
 // The planner and gate invocations every gated workflow must carry. Moving the
 // planner to another runtime changes only this table.
-const REQUIREMENTS_FILE = "scripts/ci_selection_requirements.txt";
 export const PLANNER_COMMANDS = {
-  /** Text the ci-plan steps must contain to install the planner's dependencies. */
-  planSetup: REQUIREMENTS_FILE,
-  planSetupMessage: `must install pinned ${REQUIREMENTS_FILE}`,
   /** Text that marks the plan invocation line. */
-  plan: "scripts/ci_selection.py plan",
-  planMessage: "must invoke ci_selection.py plan",
+  plan: "bun tools/ci/plan.ts",
+  planMessage: "must invoke tools/ci/plan.ts",
   /** The selector regression wrapper: an exact line in rust ci-plan, absent elsewhere. */
   selectorRegression: "scripts/test-ci-selection.sh",
-  /** Gate setup lines, per workflow, before the gate invocation. */
-  gateSetup: {
-    rust:
-      "python3 -m pip install --disable-pip-version-check --user --break-system-packages " +
-      `-r ${REQUIREMENTS_FILE}\n`,
-  } as Readonly<Partial<Record<GatedWorkflow, string>>>,
-  gate: "python3 scripts/ci_selection.py gate",
+  gate: "bun tools/ci/gate.ts",
 } as const;
+
+// plan.ts and gate.ts use Bun builtins only: the pinned Bun is their whole
+// toolchain, with no package install and no Python.
+export const SETUP_BUN_STEP: Mapping = {
+  uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+  with: { "bun-version-file": ".bun-version" },
+};
+const FOREIGN_TOOLCHAIN = /python|\bpip\d*\b|ci_selection|\bbun (?:ci|install|add|x)\b|\bbunx\b/;
 
 export function canonicalGateRun(workflow: GatedWorkflow): string {
   return (
     "set -euo pipefail\n" +
-    (PLANNER_COMMANDS.gateSetup[workflow] ?? "") +
     `${PLANNER_COMMANDS.gate} --workflow ${workflow} ` +
     '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
   );
+}
+
+/**
+ * The job checks out, then installs the pinned Bun exactly once with no
+ * condition, before the step at `runAt`; no run step installs anything else.
+ */
+function verifyBunToolchain(
+  workflow: GatedWorkflow,
+  jobId: string,
+  job: Mapping,
+  runAt: number,
+): string[] {
+  const errors: string[] = [];
+  const steps = stepList(job);
+  const setups = steps.flatMap((step, index) =>
+    usesStartsWith(step, ["oven-sh/setup-bun@"]) ? [index] : [],
+  );
+  const checkoutAt = steps.findIndex((step) => usesStartsWith(step, ["actions/checkout@"]));
+  const [setupAt] = setups;
+  if (
+    setups.length !== 1 ||
+    setupAt === undefined ||
+    !deepEqual(steps[setupAt], SETUP_BUN_STEP) ||
+    checkoutAt < 0 ||
+    checkoutAt > setupAt ||
+    (runAt >= 0 && runAt < setupAt)
+  ) {
+    errors.push(
+      `${workflow}: ${jobId} must install pinned Bun from .bun-version once, after checkout and before the selector`,
+    );
+  }
+  if (runSteps(job).some((step) => FOREIGN_TOOLCHAIN.test(get(step, "run") as string))) {
+    errors.push(`${workflow}: ${jobId} must not install packages or run Python`);
+  }
+  return errors;
 }
 
 export function gateJobId(workflow: string): string {
@@ -395,9 +427,11 @@ function verifyPlanJob(workflow: GatedWorkflow, data: Mapping, planJob: Mapping)
   const planRuns = runSteps(planJob)
     .map((step) => get(step, "run") as string)
     .join("\n");
-  if (!planRuns.includes(PLANNER_COMMANDS.planSetup)) {
-    errors.push(`${workflow}: ${PLAN_JOB_ID} ${PLANNER_COMMANDS.planSetupMessage}`);
-  }
+  const planAt = stepList(planJob).findIndex((step) => {
+    const run = get(step, "run");
+    return typeof run === "string" && run.includes(PLANNER_COMMANDS.plan);
+  });
+  errors.push(...verifyBunToolchain(workflow, PLAN_JOB_ID, planJob, planAt));
   if (!planRuns.includes(PLANNER_COMMANDS.plan)) {
     errors.push(`${workflow}: ${PLAN_JOB_ID} ${PLANNER_COMMANDS.planMessage}`);
   }
@@ -460,6 +494,7 @@ function verifyGateJob(workflow: GatedWorkflow, gateJob: Mapping): string[] {
   if (normalizeRunScript(get(step, "run") as string) !== canonicalGateRun(workflow)) {
     errors.push(`${workflow}: ${gate} must use the canonical gate invocation`);
   }
+  errors.push(...verifyBunToolchain(workflow, gate, gateJob, stepList(gateJob).indexOf(step)));
   return errors;
 }
 

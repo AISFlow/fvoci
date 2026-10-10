@@ -9,7 +9,6 @@
     "**/*.tsx",
     "**/*.vue",
     "../../tools/ci/workflows.test.ts",
-    "../../tools/ci/planner.test.ts",
     "../../tools/web-e2e/**/*.ts",
     "../../scripts/schema-baseline/*.ts",
     "../../scripts/run-selected-backend-e2e.ts",
