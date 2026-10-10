@@ -4,8 +4,7 @@
 // well-formedness error throws, including bad attribute syntax, duplicate
 // attributes, undefined entities, character references outside the XML Char
 // production, unbound namespace prefixes, mismatched or unclosed tags and
-// content outside the root. It never loads a DTD or external entity, so only
-// the five predefined entities resolve.
+// content outside the root. Only the five predefined entities resolve.
 import { SaxesParser } from "saxes";
 
 export function xmlText(xml: string): string {
@@ -14,6 +13,11 @@ export function xmlText(xml: string): string {
   // characters such as &#1;.
   parser.on("xmldecl", (decl) => {
     if (decl.version !== "1.0") throw parser.makeError(`XML version ${String(decl.version)}`);
+  });
+  // OPC (ISO/IEC 29500-2) forbids DTD declarations in package XML, and saxes
+  // does not check DTD syntax, so every DOCTYPE is refused, not skipped.
+  parser.on("doctype", () => {
+    throw parser.makeError("DOCTYPE is not allowed in an Office part");
   });
   let text = "";
   let depth = 0;

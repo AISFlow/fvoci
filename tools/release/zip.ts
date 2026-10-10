@@ -1,6 +1,7 @@
 // The ZIP subset the documents smoke needs: write a deflated archive for the
 // Markdown import, and read an exported DOCX/PPTX fail-closed. ZIP64,
-// multi-disk, encryption and methods other than stored/deflate are refused.
+// multi-disk, encryption, methods other than stored/deflate, other flags and a
+// version needed above 2.0 are refused.
 // JSZip (in the tree) is not used for reading: it deliberately accepts a local
 // header that names a different file than the central directory, which this
 // check must refuse. Inflation is node:zlib.
@@ -12,6 +13,12 @@ const END = 0x06054b50;
 const UTF8_NAMES = 0x0800;
 const ENCRYPTED = 0x0001;
 const DESCRIPTOR = 0x0008;
+// Flags this reader understands: deflate option bits 1-2, the data descriptor
+// and UTF-8 names. Anything else (patched data, strong or central-directory
+// encryption, reserved bits) names a feature it does not implement.
+const SUPPORTED_FLAGS = 0x0002 | 0x0004 | DESCRIPTOR | UTF8_NAMES;
+// Deflate needs ZIP 2.0; a higher version needed names an unsupported feature.
+const MAX_VERSION_NEEDED = 20;
 // An exported DOCX/PPTX part is far smaller; a larger declared size is refused.
 const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
 
@@ -117,9 +124,9 @@ function entryName(raw: Uint8Array, flags: number): string {
 //   end record, and its entries account for all of it;
 // - names are valid, and unique ignoring ASCII case (Office part names are
 //   case-insensitive);
-// - every local header matches its central entry (name bytes, method,
-//   encryption, descriptor and UTF-8 flags, and CRC and sizes from the local
-//   header or the data descriptor);
+// - both headers pass the flag, version and extra-field checks, and every
+//   local header matches its central entry (name bytes, method, all
+//   flags, and CRC and sizes from the local header or the data descriptor);
 // - local entries tile the file from offset 0 to the central directory with
 //   no gap and no overlap, so no data hides outside the directory's view;
 // - declared sizes stay within the per-entry and total budgets.
@@ -127,6 +134,29 @@ export function openZip(bytes: Uint8Array, maxTotalBytes = MAX_ENTRY_BYTES): Zip
   const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const u16 = (at: number) => (at + 2 <= buf.length ? buf.readUInt16LE(at) : fail("truncated"));
   const u32 = (at: number) => (at + 4 <= buf.length ? buf.readUInt32LE(at) : fail("truncated"));
+  // The same feature policy holds for the central and the local header.
+  const supported = (name: string, flags: number, versionNeeded: number) => {
+    if (flags & ENCRYPTED) fail(`${name}: encrypted entries are not supported`);
+    const unknown = flags & ~SUPPORTED_FLAGS;
+    if (unknown) {
+      fail(`${name}: flags 0x${unknown.toString(16).padStart(4, "0")} are not supported`);
+    }
+    // The lower byte is the version; some writers put the host system above it.
+    const version = versionNeeded & 0xff;
+    if (version > MAX_VERSION_NEEDED) {
+      fail(
+        `${name}: needs ZIP version ${String(Math.floor(version / 10))}.${String(version % 10)}`,
+      );
+    }
+  };
+  // An extra field is a sequence of (id, length, data) records that fills it exactly.
+  const extraField = (name: string, from: number, length: number) => {
+    const to = from + length;
+    if (to > buf.length) fail("truncated");
+    for (let at = from; at < to; at += 4 + u16(at + 2)) {
+      if (at + 4 > to || at + 4 + u16(at + 2) > to) fail(`${name}: malformed extra field`);
+    }
+  };
   const ends: number[] = [];
   for (let at = buf.length - 22; at >= Math.max(0, buf.length - 22 - 0xffff); at--) {
     if (buf.readUInt32LE(at) === END && at + 22 + buf.readUInt16LE(at + 20) === buf.length) {
@@ -159,7 +189,11 @@ export function openZip(bytes: Uint8Array, maxTotalBytes = MAX_ENTRY_BYTES): Zip
     const packedSize = u32(at + 20);
     const size = u32(at + 24);
     const nameLength = u16(at + 28);
-    const next = at + 46 + nameLength + u16(at + 30) + u16(at + 32);
+    const versionNeeded = u16(at + 6);
+    const extraStart = at + 46 + nameLength;
+    const extraLength = u16(at + 30);
+    const diskStart = u16(at + 34);
+    const next = extraStart + extraLength + u16(at + 32);
     const start = u32(at + 42);
     if (next > end) fail("central directory entry overruns the directory");
     const rawName = buf.subarray(at + 46, at + 46 + nameLength);
@@ -169,7 +203,9 @@ export function openZip(bytes: Uint8Array, maxTotalBytes = MAX_ENTRY_BYTES): Zip
     const folded = name.replace(/[A-Z]/g, (c) => c.toLowerCase());
     if (seen.has(folded)) fail(`${name} appears twice`);
     seen.add(folded);
-    if (flags & ENCRYPTED) fail(`${name}: encrypted entries are not supported`);
+    supported(name, flags, versionNeeded);
+    extraField(name, extraStart, extraLength);
+    if (diskStart !== 0) fail("multi-disk archives are not supported");
     if (method !== 0 && method !== 8) {
       fail(`${name}: compression method ${String(method)} is not supported`);
     }
@@ -187,8 +223,10 @@ export function openZip(bytes: Uint8Array, maxTotalBytes = MAX_ENTRY_BYTES): Zip
     const dataStart = start + 30 + localNameLength + u16(start + 28);
     const localName = buf.subarray(start + 30, start + 30 + localNameLength);
     if (!localName.equals(rawName)) fail(`${name}: local header names a different file`);
+    supported(name, localFlags, u16(start + 4));
+    extraField(name, start + 30 + localNameLength, u16(start + 28));
     const disagrees = () => fail(`${name}: local header disagrees with the central directory`);
-    if (((localFlags ^ flags) & (ENCRYPTED | DESCRIPTOR | UTF8_NAMES)) !== 0) disagrees();
+    if (localFlags !== flags) disagrees();
     if (u16(start + 8) !== method) disagrees();
     const dataEnd = dataStart + packedSize;
     let entryEnd = dataEnd;

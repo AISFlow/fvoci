@@ -171,6 +171,31 @@ const refusedExports: Array<[string, Uint8Array, string]> = [
     ]),
     "word/document.xml appears twice",
   ],
+  // OPC forbids DTDs, and saxes does not check DTD syntax: every DOCTYPE,
+  // well-formed or not, is refused.
+  ...[
+    "<!DOCTYPE>",
+    "<!DOCTYPE a [garbage]>",
+    "<!DOCTYPE a [<!ELEMENT a bogus>]>",
+    "<!DOCTYPE a SYSTEM>",
+  ].map((doctype): [string, Uint8Array, string] => [
+    `a DOCTYPE ${doctype}`,
+    docxWith(`${doctype}<a>후속 편집 저장</a>`),
+    "DOCTYPE is not allowed",
+  ]),
+  // ZIP features this reader does not implement, or a broken extra field.
+  ...(
+    [
+      ["compressed patched data (flag bit 5)", { flags: 0x20 }, "flags 0x0020 are not supported"],
+      ["strong encryption (flag bit 6)", { flags: 0x40 }, "flags 0x0040 are not supported"],
+      ["version needed 9.9", { version: 99 }, "needs ZIP version 9.9"],
+      ["a truncated extra field", { extra: Buffer.from([0x99, 0x99, 0x01, 0x00]) }, "extra field"],
+    ] as const
+  ).map(([label, entry, needle]): [string, Uint8Array, string] => [
+    label,
+    rawZip([{ name: "word/document.xml", data: "<a>후속 편집 저장</a>", ...entry }]),
+    needle,
+  ]),
   [
     "a non-canonical part name",
     writeZip([{ name: "word/../document.xml", data: utf8("<a>후속 편집 저장</a>") }]),
@@ -226,7 +251,7 @@ describe("export checks", () => {
     expect(xmlText('<w:a xmlns:w="u"><w:t xml:space="preserve">x</w:t></w:a>')).toBe("x");
     expect(() => xmlText("<a>&nbsp;</a>")).toThrow("undefined entity");
     expect(() => xmlText('<!DOCTYPE a [<!ENTITY e "boom">]><a>&e;</a>')).toThrow(
-      "undefined entity",
+      "DOCTYPE is not allowed",
     );
     expect(() => xmlText("<a/><b/>")).toThrow("only one root");
     expect(() => xmlText("text<a/>")).toThrow("outside of root");
@@ -310,6 +335,9 @@ type RawEntry = {
   packed?: Uint8Array;
   descriptor?: boolean;
   descriptorCrc?: number;
+  version?: number; // version needed to extract, local and central
+  extra?: Uint8Array; // extra field, local and central
+  localFlags?: number; // local header flags when they differ from the central ones
 };
 
 // A hand-assembled archive for structural cases writeZip cannot express.
@@ -323,10 +351,12 @@ function rawZip(entries: RawEntry[], options: { gap?: number; secondEnd?: boolea
     const packed = Buffer.from(entry.packed ?? deflateRawSync(data));
     const crc = crc32(data);
     const flags = (entry.flags ?? 0) | (entry.descriptor ? 8 : 0);
+    const version = entry.version ?? 20;
+    const extra = Buffer.from(entry.extra ?? []);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(flags, 6);
+    local.writeUInt16LE(version, 4);
+    local.writeUInt16LE(entry.localFlags ?? flags, 6);
     local.writeUInt16LE(8, 8);
     if (!entry.descriptor) {
       local.writeUInt32LE(crc, 14);
@@ -334,6 +364,7 @@ function rawZip(entries: RawEntry[], options: { gap?: number; secondEnd?: boolea
       local.writeUInt32LE(data.length, 22);
     }
     local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(extra.length, 28);
     const descriptor = Buffer.alloc(entry.descriptor ? 16 : 0);
     if (entry.descriptor) {
       descriptor.writeUInt32LE(0x08074b50, 0);
@@ -341,20 +372,21 @@ function rawZip(entries: RawEntry[], options: { gap?: number; secondEnd?: boolea
       descriptor.writeUInt32LE(packed.length, 8);
       descriptor.writeUInt32LE(data.length, 12);
     }
-    parts.push(local, name, packed, descriptor);
+    parts.push(local, name, extra, packed, descriptor);
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(version, 6);
     central.writeUInt16LE(flags, 8);
     central.writeUInt16LE(8, 10);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(packed.length, 20);
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(extra.length, 30);
     central.writeUInt32LE(offset, 42);
-    centrals.push(central, name);
-    offset += 30 + name.length + packed.length + descriptor.length;
+    centrals.push(central, name, extra);
+    offset += 30 + name.length + extra.length + packed.length + descriptor.length;
   }
   const directory = Buffer.concat(centrals);
   const end = Buffer.alloc(22);
@@ -375,7 +407,12 @@ describe("zip structure (assembled archives)", () => {
   const doc = { name: "word/document.xml", data: "<a>후속 편집 저장</a>" };
 
   test("a well-formed assembled archive, with and without a data descriptor, passes", () => {
-    for (const archive of [rawZip([doc]), rawZip([{ ...doc, descriptor: true }])]) {
+    for (const archive of [
+      rawZip([doc]),
+      rawZip([{ ...doc, descriptor: true }]),
+      // Deflate option bits 1-2 (Word writes 0x0006), version 1.0, a timestamp extra field.
+      rawZip([{ ...doc, flags: 0x06, version: 10, extra: Buffer.from("555405000100000000", "hex") }]),
+    ]) {
       expect(officeHasText(archive, "docx", "후속 편집 저장")).toBe(true);
     }
   });
@@ -413,6 +450,21 @@ describe("zip structure (assembled archives)", () => {
       "appears twice",
     ],
     ["two end records", rawZip([doc], { secondEnd: true }), "more than one end"],
+    [
+      "an unsupported flag in the local header only",
+      rawZip([{ ...doc, localFlags: 0x20 }]),
+      "flags 0x0020 are not supported",
+    ],
+    [
+      "deflate option bits that differ between the headers",
+      rawZip([{ ...doc, flags: 0x06, localFlags: 0x02 }]),
+      "disagrees",
+    ],
+    [
+      "extra-field bytes after the last record",
+      rawZip([{ ...doc, extra: Buffer.from("55540100010000", "hex") }]),
+      "extra field",
+    ],
   ] as const)("refuses %s", (_name, archive, needle) => {
     expect(() => officeHasText(archive, "docx", "후속 편집 저장")).toThrow(needle);
   });
