@@ -97,46 +97,11 @@ grep -q "&fvoci-image ${IMAGE}\$" "$WORK/compose.yml" || fail "image substitutio
 cp "$ROOT/infra/rust/compose.user.env.example" "$WORK/env.example"
 cd "$WORK"
 
-# fill_env: .env from env.example, a fresh value for every empty entry in the
-# format its comment shows (openssl rand -hex 32; *_KEYS keyring under its
-# *_ACTIVE_KEY_ID).
-fill_env() {
-  local line key active out=() values=()
-  local -A value_of=()
-  mapfile -t values <env.example
-  for line in "${values[@]}"; do
-    [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] && value_of["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
-  done
-  for line in "${values[@]}"; do
-    if [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      if [[ "$key" == *_KEYS ]]; then
-        active="${key%_KEYS}_ACTIVE_KEY_ID"
-        [[ -v "value_of[$active]" ]] || fail "env.example has $key but no $active"
-        line="${key}={\"${value_of[$active]}\":\"$(random_hex)\"}"
-      else
-        line="${key}=$(random_hex)"
-      fi
-    fi
-    out+=("$line")
-  done
-  printf '%s\n' "${out[@]}" >.env
-  chmod 600 .env
-}
-random_hex() { od -An -tx1 -N32 /dev/urandom | tr -d ' \n'; }
+# .env from env.example as the user procedure fills it, and single-key edits
+# (tools/install-smoke/smoke.ts fill-env / set-env).
+fill_env() { smoke_ts fill-env env.example .env || fail "cannot fill .env from env.example"; }
 env_value() { sed -n "s/^$1=//p" .env; }
-set_env() { # KEY VALUE: replace the one KEY= line
-  local line n=0 out=()
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "$1="* ]]; then
-      line="$1=$2"
-      n=$((n + 1))
-    fi
-    out+=("$line")
-  done <.env
-  (( n == 1 )) || fail "set_env: $n lines for $1 in .env"
-  printf '%s\n' "${out[@]}" >.env
-}
+set_env() { smoke_ts set-env .env "$1" "$2" || fail "cannot set $1 in .env"; }
 logs() { docker compose logs --no-color "$1" 2>&1; }
 state() {
   local cid
@@ -426,7 +391,7 @@ done
 echo "checked $N secret values against $(wc -l <<<"$LOGS") log lines: none found"
 
 step "a changed POSTGRES_PASSWORD: restart keeps the old value, up -d applies it and is refused, the original starts again"
-set_env POSTGRES_PASSWORD "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+set_env POSTGRES_PASSWORD "$(smoke_ts random-hex)"
 # The container keeps the environment it was created with.
 docker compose restart fvoci
 wait_healthy

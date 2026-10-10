@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // JSON reads, assertions and small builders for the container smokes
-// (scripts/{install,backup-restore,upgrade}-smoke.sh), in place of their
+// (scripts/{install,backup-restore,upgrade,standalone-install}-smoke.sh), in place of their
 // inline Python. Every check keeps the meaning of the assertion it replaces.
 //
 //   smoke.ts port                     free 127.0.0.1 TCP port
@@ -13,6 +13,9 @@
 //   smoke.ts object-versions          mcli --json ls --versions lines -> one line per version
 //   smoke.ts zotero-keyring ROOT      synthetic keyring of the Zotero fixture
 //   smoke.ts redact                   stdin -> stdout, every FVOCI_REDACT line replaced
+//   smoke.ts random-hex               32 random bytes as hex
+//   smoke.ts fill-env SRC DEST        DEST (mode 0600): SRC with every empty value filled
+//   smoke.ts set-env FILE KEY VALUE   replace the one KEY= line of FILE
 //   smoke.ts init STATE NAME [ASSERT_LOG] / phase STATE NAME / fail STATE MESSAGE...
 //            error STATE STATUS LINE COMMAND / report STATE STATUS / finish STATE STATUS
 //            group TITLE / endgroup / quote (stdin)   phases and first error (below)
@@ -20,7 +23,14 @@
 // A JSON or text argument `-` is read from stdin (so a producer's failure
 // still fails the pipeline under pipefail).
 
-import { appendFileSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -737,6 +747,59 @@ export function hasItem(text: string, id: string): boolean {
   return ids.includes(id);
 }
 
+// .env files of the standalone install (standalone-install-smoke.sh).
+const envKey = /^[A-Z][A-Z0-9_]*$/;
+const envLine = /^([A-Z][A-Z0-9_]*)=(.*)$/;
+
+export const randomHex = (): string =>
+  Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
+
+const readText = (path: string): string =>
+  new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(path));
+
+// The user procedure on env.example: every empty `KEY=` gets a fresh 32-byte
+// hex value, and an empty `X_KEYS=` gets the one-key keyring
+// {"<X_ACTIVE_KEY_ID>":"<hex>"} (the format its comment shows). Every other
+// line is kept as is. A key assigned twice, or a keyring without its active
+// key id, is refused.
+export function fillEnv(text: string, hex: () => string = randomHex): string {
+  const lines = text.split("\n");
+  const filled = new Map<string, string>();
+  for (const line of lines) {
+    const match = envLine.exec(line);
+    if (!match) continue;
+    const [, key = "", value = ""] = match;
+    ensure(!filled.has(key), `env.example assigns ${key} twice`);
+    filled.set(key, value === "" && !key.endsWith("_KEYS") ? hex() : value);
+  }
+  return lines
+    .map((line) => {
+      const match = envLine.exec(line);
+      if (!match || match[2] !== "") return line;
+      const key = match[1] ?? "";
+      if (!key.endsWith("_KEYS")) return `${key}=${filled.get(key) ?? ""}`;
+      const active = `${key.slice(0, -"_KEYS".length)}_ACTIVE_KEY_ID`;
+      const id = filled.get(active);
+      ensure(id !== undefined && id !== "", `env.example has ${key} but no ${active}`);
+      return `${key}=${JSON.stringify({ [id]: hex() })}`;
+    })
+    .join("\n");
+}
+
+// Replace the one `KEY=` line; refused unless exactly one line assigns KEY.
+export function setEnv(text: string, key: string, value: string): string {
+  ensure(envKey.test(key), `bad env key ${JSON.stringify(key)}`);
+  ensure(!/[\r\n]/.test(value), `value for ${key} spans lines`);
+  let count = 0;
+  const out = text.split("\n").map((line) => {
+    if (!line.startsWith(`${key}=`)) return line;
+    count += 1;
+    return `${key}=${value}`;
+  });
+  ensure(count === 1, `set-env: ${String(count)} lines for ${key}`);
+  return out.join("\n");
+}
+
 // Phases and the first error, kept in a per-run state file so a `fail` inside
 // a `$(...)` subshell still names the first error. In GitHub Actions a phase is
 // a `::group::` block and a failure is also an `::error::` annotation;
@@ -929,6 +992,20 @@ async function main(argv: string[]): Promise<number> {
     case "field":
       out(field(args[0] ?? "", args.slice(1)));
       return 0;
+    case "random-hex":
+      out(randomHex());
+      return 0;
+    case "fill-env": {
+      const [source = "", dest = ""] = args;
+      writeFileSync(dest, fillEnv(readText(source)), { mode: 0o600 });
+      chmodSync(dest, 0o600);
+      return 0;
+    }
+    case "set-env": {
+      const [path = "", key = "", value = ""] = args;
+      writeFileSync(path, setEnv(readText(path), key, value));
+      return 0;
+    }
     case "has-item":
       return hasItem(args[0] ?? "", args[1] ?? "") ? 0 : 1;
     case "oracle":

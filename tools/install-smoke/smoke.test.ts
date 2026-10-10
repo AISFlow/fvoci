@@ -1,16 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CheckFailed,
   checks,
   field,
+  fillEnv,
   hasItem,
   objectVersions,
   oracle,
   phaseCommand,
   phaseCommands,
+  randomHex,
+  setEnv,
   truthy,
   zoteroKeyring,
 } from "./smoke.ts";
@@ -287,5 +290,82 @@ describe("has-item CLI", () => {
       j({ items: [{ id: "u" }, { id: null }] }),
     ])
       expect({ body, status: cli(body) }).toEqual({ body, status: 2 });
+  });
+});
+
+describe("standalone .env", () => {
+  const counter = () => {
+    let n = 0;
+    return () => String(++n).padStart(64, "0");
+  };
+
+  test("fill-env fills every empty value and builds keyrings under the active id", () => {
+    const example = [
+      "# comment PASSWORD=",
+      "FVOCI_PUBLISH_PORT=8080",
+      "POSTGRES_PASSWORD=",
+      "PASSWORD_PEPPER_KEYS=",
+      "PASSWORD_PEPPER_ACTIVE_KEY_ID=install",
+      "ENCRYPTION_KEYS=",
+      "ENCRYPTION_ACTIVE_KEY_ID=",
+      "",
+    ].join("\n");
+    const lines = fillEnv(example, counter()).split("\n");
+    expect(lines[0]).toBe("# comment PASSWORD=");
+    expect(lines[1]).toBe("FVOCI_PUBLISH_PORT=8080");
+    expect(lines[2]).toBe(`POSTGRES_PASSWORD=${"1".padStart(64, "0")}`);
+    // The keyring's id is the active id after filling, never an empty one.
+    expect(lines[6]).toBe(`ENCRYPTION_ACTIVE_KEY_ID=${"2".padStart(64, "0")}`);
+    expect(JSON.parse(lines[3]?.slice("PASSWORD_PEPPER_KEYS=".length) ?? "")).toEqual({
+      install: "3".padStart(64, "0"),
+    });
+    expect(JSON.parse(lines[5]?.slice("ENCRYPTION_KEYS=".length) ?? "")).toEqual({
+      ["2".padStart(64, "0")]: "4".padStart(64, "0"),
+    });
+    expect(lines[7]).toBe("");
+    expect(randomHex()).toMatch(/^[0-9a-f]{64}$/);
+    expect(randomHex()).not.toBe(randomHex());
+  });
+
+  test("fill-env refuses a keyring without its active id and a key assigned twice", () => {
+    expect(() => fillEnv("X_KEYS=\n")).toThrow(CheckFailed);
+    expect(() => fillEnv("A=\nA=1\n")).toThrow(CheckFailed);
+  });
+
+  test("set-env replaces exactly one line", () => {
+    const text = "A=1\nAB=2\n# A=3\n";
+    expect(setEnv(text, "A", "x")).toBe("A=x\nAB=2\n# A=3\n");
+    expect(() => setEnv(text, "C", "x")).toThrow(CheckFailed);
+    expect(() => setEnv("A=1\nA=2\n", "A", "x")).toThrow(CheckFailed);
+    expect(() => setEnv(text, "A", "x\ny")).toThrow(CheckFailed);
+    expect(() => setEnv(text, "A.*", "x")).toThrow(CheckFailed);
+  });
+
+  test("fill-env and set-env CLI write a 0600 .env", () => {
+    const dir = mkdtempSync(join(tmpdir(), "install-smoke-env-"));
+    try {
+      const cli = (...args: string[]) =>
+        Bun.spawnSync([process.execPath, join(import.meta.dir, "smoke.ts"), ...args], {
+          cwd: dir,
+          stdout: "ignore",
+          stderr: "ignore",
+        }).exitCode;
+      const mode = (name: string) => statSync(join(dir, name)).mode & 0o777;
+      writeFileSync(join(dir, "env.example"), "K_KEYS=\nK_ACTIVE_KEY_ID=install\nP=\n");
+      expect(cli("fill-env", "env.example", ".env")).toBe(0);
+      expect(mode(".env")).toBe(0o600);
+      expect(readFileSync(join(dir, ".env"), "utf8")).toMatch(
+        /^K_KEYS=\{"install":"[0-9a-f]{64}"\}\nK_ACTIVE_KEY_ID=install\nP=[0-9a-f]{64}\n$/,
+      );
+      expect(cli("set-env", ".env", "P", "v")).toBe(0);
+      expect(readFileSync(join(dir, ".env"), "utf8").split("\n")[2]).toBe("P=v");
+      expect(mode(".env")).toBe(0o600);
+      expect(cli("set-env", ".env", "Q", "v")).toBe(1);
+      writeFileSync(join(dir, "bad.example"), "X_KEYS=\n");
+      expect(cli("fill-env", "bad.example", "bad.env")).toBe(1);
+      expect(existsSync(join(dir, "bad.env"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
   });
 });
