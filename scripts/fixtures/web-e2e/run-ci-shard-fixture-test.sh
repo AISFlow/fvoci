@@ -14,7 +14,8 @@ trap cleanup EXIT
 REAL_BUN="$(command -v bun)"
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web" "$FIXTURE_ROOT/tools/web-e2e"
 cp "$ROOT/scripts/run-web-e2e.sh" "$FIXTURE_ROOT/scripts/"
-cp "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXTURE_ROOT/tools/web-e2e/"
+cp "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/compat.ts" "$ROOT/tools/web-e2e/run-web-e2e.ts" \
+  "$ROOT/tools/web-e2e/shard-fixture.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 chmod +x "$FIXTURE_ROOT/scripts/run-web-e2e.sh"
 
 cat >"$FIXTURE_ROOT/scripts/web-e2e-run-group.sh" <<'STUB'
@@ -59,8 +60,11 @@ if [[ "$*" == "--bun run build" ]]; then
   exit "${FVOCI_TEST_BUN_BUILD_EXIT:-0}"
 fi
 # The fixture checkout's own group planner runs for real: its plan modes and
-# the shard-count query only.
+# the shard-count query only; so do its plan-line and committed API checks.
 if [[ $# -ge 2 && "$1" == @GROUPS@ && ("$2" == verify || "$2" == shard-jsonl || "$2" == shards) ]]; then
+  exec @REAL_BUN@ "$@"
+fi
+if [[ $# -ge 2 && "$1" == @CHECKS@ && ("$2" == plan-specs || "$2" == committed-api) ]]; then
   exec @REAL_BUN@ "$@"
 fi
 # Test-only handoff leaves: check invocation/propagate refusal, without build.
@@ -81,7 +85,8 @@ STUB
 handoff="$FIXTURE_ROOT/tools/selected-backend-ci/handoff.ts"
 sed -i "s|@HANDOFF@|\"${handoff//|/\\|}\"|" "$FAKE_BIN/bun"
 groups="$FIXTURE_ROOT/tools/web-e2e/groups.ts"
-sed -i "s|@GROUPS@|\"${groups//|/\\|}\"|; s|@REAL_BUN@|\"${REAL_BUN//|/\\|}\"|" "$FAKE_BIN/bun"
+checks="$FIXTURE_ROOT/tools/web-e2e/run-web-e2e.ts"
+sed -i "s|@GROUPS@|\"${groups//|/\\|}\"|; s|@CHECKS@|\"${checks//|/\\|}\"|; s|@REAL_BUN@|\"${REAL_BUN//|/\\|}\"|" "$FAKE_BIN/bun"
 chmod +x "$FAKE_BIN/bun"
 
 cat >"$FAKE_BIN/cargo" <<'STUB'
@@ -377,7 +382,7 @@ STUB
 cat >"$FIXTURE_ROOT/scripts/web-e2e-run-group.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"
+bun "$ROOT/tools/web-e2e/shard-fixture.ts" record-args "$@"
 for arg in "$@"; do
   if [[ "$arg" == "${FVOCI_TEST_TIMER_FAIL_FILTER:-unset}" ]]; then
     exit 7
@@ -391,131 +396,27 @@ run_timer_dispatch() {
 
 timer_log="$FIXTURE_ROOT/timer-dispatch.jsonl"
 run_timer_dispatch --workers=1 e2e/v050-task-timer.spec.ts --retries=0 --trace=on >"$timer_log"
-python3 - "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts" <<'PYTHON'
-import json, re, sys
-rows = [json.loads(line) for line in open(sys.argv[1])]
-original = ["--workers=1", "e2e/v050-task-timer.spec.ts", "--retries=0", "--trace=on"]
-assert len(rows) == 4, rows
-assert all(row[:-2] == original for row in rows), rows
-assert [row[-2] for row in rows] == ["--grep-invert", "--grep", "--grep", "--grep"], rows
-titles = re.findall(r'^test\("([^"\n]+)"', open(sys.argv[2]).read(), re.MULTILINE)
-assert len(titles) == 22, titles
-groups = [
-    {title for title in titles if bool(re.search(row[-1], title)) == (row[-2] == "--grep")}
-    for row in rows
-]
-assert [len(group) for group in groups] == [9, 7, 1, 5], groups
-assert set.union(*groups) == set(titles), groups
-assert sum(map(len, groups)) == len(set.union(*groups)), groups
-PYTHON
 # The dispatcher's filters are exactly the groups.ts timer filters, so a stale
-# copy in web-e2e-run-group.sh fails here. The restart group (one title, see
-# the sizes above) consumes the whole DB graph and retires the group's
-# original server; it shares neither earlier rows nor a later base-URL consumer.
-bun -e '
-const [groups, log, spec] = process.argv.slice(1);
-const { TIMER_FILTERS: f } = await import(groups);
-const rows = (await Bun.file(log).text()).trimEnd().split("\n").map((line) => JSON.parse(line));
-const actual = JSON.stringify(rows.map((row) => row.slice(-2)));
-const expected = JSON.stringify([
-  ["--grep-invert", [f.new_control, f.recovery, f.restart].join("|")],
-  ["--grep", f.recovery],
-  ["--grep", f.restart],
-  ["--grep", f.new_control],
-]);
-if (actual !== expected) throw new Error("timer dispatch filters differ from groups.ts: " + actual);
-const titles = [...(await Bun.file(spec).text()).matchAll(/^test\("([^"\n]+)"/gm)].map((m) => m[1]);
-const restart = titles.filter((title) => new RegExp(f.restart).test(title));
-const pinned = "native same-database restart preserves paused and running anchors for genuine new clients";
-if (JSON.stringify(restart) !== JSON.stringify([pinned]))
-  throw new Error("restart group is not the native restart fixture alone: " + JSON.stringify(restart));
-' "$ROOT/tools/web-e2e/groups.ts" "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts"
+# copy in web-e2e-run-group.sh fails here. The four runs keep the original
+# argv and split the titles 9+7+1+5 without overlap; the restart group (one
+# title) consumes the whole DB graph and retires the group's original server.
+bun "$ROOT/tools/web-e2e/shard-fixture.ts" timer-rows "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts"
 
 # Existing explicit filters, mixed specs, shard/list/pending selection and
 # option ordering pass through once with every original argument unchanged.
-python3 - "$timer_dispatch" "$FIXTURE_ROOT" <<'PYTHON'
-import json, os, subprocess, sys
-script, root = sys.argv[1:]
-env = dict(os.environ, ROOT=root, CARGO_TARGET_DIR=root + "/target")
-cases = [
-    ["v050-task-timer.spec.ts", "--grep", "literal owner title", "--workers=1"],
-    ["--grep=literal owner title", "e2e/v050-task-timer.spec.ts"],
-    ["v050-task-timer.spec.ts", "--grep-invert", "literal owner title"],
-    ["v050-task-timer.spec.ts", "--grep-invert=literal owner title"],
-    ["v050-task-timer.spec.ts", "-g", "literal owner title"],
-    ["v050-task-timer.spec.ts", "-gliteral owner title"],
-    ["v050-task-timer.spec.ts", "--shard=1/2"],
-    ["v050-task-timer.spec.ts", "--shard", "1/2"],
-    ["v050-task-timer.spec.ts", "--list"],
-    ["v050-task-timer.spec.ts", "--", "literal owner title"],
-    ["v050-task-timer.spec.ts", "other-flow.spec.ts"],
-    ["other-flow.spec.ts", "--workers=1"],
-    [],
-]
-for args in cases:
-    result = subprocess.run(["bash", script, *args], env=env, text=True, capture_output=True, check=True)
-    assert [json.loads(line) for line in result.stdout.splitlines()] == [args], (args, result.stdout)
-pending = dict(env, FVOCI_E2E_PENDING="1")
-args = ["v050-task-timer.spec.ts", "--workers=1"]
-result = subprocess.run(["bash", script, *args], env=pending, text=True, capture_output=True, check=True)
-assert [json.loads(line) for line in result.stdout.splitlines()] == [args]
-dispatch = subprocess.run(["bash", script, "v050-task-timer.spec.ts"], env=env, text=True, capture_output=True, check=True)
-groups = [json.loads(line) for line in dispatch.stdout.splitlines()]
-for expected_count, group in enumerate(groups, 1):
-    failing = dict(env, FVOCI_TEST_TIMER_FAIL_FILTER=group[-1])
-    result = subprocess.run(["bash", script, "v050-task-timer.spec.ts"], env=failing, text=True, capture_output=True)
-    assert result.returncode == 7, (group, result.returncode, result.stderr)
-    assert len(result.stdout.splitlines()) == expected_count, (group, result.stdout)
-PYTHON
+bun "$ROOT/tools/web-e2e/shard-fixture.ts" dispatch-cases "$timer_dispatch" "$FIXTURE_ROOT"
 
 # Use the actual export statement: each independently allocated run supplies
 # its own default beneath retained Playwright output; explicit paths survive.
 evidence_export="$FIXTURE_ROOT/scripts/evidence-export-fixture.sh"
 sed -n '/^export FVOCI_W5_EVIDENCE_DIR=/p' "$ROOT/scripts/web-e2e-run-group.sh" >"$evidence_export"
 [[ "$(wc -l <"$evidence_export")" -eq 1 ]]
-python3 - "$evidence_export" "$FIXTURE_ROOT" <<'PYTHON'
-import os, pathlib, subprocess, sys
-statement, root = sys.argv[1:]
-script = 'RUN_DIR="$1"; source "$2"; printf "%s" "$FVOCI_W5_EVIDENCE_DIR"'
-clean = dict(os.environ)
-clean.pop("FVOCI_W5_EVIDENCE_DIR", None)
-for run in ["run-first", "run-second"]:
-    directory = str(pathlib.Path(root, run))
-    result = subprocess.run(["bash", "-c", script, "fixture", directory, statement], env=clean, text=True, capture_output=True, check=True)
-    assert result.stdout == directory + "/playwright-output/w5-evidence", result.stdout
-explicit = str(pathlib.Path(root, "caller-owned evidence"))
-env = dict(clean, FVOCI_W5_EVIDENCE_DIR=explicit)
-result = subprocess.run(["bash", "-c", script, "fixture", root + "/run-third", statement], env=env, text=True, capture_output=True, check=True)
-assert result.stdout == explicit, result.stdout
-empty = dict(clean, FVOCI_W5_EVIDENCE_DIR="")
-result = subprocess.run(["bash", "-c", script, "fixture", root + "/run-empty", statement], env=empty, text=True, capture_output=True, check=True)
-assert result.stdout == root + "/run-empty/playwright-output/w5-evidence"
-PYTHON
+bun "$ROOT/tools/web-e2e/shard-fixture.ts" evidence-export "$evidence_export" "$FIXTURE_ROOT"
 
 # The real retention function must copy default proof/screenshot files before
 # the owning runtime directory is removed, using no DB or browser.
 retention_fixture="$FIXTURE_ROOT/scripts/evidence-retention-fixture.sh"
 sed -n '/^retain_failure_artifacts() {/,/^}/p' "$ROOT/scripts/web-e2e-run-group.sh" >"$retention_fixture"
-python3 - "$retention_fixture" "$FIXTURE_ROOT" <<'PYTHON'
-import os, pathlib, subprocess, sys
-function, root = sys.argv[1:]
-root = pathlib.Path(root)
-run = root / "run-retention"
-evidence = run / "playwright-output" / "w5-evidence"
-evidence.mkdir(parents=True)
-files = {"native-proof.json": b'{"fixture":true}', "zoom200.png": b"fixture screenshot bytes"}
-for name, value in files.items():
-    (evidence / name).write_bytes(value)
-temporary = root / "retained-tmp"
-temporary.mkdir()
-output = root / "retention-github-output"
-env = dict(os.environ, RUN_DIR=str(run), SERVER_LOG=str(run / "missing-server.log"), NET_MONITOR_LOG=str(run / "missing-net.log"), NET_MARKS_LOG=str(run / "missing-marks.log"), GROUP_LABEL="timer-evidence-fixture", TMPDIR=str(temporary), GITHUB_OUTPUT=str(output))
-script = 'source "$1"; retain_failure_artifacts; rm -rf "$RUN_DIR"'
-subprocess.run(["bash", "-eu", "-c", script, "fixture", function], env=env, check=True, capture_output=True)
-retained = next(line.split("=", 1)[1] for line in output.read_text().splitlines() if line.startswith("failure-artifacts="))
-assert not run.exists()
-for name, value in files.items():
-    assert (pathlib.Path(retained) / "playwright-output" / "w5-evidence" / name).read_bytes() == value
-PYTHON
+bun "$ROOT/tools/web-e2e/shard-fixture.ts" retention "$retention_fixture" "$FIXTURE_ROOT"
 
 echo "run-ci-shard-fixture-test: ok"
