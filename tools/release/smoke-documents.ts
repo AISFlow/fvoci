@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { ReleaseError, decodeUtf8, dumpJson, isRecord, jsonEqual } from "./py.ts";
 import { xmlText } from "./xml-text.ts";
-import { readZip, writeZip } from "./zip.ts";
+import { openZip, writeZip } from "./zip.ts";
 
 const TIMEOUT_MS = 40_000;
 const encoder = new TextEncoder();
@@ -169,12 +169,25 @@ export function isPdf(bytes: Uint8Array): boolean {
   return startsWith(bytes, "%PDF-") && Buffer.from(bytes).subarray(-1024).includes("%%EOF");
 }
 
-// Every DOCX word/ or PPTX ppt/slides/ XML part must parse; one holds the text.
+// Office part names are plain relative paths: no empty, "." or ".." segment,
+// no backslash, no leading slash. A directory entry ("word/", as docx-rs
+// writes) is that path plus one trailing slash.
+function canonicalPartName(name: string): boolean {
+  const path = name.endsWith("/") ? name.slice(0, -1) : name;
+  return !path.includes("\\") && path.split("/").every((s) => s !== "" && s !== "." && s !== "..");
+}
+
+// The archive must be structurally sound with canonical part names; every
+// DOCX word/ or PPTX ppt/slides/ XML part must be well-formed UTF-8 XML, and
+// one of them holds the text. Only those parts are inflated.
 export function officeHasText(bytes: Uint8Array, extension: string, text: string): boolean {
   const prefix = extension === "docx" ? "word/" : "ppt/slides/";
-  const parts = readZip(bytes)
-    .filter((entry) => entry.name.startsWith(prefix) && entry.name.endsWith(".xml"))
-    .map((entry) => xmlText(decodeUtf8(entry.data)));
+  const archive = openZip(bytes);
+  const bad = archive.names.find((name) => !canonicalPartName(name));
+  check(bad === undefined, `${extension} export has a non-canonical part name ${String(bad)}`);
+  const parts = archive.names
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".xml"))
+    .map((name) => xmlText(decodeUtf8(archive.read(name))));
   return parts.some((part) => part.includes(text));
 }
 

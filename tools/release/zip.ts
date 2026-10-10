@@ -1,12 +1,17 @@
 // The ZIP subset the documents smoke needs: write a deflated archive for the
-// Markdown import, read stored or deflated entries of an exported DOCX/PPTX
-// with their CRC checked. ZIP64, encryption and other methods are refused.
+// Markdown import, and read an exported DOCX/PPTX fail-closed. ZIP64,
+// multi-disk, encryption and methods other than stored/deflate are refused.
+// JSZip (in the tree) is not used for reading: it deliberately accepts a local
+// header that names a different file than the central directory, which this
+// check must refuse. Inflation is node:zlib.
 import { crc32, deflateRawSync, inflateRawSync } from "node:zlib";
 
 const LOCAL = 0x04034b50;
 const CENTRAL = 0x02014b50;
 const END = 0x06054b50;
 const UTF8_NAMES = 0x0800;
+const ENCRYPTED = 0x0001;
+const DESCRIPTOR = 0x0008;
 // An exported DOCX/PPTX part is far smaller; a larger declared size is refused.
 const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
 
@@ -67,50 +72,176 @@ export function writeZip(entries: ZipEntry[], date = new Date()): Uint8Array {
   return Buffer.concat([...locals, directory, end]);
 }
 
-export function readZip(bytes: Uint8Array): ZipEntry[] {
+type Located = {
+  name: string;
+  method: number;
+  crc: number;
+  packedSize: number;
+  size: number;
+  start: number; // local header offset
+  dataStart: number;
+  end: number; // after the data and its data descriptor, if any
+};
+
+export type ZipArchive = {
+  // Entry names in directory order, directories (ending in "/") included.
+  readonly names: readonly string[];
+  // Inflates one entry; the deflate stream must use exactly the declared
+  // compressed bytes, and the size and CRC must match the directory.
+  read(name: string): Uint8Array;
+};
+
+function fail(message: string): never {
+  throw new Error(`zip: ${message}`);
+}
+
+const DESCRIPTOR_SIGNATURE = 0x08074b50;
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+function entryName(raw: Uint8Array, flags: number): string {
+  if (flags & UTF8_NAMES) {
+    try {
+      return strictUtf8.decode(raw);
+    } catch {
+      return fail("entry name is not valid UTF-8");
+    }
+  }
+  // Without the UTF-8 flag the name is CP437; only its ASCII subset is taken.
+  if (raw.some((byte) => byte > 0x7f)) fail("non-ASCII entry name without the UTF-8 flag");
+  return Buffer.from(raw).toString("latin1");
+}
+
+// Validates the whole structure before any entry is inflated:
+// - exactly one end record, closing the file, on a single disk, no ZIP64;
+// - the central directory fills the space between the last entry and the
+//   end record, and its entries account for all of it;
+// - names are valid, and unique ignoring ASCII case (Office part names are
+//   case-insensitive);
+// - every local header matches its central entry (name bytes, method,
+//   encryption, descriptor and UTF-8 flags, and CRC and sizes from the local
+//   header or the data descriptor);
+// - local entries tile the file from offset 0 to the central directory with
+//   no gap and no overlap, so no data hides outside the directory's view;
+// - declared sizes stay within the per-entry and total budgets.
+export function openZip(bytes: Uint8Array, maxTotalBytes = MAX_ENTRY_BYTES): ZipArchive {
   const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let end = -1;
+  const u16 = (at: number) => (at + 2 <= buf.length ? buf.readUInt16LE(at) : fail("truncated"));
+  const u32 = (at: number) => (at + 4 <= buf.length ? buf.readUInt32LE(at) : fail("truncated"));
+  const ends: number[] = [];
   for (let at = buf.length - 22; at >= Math.max(0, buf.length - 22 - 0xffff); at--) {
-    if (buf.readUInt32LE(at) === END) {
-      end = at;
-      break;
+    if (buf.readUInt32LE(at) === END && at + 22 + buf.readUInt16LE(at + 20) === buf.length) {
+      ends.push(at);
     }
   }
-  if (end < 0) throw new Error("not a zip archive");
-  const total = buf.readUInt16LE(end + 10);
-  const start = buf.readUInt32LE(end + 16);
-  if (total === 0xffff || start === 0xffffffff) throw new Error("ZIP64 archives are not supported");
-  const entries: ZipEntry[] = [];
-  let at = start;
+  const [end] = ends;
+  if (end === undefined) fail("no end of central directory record");
+  if (ends.length > 1) fail("more than one end of central directory record");
+  const total = u16(end + 10);
+  const dirSize = u32(end + 12);
+  const dirStart = u32(end + 16);
+  if (u16(end + 4) !== 0 || u16(end + 6) !== 0 || u16(end + 8) !== total) {
+    fail("multi-disk archives are not supported");
+  }
+  if (total === 0xffff || dirSize === 0xffffffff || dirStart === 0xffffffff) {
+    fail("ZIP64 archives are not supported");
+  }
+  if (dirStart + dirSize !== end) fail("central directory does not end at the end record");
+
+  const entries: Located[] = [];
+  const seen = new Set<string>();
+  let declared = 0;
+  let at = dirStart;
   for (let i = 0; i < total; i++) {
-    if (buf.readUInt32LE(at) !== CENTRAL) throw new Error("bad zip central directory");
-    const flags = buf.readUInt16LE(at + 8);
-    const method = buf.readUInt16LE(at + 10);
-    const crc = buf.readUInt32LE(at + 16);
-    const packedSize = buf.readUInt32LE(at + 20);
-    const size = buf.readUInt32LE(at + 24);
-    const nameLength = buf.readUInt16LE(at + 28);
-    const extraLength = buf.readUInt16LE(at + 30);
-    const commentLength = buf.readUInt16LE(at + 32);
-    const local = buf.readUInt32LE(at + 42);
+    if (u32(at) !== CENTRAL) fail("bad central directory entry");
+    const flags = u16(at + 8);
+    const method = u16(at + 10);
+    const crc = u32(at + 16);
+    const packedSize = u32(at + 20);
+    const size = u32(at + 24);
+    const nameLength = u16(at + 28);
+    const next = at + 46 + nameLength + u16(at + 30) + u16(at + 32);
+    const start = u32(at + 42);
+    if (next > end) fail("central directory entry overruns the directory");
     const rawName = buf.subarray(at + 46, at + 46 + nameLength);
-    const name = rawName.toString(flags & UTF8_NAMES ? "utf8" : "latin1");
-    at += 46 + nameLength + extraLength + commentLength;
-    if (flags & 1) throw new Error(`${name}: encrypted zip entries are not supported`);
-    if (packedSize === 0xffffffff || size === 0xffffffff || local === 0xffffffff) {
-      throw new Error("ZIP64 archives are not supported");
+    const name = entryName(rawName, flags);
+    at = next;
+    if (!name) fail("entry without a name");
+    const folded = name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    if (seen.has(folded)) fail(`${name} appears twice`);
+    seen.add(folded);
+    if (flags & ENCRYPTED) fail(`${name}: encrypted entries are not supported`);
+    if (method !== 0 && method !== 8) {
+      fail(`${name}: compression method ${String(method)} is not supported`);
     }
-    if (size > MAX_ENTRY_BYTES)
-      throw new Error(`${name}: entry larger than ${String(MAX_ENTRY_BYTES)} bytes`);
-    if (buf.readUInt32LE(local) !== LOCAL) throw new Error(`${name}: bad local header`);
-    const dataStart = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
-    const packed = buf.subarray(dataStart, dataStart + packedSize);
-    let data: Uint8Array;
-    if (method === 0) data = packed;
-    else if (method === 8) data = inflateRawSync(packed, { maxOutputLength: size + 1 });
-    else throw new Error(`${name}: compression method ${String(method)} is not supported`);
-    if (data.length !== size || crc32(data) !== crc) throw new Error(`${name}: bad CRC or size`);
-    entries.push({ name, data });
+    if (packedSize === 0xffffffff || size === 0xffffffff || start === 0xffffffff) {
+      fail("ZIP64 archives are not supported");
+    }
+    if (size > MAX_ENTRY_BYTES) fail(`${name}: larger than ${String(MAX_ENTRY_BYTES)} bytes`);
+    declared += size;
+    if (declared > maxTotalBytes) fail(`entries exceed ${String(maxTotalBytes)} bytes in total`);
+    if (method === 0 && packedSize !== size) fail(`${name}: stored size mismatch`);
+
+    if (u32(start) !== LOCAL) fail(`${name}: bad local header`);
+    const localFlags = u16(start + 6);
+    const localNameLength = u16(start + 26);
+    const dataStart = start + 30 + localNameLength + u16(start + 28);
+    const localName = buf.subarray(start + 30, start + 30 + localNameLength);
+    if (!localName.equals(rawName)) fail(`${name}: local header names a different file`);
+    const disagrees = () => fail(`${name}: local header disagrees with the central directory`);
+    if (((localFlags ^ flags) & (ENCRYPTED | DESCRIPTOR | UTF8_NAMES)) !== 0) disagrees();
+    if (u16(start + 8) !== method) disagrees();
+    const dataEnd = dataStart + packedSize;
+    let entryEnd = dataEnd;
+    if (flags & DESCRIPTOR) {
+      // Optional signature, then CRC, compressed and uncompressed sizes.
+      const sig = u32(dataEnd) === DESCRIPTOR_SIGNATURE ? 4 : 0;
+      if (u32(dataEnd + sig) !== crc || u32(dataEnd + sig + 4) !== packedSize) disagrees();
+      if (u32(dataEnd + sig + 8) !== size) disagrees();
+      entryEnd = dataEnd + sig + 12;
+    } else if (u32(start + 14) !== crc || u32(start + 18) !== packedSize) {
+      disagrees();
+    } else if (u32(start + 22) !== size) {
+      disagrees();
+    }
+    if (entryEnd > dirStart) fail(`${name}: data overruns the central directory`);
+    entries.push({ name, method, crc, packedSize, size, start, dataStart, end: entryEnd });
   }
-  return entries;
+  if (at !== end) fail("central directory size does not match its entries");
+  let cursor = 0;
+  for (const entry of [...entries].sort((a, b) => a.start - b.start)) {
+    if (entry.start < cursor) fail(`${entry.name} overlaps another entry`);
+    if (entry.start > cursor) fail(`unlisted bytes before ${entry.name}`);
+    cursor = entry.end;
+  }
+  if (cursor !== dirStart) fail("unlisted bytes before the central directory");
+
+  const byName = new Map(entries.map((entry) => [entry.name, entry]));
+  return {
+    names: entries.map((entry) => entry.name),
+    read(name) {
+      const entry = byName.get(name) ?? fail(`no entry ${name}`);
+      const packed = buf.subarray(entry.dataStart, entry.dataStart + entry.packedSize);
+      let data: Uint8Array = packed;
+      if (entry.method === 8) {
+        const result = inflateRawSync(packed, {
+          maxOutputLength: Math.max(entry.size, 1),
+          info: true,
+        }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+        if (result.engine.bytesWritten !== packed.length) {
+          fail(`${name}: compressed data does not end with the deflate stream`);
+        }
+        data = result.buffer;
+      }
+      if (data.length !== entry.size || crc32(data) !== entry.crc) {
+        fail(`${name}: bad CRC or size`);
+      }
+      return data;
+    },
+  };
+}
+
+// Every entry, inflated.
+export function readZip(bytes: Uint8Array): ZipEntry[] {
+  const archive = openZip(bytes);
+  return archive.names.map((name) => ({ name, data: archive.read(name) }));
 }

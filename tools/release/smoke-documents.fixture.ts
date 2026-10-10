@@ -43,7 +43,8 @@ function office(prefix: string, text: string, malformed: boolean): Uint8Array {
   ]);
 }
 
-export function startFakeServer(faults: Set<Fault> = new Set()) {
+// `docx`, when given, is served as the DOCX export instead of the generated one.
+export function startFakeServer(faults: Set<Fault> = new Set(), docx?: Uint8Array) {
   const requests: Recorded[] = [];
   let markdown = "";
   const json = (value: unknown, status = 200) =>
@@ -128,6 +129,7 @@ export function startFakeServer(faults: Set<Fault> = new Set()) {
             "application/pdf",
           );
         }
+        if (extension === "docx" && docx) return send(docx, DOCX);
         if (extension === "docx") {
           const text = faults.has("docx-without-edit") ? "다른 문장" : "후속 편집 저장";
           return send(office("word/", text, false), DOCX);
