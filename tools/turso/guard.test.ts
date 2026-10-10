@@ -857,7 +857,7 @@ describe("child capture", () => {
 
 describe("CLI", () => {
   const cli = (args: string[], env: Record<string, string>) => {
-    const result = Bun.spawnSync(["bun", GUARD, ...args], {
+    const result = Bun.spawnSync([process.execPath, "--no-env-file", GUARD, ...args], {
       cwd: REPO,
       env,
       stdout: "pipe",
