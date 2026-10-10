@@ -874,7 +874,9 @@ export function phaseCommand(
       const message = rest.join(" ");
       errors.push(`FAIL: ${message}`);
       if (state.assertLog) appendFileSync(state.assertLog, `FAIL: ${message}\n`);
-      writeState(path, { ...state, failure: message });
+      // The first failure of the phase is the reported one; later ones are
+      // printed above but usually follow from it.
+      writeState(path, { ...state, failure: state.failure || message });
       break;
     }
     case "error": {

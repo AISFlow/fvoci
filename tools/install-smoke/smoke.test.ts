@@ -249,6 +249,24 @@ describe("phases and the first error", () => {
     });
   });
 
+  test("a later fail in the same phase keeps the first failure", () => {
+    withActions(undefined, (dir) => {
+      const state = join(dir, "state");
+      const report = () => (JSON.parse(readFileSync(state, "utf8")) as { report: string }).report;
+      run("init", state, "unit");
+      run("phase", state, "one");
+      run("fail", state, "body differs");
+      run("fail", state, "restore check failed");
+      run("report", state, "1");
+      expect(report()).toBe("phase one failed (exit 1): body differs");
+      run("phase", state, "two");
+      run("fail", state, "second phase");
+      run("report", state, "1");
+      expect(report()).toBe("phase two failed (exit 1): second phase");
+      run("finish", state, "1");
+    });
+  });
+
   test("the failing command, an interrupt and a teardown-only failure", () => {
     withActions(undefined, (dir) => {
       const state = join(dir, "state");
