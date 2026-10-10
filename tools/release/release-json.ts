@@ -38,7 +38,9 @@ export function state(answer: Json): string {
 
 export function missingAssets(answer: Json, required: string[]): string[] {
   const listed = answer.assets;
-  if (!Array.isArray(listed)) throw new Fail("release state has no asset list");
+  if (!Array.isArray(listed) || !listed.every((name) => typeof name === "string")) {
+    throw new Fail("release state has no asset name list");
+  }
   const present = new Set(listed);
   return [...new Set(required)].filter((name) => !present.has(name)).sort();
 }
@@ -54,11 +56,16 @@ export function recordDigest(record: Json, expectedVersion: string, sha: string)
 
 export function checkImageLabels(images: Json, expectedVersion: string, sha: string): void {
   const platforms = Object.keys(images).sort();
-  if (platforms.join(",") !== "linux/amd64,linux/arm64")
+  if (platforms.length !== 2 || platforms[0] !== "linux/amd64" || platforms[1] !== "linux/arm64") {
     throw new Fail(`image platforms ${repr(platforms)}`);
+  }
   for (const platform of platforms) {
-    const config = (images[platform] as Json | null)?.config as Json | undefined;
-    const labels = (config?.Labels as Json | null | undefined) ?? {};
+    const image = object(images[platform], platform);
+    const config = image.config === undefined ? {} : object(image.config, `${platform} config`);
+    const labels =
+      config.Labels === undefined || config.Labels === null
+        ? {}
+        : object(config.Labels, `${platform} labels`);
     if (
       labels["org.opencontainers.image.version"] !== expectedVersion ||
       labels["org.opencontainers.image.revision"] !== sha
@@ -71,7 +78,16 @@ export function checkImageLabels(images: Json, expectedVersion: string, sha: str
 }
 
 function readJson(path: string): Json {
-  return object(parseJson(readFileSync(path, "utf8"), path), path);
+  // Bytes, not a "utf8" string read: invalid UTF-8 must be refused, not replaced
+  // by U+FFFD; a BOM is kept so JSON.parse refuses it as the original did.
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(path));
+  } catch (error) {
+    if (error instanceof TypeError) throw new Fail(`${path} is not valid UTF-8`);
+    throw error;
+  }
+  return object(parseJson(text, path), path);
 }
 
 export function run(argv: string[]): string | undefined {

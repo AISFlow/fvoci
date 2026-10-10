@@ -708,3 +708,54 @@ describe("release-state", () => {
     );
   });
 });
+
+describe("review counterexamples", () => {
+  const listing = (pages: unknown[][]) =>
+    run(["release-state", "--tag", "v0.1.0"], new FakeRegistry({ releasePages: pages }).client);
+
+  test.each([
+    ["an array entry", [[[]]]],
+    ["an array entry next to the matching release", [[[], release("v0.1.0", false, ["a"])]]],
+    ["a null entry", [[null]]],
+    ["assets null", [[{ ...release("v0.1.0", false, []), assets: null }]]],
+    ["an array asset", [[{ ...release("v0.1.0", false, []), assets: [[]] }]]],
+    ["a non-boolean draft", [[{ ...release("v0.1.0", false, []), draft: [] }]]],
+  ])("a release list with %s is refused", async (_, pages) => {
+    const result = await listing(pages);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+  });
+
+  test("an index whose manifests is null is refused", async () => {
+    const fake = new FakeRegistry();
+    const digest = fake.add(OCI_INDEX, JSON.stringify({ mediaType: OCI_INDEX, manifests: null }));
+    const result = await run(["describe", "--image", IMAGE, "--digest", digest], fake.client);
+    expect(result.code).toBe(1);
+  });
+
+  const digest = "sha256:" + "1".repeat(64);
+  test.each([
+    [["registry-digest", "--image", IMAGE, "--tag", "0.1.0\n"]],
+    [["registry-digest", "--image", IMAGE + "\n", "--tag", "0.1.0"]],
+    [["describe", "--image", IMAGE, "--digest", digest + "\n"]],
+    [["describe", "--image", IMAGE, "--digest", digest + "\r"]],
+    [["tag", "--image", IMAGE, "--digest", digest, "--tag", "0.1.0\n"]],
+    [["push-index", "--image", IMAGE, "--amd64", digest + "\n", "--arm64", digest]],
+  ])("a trailing line break is refused before any request: %j", async (argv) => {
+    const fake = new FakeRegistry();
+    const result = await run(argv, fake.client);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(fake.requests).toEqual([]);
+  });
+
+  test("a trailing line break in GITHUB_REPOSITORY is refused", async () => {
+    const fake = new FakeRegistry();
+    const result = await run(["release-state", "--tag", "v0.1.0"], fake.client, {
+      ...ENV,
+      GITHUB_REPOSITORY: "AISFlow/fvoci\n",
+    });
+    expect(result.code).toBe(2);
+    expect(fake.requests).toEqual([]);
+  });
+});

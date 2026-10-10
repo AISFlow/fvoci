@@ -41,7 +41,7 @@ export async function releaseState(
     if (!Array.isArray(batch))
       throw new Fail(`listing releases of ${repository}: page ${String(page)} is not a list`);
     for (const release of batch as unknown[]) {
-      if (typeof release !== "object" || release === null)
+      if (typeof release !== "object" || release === null || Array.isArray(release))
         throw new Fail(`listing releases of ${repository}: bad entry`);
       if ((release as Record<string, unknown>).tag_name === tag)
         matching.push(release as Record<string, unknown>);
@@ -59,14 +59,20 @@ export async function releaseState(
     );
   const [release] = matching;
   if (release === undefined) return { state: "none", assets: [] };
-  const assets = (release.assets ?? []) as unknown;
+  const assets = release.assets === undefined ? [] : release.assets;
   if (!Array.isArray(assets)) throw new Fail(`release ${tag}: assets is not a list`);
   const names = assets.map((asset: unknown) => {
-    const name = (asset as Record<string, unknown> | null)?.name;
+    const name =
+      typeof asset === "object" && asset !== null && !Array.isArray(asset)
+        ? (asset as Record<string, unknown>).name
+        : undefined;
     if (typeof name !== "string") throw new Fail(`release ${tag}: asset without a name`);
     return name;
   });
-  return { state: release.draft ? "draft" : "published", assets: names.sort(compareCodePoints) };
+  // GitHub sends a boolean; anything else is an answer we cannot classify.
+  const draft = release.draft ?? false;
+  if (typeof draft !== "boolean") throw new Fail(`release ${tag}: draft is not a boolean`);
+  return { state: draft ? "draft" : "published", assets: names.sort(compareCodePoints) };
 }
 
 function compareCodePoints(a: string, b: string): number {

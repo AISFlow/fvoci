@@ -95,7 +95,7 @@ export function indexPlatforms(
   index: Record<string, unknown>,
   where: string,
 ): { amd64: string; arm64: string } {
-  const entries = index.manifests ?? [];
+  const entries = index.manifests === undefined ? [] : index.manifests;
   if (!Array.isArray(entries)) throw new Fail(`${where}: manifests is not a list`);
   const platforms = new Map<string, string>();
   for (const entry of entries as unknown[]) {
