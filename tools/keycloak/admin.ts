@@ -11,8 +11,10 @@ import {
   masterUsers,
   realmSummary,
   requiredActions,
+  scrubSecrets,
   type Json,
 } from "./realm.ts";
+import { secretsOf } from "./redact.ts";
 
 type Answer = { status: number; body: string };
 
@@ -175,6 +177,56 @@ export async function verify(
   config: Json,
   ssoConfig?: Json,
 ): Promise<{ report: Json; problems: string[] }> {
+  const ssoRealms = ssoConfig === undefined ? undefined : ssoRealmsOf(ssoConfig);
+  const secrets = [
+    ...new Set([
+      ...secretsOf(config),
+      ...(ssoRealms ?? []).flatMap((realm) => [realm.clientSecret, realm.password]),
+    ]),
+  ];
+  const { report, problems } = await readBack(config, ssoRealms);
+  // Nothing Keycloak echoed back leaves this process with a known secret in it.
+  return {
+    report: scrubSecrets(report, secrets) as Json,
+    problems: problems.map((problem) => scrubSecrets(problem, secrets) as string),
+  };
+}
+
+type SsoRealm = Record<
+  "realm" | "issuer" | "clientId" | "clientSecret" | "username" | "password" | "email",
+  string
+>;
+
+/** The realms of a given SSO config; a missing or mistyped member stops the run. */
+function ssoRealmsOf(ssoConfig: Json): SsoRealm[] {
+  const realms = ssoConfig.realms;
+  if (!Array.isArray(realms) || realms.length === 0) {
+    throw new HelperError("config lacks realms");
+  }
+  return realms.map((realm: unknown, index) => {
+    const out = {} as SsoRealm;
+    for (const key of [
+      "realm",
+      "issuer",
+      "clientId",
+      "clientSecret",
+      "username",
+      "password",
+      "email",
+    ] as const) {
+      const value = get(realm, key);
+      if (typeof value !== "string" || value === "")
+        throw new HelperError(`config lacks realms.${String(index)}.${key}`);
+      out[key] = value;
+    }
+    return out;
+  });
+}
+
+async function readBack(
+  config: Json,
+  ssoRealms: SsoRealm[] | undefined,
+): Promise<{ report: Json; problems: string[] }> {
   const admin = await adminSession(config);
   const problems: string[] = [];
   const report: Json = {
@@ -194,19 +246,23 @@ export async function verify(
     problems,
   );
   report.masterRealmUsers = masterUsers(await adminGet(admin, "/master/users?max=100"), problems);
-  if (ssoConfig !== undefined) {
+  if (ssoRealms !== undefined) {
     const sso: Json = {};
-    for (const realm of (ssoConfig.realms ?? []) as Json[]) {
-      const name = text(realm, "realm");
-      sso[name] = {
-        realm: await realmRead(admin, name, [[realm.username, realm.email, true, []]], problems),
-        client: await clientRead(admin, name, text(realm, "clientId"), problems),
+    for (const realm of ssoRealms) {
+      sso[realm.realm] = {
+        realm: await realmRead(
+          admin,
+          realm.realm,
+          [[realm.username, realm.email, true, []]],
+          problems,
+        ),
+        client: await clientRead(admin, realm.realm, realm.clientId, problems),
         tokenEndpointRefusals: await grantRefusals(
-          text(realm, "issuer"),
-          text(realm, "clientId"),
-          text(realm, "clientSecret"),
-          text(realm, "username"),
-          text(realm, "password"),
+          realm.issuer,
+          realm.clientId,
+          realm.clientSecret,
+          realm.username,
+          realm.password,
           problems,
         ),
       };

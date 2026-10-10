@@ -198,7 +198,10 @@ export function get(value: unknown, key: string): unknown {
     : null;
 }
 
-const show = (value: unknown) => JSON.stringify(value ?? null);
+// A read-back value that differs is replaced by this marker in the report and
+// named without its value in the problems: Keycloak may echo anything back,
+// a per-run secret included.
+export const MISMATCH = "<mismatch>";
 
 // --- Read-back checks of the imported realms --------------------------------
 
@@ -271,7 +274,8 @@ export function clientSummary(
   };
   for (const [key, value] of Object.entries(expected)) {
     if (!deepEqual(summary[key], value)) {
-      problems.push(`${realm} client ${key}: ${show(summary[key])} != ${show(value)}`);
+      problems.push(`${realm} client ${key}: mismatch`);
+      summary[key] = MISMATCH;
     }
   }
   return summary;
@@ -317,7 +321,8 @@ export function realmSummary(
   ];
   for (const [key, value] of wanted) {
     if (!deepEqual(summary[key], value)) {
-      problems.push(`${realm} ${key}: ${show(summary[key])} != ${show(value)}`);
+      problems.push(`${realm} ${key}: mismatch`);
+      summary[key] = MISMATCH;
     }
   }
   const actual: UserRow[] = (Array.isArray(users) ? users : [])
@@ -329,10 +334,12 @@ export function realmSummary(
     ])
     .sort(pyCompare);
   const want = [...expected].sort(pyCompare);
-  if (!deepEqual(actual, want)) {
-    problems.push(`${realm} users: ${show(actual)} != ${show(want)}`);
+  if (deepEqual(actual, want)) {
+    summary.users = actual;
+  } else {
+    problems.push(`${realm} users: mismatch`);
+    summary.users = MISMATCH;
   }
-  summary.users = actual;
   return summary;
 }
 
@@ -344,11 +351,18 @@ export function grantRefusal(
   answer: unknown,
   problems: string[],
 ): Json {
-  const record = { status, error: get(answer, "error") };
-  const hasToken =
-    answer !== null && typeof answer === "object" && Object.hasOwn(answer, "access_token");
-  if (status < 400 || hasToken) problems.push(`${issuer}: ${grant} grant was not refused`);
-  return record;
+  // A refusal is an OAuth error answer (RFC 6749 5.2): an error status and a
+  // JSON object with a string `error` and no token. Anything else is not
+  // evidence that the grant is disabled.
+  const isObject = answer !== null && typeof answer === "object" && !Array.isArray(answer);
+  const error = isObject ? get(answer, "error") : null;
+  const refused =
+    status >= 400 &&
+    isObject &&
+    typeof error === "string" &&
+    !Object.hasOwn(answer, "access_token");
+  if (!refused) problems.push(`${issuer}: ${grant} grant was not refused`);
+  return { status, error: refused ? error : MISMATCH };
 }
 
 export function requiredActions(actions: unknown, problems: string[]): Json {
@@ -360,12 +374,30 @@ export function requiredActions(actions: unknown, problems: string[]): Json {
   return out;
 }
 
-export function masterUsers(users: unknown, problems: string[]): unknown[] {
+export function masterUsers(users: unknown, problems: string[]): unknown {
   const names = (Array.isArray(users) ? users : [])
     .map((user) => get(user, "username"))
     .sort(pyCompare);
-  if (!deepEqual(names, ["admin"])) problems.push(`master realm users: ${show(names)}`);
-  return names;
+  if (deepEqual(names, ["admin"])) return names;
+  problems.push("master realm users: mismatch");
+  return MISMATCH;
+}
+
+/**
+ * The report with every string (and key) that contains a known secret
+ * replaced: unchecked read-back fields are printed as they are.
+ */
+export function scrubSecrets(value: unknown, secrets: readonly string[]): unknown {
+  const clean = (text: string) =>
+    secrets.some((secret) => text.includes(secret)) ? "<redacted-secret>" : text;
+  if (typeof value === "string") return clean(value);
+  if (Array.isArray(value)) return value.map((item) => scrubSecrets(item, secrets));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, member]) => [clean(key), scrubSecrets(member, secrets)]),
+    );
+  }
+  return value;
 }
 
 // --- Events and the run summary ---------------------------------------------
