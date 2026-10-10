@@ -144,19 +144,82 @@ export function redactLine(input: string, secrets: readonly string[]): string {
   });
 }
 
-/** Secrets of the spec config worth replacing, longest first. */
-export function secretsOf(config: unknown): string[] {
-  const record = (config ?? {}) as { secrets?: unknown; users?: unknown };
+// --- Known secrets of this process -------------------------------------------
+//
+// Every per-run secret the helper reads (environment, configs) or obtains
+// (the admin access token) is registered here, and every byte the helper
+// writes to stdout or stderr goes through `scrubText`. A secret shorter than
+// MIN_SECRET_LENGTH is refused instead of being left out: a short value would
+// also match ordinary text.
+
+export const MIN_SECRET_LENGTH = 8;
+const known = new Set<string>();
+
+const length = (text: string) => Array.from(text).length;
+
+/** Registers a secret; `what` names it in the refusal, never the value. */
+export function addSecret(value: string, what: string): void {
+  if (length(value) < MIN_SECRET_LENGTH) {
+    throw new Error(`${what} is shorter than ${String(MIN_SECRET_LENGTH)} characters`);
+  }
+  known.add(value);
+}
+
+/** The registered secrets, longest first (a secret inside another goes after it). */
+export function knownSecrets(): string[] {
+  return Array.from(known).sort((a, b) => length(b) - length(a));
+}
+
+/** Forgets every registered secret (tests only). */
+export function forgetSecrets(): void {
+  known.clear();
+}
+
+const jsonEscaped = (text: string) => JSON.stringify(text).slice(1, -1);
+const asciiEscaped = (text: string) =>
+  jsonEscaped(text).replace(
+    new RegExp("[\\u007f-\\uffff]", "g"),
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+
+/** The text with every registered secret, raw or JSON-escaped, replaced. */
+export function scrubText(text: string): string {
+  let out = text;
+  for (const secret of knownSecrets()) {
+    for (const form of new Set([secret, jsonEscaped(secret), asciiEscaped(secret)])) {
+      out = out.replaceAll(form, "<redacted-secret>");
+    }
+  }
+  return out;
+}
+
+/** Registers every secret of a spec config: client secrets, passwords, the admin password. */
+export function registerConfigSecrets(config: unknown): void {
+  const record = (config ?? {}) as {
+    secrets?: unknown;
+    users?: unknown;
+    admin?: unknown;
+    fvoci?: unknown;
+  };
   const users = record.users;
   if (users === null || typeof users !== "object") throw new Error("config has no users");
-  const all: unknown[] = [
-    ...(Array.isArray(record.secrets) ? (record.secrets as unknown[]) : []),
-    ...Object.values(users as Record<string, { password?: unknown }>).map((user) => user.password),
+  const listed: [string, unknown][] = [
+    ...(Array.isArray(record.secrets) ? (record.secrets as unknown[]) : []).map(
+      (value, index): [string, unknown] => [`config secrets.${String(index)}`, value],
+    ),
+    ...Object.entries(users as Record<string, { password?: unknown }>).map(
+      ([name, user]): [string, unknown] => [`config users.${name}.password`, user.password],
+    ),
+    ["config admin.password", (record.admin as { password?: unknown } | undefined)?.password],
+    ...Object.entries((record.fvoci ?? {}) as Record<string, unknown>).map(
+      ([name, value]): [string, unknown] => [`config fvoci.${name}`, value],
+    ),
   ];
-  // Lengths in code points, as the replaced helper counted them.
-  const length = (text: string) => Array.from(text).length;
-  const unique = new Set(all.filter((s): s is string => typeof s === "string" && length(s) >= 8));
-  return Array.from(unique).sort((a, b) => length(b) - length(a));
+  for (const [what, value] of listed) {
+    if (value === undefined) continue;
+    if (typeof value !== "string") throw new Error(`${what} is not a string`);
+    addSecret(value, what);
+  }
 }
 
 /**

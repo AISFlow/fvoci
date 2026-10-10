@@ -14,7 +14,7 @@ import {
   scrubSecrets,
   type Json,
 } from "./realm.ts";
-import { secretsOf } from "./redact.ts";
+import { addSecret, knownSecrets, registerConfigSecrets } from "./redact.ts";
 
 type Answer = { status: number; body: string };
 
@@ -112,6 +112,8 @@ async function adminSession(config: Json): Promise<Admin> {
   if (answer.status !== 200) throw new HelperError(`admin token HTTP ${String(answer.status)}`);
   const token = get(parse(answer.body, "admin token answer"), "access_token");
   if (typeof token !== "string") throw new HelperError("admin token answer has no access_token");
+  // A credential of this process from here on: scrubbed from all output.
+  addSecret(token, "admin access token");
   return { origin, token };
 }
 
@@ -177,15 +179,16 @@ export async function verify(
   config: Json,
   ssoConfig?: Json,
 ): Promise<{ report: Json; problems: string[] }> {
+  registerConfigSecrets(config);
   const ssoRealms = ssoConfig === undefined ? undefined : ssoRealmsOf(ssoConfig);
-  const secrets = [
-    ...new Set([
-      ...secretsOf(config),
-      ...(ssoRealms ?? []).flatMap((realm) => [realm.clientSecret, realm.password]),
-    ]),
-  ];
+  for (const [index, realm] of (ssoRealms ?? []).entries()) {
+    addSecret(realm.clientSecret, `config realms.${String(index)}.clientSecret`);
+    addSecret(realm.password, `config realms.${String(index)}.password`);
+  }
   const { report, problems } = await readBack(config, ssoRealms);
-  // Nothing Keycloak echoed back leaves this process with a known secret in it.
+  // Read-back values that hold a known secret (the admin token included) are
+  // replaced whole; the CLI's output boundary scrubs every write once more.
+  const secrets = knownSecrets();
   return {
     report: scrubSecrets(report, secrets) as Json,
     problems: problems.map((problem) => scrubSecrets(problem, secrets) as string),
@@ -273,6 +276,7 @@ async function readBack(
 }
 
 export async function events(config: Json, realms: string[]): Promise<Json> {
+  registerConfigSecrets(config);
   const admin = await adminSession(config);
   const report: Json = {};
   for (const realm of realms.length > 0 ? realms : [REALM]) {

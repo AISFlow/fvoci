@@ -24,7 +24,9 @@ import {
   LineSplitter,
   REDACTION_CASES,
   redactLine,
-  secretsOf,
+  knownSecrets,
+  registerConfigSecrets,
+  scrubText,
   selftestFailures,
 } from "./redact.ts";
 
@@ -71,25 +73,36 @@ function loadJson(path: string): Json {
   }
 }
 
+// The output boundary: every byte this helper writes to stdout or stderr,
+// error paths included, goes through scrubText.
+function out(text: string): void {
+  process.stdout.write(scrubText(text));
+}
+function err(text: string): void {
+  process.stderr.write(scrubText(text));
+}
+
 async function redactStdin(configPath: string | undefined): Promise<void> {
-  const secrets = configPath && existsSync(configPath) ? secretsOf(loadJson(configPath)) : [];
+  if (configPath && existsSync(configPath)) registerConfigSecrets(loadJson(configPath));
+  const secrets = knownSecrets();
   // Invalid UTF-8 becomes U+FFFD instead of ending the stream; a BOM is kept.
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const splitter = new LineSplitter();
   // Each complete line is written as soon as it is read: the run log follows
   // a group live.
-  const out = async (lines: string[]) => {
-    if (lines.length > 0)
-      await Bun.write(Bun.stdout, lines.map((line) => redactLine(line, secrets)).join(""));
+  const emit = async (lines: string[]) => {
+    if (lines.length === 0) return;
+    const text = lines.map((line) => redactLine(line, secrets)).join("");
+    await Bun.write(Bun.stdout, scrubText(text));
   };
   const reader = Bun.stdin.stream().getReader();
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    await out(splitter.push(decoder.decode(value, { stream: true })));
+    await emit(splitter.push(decoder.decode(value, { stream: true })));
   }
-  await out(splitter.push(decoder.decode()));
-  await out(splitter.end());
+  await emit(splitter.push(decoder.decode()));
+  await emit(splitter.end());
 }
 
 /** Trimmed stdout of a command, or null when it cannot start or does not finish in 30 s. */
@@ -178,7 +191,7 @@ function versions(argv: string[]): void {
     issuer: value("issuer"),
   };
   const text = pyDumpsIndented(info);
-  process.stdout.write(`${text}\n`);
+  out(`${text}\n`);
   const evidence = value("evidence");
   if (evidence !== "") writeFileSync(join(evidence, "versions.json"), text);
 }
@@ -230,17 +243,17 @@ async function main(argv: string[]): Promise<void> {
       loadJson(args[0] as string),
       two ? loadJson(args[1] as string) : undefined,
     );
-    process.stdout.write(`${pyDumpsIndented(report)}\n`);
+    out(`${pyDumpsIndented(report)}\n`);
     if (problems.length > 0)
       throw new HelperError(`imported settings differ:\n  ${problems.join("\n  ")}`);
   } else if (command === "events" && args.length > 0) {
     const report = await events(loadJson(args[0] as string), args.slice(1));
-    process.stdout.write(`${pyDumpsIndented(report)}\n`);
+    out(`${pyDumpsIndented(report)}\n`);
   } else if (command === "selftest" && args.length === 0) {
     const failed = selftestFailures();
     for (const [index, got] of failed) {
       const want = (REDACTION_CASES[index] as readonly [string, string])[1];
-      process.stderr.write(
+      err(
         `redaction case ${String(index)}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}\n`,
       );
     }
@@ -249,13 +262,13 @@ async function main(argv: string[]): Promise<void> {
         `${String(failed.length)} of ${String(REDACTION_CASES.length)} redaction cases failed`,
       );
     }
-    process.stdout.write(`redaction selftest: ${String(REDACTION_CASES.length)} cases ok\n`);
+    out(`redaction selftest: ${String(REDACTION_CASES.length)} cases ok\n`);
   } else if (command === "redact" && args.length <= 1) {
     await redactStdin(args[0]);
   } else if (command === "versions") {
     versions(args);
   } else if (command === "summary" && two) {
-    process.stdout.write(`${summary(args[0] as string, args[1] as string)}\n`);
+    out(`${summary(args[0] as string, args[1] as string)}\n`);
   } else {
     throw new HelperError(
       command === undefined ? USAGE : `unknown command or arguments: ${command}`,
@@ -263,14 +276,26 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
+/** Reports an error through the output boundary: messages may hold config-derived text. */
+function fail(error: unknown): void {
+  err(`keycloak e2e: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+}
+
 if (import.meta.main) {
+  // Errors outside main's await (a stray rejection or callback) take the same
+  // path instead of Bun's default report, which would print them unscrubbed.
+  process.on("uncaughtException", (error) => {
+    fail(error);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (error) => {
+    fail(error);
+    process.exit(1);
+  });
   try {
     await main(process.argv.slice(2));
   } catch (error) {
-    // Messages name files, variables and HTTP statuses, never secret values.
-    process.stderr.write(
-      `keycloak e2e: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    process.exitCode = 1;
+    fail(error);
   }
 }

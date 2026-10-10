@@ -21,37 +21,13 @@ import {
   LineSplitter,
   REDACTION_CASES,
   redactLine,
-  secretsOf,
+  forgetSecrets,
+  knownSecrets,
+  registerConfigSecrets,
+  scrubText,
   selftestFailures,
 } from "./redact.ts";
-
-const HELPER = join(import.meta.dir, "kc-e2e.ts");
-const ENV: Record<string, string> = {
-  KC_BOOTSTRAP_ADMIN_PASSWORD: "admin-pass-0123456789",
-  KC_E2E_CLIENT_SECRET: "client-secret-0123456789",
-  KC_E2E_WRONG_SECRET: "wrong-secret-0123456789",
-  KC_E2E_FVOCI_OWNER_PASSWORD: "owner-pass-0123",
-  KC_E2E_FVOCI_MEMBER_PASSWORD: "member-pass-0123",
-  KC_E2E_SSO_A_CLIENT_SECRET: "sso-a-secret-0123",
-  KC_E2E_SSO_A_PASSWORD: "sso-a-pass-0123",
-  KC_E2E_SSO_B_CLIENT_SECRET: "sso-b-secret-0123",
-  KC_E2E_SSO_B_PASSWORD: "sso-b-pass-0123",
-};
-for (const user of ["ALICE", "BOB", "CAROL", "MALLORY", "ERIN", "TINA"]) {
-  ENV[`KC_E2E_PASSWORD_${user}`] = `${user.toLowerCase()}-pass-0123`;
-}
-
-const secret = (name: string) => ENV[name] ?? "";
-
-/** The message a promise rejects with ("" when it resolves). */
-async function failure(promise: Promise<unknown>): Promise<string> {
-  try {
-    await promise;
-    return "";
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
+import { ENV, cli, failure, secret, ADMIN_TOKEN } from "./fixtures.ts";
 
 let dir = "";
 beforeAll(() => {
@@ -60,21 +36,6 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
-
-async function cli(args: string[], options: { env?: Record<string, string>; stdin?: string } = {}) {
-  const child = Bun.spawn([process.execPath, HELPER, ...args], {
-    env: { PATH: process.env.PATH ?? "", ...options.env },
-    stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { stdout, stderr, code };
-}
 
 describe("redaction", () => {
   test("every selftest case holds", () => {
@@ -90,20 +51,36 @@ describe("redaction", () => {
     expect(redactLine("code=abc1\x1cnext", [])).toBe("code=<redacted>\x1cnext");
   });
 
-  test("known secrets go first, longest first", () => {
-    const config = {
-      secrets: ["abcdefgh", "abcdefghijkl", "short"],
-      users: { a: { password: "pw-0123456" } },
-    };
-    const secrets = secretsOf(config);
-    expect(secrets).toEqual(["abcdefghijkl", "pw-0123456", "abcdefgh"]);
-    expect(redactLine("x abcdefghijkl pw-0123456 short\n", secrets)).toBe(
-      "x <redacted-secret> <redacted-secret> short\n",
+  test("known secrets go first, longest first, raw or JSON-escaped", () => {
+    forgetSecrets();
+    registerConfigSecrets({
+      secrets: ["abcdefgh", "abcdefghijkl"],
+      users: { a: { password: 'pw-"0123é' } },
+      admin: { password: "admin-pass-0" },
+    });
+    const secrets = knownSecrets();
+    expect(secrets).toEqual(["abcdefghijkl", "admin-pass-0", 'pw-"0123é', "abcdefgh"]);
+    expect(redactLine("x abcdefghijkl abcdefgh y\n", secrets)).toBe(
+      "x <redacted-secret> <redacted-secret> y\n",
     );
+    expect(scrubText('{"p": "pw-\\"0123\\u00e9", "q": "pw-\\"0123é"} admin-pass-0')).toBe(
+      '{"p": "<redacted-secret>", "q": "<redacted-secret>"} <redacted-secret>',
+    );
+    forgetSecrets();
   });
 
-  test("a config without users is refused", () => {
-    expect(() => secretsOf({ secrets: [] })).toThrow("config has no users");
+  test("a short secret is refused by name, never left out", () => {
+    forgetSecrets();
+    expect(() => {
+      registerConfigSecrets({ secrets: ["7chars!"], users: {} });
+    }).toThrow("config secrets.0 is shorter than 8 characters");
+    expect(() => {
+      registerConfigSecrets({ secrets: [], users: { a: { password: 3 } } });
+    }).toThrow("config users.a.password is not a string");
+    expect(() => {
+      registerConfigSecrets({ secrets: [] });
+    }).toThrow("config has no users");
+    forgetSecrets();
   });
 
   test("lines split at \\n only, the tail waits for the next chunk", () => {
@@ -255,7 +232,7 @@ describe("fake Keycloak", () => {
       if (url.pathname === "/realms/master/protocol/openid-connect/token") {
         const form = new URLSearchParams(await request.text());
         return form.get("password") === ENV.KC_BOOTSTRAP_ADMIN_PASSWORD
-          ? json(200, { access_token: "ADMIN" })
+          ? json(200, { access_token: ADMIN_TOKEN })
           : json(401, { error: "invalid_grant" });
       }
       if (url.pathname.endsWith("/protocol/openid-connect/token")) {
@@ -269,7 +246,7 @@ describe("fake Keycloak", () => {
         tokenSeen = await request.text();
         return json(200, { access_token: "leaked" });
       }
-      if (request.headers.get("authorization") !== "Bearer ADMIN") return json(401, {});
+      if (request.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return json(401, {});
       const path = url.pathname.replace("/admin/realms", "");
       if (path === "/fvoci-e2e") {
         return json(200, {
@@ -321,7 +298,7 @@ describe("fake Keycloak", () => {
     expect(problems).toContain(`${origin}/realms/fvoci-e2e: password grant was not refused`);
     expect(tokenSeen).toBeNull();
     expect(report.masterRealmUsers).toEqual(["admin"]);
-    const bad = { ...config, admin: { username: "admin", password: "wrong" } };
+    const bad = { ...config, admin: { username: "admin", password: "wrong-password-0" } };
     expect(await failure(verify(bad))).toBe("admin token HTTP 401");
     // A missing credential stops the check instead of posting "undefined".
     const noAlice = { ...config, users: {} };
@@ -374,160 +351,5 @@ describe("CLI", () => {
       expect((await cli(args)).code).toBe(1);
     }
     expect((await cli(["selftest"])).stdout).toBe("redaction selftest: 27 cases ok\n");
-  });
-});
-
-// A Keycloak that answers every read-back as imported, so a single changed
-// answer is the only reason for a verdict.
-describe("verify against a correct fake Keycloak", () => {
-  let grantBody = JSON.stringify({ error: "unauthorized_client" });
-  let pkce = "S256";
-  let logoutUris = "+";
-  const validClient = (clientId: string) => ({
-    clientId,
-    publicClient: false,
-    bearerOnly: false,
-    clientAuthenticatorType: "client-secret",
-    standardFlowEnabled: true,
-    implicitFlowEnabled: false,
-    directAccessGrantsEnabled: false,
-    serviceAccountsEnabled: false,
-    consentRequired: false,
-    fullScopeAllowed: false,
-    frontchannelLogout: false,
-    redirectUris: [],
-    webOrigins: [],
-    defaultClientScopes: ["basic"],
-    optionalClientScopes: ["profile", "email"],
-    attributes: {
-      "pkce.code.challenge.method": pkce,
-      "oauth2.device.authorization.grant.enabled": "false",
-      "oidc.ciba.grant.enabled": "false",
-      "standard.token.exchange.enabled": "false",
-      "post.logout.redirect.uris": logoutUris,
-    },
-  });
-  const usersOf = (realm: string) => {
-    if (realm === "fvoci-e2e") {
-      return expectedUsers().map(([username, email, emailVerified, requiredActions]) => ({
-        username,
-        email,
-        emailVerified,
-        requiredActions,
-      }));
-    }
-    const user = realm.replace("fvoci-e2e-", "");
-    return [{ username: user, email: `kc-${user}@example.com`, emailVerified: true }];
-  };
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    async fetch(request) {
-      const url = new URL(request.url);
-      const json = (status: number, body: unknown) => Response.json(body, { status });
-      if (url.pathname === "/realms/master/protocol/openid-connect/token") {
-        const form = new URLSearchParams(await request.text());
-        return form.get("password") === secret("KC_BOOTSTRAP_ADMIN_PASSWORD")
-          ? json(200, { access_token: "ADMIN" })
-          : json(401, { error: "invalid_grant" });
-      }
-      if (url.pathname.endsWith("/protocol/openid-connect/token")) {
-        return new Response(grantBody, {
-          status: 400,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (request.headers.get("authorization") !== "Bearer ADMIN") return json(401, {});
-      const [realm = "", section] = url.pathname.replace("/admin/realms/", "").split("/");
-      if (realm === "master") return json(200, [{ username: "admin" }]);
-      if (section === undefined) {
-        return json(200, {
-          realm,
-          sslRequired: "external",
-          registrationAllowed: false,
-          eventsEnabled: true,
-          eventsListeners: [],
-        });
-      }
-      if (section === "users") return json(200, usersOf(realm));
-      if (section === "clients") {
-        return json(200, [validClient(url.searchParams.get("clientId") ?? "")]);
-      }
-      if (section === "authentication") {
-        return json(200, [{ alias: "TERMS_AND_CONDITIONS", enabled: true }]);
-      }
-      return json(404, {});
-    },
-  });
-  afterAll(() => server.stop(true));
-  const origin = `http://127.0.0.1:${String(server.port)}`;
-  const configPath = () => join(dir, "verify-kc.json");
-  const ssoPath = () => join(dir, "verify-sso.json");
-  beforeAll(() => {
-    writeFileSync(configPath(), pyDumps(specConfig(`${origin}/realms/fvoci-e2e`, ENV)));
-    const realms = ["a", "b"].map((key) => ({
-      realm: `fvoci-e2e-ws-${key}`,
-      issuer: `${origin}/realms/fvoci-e2e-ws-${key}`,
-      clientId: "fvoci-ws",
-      clientSecret: secret(`KC_E2E_SSO_${key.toUpperCase()}_CLIENT_SECRET`),
-      username: `ws-${key}`,
-      password: secret(`KC_E2E_SSO_${key.toUpperCase()}_PASSWORD`),
-      email: `kc-ws-${key}@example.com`,
-    }));
-    writeFileSync(ssoPath(), pyDumps({ realms }));
-  });
-
-  test("the baseline passes, with and without the SSO realms", async () => {
-    expect((await cli(["verify", configPath()])).code).toBe(0);
-    expect((await cli(["verify", configPath(), ssoPath()])).code).toBe(0);
-  });
-
-  test("a 400 answer that is not an OAuth error object is not a refusal", async () => {
-    for (const body of ["null", "[]", "false", "17", "{}", '{"error": 3}', ""]) {
-      grantBody = body;
-      const result = await cli(["verify", configPath()]);
-      expect({ body, code: result.code }).toEqual({ body, code: 1 });
-      expect(result.stderr).toContain("password grant was not refused");
-    }
-    grantBody = JSON.stringify({ error: "unauthorized_client" });
-  });
-
-  test("a given SSO config without its realms stops the run", async () => {
-    const cases: [string, string][] = [
-      ["empty", "{}"],
-      ["no-realms", '{"realms": []}'],
-      ["realm-lacks-a-secret", '{"realms": [{"realm": "fvoci-e2e-ws-a"}]}'],
-    ];
-    for (const [name, content] of cases) {
-      const path = join(dir, `sso-${name}.json`);
-      writeFileSync(path, content);
-      const result = await cli(["verify", configPath(), path]);
-      expect({ name, code: result.code }).toEqual({ name, code: 1 });
-      expect(result.stderr).toStartWith("keycloak e2e: config lacks realms");
-    }
-  });
-
-  test("a mismatch never prints a known secret (canary in a read-back field)", async () => {
-    const canary = secret("KC_E2E_CLIENT_SECRET");
-    for (const value of [canary, `x-${canary}-y`]) {
-      pkce = value;
-      const result = await cli(["verify", configPath(), ssoPath()]);
-      expect(result.code).toBe(1);
-      expect(result.stderr).toContain("fvoci-e2e client pkce.code.challenge.method: mismatch");
-      expect(result.stderr.includes(canary)).toBe(false);
-      expect(result.stdout.includes(canary)).toBe(false);
-      expect(result.stdout).toContain('"pkce.code.challenge.method": "<mismatch>"');
-    }
-    pkce = "S256";
-  });
-
-  test("an unchecked read-back field never carries a known secret into the report", async () => {
-    const canary = secret("KC_E2E_SSO_A_CLIENT_SECRET");
-    logoutUris = `https://h/${canary}`;
-    const result = await cli(["verify", configPath(), ssoPath()]);
-    logoutUris = "+";
-    expect(result.code).toBe(0);
-    expect(result.stdout.includes(canary)).toBe(false);
-    expect(result.stdout).toContain('"post.logout.redirect.uris": "<redacted-secret>"');
   });
 });
