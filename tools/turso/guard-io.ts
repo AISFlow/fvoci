@@ -2,7 +2,8 @@
 // helpers only observe or execute.
 import { createHash } from "node:crypto";
 import { closeSync, openSync, readFileSync, readSync } from "node:fs";
-import { request } from "node:https";
+import { request, type RequestOptions } from "node:https";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { constants } from "node:os";
 import { AdmissionError, API_ROOT, reject } from "./guard-policy.ts";
 import { resolved, sha } from "../selected-backend-ci/io.ts";
@@ -126,11 +127,20 @@ export function parseEnvironmentBody(body: Uint8Array): EnvironmentMetadata {
   return { value, idText: integerIds.get(value) ?? null };
 }
 
+/** The one HTTPS call the metadata read makes; tests pass an offline double. */
+export type HttpsRequest = (
+  url: string,
+  options: RequestOptions,
+  callback: (response: IncomingMessage) => void,
+) => ClientRequest;
+
 /**
  * Anonymous public read of the fixed Environment resource: no credential,
  * no proxy, no redirect, bounded body. Every failure is one fixed code.
  */
-export function fetchEnvironmentMetadata(): Promise<EnvironmentMetadata> {
+export function fetchEnvironmentMetadata(
+  send: HttpsRequest = request,
+): Promise<EnvironmentMetadata> {
   return new Promise((done, fail) => {
     let settled = false;
     const refuse = () => {
@@ -138,7 +148,7 @@ export function fetchEnvironmentMetadata(): Promise<EnvironmentMetadata> {
       settled = true;
       fail(new AdmissionError("ENVIRONMENT_METADATA_UNAVAILABLE"));
     };
-    const req = request(
+    const req = send(
       API_ROOT,
       {
         method: "GET",
