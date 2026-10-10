@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bun tools/web-e2e/groups.ts verify --shards 8
+shard_count="$(bun tools/web-e2e/groups.ts shards)"
+bun tools/web-e2e/groups.ts verify --shards "$shard_count"
 bun --bun node_modules/typescript/bin/tsc -p tools/web-e2e/tsconfig.json
 bun test --timeout=60000 ./tools/web-e2e/groups.test.ts ./tools/web-e2e/trace-summary.test.ts \
   ./tools/web-e2e/smtp-sink.test.ts

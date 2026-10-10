@@ -39,6 +39,7 @@ cat >"$FIXTURE_ROOT/scripts/prepare-sqlite-ci.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == --env-file && $# == 2 ]]
+echo "fvoci-web-e2e-fake-sqlite-prep" >&2
 printf '%s\n' 'export SQLITE3_LIB_DIR=/fixture/sqlite/lib' \
   'export SQLITE3_INCLUDE_DIR=/fixture/sqlite/include' \
   'export SQLITE3_STATIC=1' 'export SQLITE3_NO_PKG_CONFIG=1' >"$2"
@@ -57,11 +58,17 @@ if [[ "$*" == "--bun run build" ]]; then
   fi
   exit "${FVOCI_TEST_BUN_BUILD_EXIT:-0}"
 fi
-# The fixture checkout's own group planner runs for real, in its two plan modes only.
-if [[ $# -ge 2 && "$1" == @GROUPS@ && ("$2" == verify || "$2" == shard-jsonl) ]]; then
+# The fixture checkout's own group planner runs for real: its plan modes and
+# the shard-count query only.
+if [[ $# -ge 2 && "$1" == @GROUPS@ && ("$2" == verify || "$2" == shard-jsonl || "$2" == shards) ]]; then
   exec @REAL_BUN@ "$@"
 fi
-# Test-only handoff leaf: checks invocation/propagates refusal, without build.
+# Test-only handoff leaves: check invocation/propagate refusal, without build.
+if [[ $# == 2 && "$1" == @HANDOFF@ && "$2" == admit ]]; then
+  [[ "${FVOCI_WEB_BUILD_PHASE:-}" == consume ]] || exit 99
+  echo "fvoci-web-e2e-fake-handoff-admit"
+  exit 0
+fi
 if [[ $# == 2 && "$1" == @HANDOFF@ && "$2" == consume ]]; then
   [[ "${FVOCI_WEB_BUILD_PHASE:-}" == consume ]] || exit 99
   echo "fvoci-web-e2e-fake-handoff-consume"
@@ -84,10 +91,18 @@ exit "${FVOCI_TEST_CARGO_EXIT:-0}"
 STUB
 chmod +x "$FAKE_BIN/cargo"
 
+# Pair names, shard count and timer filters come from groups.ts only.
+mapfile -t PAIR_SPECS < <(bun -e '
+const { PAIR_FIRST, PAIR_SECOND } = await import(process.argv[1]);
+console.log(PAIR_FIRST);
+console.log(PAIR_SECOND);
+' "$FIXTURE_ROOT/tools/web-e2e/groups.ts")
+((${#PAIR_SPECS[@]} == 2))
+
 populate_e2e_tree() {
   local dest="$FIXTURE_ROOT/apps/web/e2e"
   mkdir -p "$dest"
-  for name in workspace-flow.spec.ts workspace-wiki-flow.spec.ts; do
+  for name in "${PAIR_SPECS[@]}"; do
     echo "// fixture" >"$dest/$name"
   done
   local i=1
@@ -129,8 +144,8 @@ populate_e2e_tree \
 planned_groups_file="$(mktemp)"
 bun -e '
 const [groups, e2e] = process.argv.slice(1);
-const { shardPlanLines } = await import(groups);
-for (const line of shardPlanLines(e2e, 0, 8)) console.log(line.specs.join(" "));
+const { DEFAULT_SHARD_COUNT, shardPlanLines } = await import(groups);
+for (const line of shardPlanLines(e2e, 0, DEFAULT_SHARD_COUNT)) console.log(line.specs.join(" "));
 ' "$FIXTURE_ROOT/tools/web-e2e/groups.ts" "$FIXTURE_ROOT/apps/web/e2e" >"$planned_groups_file"
 
 log="$(run_shard 0)"
@@ -300,6 +315,58 @@ printf '%s\n' '// dirty source' >>"$FIXTURE_ROOT/apps/web/e2e/workspace-flow.spe
 reject_committed_api 'dirty tracked source'
 git -C "$FIXTURE_ROOT" restore apps/web/e2e/workspace-flow.spec.ts
 
+# A collaboration lane consumer of a verified handoff prepares nothing native:
+# no SQLite prep (the workflow step exported it), no API generation, no cargo.
+# It still builds dist once (the packet has none and consume compares hashes)
+# and verifies committed outputs at entry and after that build only. The
+# consume refusal stops the run before the sudo-owned selected runtime.
+consumer_log="$FIXTURE_ROOT/selected-consumer.log"
+run_selected_consumer() {
+  (
+    export PATH="$FAKE_BIN:$PATH" CARGO_TARGET_DIR="$FIXTURE_ROOT/target"
+    export CI=true GITHUB_ACTIONS=true GITHUB_JOB=collaboration-flow FVOCI_E2E_PENDING=1
+    export GITHUB_SHA="$(git -C "$FIXTURE_ROOT" rev-parse HEAD)"
+    export FVOCI_SELECTED_CI_OUTPUT="$FIXTURE_ROOT/selected-output"
+    export FVOCI_WEB_BUILD_HANDOFF="$FIXTURE_ROOT/selected-packet"
+    export FVOCI_WEB_BUILD_HANDOFF_SHA256="$(printf '%064d' 0)" FVOCI_TEST_HANDOFF_EXIT=7
+    cd "$FIXTURE_ROOT"
+    bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+  ) >"$consumer_log" 2>&1
+}
+status=0
+SQLITE3_LIB_DIR=/fixture/sqlite/lib SQLITE3_INCLUDE_DIR=/fixture/sqlite/include \
+  SQLITE3_STATIC=1 SQLITE3_NO_PKG_CONFIG=1 run_selected_consumer || status=$?
+consumer_count() { grep -c -- "$1" "$consumer_log" || true; }
+if [[ "$status" != 7 || "$(consumer_count fvoci-web-e2e-fake-sqlite-prep)" != 0 ||
+  "$(consumer_count fvoci-web-e2e-fake-generate-api)" != 0 ||
+  "$(consumer_count fvoci-web-e2e-fake-cargo)" != 0 ||
+  "$(consumer_count fvoci-web-e2e-fake-bun-build)" != 1 ||
+  "$(consumer_count 'committed API outputs match')" != 2 ||
+  "$(consumer_count fvoci-web-e2e-fake-handoff-admit)" != 1 ||
+  "$(consumer_count fvoci-web-e2e-fake-handoff-consume)" != 1 ||
+  "$(consumer_count '^fvoci-web-e2e-run-group ')" != 0 ]]; then
+  echo "selected consumer did not prepare exactly the dist build (status ${status})" >&2
+  cat "$consumer_log" >&2
+  exit 1
+fi
+grep -Eq '^web-e2e stage=selected-handoff-consume finished at=[0-9T:Z-]+ elapsed_seconds=[0-9]+ exit=7$' "$consumer_log"
+# Missing or partial workflow SQLite environments are refused before building.
+for dropped in SQLITE3_LIB_DIR SQLITE3_STATIC; do
+  status=0
+  (export SQLITE3_LIB_DIR=/fixture/sqlite/lib SQLITE3_INCLUDE_DIR=/fixture/sqlite/include \
+    SQLITE3_STATIC=1 SQLITE3_NO_PKG_CONFIG=1
+    unset "$dropped"
+    run_selected_consumer) || status=$?
+  if [[ "$status" == 0 ]] ||
+    ! grep -q 'selected consumer requires the workflow-prepared SQLite environment' "$consumer_log" ||
+    grep -Eq 'fvoci-web-e2e-fake-(sqlite-prep|bun-build|cargo|handoff-consume)' "$consumer_log"; then
+    echo "selected consumer without ${dropped} was not refused before building" >&2
+    cat "$consumer_log" >&2
+    exit 1
+  fi
+done
+echo 'selected consumer: no native rebuild, one dist build, refusal propagated'
+
 # Exercise the actual timer dispatch prefix with only its downstream runtime
 # stubbed; no DB/browser allocation or alternate production mode is introduced.
 timer_dispatch="$FIXTURE_ROOT/scripts/timer-dispatch-fixture.sh"
@@ -340,12 +407,29 @@ groups = [
 assert [len(group) for group in groups] == [9, 7, 1, 5], groups
 assert set.union(*groups) == set(titles), groups
 assert sum(map(len, groups)) == len(set.union(*groups)), groups
-# This fixture consumes the whole DB graph and retires the group's original
-# server; it must share neither earlier rows nor a later base-URL consumer.
-assert groups[2] == {
-    "native same-database restart preserves paused and running anchors for genuine new clients"
-}, groups
 PYTHON
+# The dispatcher's filters are exactly the groups.ts timer filters, so a stale
+# copy in web-e2e-run-group.sh fails here. The restart group (one title, see
+# the sizes above) consumes the whole DB graph and retires the group's
+# original server; it shares neither earlier rows nor a later base-URL consumer.
+bun -e '
+const [groups, log, spec] = process.argv.slice(1);
+const { TIMER_FILTERS: f } = await import(groups);
+const rows = (await Bun.file(log).text()).trimEnd().split("\n").map((line) => JSON.parse(line));
+const actual = JSON.stringify(rows.map((row) => row.slice(-2)));
+const expected = JSON.stringify([
+  ["--grep-invert", [f.new_control, f.recovery, f.restart].join("|")],
+  ["--grep", f.recovery],
+  ["--grep", f.restart],
+  ["--grep", f.new_control],
+]);
+if (actual !== expected) throw new Error("timer dispatch filters differ from groups.ts: " + actual);
+const titles = [...(await Bun.file(spec).text()).matchAll(/^test\("([^"\n]+)"/gm)].map((m) => m[1]);
+const restart = titles.filter((title) => new RegExp(f.restart).test(title));
+const pinned = "native same-database restart preserves paused and running anchors for genuine new clients";
+if (JSON.stringify(restart) !== JSON.stringify([pinned]))
+  throw new Error("restart group is not the native restart fixture alone: " + JSON.stringify(restart));
+' "$ROOT/tools/web-e2e/groups.ts" "$timer_log" "$ROOT/apps/web/e2e/v050-task-timer.spec.ts"
 
 # Existing explicit filters, mixed specs, shard/list/pending selection and
 # option ordering pass through once with every original argument unchanged.
