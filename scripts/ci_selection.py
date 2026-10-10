@@ -1470,6 +1470,7 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
     if matrix != POSTGRES_MATRIX_EXPR:
         errors.append(
             "rust: PostgreSQL budget matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix)"
+            " without an empty-array fallback"
         )
     rows, err = _postgres_matrix_rows(job)
     if err:
@@ -2764,45 +2765,79 @@ def _need_outputs(entry: dict) -> tuple[dict[str, str] | None, str | None]:
     return parsed, None
 
 
-def _load_needs_context(raw: str, workflow: str) -> tuple[dict | None, dict[str, str] | None, str | None]:
+def _load_needs_context(
+    raw: str, workflow: str
+) -> tuple[dict | None, dict[str, str] | None, dict[str, str] | None, str | None]:
     try:
         needs = json.loads(raw)
     except json.JSONDecodeError:
-        return None, None, "NEEDS_MALFORMED"
+        return None, None, None, "NEEDS_MALFORMED"
     if not isinstance(needs, dict):
-        return None, None, "NEEDS_TYPE"
+        return None, None, None, "NEEDS_TYPE"
     expected_jobs = list(WORKFLOW_JOBS[workflow])
     expected_keys = {PLAN_JOB_ID, *expected_jobs}
     if set(needs.keys()) != expected_keys:
-        return None, None, "NEEDS_KEY_SET"
+        return None, None, None, "NEEDS_KEY_SET"
 
     plan_entry = needs[PLAN_JOB_ID]
     plan_result, result_err = _need_result(plan_entry)
     if result_err:
-        return None, None, f"PLAN_{result_err}"
+        return None, None, None, f"PLAN_{result_err}"
     if plan_result != "success":
-        return None, None, "PLAN_RESULT"
+        return None, None, None, "PLAN_RESULT"
     assert isinstance(plan_entry, dict)
     outputs, outputs_err = _need_outputs(plan_entry)
     if outputs_err:
-        return None, None, f"PLAN_{outputs_err}"
+        return None, None, None, f"PLAN_{outputs_err}"
     assert outputs is not None
     plan_json = outputs.get("plan_json")
     if not isinstance(plan_json, str) or not plan_json.strip():
-        return None, None, "PLAN_JSON_MISSING"
+        return None, None, None, "PLAN_JSON_MISSING"
     try:
         plan = json.loads(plan_json)
     except json.JSONDecodeError:
-        return None, None, "PLAN_JSON_MALFORMED"
+        return None, None, None, "PLAN_JSON_MALFORMED"
 
     results: dict[str, str] = {}
     for job in expected_jobs:
         job_result, job_err = _need_result(needs[job])
         if job_err:
-            return None, None, f"JOB_{job_err}"
+            return None, None, None, f"JOB_{job_err}"
         assert job_result is not None
         results[job] = job_result
-    return plan, results, None
+    return plan, results, outputs, None
+
+
+def postgres_matrix_gate_error(workflow: str, plan: dict, outputs: dict[str, str] | None) -> str | None:
+    """Selected rust postgres must carry a non-empty include matrix.
+
+    A failed or skipped plan never reaches this check: the needs loader
+    already rejects it. A missing output or an empty array must not count
+    as a successful matrix.
+    """
+    if workflow != "rust":
+        return None
+    jobs = plan.get("jobs")
+    entry = jobs.get("postgres") if isinstance(jobs, dict) else None
+    if not isinstance(entry, dict) or entry.get("selected") is not True:
+        return None
+    raw = None if outputs is None else outputs.get("postgres_matrix")
+    if not isinstance(raw, str) or not raw.strip():
+        return "POSTGRES_MATRIX_MISSING"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return "POSTGRES_MATRIX_MALFORMED"
+    include = parsed.get("include") if isinstance(parsed, dict) else None
+    if (
+        not isinstance(parsed, dict)
+        or set(parsed) != {"include"}
+        or not isinstance(include, list)
+        or not include
+        or not all(isinstance(row, dict) and row for row in include)
+    ):
+        return "POSTGRES_MATRIX_EMPTY"
+    return None
 
 
 def _gate_opt_in_error(workflow: str, plan: dict) -> str | None:
@@ -2845,7 +2880,7 @@ def cmd_gate(argv: list[str] | None = None) -> int:
         print("gate: needs json missing", file=sys.stderr)
         return 1
 
-    plan, results, needs_err = _load_needs_context(needs_raw, args.workflow)
+    plan, results, plan_outputs, needs_err = _load_needs_context(needs_raw, args.workflow)
     if needs_err:
         print(f"gate: needs error {needs_err}", file=sys.stderr)
         return 1
@@ -2876,6 +2911,11 @@ def cmd_gate(argv: list[str] | None = None) -> int:
         elif result != "skipped":
             print(f"gate: unselected job {job} must be skipped, got {result}", file=sys.stderr)
             return 1
+
+    matrix_err = postgres_matrix_gate_error(args.workflow, plan, plan_outputs)
+    if matrix_err:
+        print(f"gate: postgres matrix error {matrix_err}", file=sys.stderr)
+        return 1
 
     print("gate: ok")
     return 0
