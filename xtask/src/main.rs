@@ -9,6 +9,8 @@ Usage: cargo xtask <command> [arguments...]
 
 Commands:
   help          Show this help
+  prepare-rustup-ci-metadata
+                Canonical Rustup component order before CI input capture
   rust-binaries Rust workflow executable hand-off (build, pack, unpack, run)
   selected-library
                 Selected SQLite library controls (one build, exact filters)
@@ -24,6 +26,7 @@ Options:
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    PrepareRustupCiMetadata(Vec<OsString>),
     RustBinaries(Vec<OsString>),
     SelectedLibrary(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
@@ -54,6 +57,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     let command = match argument.to_str() {
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
+        Some("prepare-rustup-ci-metadata") => {
+            return Ok(Command::PrepareRustupCiMetadata(args.collect()))
+        }
         Some("rust-binaries") => return Ok(Command::RustBinaries(args.collect())),
         Some("selected-library") => return Ok(Command::SelectedLibrary(args.collect())),
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
@@ -77,6 +83,9 @@ fn run(command: Command) -> ExitCode {
         Command::Help => {
             print!("{HELP}");
             ExitCode::SUCCESS
+        }
+        Command::PrepareRustupCiMetadata(args) => {
+            exit_status(xtask::rustup_ci_metadata::main(args))
         }
         Command::RustBinaries(args) => exit_status(xtask::rust_binaries::main(args)),
         Command::SelectedLibrary(args) => exit_status(xtask::selected_library::main(args)),
@@ -190,6 +199,21 @@ mod tests {
         assert_eq!(
             parse_args([argument.clone()].into_iter()),
             Err(CliError::UnknownCommand(argument))
+        );
+    }
+}
+
+#[cfg(test)]
+mod rustup_ci_metadata_dispatch {
+    use super::{parse_args, Command};
+    use std::ffi::OsString;
+
+    #[test]
+    fn keeps_its_arguments() {
+        let args = ["prepare-rustup-ci-metadata", "--output", "o", "--help"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::PrepareRustupCiMetadata(args[1..].to_vec()))
         );
     }
 }

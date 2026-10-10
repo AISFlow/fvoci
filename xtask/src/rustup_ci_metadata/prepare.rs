@@ -1,0 +1,536 @@
+//! Canonicalize `lib/rustlib/components` in place while proving that the
+//! public installed set, the Rustup executable and every other toolchain
+//! entry (bytes and identity) are unchanged, writing receipts before and
+//! after the single in-place write.
+
+use super::guard::{self, identity, Identity, Owner};
+use super::scope::Context;
+use super::{canonical, json, require, Refusal, PUBLIC_ROWS, RELATIVE, ROWS, TOOLCHAIN};
+use crate::host::sha256_hex;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::ffi::{CStr, CString, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+
+const TOOLCHAIN_BYTE_BOUND: u64 = 4 * 1024 * 1024 * 1024;
+const TOOLCHAIN_ENTRY_BOUND: usize = 50_000;
+
+/// Points between steps where tests interleave a concurrent change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Point {
+    ComponentOpen,
+    Receipt(&'static str),
+    ReceiptWritten(&'static str),
+}
+
+/// `rustup component list --installed` and the step points; the process
+/// implementation runs the real Rustup and ignores the points.
+pub trait Inspect {
+    fn component_list(&mut self) -> Result<String, Refusal>;
+    fn checkpoint(&mut self, _point: Point) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
+/// The 136-byte LF-terminated components file holding exactly the four rows.
+fn exact_rows(raw: &[u8]) -> Result<Vec<String>, Refusal> {
+    require(
+        raw.len() == 136 && raw.ends_with(b"\n") && !raw.contains(&b'\r') && raw.is_ascii(),
+        "components-byte-format",
+    )?;
+    let text = std::str::from_utf8(&raw[..raw.len() - 1]).expect("ASCII is UTF-8");
+    let rows: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    let set: BTreeSet<&str> = rows.iter().map(String::as_str).collect();
+    require(
+        rows.len() == 4 && set.len() == 4 && set == BTreeSet::from(ROWS),
+        "components-set",
+    )?;
+    Ok(rows)
+}
+
+/// Diagnostic JSON line (fixed public labels, counts and the raw hash only,
+/// never unknown output) and the sorted public installed set.
+fn installed_rows(text: &str) -> (String, Result<Vec<String>, Refusal>) {
+    let rows: Vec<&str> = text
+        .strip_suffix('\n')
+        .unwrap_or(text)
+        .split('\n')
+        .collect();
+    let set: BTreeSet<&str> = rows.iter().copied().collect();
+    let public = BTreeSet::from(PUBLIC_ROWS);
+    let recognized: Vec<String> = set
+        .intersection(&public)
+        .map(|row| format!("\"{row}\""))
+        .collect();
+    let unknown = rows.iter().filter(|row| !public.contains(*row)).count();
+    let line = format!(
+        "{{\"rustup_installed\": {{\"recognized\": [{}], \"row_count\": {}, \"unknown_count\": {}, \"raw_sha256\": \"{}\"}}}}",
+        recognized.join(", "),
+        rows.len(),
+        unknown,
+        sha256_hex(text.as_bytes())
+    );
+    let result = require(
+        rows.len() == 4 && set.len() == 4 && set == public,
+        "public-installed-set",
+    )
+    .map(|()| {
+        let mut sorted: Vec<String> = rows.iter().map(|row| (*row).to_owned()).collect();
+        sorted.sort();
+        sorted
+    });
+    (line, result)
+}
+
+fn installed(inspect: &mut dyn Inspect, out: &mut dyn Write) -> Result<Vec<String>, Refusal> {
+    let (line, rows) = installed_rows(&inspect.component_list()?);
+    writeln!(out, "{line}")?;
+    rows
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Closure {
+    entries: Vec<Value>,
+    regular_file_bytes: u64,
+    sha256: String,
+}
+
+impl Closure {
+    fn to_json(&self) -> Value {
+        json!({
+            "entries": self.entries,
+            "entry_count": self.entries.len(),
+            "regular_file_bytes": self.regular_file_bytes,
+            "sha256": self.sha256,
+        })
+    }
+}
+
+/// Every path under `root`, without following symlinks; any unreadable
+/// directory refuses.
+fn walk(directory: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let is_directory = entry.file_type()?.is_dir();
+        found.push(path.clone());
+        if is_directory {
+            walk(&path, found)?;
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path, info: &fs::Metadata) -> Result<String, Refusal> {
+    let mut stream = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    require(
+        identity(&stream.metadata()?) == identity(info),
+        "closure-file-race",
+    )?;
+    let mut digest = Sha256::new();
+    let mut chunk = vec![0; 1024 * 1024];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+    }
+    require(
+        identity(&fs::symlink_metadata(path)?) == identity(info),
+        "closure-file-race",
+    )?;
+    Ok(crate::host::hex(&digest.finalize()))
+}
+
+/// Path, identity and content (regular files) or target (symlinks) of every
+/// toolchain entry except the components file, in component-wise path order.
+pub fn closure(root: &Path) -> Result<Closure, Refusal> {
+    let mut paths = Vec::new();
+    walk(root, &mut paths)?;
+    paths.sort();
+    let (mut entries, mut total) = (Vec::new(), 0u64);
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .expect("walked under root")
+            .to_str()
+            .ok_or(Refusal::Reason("toolchain-entry-name"))?
+            .to_owned();
+        if relative == RELATIVE {
+            continue;
+        }
+        let info = fs::symlink_metadata(&path)?;
+        let mut facts = vec![Value::from(relative)];
+        facts.extend(identity(&info).map(Value::from));
+        let kind = info.file_type();
+        if kind.is_file() {
+            total += info.size();
+            require(total <= TOOLCHAIN_BYTE_BOUND, "toolchain-byte-bound")?;
+            let digest = sha256_file(&path, &info)?;
+            facts.extend([Value::from(info.size()), Value::from(digest)]);
+        } else if kind.is_symlink() {
+            // Dangling, looping and outside targets all refuse.
+            let inside = fs::canonicalize(&path).is_ok_and(|target| target.starts_with(root));
+            require(inside, "external-toolchain-symlink")?;
+            let target = fs::read_link(&path)?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| Refusal::Reason("toolchain-entry-name"))?;
+            facts.push(Value::from(target));
+        } else {
+            require(kind.is_dir(), "unsupported-toolchain-entry")?;
+        }
+        entries.push(Value::Array(facts));
+        require(
+            entries.len() <= TOOLCHAIN_ENTRY_BOUND,
+            "toolchain-entry-bound",
+        )?;
+    }
+    let sha256 = sha256_hex(json::compact_list(&entries).as_bytes());
+    Ok(Closure {
+        entries,
+        regular_file_bytes: total,
+        sha256,
+    })
+}
+
+/// `openat(2)` with `O_CLOEXEC` added.
+fn open_at(directory: &File, name: &CStr, flags: libc::c_int, mode: u32) -> io::Result<File> {
+    // SAFETY: `directory` is an open descriptor and `name` is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a freshly opened descriptor owned by nobody else.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// The receipt directory, opened without following symlinks right after
+/// `mkdirat` under the held parent descriptor. Receipts are created
+/// relative to that descriptor, and the directory must still be the inode at
+/// the physical `output` path before every receipt, before the components
+/// write and before success, so a replaced directory refuses instead of
+/// redirecting receipts. At the same points every receipt written so far must
+/// still be the private single-link file holding the written bytes, and the
+/// directory must hold nothing else. Each leaf's descriptor stays open until
+/// preparation returns, which keeps its inode allocated, so a file created
+/// after an unlink cannot reuse the inode number and pass as the receipt.
+struct Receipts<'a> {
+    output: &'a Path,
+    owner: Owner,
+    directory: File,
+    identity: Identity,
+    written: Vec<(&'static str, File, Identity, Vec<u8>)>,
+}
+
+impl<'a> Receipts<'a> {
+    fn create(output: &'a Path, owner: Owner) -> Result<Self, Refusal> {
+        let parent_path = guard::owned_directory(output.parent().unwrap_or(Path::new("")), owner)?;
+        let name = output
+            .file_name()
+            .map(|name| CString::new(name.as_bytes()))
+            .and_then(Result::ok)
+            .ok_or(Refusal::Reason("nonphysical-path"))?;
+        let parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&parent_path)?;
+        // The link count is left out: other entries in a shared parent may
+        // come and go.
+        require(
+            identity(&parent.metadata()?)[..5]
+                == identity(&fs::symlink_metadata(&parent_path)?)[..5],
+            "receipt-directory-race",
+        )?;
+        // A plain mkdir refuses every existing destination, including
+        // symlinks and files.
+        // SAFETY: `parent` is an open descriptor and `name` is NUL-terminated.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let directory = open_at(
+            &parent,
+            &name,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            0,
+        )?;
+        let info = directory.metadata()?;
+        require(
+            (info.uid(), info.gid()) == (owner.uid, owner.gid),
+            "unowned-directory",
+        )?;
+        require(info.mode() & 0o7777 == 0o700, "receipt-directory-mode")?;
+        let receipts = Self {
+            output,
+            owner,
+            directory,
+            identity: identity(&info),
+            written: Vec::new(),
+        };
+        receipts.verify()?;
+        Ok(receipts)
+    }
+
+    /// The directory's full identity, then each written leaf's identity and
+    /// bytes, then the exact set of names, which is what refuses any extra
+    /// entry.
+    fn verify(&self) -> Result<(), Refusal> {
+        let bound = guard::physical(self.output).is_ok()
+            && fs::symlink_metadata(self.output).is_ok_and(|info| identity(&info) == self.identity)
+            && identity(&self.directory.metadata()?) == self.identity;
+        require(bound, "receipt-directory-race")?;
+        for (name, held, written, raw) in &self.written {
+            let leaf = CString::new(*name).expect("receipt names have no NUL");
+            // `O_NONBLOCK`: a FIFO swapped in for the leaf opens at once and
+            // refuses on its identity before any read.
+            let mut stream = open_at(
+                &self.directory,
+                &leaf,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                0,
+            )
+            .map_err(|error| match error.raw_os_error() {
+                // Gone, a symlink, or a socket.
+                Some(libc::ENOENT | libc::ELOOP | libc::ENXIO) => {
+                    Refusal::Reason("receipt-leaf-race")
+                }
+                _ => error.into(),
+            })?;
+            // The name and the held descriptor are both the written inode,
+            // still a private single-link regular file.
+            require(
+                identity(&held.metadata()?) == *written
+                    && identity(&stream.metadata()?) == *written
+                    && read_upto(&mut stream, raw.len() as u64 + 1)? == *raw,
+                "receipt-leaf-race",
+            )?;
+        }
+        // Listed through the held descriptor's `/proc` link, not the path.
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))? {
+            names.insert(entry?.file_name());
+        }
+        let expected: BTreeSet<OsString> = self
+            .written
+            .iter()
+            .map(|(name, _, _, _)| OsString::from(name))
+            .collect();
+        require(names == expected, "receipt-directory-race")
+    }
+
+    fn write(&mut self, name: &'static str, raw: &[u8]) -> Result<(), Refusal> {
+        self.verify()?;
+        let leaf = CString::new(name).expect("receipt names have no NUL");
+        let mut stream = open_at(
+            &self.directory,
+            &leaf,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o600,
+        )?;
+        let info = stream.metadata()?;
+        require(info.mode() & 0o7777 == 0o600, "receipt-mode")?;
+        require(
+            info.nlink() == 1 && (info.uid(), info.gid()) == (self.owner.uid, self.owner.gid),
+            "receipt-leaf-race",
+        )?;
+        stream.write_all(raw)?;
+        stream.flush()?;
+        stream.sync_all()?;
+        self.directory.sync_all()?;
+        // The identity checked before the write, so a link or mode change
+        // made while writing refuses later instead of becoming the baseline.
+        self.written
+            .push((name, stream, identity(&info), raw.to_vec()));
+        Ok(())
+    }
+}
+
+fn receipt(
+    inspect: &mut dyn Inspect,
+    receipts: &mut Receipts,
+    name: &'static str,
+    raw: &[u8],
+) -> Result<(), Refusal> {
+    inspect.checkpoint(Point::Receipt(name))?;
+    receipts.write(name, raw)?;
+    inspect.checkpoint(Point::ReceiptWritten(name))?;
+    // Also the last check before the components write and before success.
+    receipts.verify()
+}
+
+fn read_upto(stream: &mut File, limit: u64) -> io::Result<Vec<u8>> {
+    let mut raw = Vec::new();
+    stream.take(limit).read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+fn read_all(stream: &mut File) -> io::Result<Vec<u8>> {
+    stream.seek(SeekFrom::Start(0))?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+fn open_component(path: &Path, write: bool) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(write)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+fn rustup_facts(rustup: &Path) -> Result<(String, Identity), Refusal> {
+    guard::file_facts(rustup)
+}
+
+fn object(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => unreachable!("json! object"),
+    }
+}
+
+/// Returns the `after.json` fields.
+pub fn prepare(
+    root: &Path,
+    output: &Path,
+    rustup: &Path,
+    context: &Context,
+    owner: Owner,
+    inspect: &mut dyn Inspect,
+    out: &mut dyn Write,
+) -> Result<Map<String, Value>, Refusal> {
+    guard::owned_directory(root, owner)?;
+    guard::owned_directory(&root.join("lib"), owner)?;
+    guard::owned_directory(&root.join("lib/rustlib"), owner)?;
+    let component = root.join(RELATIVE);
+    let original = identity(&guard::regular(&component, Some(0o644), Some(owner))?);
+    let schema = root.join("lib/rustlib/rust-installer-version");
+    guard::regular(&schema, None, Some(owner))?;
+    let schema_bytes = read_upto(&mut open_component(&schema, false)?, 4096)?;
+    require(
+        schema_bytes == b"3" || schema_bytes == b"3\n",
+        "unsupported-installer-schema",
+    )?;
+    for name in ROWS {
+        let manifest = root.join("lib/rustlib").join(format!("manifest-{name}"));
+        let info = guard::regular(&manifest, None, Some(owner))?;
+        require(info.size() > 0, "missing-installed-manifest")?;
+    }
+    let before_set = installed(inspect, out)?;
+    let before_closure = closure(root)?;
+    let before_rustup = rustup_facts(rustup)?;
+    require(
+        before_rustup == (context.rustup_sha256.clone(), context.rustup_identity),
+        "rustup-identity-drift",
+    )?;
+    guard::owned_directory(output.parent().unwrap_or(Path::new("")), owner)?;
+    let canonical = canonical();
+    inspect.checkpoint(Point::ComponentOpen)?;
+    let (raw, mut receipts) = {
+        let mut current = open_component(&component, true)?;
+        require(
+            identity(&current.metadata()?) == original,
+            "components-fd-race",
+        )?;
+        let raw = read_upto(&mut current, 4096)?;
+        let order = exact_rows(&raw)?;
+        let mut receipts = Receipts::create(output, owner)?;
+        receipt(inspect, &mut receipts, "original-components.txt", &raw)?;
+        let mut before = context.fields();
+        before.extend(object(json!({
+            "toolchain": TOOLCHAIN,
+            "installer_schema": 3,
+            "original_order": order,
+            "original_sha256": sha256_hex(&raw),
+            "component_identity": original,
+            "public_installed": before_set,
+            "other_toolchain_inputs": before_closure.to_json(),
+        })));
+        let before = json::indented(&Value::Object(before));
+        receipt(inspect, &mut receipts, "before.json", before.as_bytes())?;
+        require(
+            identity(&fs::symlink_metadata(&component)?) == original,
+            "components-path-race",
+        )?;
+        require(read_all(&mut current)? == raw, "components-byte-race")?;
+        if raw != canonical {
+            current.seek(SeekFrom::Start(0))?;
+            current.write_all(&canonical)?;
+            current.flush()?;
+            current.sync_all()?;
+        }
+        require(
+            read_all(&mut current)? == canonical,
+            "components-write-verification",
+        )?;
+        require(
+            identity(&current.metadata()?) == original
+                && identity(&fs::symlink_metadata(&component)?) == original,
+            "components-identity-drift",
+        )?;
+        (raw, receipts)
+    };
+    require(
+        installed(inspect, out)? == before_set,
+        "public-installed-set-drift",
+    )?;
+    require(
+        rustup_facts(rustup)? == before_rustup,
+        "rustup-identity-drift",
+    )?;
+    let after_closure = closure(root)?;
+    require(
+        after_closure == before_closure,
+        "compiled-toolchain-input-drift",
+    )?;
+    let mut last = open_component(&component, false)?;
+    require(
+        identity(&last.metadata()?) == original
+            && identity(&fs::symlink_metadata(&component)?) == original,
+        "components-final-identity-drift",
+    )?;
+    require(
+        read_upto(&mut last, 4096)? == canonical,
+        "components-final-byte-drift",
+    )?;
+    let mut after = context.fields();
+    after.extend(object(json!({
+        "changed": raw != canonical,
+        "canonical_order": ROWS,
+        "canonical_sha256": sha256_hex(&canonical),
+        "component_identity": identity(&fs::symlink_metadata(&component)?),
+        "other_toolchain_inputs_sha256": after_closure.sha256,
+        "other_toolchain_entry_count": after_closure.entries.len(),
+        "other_toolchain_regular_file_bytes": after_closure.regular_file_bytes,
+        "public_installed_set_unchanged": true,
+        "compiled_toolchain_inputs_unchanged": true,
+    })));
+    receipt(
+        inspect,
+        &mut receipts,
+        "after.json",
+        json::indented(&Value::Object(after.clone())).as_bytes(),
+    )?;
+    Ok(after)
+}
+
+#[cfg(test)]
+mod tests;
