@@ -178,16 +178,16 @@ build_current_artifacts() {
   if [[ "$SELECTED_PHASE" == consume ]]; then
     run_stage selected-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
   elif [[ "$SELECTED_BACKENDS" == true ]]; then
-    run_stage selected-input-before python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
-    run_stage selected-main python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
+    run_stage selected-input-before bun "$ROOT/scripts/run-selected-backend-e2e.ts" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
+    run_stage selected-main bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
       cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
-    run_stage selected-lib python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
+    run_stage selected-lib bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
       cargo test --locked --offline --features db-tests,api-schema --lib --no-run --message-format=json-render-diagnostics
-    run_stage selected-install python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
+    run_stage selected-install bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
       cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run --message-format=json-render-diagnostics
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage selected-engine python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
+    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage selected-engine bun "$ROOT/scripts/run-selected-backend-e2e.ts" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
       cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine --message-format=json-render-diagnostics
-    run_stage selected-input-after python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
+    run_stage selected-input-after bun "$ROOT/scripts/run-selected-backend-e2e.ts" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
   else
     run_stage fixture-build cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
     run_stage default-server-build cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
@@ -377,7 +377,7 @@ PY_DIAGNOSTICS
   docker_gid="$(stat -c %g /var/run/docker.sock)"
   # Qualify only the existing primary read group actually required by current
   # code/input ancestry. Inaccessible files fail before private ownership moves.
-  runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
+  runtime_groups="$(bun "$ROOT/scripts/run-selected-backend-e2e.ts" permissions \
     --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
   export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
   if [[ -n "${FVOCI_COLLAB_LANE:-}" && "$FVOCI_COLLAB_LANE" != install/on ]]; then
@@ -402,7 +402,7 @@ PY_DIAGNOSTICS
       sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
         setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
         env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-          python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
+          bun "$ROOT/scripts/run-selected-backend-e2e.ts" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
           >"$safe_diagnostics/config-list.stdout.log" 2>"$safe_diagnostics/config-list.stderr.log") || config_list_exit=$?
     selected_status="$config_list_exit"
   fi
@@ -418,7 +418,7 @@ PY_DIAGNOSTICS
     sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
       env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
+        bun "$ROOT/scripts/run-selected-backend-e2e.ts" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
     launcher_status="$selected_status"
   fi
   # The launcher has returned, but require existing exact resource-retirement
@@ -427,7 +427,7 @@ PY_DIAGNOSTICS
   (umask 077
     sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
+      bun "$ROOT/scripts/run-selected-backend-e2e.ts" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
       >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
   if [[ "$ownership_status" -eq 0 ]]; then
     if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then

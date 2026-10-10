@@ -176,7 +176,10 @@ export function browserInventory(
   function visit(path: string, key: string): void {
     const facts = lstatSync(path);
     assert.ok(facts.isFile() || facts.isDirectory(), "nonregular browser asset");
-    if (owner) assert.ok(facts.uid === owner[0] && facts.gid === owner[1] && owner[1] >= 1000);
+    if (owner)
+      assert.ok(
+        owner[0] !== 0 && owner[1] !== 0 && facts.uid === owner[0] && facts.gid === owner[1],
+      );
     if (facts.isFile())
       result[key] = metadata ? { sha256: sha(path), mode: facts.mode & 0o7777 } : sha(path);
     else {

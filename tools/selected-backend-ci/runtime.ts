@@ -248,16 +248,17 @@ export function laneRetirement(
 }
 
 export function prepareBrowser(output: string, chromium: string): string {
+  // The preparation owner is the actual host user, never root; its numeric
+  // value is not an ownership check (macOS and CI hosts differ).
   const runner = uid();
-  assert.ok(runner >= 1000);
+  assert.ok(runner !== 0 && gid() !== 0, "browser preparation refuses root");
   const component = dirname(dirname(chromium)),
     cache = dirname(component);
   assert.match(basename(component), /^chromium-[0-9]+$/);
   assert.ok(
     !lstatSync(cache).isSymbolicLink() &&
       statSync(cache).uid === runner &&
-      statSync(cache).gid === gid() &&
-      gid() >= 1000,
+      statSync(cache).gid === gid(),
   );
   const components = readdirSync(cache)
     .filter((name) => /^(chromium|chromium_headless_shell|ffmpeg)-[0-9]+$/.test(name))
@@ -401,7 +402,7 @@ export function runtimePermissions(
         facts.gid === runnerGid &&
         ((facts.mode >> 3) & required) === required
       ) {
-        assert.ok(runnerGid >= 1000);
+        assert.ok(runnerGid !== 0, "root group is never granted to the runtime actor");
         allowedGroups.add(runnerGid);
         needed[entry] = {
           path_sha256: digest(entry),

@@ -397,9 +397,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       ]);
     const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
     for (const mode of modes.filter((value) => value !== "stage"))
-      expect(caller).toContain('scripts/run-selected-backend-e2e.py" ' + mode);
-    expect(caller.match(/scripts\/run-selected-backend-e2e\.py" stage/g)).toHaveLength(4);
-    expect(caller).not.toContain("run-selected-backend-e2e.ts");
+      expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" ' + mode);
+    expect(caller.match(/bun "\$ROOT\/scripts\/run-selected-backend-e2e\.ts" stage/g)).toHaveLength(4);
+    expect(caller).not.toContain("run-selected-backend-e2e.py");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
     expect(() => requestedRuns("")).toThrow("unknown collaboration lane");
@@ -1361,6 +1361,28 @@ try {
     });
   });
 
+  test("browser owner check is the actual owner pair, not a numeric range, and never root", () => {
+    const parent = directory(),
+      assets = join(parent, "chromium-1");
+    mkdirSync(assets);
+    writeFileSync(join(assets, "chrome"), "fixture");
+    // A host group below 1000 (macOS staff is 20) is a valid preparation owner.
+    const hostGroup = 100;
+    try {
+      expect(
+        spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(hostGroup)}`, parent])
+          .exitCode,
+      ).toBe(0);
+      expect(Object.keys(browserInventory(assets, [uid(), hostGroup]))).toEqual(["chrome"]);
+      expect(() =>
+        browserInventory(assets, [uid(), gid() === hostGroup ? hostGroup + 1 : gid()]),
+      ).toThrow();
+      expect(spawnSync(["sudo", "-n", "chown", "-R", "0:0", parent]).exitCode).toBe(0);
+      expect(() => browserInventory(assets, [0, 0])).toThrow();
+    } finally {
+      spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, parent]);
+    }
+  });
   test("browser staging preserves source bytes/modes and rejects symlink/owner/byte/mode changes", async () => {
     const cache = directory(),
       component = join(cache, "chromium-123"),
