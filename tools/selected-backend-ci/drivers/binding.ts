@@ -19,7 +19,7 @@ import type {
   Reference,
   Web,
 } from "../types.ts";
-import { command, lines, readText, treeHashes } from "./common.ts";
+import { command, hex40, inputCheck, lines, readText, treeHashes } from "./common.ts";
 import { restartHelper, validateAllocation, type RestartBinding } from "./restart.ts";
 
 export const bindingModule = import.meta.path;
@@ -30,7 +30,6 @@ export const bindingModule = import.meta.path;
 export const engineFeatures = ["default", "worker"];
 export const engineFeaturesMatch = (features: unknown) =>
   Array.isArray(features) && deepEquals([...(features as string[])].sort(), engineFeatures);
-const hex40 = /^[0-9a-f]{40}$/;
 // Receipt booleans are JSON values; only a literal true qualifies.
 const isTrue = (value: unknown) => value === true;
 const wikiSpec = "apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts";
@@ -113,6 +112,8 @@ export interface Current {
   grant: Grant;
   run: string;
   before: Inputs;
+  // The input_check result recorded before any resource is touched.
+  sourceBefore: Inputs;
   build: Bundle;
   compileReceipt: CompileReceipt;
   assets: Web;
@@ -269,17 +270,9 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
       before.tracked["apps/web/e2e-pending/workspace-wiki-selected-auxiliary.ts"] ===
         "c38b23f590e08f68f4a7abf64d71976e9b088f66631982e73e8f26aa8d606f57",
     );
-  assert.ok((await git("status", "--short")) === before.status);
-  const tracked = (await git("ls-files", "-z")).split("\0").slice(0, -1);
-  assert.ok(
-    deepEquals(new Set(tracked), new Set(Object.keys(before.tracked))),
-    "full current closure must include newly integrated helper/tests",
-  );
-  for (const [name, hash] of Object.entries(before.tracked))
-    assert.ok(sha(join(root, name)) === hash);
-  for (const [name, hash] of Object.entries(before.external)) assert.ok(sha(name) === hash);
-  for (const [name, hash] of Object.entries(before.untracked))
-    assert.ok(sha(join(root, name)) === hash);
+  // The full current closure (status, ls-files set and every tracked, external
+  // and untracked hash) is the same check every driver mode repeats later.
+  const sourceBefore = await inputCheck(before, m.source, m.tree);
   const build = referenced(m.bundle) as Bundle;
   const compileReceipt = referenced(m.compileReceipt) as CompileReceipt;
   assert.ok(build.source === compileReceipt.source && build.source === m.source);
@@ -332,6 +325,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(engine !== undefined);
   const engineRecord = binaries[engine] as Bundle["binaries"][string];
   assert.ok(sha(engine) === engineRecord.sha256);
+  assert.ok(typeof engineRecord.compiledSource === "string", "engine compile source required");
   if (engineRecord.compiledSource !== m.source) {
     assert.ok(m.nativeQualification !== null);
     const q = referenced(m.nativeQualification) as NativeQualification;
@@ -446,6 +440,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
     grant,
     run,
     before,
+    sourceBefore,
     build,
     compileReceipt,
     assets,

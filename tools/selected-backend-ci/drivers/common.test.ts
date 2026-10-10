@@ -10,6 +10,7 @@ import {
   command,
   decode,
   failureCheckpoint,
+  field,
   frameLine,
   identityGone,
   knownBrowserCheckpoint,
@@ -315,6 +316,10 @@ describe("encodings", () => {
     expect(attachmentJson(Buffer.from('{"a":1}').toString("base64"))).toEqual({ a: 1 });
     for (const body of ["eyJhIjoxfQ", "eyJhIjo xfQ==", 7, "eyJh\nIjoxfQ=="])
       expect(() => attachmentJson(body)).toThrow();
+  });
+  test("a required JSON member refuses when absent, even as undefined", () => {
+    expect(field({ a: null }, "a")).toBeNull();
+    for (const value of [{}, { b: 1 }, null, [1], "a"]) expect(() => field(value, "a")).toThrow();
   });
   test("frameLine names only this file's innermost frame", () => {
     const thrown = (() => {

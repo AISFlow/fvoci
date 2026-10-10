@@ -542,6 +542,24 @@ describe("parent finalization", () => {
       expect(code).toBe(7);
       expect(writes).toEqual(["fixtures"]);
       expect(existsSync(join(run, "parent-original-failure.private.json"))).toBe(true);
+      // The same nine-key packet the child writes, browser fields null.
+      expect(
+        Object.keys(
+          JSON.parse(
+            readFileSync(join(run, "parent-original-failure.private.json"), "utf8"),
+          ) as object,
+        ),
+      ).toEqual([
+        "failed_phase",
+        "observed_failed_exit",
+        "failure_code",
+        "original_driver_failure",
+        "original_body_log_sha256",
+        "known_browser_test",
+        "known_browser_status",
+        "known_browser_checkpoint",
+        "browser_report_state",
+      ]);
       expect(emitted.join("")).not.toContain("SECOND_PARENT_PRIVATE");
       const summary = JSON.parse(emitted[0] as string) as Record<string, unknown>;
       expect(summary.final_exit_code).toBe(7);

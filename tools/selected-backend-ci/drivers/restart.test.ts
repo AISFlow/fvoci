@@ -203,11 +203,43 @@ const secret = "SYNTHETIC_PRIVATE_SECRET http://private.invalid/x token=PRIVATE"
 const restartTitle =
   "selected normal main restart: fresh actor reads persisted native history and manual revision";
 interface Probe {
-  report?: "structured" | "missing" | "malformed";
+  report?: "structured" | "missing" | "malformed" | "readback-without-history";
   beforeBrowser?: boolean;
   cleanupFailure?: boolean;
   cliMissing?: boolean;
 }
+// A one-test passing Playwright JSON report carrying one JSON attachment.
+const passedReport = (name: string, body: unknown) => ({
+  config: { workers: 1 },
+  errors: [],
+  stats: { expected: 1, unexpected: 0, flaky: 0, skipped: 0 },
+  suites: [
+    {
+      specs: [
+        {
+          tests: [
+            {
+              results: [
+                {
+                  status: "passed",
+                  retry: 0,
+                  errors: [],
+                  attachments: [
+                    {
+                      name,
+                      contentType: "application/json",
+                      body: Buffer.from(JSON.stringify(body)).toString("base64"),
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+});
 const exited = (code: number): Child => ({
   exited: Promise.resolve(code),
   exitCode: code,
@@ -284,6 +316,8 @@ async function failureProbe(options: Probe = {}) {
     finalAck: "final",
     creatorId: "creator",
     freshActorId: "fresh",
+    workspaceId: "workspace",
+    document: { id: "document" },
     canonicalEmojiOracleControls: [0, 1, 2, 3, 4, 5],
     nativeHistoryOracleControls: [0, 1],
   };
@@ -375,6 +409,21 @@ async function failureProbe(options: Probe = {}) {
           }),
         );
       else if (report === "malformed") writeFileSync(path, secret);
+      else if (report === "readback-without-history") {
+        // A passing restart run whose readback and seed both lack persisted
+        // and revision: equal absences are not a readback.
+        const readback = {
+          ...seed,
+          source: "a".repeat(40),
+          tree: "b".repeat(40),
+          documentId: "document",
+        };
+        writeFileSync(
+          path,
+          JSON.stringify(passedReport("selected-vue-restart-readback.json", readback)),
+        );
+        return Promise.resolve({ returncode: 0, stdout: "", stderr: "" });
+      }
       return Promise.resolve({ returncode: 7, stdout: "", stderr: "" });
     }
     if (args.includes("sha256sum"))
@@ -534,6 +583,15 @@ describe("restart failure and cleanup", () => {
     expect(safe.restart_browser_exit).toBeNull();
     expect(safe.known_browser_checkpoint).toBeNull();
     expect(safe.restart_stage).toBe("validated");
+  });
+  test("absent persisted and revision on both sides are not a readback", async () => {
+    const { safe, receipt } = await failureProbe({ report: "readback-without-history" });
+    expect(safe.restart_browser_exit).toBe(0);
+    expect((receipt.originalFailure as { message: string }).message).toBe(
+      "required JSON member missing",
+    );
+    expect(receipt.stage).toBe("restarted normal main ready");
+    expect(receipt.cleanupErrors).toEqual([]);
   });
   test("a CLI refusal precedes any restart child", async () => {
     await failureProbe({ cliMissing: true });
