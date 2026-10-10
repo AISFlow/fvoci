@@ -138,9 +138,11 @@ const UI_JOB = {
       name: "Credential-free current UI input preparation",
       run:
         "set -euo pipefail\n" +
-        `printf 'CARGO_TARGET_DIR=%s/turso-ui-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n` +
-        `printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n` +
-        `printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n` +
+        "{\n" +
+        `  printf 'CARGO_TARGET_DIR=%s/turso-ui-target\\n' "$RUNNER_TEMP"\n` +
+        `  printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP"\n` +
+        `  printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP"\n` +
+        '} >> "$GITHUB_ENV"\n' +
         "rustup toolchain install 1.98.1 --profile minimal\n" +
         SQLITE_PREPARATION +
         "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",

@@ -383,8 +383,9 @@ function caseList(): MutationCase[] {
     add(`turso-boundary-${String(index)}`, "turso-test.yml", swap(old, replacement), needle);
   });
 
-  const bunCache = `          printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
-  const browserCache = `          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
+  const bunCache = `            printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP"\n`;
+  const browserCache = `            printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP"\n`;
+  const exported = '          } >> "$GITHUB_ENV"\n';
   const ui: [string, string][] = [
     ["    needs: admission\n", "    needs: []\n"],
     ["github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"],
@@ -406,7 +407,8 @@ function caseList(): MutationCase[] {
     [bunCache, ""],
     [browserCache, ""],
     [bunCache, bunCache.replace("$RUNNER_TEMP", "/foreign")],
-    [browserCache, browserCache.replace("$GITHUB_ENV", "$GITHUB_OUTPUT")],
+    [exported, exported.replace("$GITHUB_ENV", "$GITHUB_OUTPUT")],
+    [browserCache + exported, exported + browserCache],
     ["          ref: ${{ github.sha }}\n", "          ref: main\n"],
     ["          persist-credentials: false\n", "          persist-credentials: true\n"],
     ["          cargo fetch --locked\n", "          cargo fetch\n"],
