@@ -41,7 +41,7 @@ async function text(path: string) {
   } catch {
     throw new PolicyError("input must be UTF-8 without a BOM");
   }
-  check(!decoded.startsWith("﻿"), "input must be UTF-8 without a BOM");
+  check(!decoded.startsWith("\ufeff"), "input must be UTF-8 without a BOM");
   return decoded;
 }
 async function json(path: string): Promise<unknown> {
@@ -120,18 +120,41 @@ function layerIdentity(index: number, name: string, bytes: Uint8Array) {
   const magic = Buffer.from(bytes.subarray(0, 4)).toString("hex") || "empty";
   return `layer ${String(index)} (${safeName}), magic=${magic}`;
 }
-// Scan window per file; a 1024-character tail is carried across windows so a
-// token split at a window boundary is still found.
+// Streams one archived file so memory stays near one stream chunk (Bun yields
+// up to 2 MiB) plus the first MiB, which decides text vs binary (compiled
+// binaries contain protocol literals). Chunks are checked in fixed 64 KiB
+// windows with a 1024-character carry, so a token split at a window boundary
+// is still found whatever chunk sizes the stream yields.
+const textHead = 1024 * 1024;
 const scanWindow = 64 * 1024;
-function scanFileBytes(data: Uint8Array) {
-  const text = !data.subarray(0, 1024 * 1024).includes(0); // compiled binaries contain protocol literals
+async function scanFile(stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader();
+  const head: Uint8Array[] = [];
+  let buffered = 0;
+  let next = await reader.read();
+  for (; !next.done && buffered < textHead; next = await reader.read()) {
+    head.push(next.value);
+    buffered += next.value.length;
+  }
+  const text = !Buffer.concat(head).subarray(0, textHead).includes(0);
   let tail = "";
-  for (let offset = 0; offset < data.length; offset += scanWindow) {
-    const window =
-      tail + Buffer.from(data.subarray(offset, offset + scanWindow)).toString("latin1");
+  const checkWindow = (bytes: Uint8Array) => {
+    const window = tail + Buffer.from(bytes).toString("latin1");
     checkText(window, text); // token signatures also checked in binaries
     tail = window.slice(-1024);
-  }
+  };
+  // Windows start at file offsets 0, 64 KiB, ...; a shorter remainder waits for the next chunk.
+  let pending: Uint8Array = new Uint8Array(0);
+  const scan = (chunk: Uint8Array) => {
+    const data = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+    let offset = 0;
+    for (; data.length - offset >= scanWindow; offset += scanWindow)
+      checkWindow(data.subarray(offset, offset + scanWindow));
+    pending = data.subarray(offset);
+  };
+  for (const chunk of head) scan(chunk);
+  for (; !next.done; next = await reader.read()) scan(next.value);
+  if (pending.length) checkWindow(pending);
 }
 
 export function verifyWorkflow(data: unknown) {
@@ -378,7 +401,7 @@ export async function scanImage(path: string, inspection: string, arch: string) 
         basename(name) !== ".env" && !basename(name).startsWith(".env."),
         "environment file found; content withheld",
       );
-      scanFileBytes(await file.bytes());
+      await scanFile(file.stream());
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
@@ -395,15 +418,11 @@ export function buildSummary(log: string, info?: unknown) {
     const step = done?.[1] === undefined ? undefined : descriptions.get(done[1]);
     if (done && step !== undefined) rows.push(`| ${step} | ${done[2] ?? "cached"} |`);
   }
-  if (info !== undefined) {
-    const size = at(info, "Size");
-    const architecture = at(info, "Architecture");
-    check(
-      typeof size === "number" && typeof architecture === "string",
-      "invalid image inspection; content withheld",
-    );
+  // Reporting only: an inspection without these fields omits the size line.
+  const size = at(info, "Size");
+  const architecture = at(info, "Architecture");
+  if (typeof size === "number" && typeof architecture === "string")
     rows.push(`\nUncompressed image size: ${String(size)} bytes (${architecture}).`);
-  }
   return rows.join("\n");
 }
 
