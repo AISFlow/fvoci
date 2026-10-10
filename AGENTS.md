@@ -39,8 +39,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 머지 큐 근거는 게시한 큐 head와, `merge_group` checkout SHA = 그 main 커밋 SHA다.
 - 통과는 타임아웃 증액·retry·sleep·skip 없이 나온다. regression·resolved·flaky 라벨에는 재현 근거가 있다.
 - 원인이 알려진 flaky는 재실행하지 않는다. 같은 실패가 두 번이면 고친다. REJECT는 2라운드까지고, 3라운드부터 막는 것은 보안·fail-closed뿐이다.
-- 새 Python은 커밋하지 않는다. Python 도구는 uv다. 예외: 하네스 이전 중 기존 Python 경로 문자열은 바꿀 수 있다.
-- 하니스의 Rust 검증은 xtask, TypeScript는 Bun, 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
+- 하네스(영환님, 2026-10-09 11:31 KST): Harness code is Rust via xtask and TypeScript via Bun only; existing Python and shell harness files are migrated and removed. Python tools may be installed with uv and used as tools, but no Python code is committed. 이전 중 기존 Python 경로·데이터 문자열은 고칠 수 있다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
 - 자식 프로세스는 `process.execPath`로 띄운다. 새 테스트는 기본 25회와 CPU 부하 5회를 통과한다.
 - force push, `reset --hard`, 진행 중 CI 직접 취소, 운영 DB 변경은 허용 조건이 없다. 예외는 `draft/*` push의 자동 취소뿐이고 main·#347 push에는 없다. 그 run은 `CANCELLED(대체됨)`이라 판정 근거가 아니다.
 - 시크릿·credential·접속 URL·host는 로그·커밋·보고·artifact 밖에 둔다. main 직접 push는 병합 허용 조건에 없다.
