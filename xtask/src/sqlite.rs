@@ -47,35 +47,67 @@ pub fn archive_root() -> String {
     archive_name().trim_end_matches(".zip").to_owned() + "/"
 }
 
-/// Hash of the build policy sources compiled into this binary. It replaces
-/// the former hash of the Python helper file in the build input identity, so
-/// any policy, flag, smoke or ZIP rule change yields a new cache identity.
-pub fn helper_sha256() -> String {
-    let mut sources = Vec::new();
-    for (name, body) in [
-        ("sqlite.rs", include_bytes!("sqlite.rs").as_slice()),
-        ("sqlite_build.rs", include_bytes!("sqlite_build.rs")),
-        ("sqlite_zip.rs", include_bytes!("sqlite_zip.rs")),
-        ("process.rs", include_bytes!("process.rs")),
-        ("shell.rs", include_bytes!("shell.rs")),
-        ("Cargo.lock", include_bytes!("../Cargo.lock")),
-    ] {
-        sources.extend_from_slice(name.as_bytes());
-        sources.push(0);
-        sources.extend_from_slice(&(body.len() as u64).to_le_bytes());
-        sources.extend_from_slice(body);
+/// Every source, manifest and lockfile compiled into this binary. Adding a
+/// module to `src/` requires listing it here (checked by a test).
+const SOURCES: [(&str, &[u8]); 12] = [
+    ("Cargo.toml", include_bytes!("../Cargo.toml")),
+    ("Cargo.lock", include_bytes!("../Cargo.lock")),
+    ("src/args.rs", include_bytes!("args.rs")),
+    ("src/host.rs", include_bytes!("host.rs")),
+    ("src/lib.rs", include_bytes!("lib.rs")),
+    ("src/main.rs", include_bytes!("main.rs")),
+    ("src/process.rs", include_bytes!("process.rs")),
+    ("src/shell.rs", include_bytes!("shell.rs")),
+    ("src/sqlite.rs", include_bytes!("sqlite.rs")),
+    ("src/sqlite_build.rs", include_bytes!("sqlite_build.rs")),
+    ("src/sqlite_ci.rs", include_bytes!("sqlite_ci.rs")),
+    ("src/sqlite_zip.rs", include_bytes!("sqlite_zip.rs")),
+];
+
+fn sources_sha256(role: &str) -> String {
+    let mut data = role.as_bytes().to_vec();
+    for (name, body) in SOURCES {
+        data.push(0);
+        data.extend_from_slice(name.as_bytes());
+        data.push(0);
+        data.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        data.extend_from_slice(body);
     }
-    sha256_hex(&sources)
+    sha256_hex(&data)
 }
 
-/// Hash of the wrapper policy source, replacing the former wrapper file hash.
+/// Replaces the former hash of the Python helper file in the build input
+/// identity: any change to the compiled xtask (policy, flags, smoke program,
+/// ZIP rules, dependencies) yields a new identity.
+pub fn helper_sha256() -> String {
+    sources_sha256("sqlite-build")
+}
+
+/// Replaces the former hash of the Python wrapper file, over the same sources.
 pub fn wrapper_sha256() -> String {
-    sha256_hex(include_bytes!("sqlite_ci.rs"))
+    sources_sha256("sqlite-ci")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_sources_cover_every_module() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| format!("src/{}", e.unwrap().file_name().to_string_lossy()))
+            .collect();
+        on_disk.sort();
+        let listed: Vec<String> = SOURCES
+            .iter()
+            .map(|(n, _)| (*n).to_owned())
+            .filter(|n| n.starts_with("src/"))
+            .collect();
+        assert_eq!(listed, on_disk);
+        assert_ne!(helper_sha256(), wrapper_sha256());
+    }
 
     #[test]
     fn derived_names_match_the_reviewed_download() {

@@ -5,9 +5,11 @@
 # The reviewed helper (`xtask sqlite-build`) owns all source hashes, C flags and
 # SQLite export policy; this entry is `xtask sqlite-ci` (xtask/src/sqlite_ci.rs).
 # Building xtask needs only its own locked crates; the host Cargo
-# target/target-dir overrides apply to the consumer command, not to xtask.
+# target, target-dir and rustflags overrides apply to the consumer command,
+# not to xtask.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+  -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
   cargo build --quiet --locked --manifest-path "$root/xtask/Cargo.toml" --target-dir "$root/xtask/target"
 exec "$root/xtask/target/debug/xtask" sqlite-ci "$@"

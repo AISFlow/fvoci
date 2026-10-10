@@ -160,6 +160,26 @@ fn ci_entry_usage_error_exits_two() {
     assert!(out.stdout.is_empty());
 }
 
+/// Consumer-directed Cargo overrides do not reach the xtask build itself.
+#[test]
+fn consumer_cargo_overrides_do_not_break_the_xtask_build() {
+    let dir = temp("fvoci-sqlite-entry-");
+    let out = run(script("prepare-sqlite-ci.sh")
+        .arg("--no-such-option")
+        .env("CARGO_BUILD_TARGET", "unsupported-cross-target")
+        .env("CARGO_TARGET_DIR", dir.join("foreign-target"))
+        .env("RUSTFLAGS", "--definitely-not-a-rustc-flag")
+        .env("CARGO_ENCODED_RUSTFLAGS", "--definitely-not-a-rustc-flag"));
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.join("foreign-target").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// `exec` leaves no shell between the caller and xtask: a signal sent to the
 /// spawned pid reaches the task itself and is reported as a signal death.
 #[test]

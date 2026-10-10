@@ -6,9 +6,11 @@
 # Source PREFIX/env.sh only after success, with the matching Rust target/features.
 # The policy is `xtask sqlite-build` (xtask/src/sqlite_build.rs); the maintained
 # `zip` crate reads the authenticated archive. Building xtask needs only its
-# own locked crates; the host Cargo target/target-dir overrides do not apply.
+# own locked crates; the host Cargo target, target-dir and rustflags
+# overrides do not apply to it.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+  -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
   cargo build --quiet --locked --manifest-path "$root/xtask/Cargo.toml" --target-dir "$root/xtask/target"
 exec "$root/xtask/target/debug/xtask" sqlite-build "$@"
