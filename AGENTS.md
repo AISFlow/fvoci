@@ -40,7 +40,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 통과는 타임아웃 증액·retry·sleep·skip 없이 나온다. regression·resolved·flaky 라벨에는 재현 근거가 있다.
 - 원인이 알려진 flaky는 재실행하지 않는다. 같은 실패가 두 번이면 고친다. REJECT는 2라운드까지고, 3라운드부터 막는 것은 보안·fail-closed뿐이다.
 - 하네스(영환님, 2026-10-09 11:31 KST): 하네스 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
-- 영환님, 2026-10-10 10:39 KST: 새 `.py` 파일과 새 Python 코드는 레포에 두지 않는다. 하네스 이전이 그 파일을 대체하기 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)은 고쳐도 된다.
+- 영환님, 2026-10-10 10:39 KST: 새 `.py` 파일과 새 Python 코드는 레포에 두지 않는다. 하네스 이전이 그 파일을 대체하기 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)을 고칠 수 있다. 그 수정의 경계는 2026-10-10 10:42 KST다. 기존 검사를 유지하거나 바꾸는 수정은 허용된다. 새 기능이나 새 테스트 준비 코드는 Python에 더하지 않고 TypeScript 또는 Rust에 둔다.
 - 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓸 수 있다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.
 - 자식 프로세스는 `process.execPath`로 띄운다. 새 테스트는 기본 25회와 CPU 부하 5회를 통과한다.
 - force push, `reset --hard`, 진행 중 CI 직접 취소, 운영 DB 변경은 허용 조건이 없다. 예외는 `draft/*` push의 자동 취소뿐이고 main·#347 push에는 없다. 그 run은 `CANCELLED(대체됨)`이라 판정 근거가 아니다.
