@@ -495,7 +495,7 @@ class PlanSelectionTest(unittest.TestCase):
                 paths=["docs/rewrite.md"],
             )
             self.assertEqual(plan["mode"], "full", event_name)
-            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertEqual(plan["reason_code"], "EVENT_UNKNOWN", event_name)
             self.assertFalse(plan["plan_ok"], event_name)
             self.assertTrue(plan["jobs"]["web-checks"]["selected"], event_name)
 
@@ -714,6 +714,15 @@ class PrCheckoutBindingTest(unittest.TestCase):
         self.assertEqual(plan["reason_code"], "FULL_PR_CHECKOUT_NOT_MERGE")
 
 
+def expected_postgres_matrix(event_name: str) -> str:
+    """The plan's postgres_matrix output for this event from the real rust.yml catalog."""
+    jobs, err = SEL._rust_workflow_jobs(ROOT)
+    assert err is None and jobs is not None, err
+    rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+    assert row_err is None and rows is not None, row_err
+    return SEL.postgres_matrix_json(event_name, rows)
+
+
 class GateSchemaTest(unittest.TestCase):
     def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
         plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
@@ -773,7 +782,7 @@ class GateSchemaTest(unittest.TestCase):
                 self.assertIn("postgres matrix error POSTGRES_MATRIX_", stderr.getvalue())
         kept = {
             "plan_json": plan_json,
-            "postgres_matrix": '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}',
+            "postgres_matrix": expected_postgres_matrix("pull_request"),
         }
         self.assertEqual(self._gate(plan, "rust", results, plan_outputs=kept), 0)
 
@@ -831,9 +840,7 @@ class GateSchemaTest(unittest.TestCase):
             jobs = plan.get("jobs") if isinstance(plan, dict) else None
             postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
             if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
-                outputs["postgres_matrix"] = (
-                    '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}'
-                )
+                outputs["postgres_matrix"] = expected_postgres_matrix("pull_request")
             needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
@@ -1813,7 +1820,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 paths=["src/lib.rs"],
             )
             self.assertFalse(plan["plan_ok"], event_name)
-            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertEqual(plan["reason_code"], "EVENT_UNKNOWN", event_name)
             self.assertTrue(plan["jobs"]["postgres"]["selected"], event_name)
 
         def holds(fn, matrix_rows: list[dict]) -> bool:
@@ -4082,7 +4089,7 @@ class MergeGroupPlanTest(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
                 self.assertEqual(plan["mode"], "full", event_name)
-                self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+                self.assertEqual(plan["reason_code"], "EVENT_UNKNOWN", event_name)
                 self.assertFalse(plan["plan_ok"], event_name)
                 self.assertIsNone(plan["base_sha"], event_name)
                 self.assertIsNone(plan["head_sha"], event_name)
@@ -4147,7 +4154,7 @@ class MergeGroupPlanTest(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertFalse(plan["plan_ok"])
-            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN")
+            self.assertEqual(plan["reason_code"], "EVENT_UNKNOWN")
             assert_full_selection(self, "rust", plan, "schedule")
             self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
 

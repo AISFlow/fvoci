@@ -403,8 +403,17 @@ def expected_select_if(job: str) -> str:
 
 
 def canonical_gate_run(workflow: str) -> str:
+    # The rust gate reads the postgres matrix catalog from rust.yml, so it
+    # installs the pinned YAML parser first. The other gates parse no YAML.
+    install = (
+        "python3 -m pip install --disable-pip-version-check --user --break-system-packages "
+        f"-r {REQUIREMENTS_FILE}\n"
+        if workflow == "rust"
+        else ""
+    )
     return (
         "set -euo pipefail\n"
+        f"{install}"
         "python3 scripts/ci_selection.py gate "
         f"--workflow {workflow} "
         '--needs-json "$NEEDS_JSON" '
@@ -709,8 +718,9 @@ def build_plan(
         )
     elif event_name not in KNOWN_EVENTS:
         # Unknown events still select the full job set. plan_ok stays false so
-        # the required gate does not accept the run.
-        decision = SelectionDecision("full", "FULL_EVENT_UNKNOWN", frozenset())
+        # the required gate does not accept the run. EVENT_UNKNOWN is the
+        # reason name the plan published before merge_group support.
+        decision = SelectionDecision("full", "EVENT_UNKNOWN", frozenset())
         plan_ok = False
     elif force_full_reason:
         decision = SelectionDecision("full", sanitize_reason_code(force_full_reason), frozenset())
@@ -1303,7 +1313,12 @@ POSTGRES_MATRIX_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_matrix }}"
 
 
 def postgres_matrix_row_runs(event_name: str, row: dict) -> bool:
-    """Pull requests run PG 18 on x64 only; every other event runs every row."""
+    """Pull requests run PG 18 on x64 only; every other event runs every row.
+
+    The event alone decides. A pull request whose paths broaden the plan to
+    full mode still runs the reduced rows; merge_group runs the full catalog
+    before main. The plan emits this matrix and the gate recomputes it.
+    """
     if event_name != "pull_request":
         return True
     return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
@@ -2808,12 +2823,21 @@ def _load_needs_context(
     return plan, results, outputs, None
 
 
-def postgres_matrix_gate_error(workflow: str, plan: dict, outputs: dict[str, str] | None) -> str | None:
-    """Selected rust postgres must carry a non-empty include matrix.
+def postgres_matrix_gate_error(
+    workflow: str,
+    plan: dict,
+    outputs: dict[str, str] | None,
+    event_name: str,
+    repo_root: Path = ROOT,
+) -> str | None:
+    """Selected rust postgres must run exactly the matrix its event requires.
 
     A failed or skipped plan never reaches this check: the needs loader
-    already rejects it. A missing output or an empty array must not count
-    as a successful matrix.
+    already rejects it. A missing output, malformed JSON, or an empty array
+    must not count as a successful matrix. The gate recomputes the include
+    rows from the checked-out rust.yml catalog for this run's event: pull
+    requests carry only the PG 18 x64 rows, every other known event the full
+    catalog. A reduced matrix outside pull_request fails.
     """
     if workflow != "rust":
         return None
@@ -2837,6 +2861,20 @@ def postgres_matrix_gate_error(workflow: str, plan: dict, outputs: dict[str, str
         or not all(isinstance(row, dict) and row for row in include)
     ):
         return "POSTGRES_MATRIX_EMPTY"
+    if event_name not in KNOWN_EVENTS:
+        return "POSTGRES_MATRIX_EVENT"
+    jobs, jobs_err = _rust_workflow_jobs(repo_root)
+    postgres_job = jobs.get("postgres") if jobs is not None and not jobs_err else None
+    if not isinstance(postgres_job, dict):
+        return "POSTGRES_MATRIX_CATALOG"
+    rows, rows_err = _postgres_matrix_rows(postgres_job)
+    if rows_err or rows is None:
+        return "POSTGRES_MATRIX_CATALOG"
+    expected = postgres_matrix_include(event_name, rows)
+    if len(include) != len(expected):
+        return "POSTGRES_MATRIX_ROW_COUNT"
+    if include != expected:
+        return "POSTGRES_MATRIX_ROWS"
     return None
 
 
@@ -2912,7 +2950,12 @@ def cmd_gate(argv: list[str] | None = None) -> int:
             print(f"gate: unselected job {job} must be skipped, got {result}", file=sys.stderr)
             return 1
 
-    matrix_err = postgres_matrix_gate_error(args.workflow, plan, plan_outputs)
+    matrix_err = postgres_matrix_gate_error(
+        args.workflow,
+        plan,
+        plan_outputs,
+        os.environ.get("GITHUB_EVENT_NAME", "").strip(),
+    )
     if matrix_err:
         print(f"gate: postgres matrix error {matrix_err}", file=sys.stderr)
         return 1

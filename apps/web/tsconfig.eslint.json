@@ -9,6 +9,7 @@
     "**/*.tsx",
     "**/*.vue",
     "../../tools/ci/workflows.test.ts",
+    "../../tools/ci/planner.test.ts",
     "../../scripts/run-selected-backend-e2e.ts",
     "../../tools/selected-backend-ci/**/*.ts"
   ],
