@@ -10,7 +10,7 @@ use crate::host::sha256_hex;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -227,11 +227,15 @@ fn open_at(directory: &File, name: &CStr, flags: libc::c_int, mode: u32) -> io::
 /// relative to that descriptor, and the directory must still be the inode at
 /// the physical `output` path before every receipt, before the components
 /// write and before success, so a replaced directory refuses instead of
-/// redirecting receipts.
+/// redirecting receipts. At the same points every receipt written so far must
+/// still be the private single-link file holding the written bytes, and the
+/// directory must hold nothing else.
 struct Receipts<'a> {
     output: &'a Path,
+    owner: Owner,
     directory: File,
     identity: Identity,
+    written: Vec<(&'static str, Identity, Vec<u8>)>,
 }
 
 impl<'a> Receipts<'a> {
@@ -273,23 +277,60 @@ impl<'a> Receipts<'a> {
         require(info.mode() & 0o7777 == 0o700, "receipt-directory-mode")?;
         let receipts = Self {
             output,
+            owner,
             directory,
             identity: identity(&info),
+            written: Vec::new(),
         };
         receipts.verify()?;
         Ok(receipts)
     }
 
-    /// The full identity, link count included, so a subdirectory appearing
-    /// in the receipt directory refuses as well.
+    /// The directory's full identity, then each written leaf's identity and
+    /// bytes, then the exact set of names, which is what refuses any extra
+    /// entry.
     fn verify(&self) -> Result<(), Refusal> {
         let bound = guard::physical(self.output).is_ok()
             && fs::symlink_metadata(self.output).is_ok_and(|info| identity(&info) == self.identity)
             && identity(&self.directory.metadata()?) == self.identity;
-        require(bound, "receipt-directory-race")
+        require(bound, "receipt-directory-race")?;
+        for (name, written, raw) in &self.written {
+            let leaf = CString::new(*name).expect("receipt names have no NUL");
+            // `O_NONBLOCK`: a FIFO swapped in for the leaf opens at once and
+            // refuses on its identity before any read.
+            let mut stream = open_at(
+                &self.directory,
+                &leaf,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                0,
+            )
+            .map_err(|error| match error.raw_os_error() {
+                // Gone, a symlink, or a socket.
+                Some(libc::ENOENT | libc::ELOOP | libc::ENXIO) => {
+                    Refusal::Reason("receipt-leaf-race")
+                }
+                _ => error.into(),
+            })?;
+            require(
+                identity(&stream.metadata()?) == *written
+                    && read_upto(&mut stream, raw.len() as u64 + 1)? == *raw,
+                "receipt-leaf-race",
+            )?;
+        }
+        // Listed through the held descriptor's `/proc` link, not the path.
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))? {
+            names.insert(entry?.file_name());
+        }
+        let expected: BTreeSet<OsString> = self
+            .written
+            .iter()
+            .map(|(name, _, _)| OsString::from(name))
+            .collect();
+        require(names == expected, "receipt-directory-race")
     }
 
-    fn write(&self, name: &'static str, raw: &[u8]) -> Result<(), Refusal> {
+    fn write(&mut self, name: &'static str, raw: &[u8]) -> Result<(), Refusal> {
         self.verify()?;
         let leaf = CString::new(name).expect("receipt names have no NUL");
         let mut stream = open_at(
@@ -298,18 +339,26 @@ impl<'a> Receipts<'a> {
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
             0o600,
         )?;
-        require(stream.metadata()?.mode() & 0o7777 == 0o600, "receipt-mode")?;
+        let info = stream.metadata()?;
+        require(info.mode() & 0o7777 == 0o600, "receipt-mode")?;
+        require(
+            info.nlink() == 1 && (info.uid(), info.gid()) == (self.owner.uid, self.owner.gid),
+            "receipt-leaf-race",
+        )?;
         stream.write_all(raw)?;
         stream.flush()?;
         stream.sync_all()?;
         self.directory.sync_all()?;
+        // The identity checked before the write, so a link or mode change
+        // made while writing refuses later instead of becoming the baseline.
+        self.written.push((name, identity(&info), raw.to_vec()));
         Ok(())
     }
 }
 
 fn receipt(
     inspect: &mut dyn Inspect,
-    receipts: &Receipts,
+    receipts: &mut Receipts,
     name: &'static str,
     raw: &[u8],
 ) -> Result<(), Refusal> {
@@ -389,7 +438,7 @@ pub fn prepare(
     guard::owned_directory(output.parent().unwrap_or(Path::new("")), owner)?;
     let canonical = canonical();
     inspect.checkpoint(Point::ComponentOpen)?;
-    let (raw, receipts) = {
+    let (raw, mut receipts) = {
         let mut current = open_component(&component, true)?;
         require(
             identity(&current.metadata()?) == original,
@@ -397,8 +446,8 @@ pub fn prepare(
         )?;
         let raw = read_upto(&mut current, 4096)?;
         let order = exact_rows(&raw)?;
-        let receipts = Receipts::create(output, owner)?;
-        receipt(inspect, &receipts, "original-components.txt", &raw)?;
+        let mut receipts = Receipts::create(output, owner)?;
+        receipt(inspect, &mut receipts, "original-components.txt", &raw)?;
         let mut before = context.fields();
         before.extend(object(json!({
             "toolchain": TOOLCHAIN,
@@ -410,7 +459,7 @@ pub fn prepare(
             "other_toolchain_inputs": before_closure.to_json(),
         })));
         let before = json::indented(&Value::Object(before));
-        receipt(inspect, &receipts, "before.json", before.as_bytes())?;
+        receipt(inspect, &mut receipts, "before.json", before.as_bytes())?;
         require(
             identity(&fs::symlink_metadata(&component)?) == original,
             "components-path-race",
@@ -470,7 +519,7 @@ pub fn prepare(
     })));
     receipt(
         inspect,
-        &receipts,
+        &mut receipts,
         "after.json",
         json::indented(&Value::Object(after.clone())).as_bytes(),
     )?;

@@ -909,3 +909,162 @@ fn receipt_directory_replacement_refuses() {
         }
     }
 }
+
+fn receipt_names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Unlinks, renames out, rewrites, hardlinks, re-modes or replaces a written
+/// receipt leaf (with a symlink, a FIFO or a fresh file holding the same
+/// bytes) right after it is written; preparation refuses before the
+/// components write or before success, and a FIFO never blocks the recheck.
+#[test]
+fn receipt_leaf_replacement_refuses() {
+    use std::os::unix::fs::FileTypeExt;
+    let attacks = [
+        "unlink",
+        "rename-out",
+        "symlink",
+        "fifo",
+        "rewrite",
+        "hardlink",
+        "hardlink-rewrite",
+        "chmod",
+        "same-bytes-copy",
+    ];
+    let points = [
+        (
+            Point::ReceiptWritten("original-components.txt"),
+            "original-components.txt",
+        ),
+        (
+            Point::ReceiptWritten("before.json"),
+            "original-components.txt",
+        ),
+        (Point::ReceiptWritten("before.json"), "before.json"),
+        (Point::ReceiptWritten("after.json"), "before.json"),
+        (Point::ReceiptWritten("after.json"), "after.json"),
+    ];
+    let mut failures = Vec::new();
+    for (point, leaf) in points {
+        for attack in attacks {
+            let fixture = Fixture::new();
+            fs::write(&fixture.component, reversed()).unwrap();
+            let target = fixture.output.join(leaf);
+            let outside = fixture.parent.join("outside");
+            let mut inspect = fake(
+                |_| Ok(PUBLIC_INSTALLED.to_owned()),
+                |at| {
+                    if at != point {
+                        return Ok(());
+                    }
+                    let bytes = fs::read(&target).unwrap();
+                    match attack {
+                        "unlink" => fs::remove_file(&target).unwrap(),
+                        "rename-out" => fs::rename(&target, &outside).unwrap(),
+                        "symlink" => {
+                            fs::write(&outside, &bytes).unwrap();
+                            mode(&outside, 0o600);
+                            fs::remove_file(&target).unwrap();
+                            symlink(&outside, &target).unwrap();
+                        }
+                        "fifo" => {
+                            fs::remove_file(&target).unwrap();
+                            let path = CString::new(target.as_os_str().as_bytes()).unwrap();
+                            // SAFETY: path is a valid NUL-terminated string.
+                            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                        }
+                        "rewrite" => {
+                            let mut file = OpenOptions::new().write(true).open(&target).unwrap();
+                            file.write_all(b"tampered-receipt\n").unwrap();
+                        }
+                        "hardlink" => fs::hard_link(&target, &outside).unwrap(),
+                        "hardlink-rewrite" => {
+                            fs::hard_link(&target, &outside).unwrap();
+                            fs::write(&outside, b"tampered-via-hardlink\n").unwrap();
+                        }
+                        "chmod" => mode(&target, 0o644),
+                        "same-bytes-copy" => {
+                            fs::remove_file(&target).unwrap();
+                            let mut file = OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .mode(0o600)
+                                .open(&target)
+                                .unwrap();
+                            file.write_all(&bytes).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+            );
+            let (result, _) = fixture.run(&mut inspect);
+            let expected = if point == Point::ReceiptWritten("after.json") {
+                canonical()
+            } else {
+                reversed()
+            };
+            let reason = result.map(|_| ()).map_err(|refusal| refusal.to_string());
+            let components = fs::read(&fixture.component).unwrap() == expected;
+            let fifo_left = fs::symlink_metadata(&target)
+                .is_ok_and(|info| info.file_type().is_fifo())
+                == (attack == "fifo");
+            let after_absent = point == Point::ReceiptWritten("after.json")
+                || !fixture.output.join("after.json").exists();
+            if reason != Err("receipt-leaf-race".to_owned())
+                || !components
+                || !fifo_left
+                || !after_absent
+            {
+                failures.push(format!(
+                    "{point:?} {leaf} {attack}: {reason:?} components_ok={components} fifo_left={fifo_left} after_absent={after_absent}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A name planted next to the receipts refuses before the components write.
+#[test]
+fn receipt_directory_extra_entry_refuses() {
+    for point in [
+        Point::Receipt("original-components.txt"),
+        Point::ReceiptWritten("original-components.txt"),
+        Point::Receipt("before.json"),
+        Point::ReceiptWritten("before.json"),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(&fixture.component, reversed()).unwrap();
+        let mut inspect = fake(
+            |_| Ok(PUBLIC_INSTALLED.to_owned()),
+            |at| {
+                if at == point {
+                    fs::write(fixture.output.join("planted"), b"extra\n").unwrap();
+                }
+                Ok(())
+            },
+        );
+        let (result, _) = fixture.run(&mut inspect);
+        assert_eq!(
+            result.map(|_| ()).unwrap_err().to_string(),
+            "receipt-directory-race",
+            "{point:?}"
+        );
+        assert_eq!(
+            fs::read(&fixture.component).unwrap(),
+            reversed(),
+            "{point:?}"
+        );
+        assert!(
+            !receipt_names(&fixture.output).contains(&"after.json".to_owned()),
+            "{point:?}"
+        );
+    }
+}
