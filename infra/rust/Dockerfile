@@ -21,6 +21,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# Independent dev dispatcher. Own lock; not a root workspace member.
+COPY xtask ./xtask
 COPY migrations ./migrations
 COPY src ./src
 # `fvoci-migrate --init-env` renders this template (include_str!).
