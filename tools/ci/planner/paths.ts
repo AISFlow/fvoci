@@ -69,6 +69,11 @@ export const CONTENT_READ_MARKDOWN: ReadonlySet<string> = new Set([
   "scripts/release-notes-template.md",
   "infra/rust/compose.user.INSTALL.md",
   "scripts/testdata/release/compose.user.INSTALL.md",
+  // Named by third-party/browser-licenses/manifest.json and bundled into the
+  // browser open-source notice.
+  "third-party/browser-licenses/supplements/is-emoji-supported-0.0.5-LICENSE.md",
+  // Copied into the install image (infra/rust/Dockerfile).
+  "vendor/libsql-0.9.30/LICENSE.md",
 ]);
 // Explicit explanatory docs (not build inputs). Exact paths are checked before
 // the broaden prefixes so these `.agents/` records stay docs while every other
@@ -232,8 +237,19 @@ export function pathMatchesPrettierIgnore(path: string, patterns: readonly strin
   return ignored;
 }
 
+/** `{a,b}` alternatives, as prettier's glob expansion reads them (no nesting). */
+export function expandBraces(pattern: string): string[] {
+  const match = /\{([^{}]*,[^{}]*)\}/.exec(pattern);
+  if (!match) return [pattern];
+  const head = pattern.slice(0, match.index);
+  const tail = pattern.slice(match.index + match[0].length);
+  return (match[1] ?? "").split(",").flatMap((alt) => expandBraces(head + alt + tail));
+}
+
 export function prettierTargetMatches(target: string, path: string): boolean {
-  if (/[*?[]/.test(target)) return new RegExp(`^${globBody(target)}$`).test(path);
+  if (/[*?[{]/.test(target)) {
+    return expandBraces(target).some((alt) => new RegExp(`^${globBody(alt)}$`).test(path));
+  }
   const name = target.slice(target.lastIndexOf("/") + 1);
   if (name.includes(".")) return path === target;
   return path === target || path.startsWith(target + "/");

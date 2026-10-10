@@ -6,6 +6,7 @@ import {
   CONTENT_READ_MARKDOWN,
   decideFromPaths,
   EXPLICIT_DOCS,
+  expandBraces,
   formatWebDefaultTargets,
   loadMarkdownInputs,
   pathMatchesPrettierIgnore,
@@ -107,6 +108,23 @@ describe("classifyPath", () => {
 
   test("markdown consumed as real input stays full", () => {
     for (const path of CONTENT_READ_MARKDOWN) expect(classifyPath(path), path).toBe("broaden");
+    // Bundled into the browser open-source notice by its manifest.
+    const manifest = JSON.parse(
+      readFileSync(join(PLANNER_ROOT, "third-party/browser-licenses/manifest.json"), "utf8"),
+    ) as Record<string, { file?: string }>;
+    const supplements = Object.values(manifest)
+      .map((entry) => entry.file)
+      .filter((file): file is string => typeof file === "string" && file.endsWith(".md"))
+      .map((file) => `third-party/browser-licenses/${file}`);
+    expect(supplements.length).toBeGreaterThan(0);
+    for (const path of supplements) expect(classifyPath(path), path).toBe("broaden");
+    // Copied into the install image.
+    const dockerfile = readFileSync(join(PLANNER_ROOT, "infra/rust/Dockerfile"), "utf8");
+    const copied = [...dockerfile.matchAll(/COPY [^\n]*?\/src\/(\S+\.md) /g)].map(
+      (m) => m[1] as string,
+    );
+    expect(copied).toContain("vendor/libsql-0.9.30/LICENSE.md");
+    for (const path of copied) expect(classifyPath(path), path).toBe("broaden");
   });
 
   test("other markdown is docs, prettier-checked markdown uses the web lane", () => {
@@ -120,6 +138,11 @@ describe("classifyPath", () => {
       expect(classifyPath(path), path).toBe("docs");
     }
     expect(classifyPath("scripts/WEB_LINT.md")).toBe("frontend_web_install");
+    // format-web.sh passes 'scripts/schema-baseline/*.{ts,md}'; prettier expands the braces.
+    expect(classifyPath("scripts/schema-baseline/compare-catalogs.md")).toBe(
+      "frontend_web_install",
+    );
+    expect(classifyPath("scripts/schema-baseline/README.md")).toBe("frontend_web_install");
     // .prettierignore excludes these from the format check.
     expect(classifyPath("packages/editor/NOTICE.md")).toBe("docs");
     expect(classifyPath("apps/web/node_modules/x/README.md")).toBe("docs");
@@ -144,6 +167,7 @@ describe("prettier inputs", () => {
   });
 
   test("glob and ignore matching", () => {
+    expect(expandBraces("a/*.{ts,md}")).toEqual(["a/*.ts", "a/*.md"]);
     expect(prettierTargetMatches("tools/web-e2e/**/*.ts", "tools/web-e2e/a/b.ts")).toBe(true);
     expect(prettierTargetMatches("tools/web-e2e/**/*.ts", "tools/web-e2e/b.ts")).toBe(true);
     expect(prettierTargetMatches("apps/web", "apps/web/x.md")).toBe(true);
