@@ -20,6 +20,7 @@ import {
   emit,
   failureCheckpoint,
   failureDigest,
+  fileSha,
   now,
   readText,
   runtimeError,
@@ -286,10 +287,10 @@ export function finalize(state: State, seam: Seam): Promise<number> {
     const unchanged = await attempt("install-post-input-observation-failed", () => {
       const changedInputs = [
         ...Object.entries(before.tracked)
-          .filter(([path, digest]) => sha(join(root, path)) !== digest)
+          .filter(([path, digest]) => fileSha(join(root, path)) !== digest)
           .map(([path]) => path),
         ...Object.entries(before.external)
-          .filter(([path, digest]) => sha(path) !== digest)
+          .filter(([path, digest]) => fileSha(path) !== digest)
           .map(([path]) => path),
       ];
       const changedBinaries = Object.keys(binaries).filter(
