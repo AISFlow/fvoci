@@ -8,7 +8,7 @@
     "**/*.ts",
     "**/*.tsx",
     "**/*.vue",
-    "../../scripts/ci/workflows.test.ts",
+    "../../tools/ci/workflows.test.ts",
     "../../scripts/run-selected-backend-e2e.ts",
     "../../tools/selected-backend-ci/**/*.ts"
   ],
