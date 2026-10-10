@@ -1370,10 +1370,31 @@ function derivedPrettierMarkdown(
       return path === pattern || path.startsWith(`${pattern.replace(/\/$/, "")}/`);
     });
   const candidates: string[] = [];
+  let trackedMarkdown: string[] | undefined;
   for (const target of targets) {
+    // Prettier brace-expands `{a,b}` but the planner matches braces literally,
+    // so a brace target would hide its files from the web lane.
+    if (/[{}]/.test(target)) throw new Error(`format-web.sh brace target ${target}`);
     if (/[*?[]/.test(target)) {
-      if (target.endsWith(".md"))
+      if (target.endsWith(".md")) {
         candidates.push(target.replace(/\*\*\//g, "nested/").replace(/\*/g, "file"));
+        const glob = new RegExp(
+          `^${target
+            .split(/(\*\*\/|\*|\?)/)
+            .map((part) =>
+              part === "**/"
+                ? "(?:.*/)?"
+                : part === "*"
+                  ? "[^/]*"
+                  : part === "?"
+                    ? "[^/]"
+                    : part.replace(/[.+^${}()|[\]\\]/g, "\\$&"),
+            )
+            .join("")}$`,
+        );
+        trackedMarkdown ??= git(root, "ls-files", "--", "*.md").split("\n").filter(Boolean);
+        candidates.push(...trackedMarkdown.filter((path) => glob.test(path)));
+      }
       continue;
     }
     const name = target.split("/").pop() ?? "";
@@ -1511,6 +1532,30 @@ describe("markdown-only lane", () => {
         }
         expect(runs[path]?.web?.plan?.jobs["web-static"]?.selected, path).toBe(true);
       }
+    },
+    TIMEOUT,
+  );
+
+  // format-web.sh checks scripts/schema-baseline/*.md; a pull request that only
+  // touches one of them must still run web-static.
+  test(
+    "schema-baseline markdown selects the web format check",
+    async () => {
+      const paths = [
+        "scripts/schema-baseline/README.md",
+        "scripts/schema-baseline/compare-catalogs.md",
+      ];
+      const runs = await planPaths(paths, ["web"]);
+      for (const path of paths) {
+        const plan = expectPlan(runs[path]?.web as PlanRun, path);
+        expect(plan.jobs["web-static"]?.selected, path).toBe(true);
+        expect(plan.reason_code, path).not.toBe("NARROW_DOCS");
+      }
+      const derived = derivedPrettierMarkdown(
+        readFileSync(join(root, "scripts/format-web.sh"), "utf8"),
+        readFileSync(join(root, ".prettierignore"), "utf8"),
+      );
+      for (const path of paths) expect(derived.paths, path).toContain(path);
     },
     TIMEOUT,
   );
