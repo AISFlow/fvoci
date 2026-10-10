@@ -83,7 +83,7 @@
   },
   "scripts": {
     "lint": "bash scripts/lint-web.sh",
-    "lint:fixtures": "python3 scripts/test_eslint.py",
+    "lint:fixtures": "bun test --timeout=600000 ./scripts/eslint-fixtures.test.ts",
     "format:check": "bash scripts/format-web.sh"
   }
 }

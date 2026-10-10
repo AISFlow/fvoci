@@ -11,6 +11,7 @@
     "../../tools/ci/workflows.test.ts",
     "../../tools/ci/planner.test.ts",
     "../../scripts/run-selected-backend-e2e.ts",
+    "../../scripts/eslint-fixtures.test.ts",
     "../../tools/selected-backend-ci/**/*.ts"
   ],
   "exclude": ["node_modules", "src/generated/api.ts"]
