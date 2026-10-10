@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -118,6 +120,8 @@ _BROADEN_PREFIXES: tuple[str, ...] = (
     "crates/",
     # Bun `patchedDependencies` (package.json), applied by every install.
     "patches/",
+    "tools/",
+    "xtask/",
 )
 
 _BROADEN_EXACT: frozenset[str] = frozenset(
@@ -151,6 +155,23 @@ _MANIFEST_MARKERS: tuple[str, ...] = (
 # Explicit explanatory docs only (not build inputs). Exact paths are checked
 # before the broaden prefixes so the agent role/environment records stay docs
 # while every other `.agents/` path (skills, references) remains full.
+# A change set of only `*.md` files is docs wherever it lives, except fixture
+# oracles and markdown whose bytes product code or tests actually load.
+_MD_FIXTURE_PREFIXES: tuple[str, ...] = (
+    "vendor/markdown/",
+    "compat/fixtures/",
+    "tests/fixtures/",
+    "scripts/fixtures/",
+)
+_CONTENT_READ_MARKDOWN: frozenset[str] = frozenset(
+    {
+        "apps/web/NOTICE.md",
+        "packages/editor/src/fonts/README.md",
+        "scripts/release-notes-template.md",
+        "infra/rust/compose.user.INSTALL.md",
+        "scripts/testdata/release/compose.user.INSTALL.md",
+    }
+)
 _EXPLICIT_DOCS: frozenset[str] = frozenset(
     {
         "README.md",
@@ -201,6 +222,155 @@ _BROWSER_UI_HELPERS = frozenset({
 
 def _starts_with(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix)
+
+
+def _is_crate_fixture_path(path: str) -> bool:
+    parts = path.split("/")
+    return len(parts) >= 4 and parts[0] == "crates" and parts[2] == "fixtures"
+
+
+def _is_fixture_markdown(path: str) -> bool:
+    return path.startswith(_MD_FIXTURE_PREFIXES) or _is_crate_fixture_path(path)
+
+
+def format_web_default_targets(script: str) -> tuple[str, ...]:
+    """Positional paths format-web.sh passes to prettier when no paths are given."""
+    marker = "set -- "
+    start = script.find(marker)
+    if start < 0:
+        raise ValueError("format-web.sh has no default prettier target list")
+    end = script.find('"$@"', start)
+    if end < 0:
+        raise ValueError("format-web.sh default target list is not closed")
+    chunk = script[start + len(marker) : end].replace("\\\n", " ")
+    return tuple(shlex.split(chunk, posix=True))
+
+
+def prettier_ignore_patterns(text: str) -> tuple[str, ...]:
+    patterns: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        patterns.append(stripped)
+    return tuple(patterns)
+
+
+def _gitignore_regex(pattern: str) -> re.Pattern[str]:
+    directory_only = pattern.endswith("/")
+    if directory_only:
+        pattern = pattern[:-1]
+    anchored = pattern.startswith("/")
+    if anchored:
+        pattern = pattern[1:]
+    elif "/" in pattern:
+        anchored = True
+    body: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            body.append("(?:.*/)?")
+            index += 3
+            continue
+        if pattern.startswith("**", index):
+            body.append(".*")
+            index += 2
+            continue
+        char = pattern[index]
+        if char == "*":
+            body.append("[^/]*")
+        elif char == "?":
+            body.append("[^/]")
+        else:
+            body.append(re.escape(char))
+        index += 1
+    expression = "".join(body)
+    if directory_only:
+        suffix = "(?:/.*)$"
+    else:
+        suffix = "(?:/.*)?$"
+    if anchored:
+        return re.compile("^" + expression + suffix)
+    return re.compile("(?:^|/)" + expression + suffix)
+
+
+def path_matches_prettier_ignore(path: str, patterns: tuple[str, ...]) -> bool:
+    ignored = False
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        body = pattern[1:] if negated else pattern
+        if _gitignore_regex(body).search(path):
+            ignored = not negated
+    return ignored
+
+
+def _prettier_glob_regex(pattern: str) -> re.Pattern[str]:
+    body: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            body.append("(?:.*/)?")
+            index += 3
+            continue
+        if pattern.startswith("**", index):
+            body.append(".*")
+            index += 2
+            continue
+        char = pattern[index]
+        if char == "*":
+            body.append("[^/]*")
+        elif char == "?":
+            body.append("[^/]")
+        else:
+            body.append(re.escape(char))
+        index += 1
+    return re.compile("^" + "".join(body) + "$")
+
+
+def prettier_target_matches(target: str, path: str) -> bool:
+    if any(char in target for char in "*?["):
+        return bool(_prettier_glob_regex(target).fullmatch(path))
+    name = target.rsplit("/", 1)[-1]
+    if "." in name:
+        return path == target
+    return path == target or path.startswith(target + "/")
+
+
+def prettier_checks_markdown(
+    path: str, *, targets: tuple[str, ...], patterns: tuple[str, ...]
+) -> bool:
+    if not path.endswith(".md") or path_matches_prettier_ignore(path, patterns):
+        return False
+    return any(prettier_target_matches(target, path) for target in targets)
+
+
+@functools.lru_cache(maxsize=1)
+def _prettier_check_inputs() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+    ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+    return format_web_default_targets(script), prettier_ignore_patterns(ignore)
+
+
+def _is_prettier_checked_markdown(path: str) -> bool:
+    targets, patterns = _prettier_check_inputs()
+    return prettier_checks_markdown(path, targets=targets, patterns=patterns)
+
+
+_PLANNER_CONTRACT_MARKDOWN = ".agents/skills/fvoci-fast-verify/SKILL.md"
+_PARENT_BROADEN_MARKDOWN = ".agents/skills/fvoci-standard-implementations/references/candidates.md"
+
+
+def _markdown_lane(path: str) -> NarrowFamily | Literal["broaden"]:
+    """Lane for a `*.md` path. Prettier inputs use the web format lane."""
+    if _is_fixture_markdown(path) or path in _CONTENT_READ_MARKDOWN:
+        return "broaden"
+    if path.startswith(".github/"):
+        return "broaden"
+    if path in {_PLANNER_CONTRACT_MARKDOWN, _PARENT_BROADEN_MARKDOWN}:
+        return "broaden"
+    if _is_prettier_checked_markdown(path):
+        return "frontend_web_install"
+    return "docs"
 
 
 def validate_sha(ref: str) -> bool:
@@ -255,6 +425,11 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
     # traversal before any allowlist/prefix match, including synthetic inputs.
     if not path or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
         return "unknown"
+    # Only `*.md` is documentation. Fixture oracles, loaded bytes, .github
+    # markdown, and the planner contract stay full. Prettier-checked markdown
+    # uses the web format lane. Every other markdown path is docs.
+    if path.endswith(".md"):
+        return _markdown_lane(path)
     if path in _EXPLICIT_DOCS:
         return "docs"
     if _BROWSER_SPEC_RE.fullmatch(path) or path in _BROWSER_UI_HELPERS:
@@ -533,6 +708,8 @@ def build_plan(
             "full", sanitize_reason_code(f"FULL_EVENT_{event_name.upper()}"), frozenset()
         )
     elif event_name not in KNOWN_EVENTS:
+        # Unknown events still select the full job set. plan_ok stays false so
+        # the required gate does not accept the run.
         decision = SelectionDecision("full", "FULL_EVENT_UNKNOWN", frozenset())
         plan_ok = False
     elif force_full_reason:
@@ -567,13 +744,33 @@ def build_plan(
     }
 
 
+def _sha_or_none(value: object) -> str | None:
+    if isinstance(value, str) and validate_sha(value):
+        return value
+    return None
+
+
+def merge_group_shas(event: object) -> tuple[str | None, str | None]:
+    """Copy merge_group.base_sha and merge_group.head_sha, nothing else.
+
+    A simultaneous pull_request or push payload is ignored. A missing group,
+    a non-object, or a value that is not 40 lowercase hex characters is
+    absent. Callers still select the full matrix and do not narrow.
+    """
+    if not isinstance(event, dict):
+        return None, None
+    group = event.get("merge_group")
+    if not isinstance(group, dict):
+        return None, None
+    return _sha_or_none(group.get("base_sha")), _sha_or_none(group.get("head_sha"))
+
+
 def event_shas(event: dict, event_name: str) -> tuple[str | None, str | None]:
     if event_name == "pull_request":
         pr = event.get("pull_request") or {}
         return pr.get("base", {}).get("sha"), pr.get("head", {}).get("sha")
     if event_name == "merge_group":
-        mg = event.get("merge_group") or {}
-        return mg.get("base_sha"), mg.get("head_sha")
+        return merge_group_shas(event)
     if event_name == "push":
         return event.get("before"), event.get("after")
     return None, None
@@ -629,10 +826,14 @@ def resolve_selection_inputs(
     if event_name == "workflow_dispatch":
         return ResolvedInputs(None, None, None, None, None, None, tested_sha)
 
-    if event_name not in KNOWN_EVENTS:
-        return ResolvedInputs(None, "EVENT_UNKNOWN", None, None, None, None, tested_sha)
+    if event_name == "merge_group":
+        base_sha, head_sha = merge_group_shas(event)
+        return ResolvedInputs(None, None, None, base_sha, head_sha, None, tested_sha)
 
-    if event_name in ("push", "merge_group"):
+    if event_name not in KNOWN_EVENTS:
+        return ResolvedInputs(None, None, None, None, None, None, tested_sha)
+
+    if event_name == "push":
         base_sha, head_sha = event_shas(event, event_name)
         return ResolvedInputs(None, None, None, base_sha, head_sha, None, tested_sha)
 
@@ -668,7 +869,9 @@ def resolve_selection_inputs(
     return ResolvedInputs(paths, None, None, base_sha, head_sha, merge_base, tested_sha)
 
 
-def write_github_outputs(plan: dict, output_path: Path | None) -> None:
+def write_github_outputs(
+    plan: dict, output_path: Path | None, *, postgres_matrix: str | None = None
+) -> None:
     if output_path is None:
         return
     reason_code = plan["reason_code"]
@@ -690,6 +893,14 @@ def write_github_outputs(plan: dict, output_path: Path | None) -> None:
         handle.write("plan_json<<PLAN_EOF\n")
         handle.write(payload + "\n")
         handle.write("PLAN_EOF\n")
+        if postgres_matrix is not None:
+            parsed = json.loads(postgres_matrix)
+            include = parsed.get("include") if isinstance(parsed, dict) else None
+            if not isinstance(parsed, dict) or set(parsed) != {"include"} or not isinstance(include, list) or "\n" in postgres_matrix:
+                raise ValueError("postgres_matrix must be one JSON object line with include")
+            handle.write("postgres_matrix<<POSTGRES_MATRIX_EOF\n")
+            handle.write(postgres_matrix + "\n")
+            handle.write("POSTGRES_MATRIX_EOF\n")
 
 
 def _load_yaml_mapping(path: Path) -> tuple[dict | None, str | None]:
@@ -1037,19 +1248,20 @@ def _rust_workflow_jobs(repo_root: Path) -> tuple[dict | None, str | None]:
 
 
 def _postgres_matrix_rows(postgres_job: dict) -> tuple[list[dict] | None, str | None]:
-    strategy = postgres_job.get("strategy")
-    if not isinstance(strategy, dict):
-        return None, "rust: postgres job strategy missing"
-    matrix = strategy.get("matrix")
-    if not isinstance(matrix, dict):
-        return None, "rust: postgres job matrix missing"
-    include = matrix.get("include")
+    env = postgres_job.get("env")
+    raw = env.get(POSTGRES_MATRIX_CATALOG_ENV) if isinstance(env, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "rust: postgres matrix catalog missing"
+    try:
+        include = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "rust: postgres matrix catalog is not JSON"
     if not isinstance(include, list) or not include:
-        return None, "rust: postgres job matrix.include missing"
+        return None, "rust: postgres matrix catalog must be a non-empty list"
     rows: list[dict] = []
     for row in include:
         if not isinstance(row, dict):
-            return None, "rust: postgres matrix.include row must be a mapping"
+            return None, "rust: postgres matrix catalog row must be a mapping"
         rows.append(row)
     return rows, None
 
@@ -1085,6 +1297,24 @@ RUST_POSTGRES_IMAGES = {
     "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
     "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
 }
+POSTGRES_MATRIX_CATALOG_ENV = "FVOCI_POSTGRES_MATRIX_CATALOG"
+POSTGRES_MATRIX_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}"
+POSTGRES_MATRIX_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_matrix }}"
+
+
+def postgres_matrix_row_runs(event_name: str, row: dict) -> bool:
+    """Pull requests run PG 18 on x64 only; every other event runs every row."""
+    if event_name != "pull_request":
+        return True
+    return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
+
+
+def postgres_matrix_include(event_name: str, rows: list[dict]) -> list[dict]:
+    return [row for row in rows if postgres_matrix_row_runs(event_name, row)]
+
+
+def postgres_matrix_json(event_name: str, rows: list[dict]) -> str:
+    return json.dumps({"include": postgres_matrix_include(event_name, rows)}, separators=(",", ":"))
 RUST_POSTGRES_BUILD_CACHE_KEY = (
     "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-"
     "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-"
@@ -1236,9 +1466,12 @@ def verify_postgres_budget_matrix(jobs: dict) -> list[str]:
     strategy = job.get("strategy", {})
     if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False:
         errors.append("rust: PostgreSQL budget must run every selected matrix row")
-    matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
-    if not isinstance(matrix, dict) or set(matrix) != {"include"}:
-        errors.append("rust: PostgreSQL budget matrix must use only explicit include rows")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if matrix != POSTGRES_MATRIX_EXPR:
+        errors.append(
+            "rust: PostgreSQL budget matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix)"
+            " without an empty-array fallback"
+        )
     rows, err = _postgres_matrix_rows(job)
     if err:
         return errors + [err]
@@ -1953,7 +2186,11 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                 if runner == "${{ matrix.runner }}":
                     strategy = job.get("strategy")
                     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-                    rows = matrix.get("include", []) if isinstance(matrix, dict) else []
+                    if matrix == POSTGRES_MATRIX_EXPR:
+                        catalog_rows, _catalog_err = _postgres_matrix_rows(job)
+                        rows = catalog_rows or []
+                    else:
+                        rows = matrix.get("include", []) if isinstance(matrix, dict) else []
                     runners = [row.get("runner") for row in rows if isinstance(row, dict)]
                 if not runners or any(not isinstance(label, str) or label not in RUST_POSTGRES_RUNNER_ARCH for label in runners):
                     errors.append(f"{path.name}: {job_id} requires explicit Ubuntu 26.04 runners")
@@ -1983,6 +2220,10 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: pull_request trigger is required for the stable gate")
         elif triggers["pull_request"] is not None:
             errors.append(f"{workflow}: pull_request must be unfiltered so required gates always run")
+        if not isinstance(triggers, dict) or "merge_group" not in triggers:
+            errors.append(f"{workflow}: merge_group trigger is required for the stable gate")
+        elif triggers["merge_group"] != {"types": ["checks_requested"]}:
+            errors.append(f"{workflow}: merge_group must request checks_requested")
         jobs = data.get("jobs")
         if not isinstance(jobs, dict) or not jobs:
             errors.append(f"{workflow}: jobs mapping missing")
@@ -2043,6 +2284,12 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
                     key = select_output_key(job)
                     if key not in outputs:
                         errors.append(f"{workflow}: missing selector output {key}")
+                if workflow == "rust" and outputs.get("postgres_matrix") != POSTGRES_MATRIX_OUTPUT_EXPR:
+                    errors.append(
+                        f"{workflow}: {PLAN_JOB_ID} must publish postgres_matrix from the plan step"
+                    )
+                if workflow == "rust" and "postgres_exclude" in outputs:
+                    errors.append(f"{workflow}: {PLAN_JOB_ID} must not publish postgres_exclude")
             plan_runs = "\n".join(_run_scripts(plan_job))
             if REQUIREMENTS_FILE not in plan_runs:
                 errors.append(
@@ -2102,6 +2349,10 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         if isinstance(gate_job, dict):
             if gate_job.get("if") != "always()":
                 errors.append(f"{workflow}: {reserved_gate} must use if: always()")
+            if gate_job.get("name") != reserved_gate:
+                errors.append(
+                    f"{workflow}: {reserved_gate} name must stay {reserved_gate} for pull_request and merge_group"
+                )
             needs, needs_err = _needs_list(gate_job)
             expected_needs = {PLAN_JOB_ID, *expected}
             if needs_err:
@@ -2413,8 +2664,23 @@ def cmd_plan(argv: list[str] | None = None) -> int:
         force_full_reason=resolved.force_full_reason,
         opt_in_inputs=opt_ins,
     )
+    postgres_matrix = None
+    if args.workflow == "rust":
+        jobs, jobs_err = _rust_workflow_jobs(args.repo_root)
+        rows: list[dict] | None = None
+        rows_err = jobs_err
+        if jobs is not None:
+            postgres_job = jobs.get("postgres")
+            if isinstance(postgres_job, dict):
+                rows, rows_err = _postgres_matrix_rows(postgres_job)
+            else:
+                rows_err = "rust: postgres job missing"
+        if rows_err or rows is None:
+            print(f"plan: {rows_err or 'postgres rows missing'}", file=sys.stderr)
+            return 1
+        postgres_matrix = postgres_matrix_json(event_name, rows)
     args.output_plan.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    write_github_outputs(plan, args.github_output)
+    write_github_outputs(plan, args.github_output, postgres_matrix=postgres_matrix)
     print(json.dumps({"mode": plan["mode"], "reason_code": plan["reason_code"]}))
     return 0
 
@@ -2499,45 +2765,79 @@ def _need_outputs(entry: dict) -> tuple[dict[str, str] | None, str | None]:
     return parsed, None
 
 
-def _load_needs_context(raw: str, workflow: str) -> tuple[dict | None, dict[str, str] | None, str | None]:
+def _load_needs_context(
+    raw: str, workflow: str
+) -> tuple[dict | None, dict[str, str] | None, dict[str, str] | None, str | None]:
     try:
         needs = json.loads(raw)
     except json.JSONDecodeError:
-        return None, None, "NEEDS_MALFORMED"
+        return None, None, None, "NEEDS_MALFORMED"
     if not isinstance(needs, dict):
-        return None, None, "NEEDS_TYPE"
+        return None, None, None, "NEEDS_TYPE"
     expected_jobs = list(WORKFLOW_JOBS[workflow])
     expected_keys = {PLAN_JOB_ID, *expected_jobs}
     if set(needs.keys()) != expected_keys:
-        return None, None, "NEEDS_KEY_SET"
+        return None, None, None, "NEEDS_KEY_SET"
 
     plan_entry = needs[PLAN_JOB_ID]
     plan_result, result_err = _need_result(plan_entry)
     if result_err:
-        return None, None, f"PLAN_{result_err}"
+        return None, None, None, f"PLAN_{result_err}"
     if plan_result != "success":
-        return None, None, "PLAN_RESULT"
+        return None, None, None, "PLAN_RESULT"
     assert isinstance(plan_entry, dict)
     outputs, outputs_err = _need_outputs(plan_entry)
     if outputs_err:
-        return None, None, f"PLAN_{outputs_err}"
+        return None, None, None, f"PLAN_{outputs_err}"
     assert outputs is not None
     plan_json = outputs.get("plan_json")
     if not isinstance(plan_json, str) or not plan_json.strip():
-        return None, None, "PLAN_JSON_MISSING"
+        return None, None, None, "PLAN_JSON_MISSING"
     try:
         plan = json.loads(plan_json)
     except json.JSONDecodeError:
-        return None, None, "PLAN_JSON_MALFORMED"
+        return None, None, None, "PLAN_JSON_MALFORMED"
 
     results: dict[str, str] = {}
     for job in expected_jobs:
         job_result, job_err = _need_result(needs[job])
         if job_err:
-            return None, None, f"JOB_{job_err}"
+            return None, None, None, f"JOB_{job_err}"
         assert job_result is not None
         results[job] = job_result
-    return plan, results, None
+    return plan, results, outputs, None
+
+
+def postgres_matrix_gate_error(workflow: str, plan: dict, outputs: dict[str, str] | None) -> str | None:
+    """Selected rust postgres must carry a non-empty include matrix.
+
+    A failed or skipped plan never reaches this check: the needs loader
+    already rejects it. A missing output or an empty array must not count
+    as a successful matrix.
+    """
+    if workflow != "rust":
+        return None
+    jobs = plan.get("jobs")
+    entry = jobs.get("postgres") if isinstance(jobs, dict) else None
+    if not isinstance(entry, dict) or entry.get("selected") is not True:
+        return None
+    raw = None if outputs is None else outputs.get("postgres_matrix")
+    if not isinstance(raw, str) or not raw.strip():
+        return "POSTGRES_MATRIX_MISSING"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return "POSTGRES_MATRIX_MALFORMED"
+    include = parsed.get("include") if isinstance(parsed, dict) else None
+    if (
+        not isinstance(parsed, dict)
+        or set(parsed) != {"include"}
+        or not isinstance(include, list)
+        or not include
+        or not all(isinstance(row, dict) and row for row in include)
+    ):
+        return "POSTGRES_MATRIX_EMPTY"
+    return None
 
 
 def _gate_opt_in_error(workflow: str, plan: dict) -> str | None:
@@ -2580,7 +2880,7 @@ def cmd_gate(argv: list[str] | None = None) -> int:
         print("gate: needs json missing", file=sys.stderr)
         return 1
 
-    plan, results, needs_err = _load_needs_context(needs_raw, args.workflow)
+    plan, results, plan_outputs, needs_err = _load_needs_context(needs_raw, args.workflow)
     if needs_err:
         print(f"gate: needs error {needs_err}", file=sys.stderr)
         return 1
@@ -2611,6 +2911,11 @@ def cmd_gate(argv: list[str] | None = None) -> int:
         elif result != "skipped":
             print(f"gate: unselected job {job} must be skipped, got {result}", file=sys.stderr)
             return 1
+
+    matrix_err = postgres_matrix_gate_error(args.workflow, plan, plan_outputs)
+    if matrix_err:
+        print(f"gate: postgres matrix error {matrix_err}", file=sys.stderr)
+        return 1
 
     print("gate: ok")
     return 0

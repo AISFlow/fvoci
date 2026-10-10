@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import importlib.util
+import inspect
+import io
 import json
 import os
 import shutil
@@ -353,7 +356,7 @@ def dummy_event_path(directory: Path) -> Path:
 class ClassifyPathsTest(unittest.TestCase):
     def test_explicit_docs_only(self) -> None:
         self.assertEqual(SEL.classify_path("docs/rewrite.md"), "docs")
-        self.assertEqual(SEL.classify_path("docs/other.md"), "broaden")
+        self.assertEqual(SEL.classify_path("docs/other.md"), "docs")
 
     def test_frontend_src_narrow(self) -> None:
         self.assertEqual(SEL.classify_path("apps/web/src/foo.ts"), "frontend_web_install")
@@ -429,6 +432,14 @@ class PlanSelectionTest(unittest.TestCase):
         decision = SEL.decide_from_paths(["crates/document-extract/src/lib.rs"])
         self.assertEqual(decision.mode, "full")
 
+    def test_tools_prefix_is_full_path_broaden(self) -> None:
+        decision = SEL.decide_from_paths(["tools/selected-backend-ci/runtime.ts"])
+        self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN")
+
+    def test_xtask_src_prefix_is_full_path_broaden(self) -> None:
+        decision = SEL.decide_from_paths(["xtask/src/main.rs"])
+        self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN")
+
     def test_main_push_is_full(self) -> None:
         plan = SEL.build_plan(
             workflow="web",
@@ -471,6 +482,22 @@ class PlanSelectionTest(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
         self.assertTrue(plan["plan_ok"])
+
+    def test_unknown_event_stays_full_and_selectable(self) -> None:
+        for event_name in ("schedule", "", "pull_request_target", "deployment"):
+            plan = SEL.build_plan(
+                workflow="web",
+                event_name=event_name,
+                base_sha=None,
+                head_sha=None,
+                merge_base_sha=None,
+                tested_sha="b" * 40,
+                paths=["docs/rewrite.md"],
+            )
+            self.assertEqual(plan["mode"], "full", event_name)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertFalse(plan["plan_ok"], event_name)
+            self.assertTrue(plan["jobs"]["web-checks"]["selected"], event_name)
 
     def test_parent_mismatch_cannot_narrow(self) -> None:
         plan = SEL.build_plan(
@@ -697,6 +724,69 @@ class GateSchemaTest(unittest.TestCase):
                 self.assertEqual(self._gate(plan, "rust", {**results, "postgres": result}), 1)
         self.assertEqual(self._gate(plan, "rust", results, omit_jobs=frozenset({"postgres"})), 1)
 
+    def test_plan_failure_or_skip_rejects_empty_postgres_matrix(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "skipped" for job in SEL.WORKFLOW_JOBS["rust"]}
+        plan_json = json.dumps(plan, separators=(",", ":"))
+        matrices: tuple[str | None, ...] = (None, "", "[]", "{}", '{"include":[]}')
+        for plan_result in ("failure", "skipped", "cancelled"):
+            for matrix in matrices:
+                outputs = {"plan_json": plan_json}
+                if matrix is not None:
+                    outputs["postgres_matrix"] = matrix
+                stderr = io.StringIO()
+                with self.subTest(plan_result=plan_result, matrix=matrix):
+                    with contextlib.redirect_stderr(stderr):
+                        rc = self._gate(
+                            plan,
+                            "rust",
+                            results,
+                            plan_result=plan_result,
+                            plan_outputs=outputs,
+                        )
+                    self.assertEqual(rc, 1)
+                    self.assertIn("PLAN_RESULT", stderr.getvalue())
+
+    def test_selected_postgres_rejects_empty_or_missing_matrix_output(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        plan_json = json.dumps(plan, separators=(",", ":"))
+        cases = {
+            "missing": None,
+            "blank": "",
+            "array": "[]",
+            "object": "{}",
+            "empty-include": '{"include":[]}',
+            "empty-row": '{"include":[{}]}',
+            "null": "null",
+            "malformed": "{",
+        }
+        for label, matrix in cases.items():
+            outputs = {"plan_json": plan_json}
+            if matrix is not None:
+                outputs["postgres_matrix"] = matrix
+            stderr = io.StringIO()
+            with self.subTest(label=label):
+                with contextlib.redirect_stderr(stderr):
+                    rc = self._gate(plan, "rust", results, plan_outputs=outputs)
+                self.assertEqual(rc, 1)
+                self.assertIn("postgres matrix error POSTGRES_MATRIX_", stderr.getvalue())
+        kept = {
+            "plan_json": plan_json,
+            "postgres_matrix": '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}',
+        }
+        self.assertEqual(self._gate(plan, "rust", results, plan_outputs=kept), 0)
+
+    def test_unselected_postgres_does_not_require_matrix_output(self) -> None:
+        plan = self._plan("rust", {})
+        results = {job: "skipped" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        outputs = {
+            "plan_json": json.dumps(plan, separators=(",", ":")),
+            "postgres_matrix": "[]",
+        }
+        self.assertEqual(self._gate(plan, "rust", results, plan_outputs=outputs), 0)
+
     def test_web_budget_lanes_require_both_selected_success(self) -> None:
         selected = {"web-checks": True, "web-native-checks": True}
         plan = self._plan("web", selected)
@@ -737,10 +827,14 @@ class GateSchemaTest(unittest.TestCase):
     ) -> str:
         needs: dict[str, object] = {}
         if plan_outputs is None:
-            needs["ci-plan"] = {
-                "result": plan_result,
-                "outputs": {"plan_json": json.dumps(plan, separators=(",", ":"))},
-            }
+            outputs = {"plan_json": json.dumps(plan, separators=(",", ":"))}
+            jobs = plan.get("jobs") if isinstance(plan, dict) else None
+            postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
+            if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
+                outputs["postgres_matrix"] = (
+                    '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}'
+                )
+            needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
         omit = omit_jobs or frozenset()
@@ -1493,6 +1587,17 @@ class RustBinaryArtifactTest(unittest.TestCase):
         self.assertEqual(gate._gate(web, "web", {j: "skipped" if j == "workspace-browser-build" else "success" for j in SEL.WORKFLOW_JOBS["web"]}), 1)
 
 
+def postgres_catalog_rows(job: dict) -> list[dict]:
+    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+    if not isinstance(rows, list):
+        raise AssertionError("postgres matrix catalog must be a list")
+    return rows
+
+
+def store_postgres_catalog(job: dict, rows: list[dict]) -> None:
+    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
+
+
 class RustSuiteRegistryFixture:
     """Minimal tree with real rust.yml wiring and a trimmed Cargo [[test]] registry."""
 
@@ -1544,6 +1649,22 @@ class RustSuiteRegistryFixture:
         rust.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
+def _postgres_matrix_structure_error(jobs: dict) -> str | None:
+    """rust.yml postgres must run fromJSON(plan output), not a static include list."""
+    plan_outputs = jobs.get("ci-plan", {}).get("outputs")
+    if not isinstance(plan_outputs, dict) or plan_outputs.get("postgres_matrix") != SEL.POSTGRES_MATRIX_OUTPUT_EXPR:
+        return "ci-plan must publish postgres_matrix from the plan step"
+    strategy = jobs.get("postgres", {}).get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if matrix != SEL.POSTGRES_MATRIX_EXPR:
+        return "postgres strategy.matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix), not a static include"
+    if jobs.get("postgres-build", {}).get("strategy", {}).get("matrix") == SEL.POSTGRES_MATRIX_EXPR:
+        return "postgres-build matrix must stay on its own include list"
+    if jobs.get("collaboration", {}).get("strategy", {}).get("matrix") == SEL.POSTGRES_MATRIX_EXPR:
+        return "collaboration matrix must stay on its own include list"
+    return None
+
+
 class RustSuiteRegistryTest(unittest.TestCase):
     def test_postgres_budget_exact_measured_split_and_isolation(self) -> None:
         original_a = {
@@ -1558,7 +1679,9 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
         job = jobs["postgres"]
-        rows = job["strategy"]["matrix"]["include"]
+        rows, row_err = SEL._postgres_matrix_rows(job)
+        self.assertIsNone(row_err)
+        assert rows is not None
         self.assertEqual(len(rows), 12)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
                               ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")):
@@ -1574,11 +1697,33 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(len(a | b | c), 44)
                 self.assertFalse(a & b or a & c or b & c)
                 self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
+        self.assertEqual(job["strategy"]["matrix"], SEL.POSTGRES_MATRIX_EXPR)
         self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
         self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
         self.assertEqual(step["run"], SEL.RUST_POSTGRES_INTEGRATION_RUN_CANONICAL)
         self.assertEqual(step["env"]["FVOCI_COLLAB_ENGINE"], "${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}")
+
+    def test_postgres_workflow_matrix_is_plan_fromjson_not_static_include(self) -> None:
+        """The rust.yml postgres job must execute the plan matrix, not a static include."""
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        self.assertIsNone(_postgres_matrix_structure_error(jobs))
+        bad = copy.deepcopy(jobs)
+        catalog = json.loads(bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+        bad["postgres"]["strategy"]["matrix"] = {"include": catalog}
+        structure_error = _postgres_matrix_structure_error(bad)
+        self.assertIsNotNone(structure_error)
+        self.assertIn("static include", structure_error or "")
+        self.assertTrue(SEL.verify_postgres_budget_matrix(bad))
+        self.assertNotEqual(
+            jobs["postgres-build"]["strategy"]["matrix"],
+            SEL.POSTGRES_MATRIX_EXPR,
+        )
+        self.assertNotEqual(
+            jobs["collaboration"]["strategy"]["matrix"],
+            SEL.POSTGRES_MATRIX_EXPR,
+        )
 
     def test_postgres_arm64_b_budget_rejects_scope_and_limit_drift(self) -> None:
         jobs, error = SEL._rust_workflow_jobs(ROOT)
@@ -1616,8 +1761,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
             with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
                 fx.write_cargo()
                 def change(data: dict) -> None:
-                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
-                    rows = matrix["include"]
+                    job = data["jobs"]["postgres"]
+                    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
                     c = next(row for row in rows if row["shard"] == "c" and row["pg_major"] == "16")
                     a = next(row for row in rows if row["shard"] == "a" and row["pg_major"] == "16")
                     if mutation == "missing-c": rows.remove(c)
@@ -1626,14 +1771,155 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "wrong-major": c["pg_major"] = "17"
                     elif mutation == "wrong-pin": c["postgres_image"] = "postgres:16"
                     elif mutation == "duplicate-check": c["check"] = a["check"]
-                    elif mutation == "extra-dimension": matrix["exclude"] = [dict(c)]
+                    elif mutation == "extra-dimension":
+                        job["strategy"]["matrix"] = {"include": rows, "exclude": []}
+                        return
                     elif mutation == "duplicate-target": c["tests"] += " --test task_integration"
                     elif mutation == "duplicate-across-shards": a["tests"] += " --test task_integration"
                     elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
                     elif mutation == "c-filter": c["tests"] += " -- --skip failing"
                     else: c["continue-on-error"] = True
+                    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+    def test_postgres_matrix_follows_event_and_rejects_check_mutations(self) -> None:
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+        self.assertIsNone(row_err)
+        assert rows is not None
+
+        def representative(row: dict) -> bool:
+            return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"
+
+        kept = [row for row in rows if representative(row)]
+        self.assertEqual([row["check"] for row in kept], ["postgres", "postgres-c", "postgres-b"])
+        self.assertEqual(len(rows) - len(kept), 9)
+        self.assertEqual(json.loads(SEL.postgres_matrix_json("pull_request", rows)), {"include": kept})
+        for event_name in ("push", "merge_group", "workflow_dispatch", "schedule", "", "pull_request_target"):
+            self.assertEqual(
+                json.loads(SEL.postgres_matrix_json(event_name, rows)),
+                {"include": rows},
+                event_name,
+            )
+        for event_name in ("schedule", "", "pull_request_target"):
+            plan = SEL.build_plan(
+                workflow="rust",
+                event_name=event_name,
+                base_sha=None,
+                head_sha=None,
+                merge_base_sha=None,
+                tested_sha="a" * 40,
+                paths=["src/lib.rs"],
+            )
+            self.assertFalse(plan["plan_ok"], event_name)
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+            self.assertTrue(plan["jobs"]["postgres"]["selected"], event_name)
+
+        def holds(fn, matrix_rows: list[dict]) -> bool:
+            ran = {row["check"] for row in matrix_rows if fn("pull_request", row)}
+            if ran != {"postgres", "postgres-c", "postgres-b"}:
+                return False
+            full_events = ("push", "merge_group", "workflow_dispatch", "schedule", "", "pull_request_target")
+            return all(fn(event_name, row) for event_name in full_events for row in matrix_rows)
+
+        source = inspect.getsource(SEL.postgres_matrix_row_runs)
+        self.assertEqual(source.count('event_name != "pull_request"'), 1)
+        self.assertTrue(holds(SEL.postgres_matrix_row_runs, rows))
+        inverted = source.replace('event_name != "pull_request"', 'event_name == "pull_request"', 1)
+        dropped_check = source.replace(
+            '    if event_name != "pull_request":\n        return True\n',
+            "",
+            1,
+        )
+        dropped_reduction = source.replace(
+            '    if event_name != "pull_request":\n'
+            '        return True\n'
+            '    return row.get("runner") == "ubuntu-26.04" and row.get("pg_major") == "18"\n',
+            "    return True\n",
+            1,
+        )
+
+        def compiled(text: str):
+            namespace: dict = {}
+            exec(text, namespace)
+            return namespace["postgres_matrix_row_runs"]
+
+        for label, mutated in (
+            ("invert", inverted),
+            ("drop-check", dropped_check),
+            ("drop-reduction", dropped_reduction),
+        ):
+            self.assertNotEqual(source, mutated, label)
+            self.assertNotIn('event_name != "pull_request"', mutated, label)
+            self.assertFalse(holds(compiled(mutated), rows), label)
+
+        for mutation in ("static-include", "exclude-object", "exclude-output"):
+            with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
+                fx.write_cargo()
+
+                def change(data: dict, mutation: str = mutation) -> None:
+                    job = data["jobs"]["postgres"]
+                    catalog = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+                    if mutation == "static-include":
+                        job["strategy"]["matrix"] = {"include": catalog, "exclude": []}
+                    elif mutation == "exclude-object":
+                        job["strategy"]["matrix"] = {
+                            "include": catalog,
+                            "exclude": "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}",
+                        }
+                    else:
+                        job["strategy"]["matrix"] = "${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}"
+
+                fx.mutate_rust_workflow(change)
+                self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        for fallback in (
+            "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix || '[]') }}",
+            '${{ fromJSON(needs.ci-plan.outputs.postgres_matrix || \'{"include":[]}\') }}',
+        ):
+            with self.subTest(fallback=fallback):
+                bad = copy.deepcopy(jobs)
+                bad["postgres"]["strategy"]["matrix"] = fallback
+                errors = SEL.verify_postgres_budget_matrix(bad)
+                self.assertTrue(errors)
+                self.assertIn("without an empty-array fallback", "\n".join(errors))
+
+        for fn_name, params in (
+            ("postgres_matrix_row_runs", ["event_name", "row"]),
+            ("postgres_matrix_include", ["event_name", "rows"]),
+            ("postgres_matrix_json", ["event_name", "rows"]),
+        ):
+            fn = getattr(SEL, fn_name)
+            self.assertEqual(list(inspect.signature(fn).parameters), params, fn_name)
+            tree = ast.parse(inspect.getsource(fn))
+            names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+            attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+            strings = {
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            self.assertFalse(names & {"event", "labels", "body", "payload", "github"}, fn_name)
+            self.assertFalse(attrs & {"labels", "body", "ref", "pull_request"}, fn_name)
+            self.assertFalse(
+                strings & {"labels", "body", "head", "ref", "github.event", "pull_request.head"},
+                fn_name,
+            )
+        plan_tree = ast.parse(inspect.getsource(SEL.cmd_plan))
+        matrix_calls = [
+            node
+            for node in ast.walk(plan_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "postgres_matrix_json"
+        ]
+        self.assertEqual(len(matrix_calls), 1)
+        self.assertEqual([arg.id for arg in matrix_calls[0].args if isinstance(arg, ast.Name)], ["event_name", "rows"])
+        self.assertEqual(matrix_calls[0].keywords, [])
 
     def test_postgres_budget_limits_and_strict_cache_mutations_fail(self) -> None:
         for mutation in ("timeout", "fail-fast", "mask", "runner", "cache-fallback", "cache-key", "cache-path", "missing-cache"):
@@ -1687,8 +1973,11 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(names, set()); self.assertIsNotNone(err)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04-arm", "18")):
             bad = copy.deepcopy(jobs)
-            bad["postgres"]["strategy"]["matrix"]["include"] = [row for row in bad["postgres"]["strategy"]["matrix"]["include"]
-                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")]
+            catalog = json.loads(bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+            bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps([
+                row for row in catalog
+                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")
+            ])
             self.assertIsNotNone(SEL.schema_baseline_inventory(bad)[1])
 
     def test_schema_target_omission_is_a_registry_failure(self) -> None:
@@ -1802,7 +2091,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
             step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
             self.assertIn('prefix="fvoci-selected-install-", dir="/run"', step["run"])
             self.assertEqual(jobs["native-arm64"]["steps"][-1]["run"].strip(), SEL.RUST_NATIVE_ARM64_RUN)
-            rows = jobs["postgres"]["strategy"]["matrix"]["include"]
+            rows = postgres_catalog_rows(jobs["postgres"])
             self.assertEqual(
                 sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
                 ["ubuntu-26.04", "ubuntu-26.04-arm"],
@@ -1834,8 +2123,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
                         helper = next(item for item in steps if item.get("name") == "Validate and restore finished postgres executables (no rebuild fallback)")
                         helper["run"] = helper["run"].replace('--cohort postgres ', '--cohort helper ')
                     else:
-                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
+                        rows = postgres_catalog_rows(job)
+                        row = next(row for row in rows if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
                         row["pg_major"] = "17"
+                        store_postgres_catalog(job, rows)
                 fx.mutate_rust_workflow(weaken)
                 errors = SEL.verify_rust_suite_registry(fx.root)
                 self.assertTrue(errors, "selected install actual execution must be mandatory")
@@ -1845,9 +2136,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["selected_install_lifetime"])
             def duplicate(data: dict) -> None:
-                for row in data["jobs"]["postgres"]["strategy"]["matrix"]["include"]:
+                job = data["jobs"]["postgres"]
+                rows = postgres_catalog_rows(job)
+                for row in rows:
                     if row["shard"] == "b":
                         row["tests"] += " --test selected_install_lifetime"
+                store_postgres_catalog(job, rows)
             fx.mutate_rust_workflow(duplicate)
             errors = SEL.verify_rust_suite_registry(fx.root)
         self.assertIn("assigned to multiple CI buckets: selected_install_lifetime", "\n".join(errors))
@@ -1863,10 +2157,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_arm64_row_omission_fails(self) -> None:
         def drop_search_meili_on_arm(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             for row in rows:
                 if row.get("runner") == "ubuntu-26.04-arm":
                     row["tests"] = row["tests"].replace(" --test search_meili", "")
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2124,8 +2420,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_matrix_tests_no_run_fragment_fails(self) -> None:
         def poison_matrix_tests(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             rows[0]["tests"] = "--no-run --test db_integration"
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2555,8 +2853,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 self.assertIsNone(err)
                 job = data["jobs"]["postgres"]
                 if mutation == "missing-c":
-                    rows = job["strategy"]["matrix"]["include"]
+                    rows = postgres_catalog_rows(job)
                     rows.remove(next(row for row in rows if row["shard"] == "c"))
+                    store_postgres_catalog(job, rows)
                     needle = "all twelve"
                 elif mutation == "missing-gate":
                     data["jobs"]["rust-ci-gate"]["needs"].remove("postgres")
@@ -3255,8 +3554,9 @@ class ImpactUnionTest(unittest.TestCase):
 
     def test_new_explanatory_docs_are_exact(self) -> None:
         self.assert_selected_workflows(["docs/RELEASING.md", "docs/collab-engine-comparison.md"], set())
-        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md", "docs/collab-engine-comparison.md.bak"):
-            self.assertEqual(SEL.decide_from_paths([path]).mode, "full", path)
+        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md"):
+            self.assertEqual(SEL.decide_from_paths([path]).reason_code, "NARROW_DOCS", path)
+        self.assertEqual(SEL.decide_from_paths(["docs/collab-engine-comparison.md.bak"]).mode, "full")
 
     def test_backend_contracts_harness_and_unknown_stay_full(self) -> None:
         for path in (
@@ -3439,19 +3739,27 @@ class AgentDocsSelectionTest(unittest.TestCase):
 
     def test_other_agents_paths_stay_broaden_or_unknown(self) -> None:
         for path in (
-            ".agents/skills/fvoci-fast-verify/SKILL.md",
-            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
             ".agents/environment.md.bak",
             ".agents/environment.mdx",
-            ".agents/other.md",
-            ".agents/sub/environment.md",
         ):
             self.assertEqual(SEL.classify_path(path), "broaden", path)
-        for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
+        for path in ("AGENTS.MD", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
-        self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
         self.assertEqual(SEL.classify_path(".agents/"), "unknown")
-        self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
+        self.assertEqual(SEL.classify_path(".agents/skills/fvoci-fast-verify/SKILL.md"), "broaden")
+        self.assertEqual(
+            SEL.classify_path(".agents/skills/fvoci-standard-implementations/references/candidates.md"),
+            "broaden",
+        )
+        for path in (
+            ".agents/other.md",
+            ".agents/sub/environment.md",
+            "agents/environment.md",
+            "apps/AGENTS.md",
+            "docs/AGENTS.md",
+            "scripts/AGENTS.md",
+        ):
+            self.assertEqual(SEL.classify_path(path), "docs", path)
 
     def test_explicit_docs_never_overlap_build_inputs(self) -> None:
         for path in SEL._EXPLICIT_DOCS:
@@ -3509,8 +3817,10 @@ class AgentDocsSelectionTest(unittest.TestCase):
     def test_agent_docs_with_fixture_or_unknown_is_full(self) -> None:
         self.assert_full([*AGENT_DOCS, "compat/fixtures/x.json"], "FULL_PATH_BROADEN")
         self.assert_full([*AGENT_DOCS, "scripts/fixtures/web-e2e/x.sh"], "FULL_PATH_BROADEN")
-        self.assert_full([*AGENT_DOCS, "docs/other.md"], "FULL_PATH_BROADEN")
-        for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
+        self.assert_docs_only([*AGENT_DOCS, "docs/other.md"])
+        for extra in ("third-party/x.md", "apps/AGENTS.md", "notes.md"):
+            self.assert_docs_only([*AGENT_DOCS, extra])
+        for extra in (".gitignore", "LICENSE"):
             self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
 
     def test_agent_docs_with_frontend_unions_impacts(self) -> None:
@@ -3592,15 +3902,15 @@ class AgentDocsSelectionTest(unittest.TestCase):
             fx.delete_file(".agents/skills/x/SKILL.md")
             paths = self._diff(fx, base)
             self.assertIn(".agents/skills/x/SKILL.md", paths)
-            self.assertEqual(SEL.decide_from_paths(paths).mode, "full")
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
 
     def test_real_diff_rename_checks_old_and_new_names(self) -> None:
         body = "role record line\n" * 20
         cases = (
-            ("AGENTS.md", "notes/AGENTS.md", "FULL_UNKNOWN_PATH"),
-            (".agents/environment.md", ".agents/skills/environment.md", "FULL_PATH_BROADEN"),
-            (".agents/skills/x/SKILL.md", ".agents/environment.md", "FULL_PATH_BROADEN"),
-            ("src/env.md", "AGENTS.md", "FULL_PATH_BROADEN"),
+            ("AGENTS.md", "notes/AGENTS.md", "NARROW_DOCS"),
+            (".agents/environment.md", ".agents/skills/environment.md", "NARROW_DOCS"),
+            (".agents/skills/x/SKILL.md", ".agents/environment.md", "NARROW_DOCS"),
+            ("src/env.md", "AGENTS.md", "NARROW_DOCS"),
             ("AGENTS.md", "Cargo.toml", "FULL_PATH_BROADEN"),
         )
         for old, new, reason in cases:
@@ -3611,8 +3921,8 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 paths = self._diff(fx, base)
                 self.assertEqual(paths, [old, new], (old, new))
                 decision = SEL.decide_from_paths(paths)
-                self.assertEqual(decision.mode, "full", (old, new))
                 self.assertEqual(decision.reason_code, reason, (old, new))
+                self.assertEqual(decision.mode, "narrow" if reason == "NARROW_DOCS" else "full", (old, new))
 
     def test_real_diff_rename_between_agent_docs_stays_docs(self) -> None:
         body = "role record line\n" * 20
@@ -3644,6 +3954,543 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assertEqual(plan["path_count"], 2)
             self.assertTrue(plan["plan_ok"])
             self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()))
+
+
+class MergeGroupPlanTest(unittest.TestCase):
+    """plan reads merge_group SHAs directly and keeps required check names stable."""
+
+    def _plan(
+        self,
+        fx: PrCheckoutFixture,
+        *,
+        workflow: str,
+        event_name: str,
+        payload: object,
+        tested: str,
+    ) -> tuple[subprocess.CompletedProcess[str], dict, str]:
+        event = fx.work / f"{workflow}-{event_name}-event.json"
+        event.write_text(json.dumps(payload), encoding="utf-8")
+        output = fx.work / f"{workflow}-{event_name}-plan.json"
+        github_output = fx.work / f"{workflow}-{event_name}-github.txt"
+        proc = run_cli(
+            [
+                "plan",
+                "--workflow",
+                workflow,
+                "--repo-root",
+                str(fx.work),
+                "--event-json",
+                str(event),
+                "--output-plan",
+                str(output),
+                "--github-output",
+                str(github_output),
+            ],
+            env={"GITHUB_EVENT_NAME": event_name, "GITHUB_SHA": tested},
+            cwd=fx.work,
+        )
+        plan = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {}
+        text = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
+        return proc, plan, text
+
+    def test_plan_copies_merge_group_shas_and_ignores_pull_request(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "docs/rewrite.md", "docs only lane\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            mg_base = "a" * 40
+            mg_head = "b" * 40
+            payload = {
+                "merge_group": {"base_sha": mg_base, "head_sha": mg_head},
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": head}},
+                "before": "e" * 40,
+                "after": "f" * 40,
+            }
+            proc, plan, _text = self._plan(
+                fx, workflow="web", event_name="merge_group", payload=payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(plan["base_sha"], mg_base)
+            self.assertEqual(plan["head_sha"], mg_head)
+            self.assertNotEqual(plan["base_sha"], fx.base_sha)
+            self.assertNotEqual(plan["head_sha"], head)
+            self.assertEqual(plan["mode"], "full")
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP")
+            self.assertTrue(plan["plan_ok"])
+            assert_full_selection(self, "web", plan, "merge_group")
+            self.assertNotIn("postgres_matrix", plan)
+
+    def test_missing_or_invalid_merge_group_fields_stay_full(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "docs/rewrite.md", "docs only lane\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            pr = {"base": {"sha": fx.base_sha}, "head": {"sha": head}}
+            cases = (
+                ("missing-group", {"pull_request": pr, "before": "e" * 40, "after": "f" * 40}, None, None),
+                ("non-object", {"merge_group": "queued", "pull_request": pr}, None, None),
+                ("missing-head", {"merge_group": {"base_sha": "a" * 40}, "pull_request": pr}, "a" * 40, None),
+                (
+                    "invalid-base",
+                    {"merge_group": {"base_sha": "HEAD", "head_sha": "b" * 40}, "pull_request": pr},
+                    None,
+                    "b" * 40,
+                ),
+                (
+                    "uppercase",
+                    {"merge_group": {"base_sha": "A" * 40, "head_sha": "b" * 40}},
+                    None,
+                    "b" * 40,
+                ),
+            )
+            for label, payload, base, head_sha in cases:
+                proc, plan, _text = self._plan(
+                    fx, workflow="rust", event_name="merge_group", payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (label, proc.stderr))
+                self.assertEqual(plan["base_sha"], base, label)
+                self.assertEqual(plan["head_sha"], head_sha, label)
+                self.assertEqual(plan["mode"], "full", label)
+                self.assertEqual(plan["reason_code"], "FULL_EVENT_MERGE_GROUP", label)
+                self.assertTrue(plan["plan_ok"], label)
+                assert_full_selection(self, "rust", plan, label)
+                self.assertNotIn(fx.base_sha, (plan["base_sha"], plan["head_sha"]), label)
+                self.assertNotIn(head, (plan["base_sha"], plan["head_sha"]), label)
+
+    def test_non_dict_event_does_not_crash(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            proc, plan, _text = self._plan(
+                fx, workflow="documents", event_name="merge_group", payload=[], tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIsNone(plan["base_sha"])
+            self.assertIsNone(plan["head_sha"])
+            self.assertEqual(plan["mode"], "full")
+            self.assertTrue(plan["plan_ok"])
+            assert_full_selection(self, "documents", plan, "list")
+
+    def test_unknown_event_cli_does_not_narrow_a_docs_merge(self) -> None:
+        with PrCheckoutFixture() as fx:
+            head = fx.commit_on_branch("pr", "NOTES.md", "ordinary docs\n")
+            fx.clone_work()
+            tested = fx.merge_checkout(fx.base_sha, head)
+            payload = {"pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": head}}}
+            for event_name in ("schedule", "deployment", "not-an-event"):
+                proc, plan, text = self._plan(
+                    fx, workflow="install", event_name=event_name, payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                self.assertEqual(plan["mode"], "full", event_name)
+                self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN", event_name)
+                self.assertFalse(plan["plan_ok"], event_name)
+                self.assertIsNone(plan["base_sha"], event_name)
+                self.assertIsNone(plan["head_sha"], event_name)
+                assert_full_selection(self, "install", plan, event_name)
+                self.assertNotIn("postgres_matrix<<", text, event_name)
+
+    def test_rust_plan_matrix_is_event_scoped_and_outside_plan_json(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            jobs, err = SEL._rust_workflow_jobs(ROOT)
+            self.assertIsNone(err)
+            rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+            self.assertIsNone(row_err)
+            assert rows is not None
+            reduced = SEL.postgres_matrix_json("pull_request", rows)
+            full = SEL.postgres_matrix_json("push", rows)
+            self.assertEqual(len(json.loads(reduced)["include"]), 3)
+            self.assertEqual(len(json.loads(full)["include"]), 12)
+            self.assertNotEqual(reduced, full)
+            pr_payload = {
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+            }
+            proc, plan, text = self._plan(
+                fx, workflow="rust", event_name="pull_request", payload=pr_payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(plan["plan_ok"])
+            self.assertNotIn("postgres_matrix", plan)
+            self.assertNotIn("postgres_exclude", plan)
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{reduced}\nPOSTGRES_MATRIX_EOF\n", text)
+            mg_payload = {
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+                "pull_request": {"base": {"sha": fx.base_sha}, "head": {"sha": tested}},
+            }
+            proc, plan, text = self._plan(
+                fx, workflow="rust", event_name="merge_group", payload=mg_payload, tested=tested
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(plan["base_sha"], "a" * 40)
+            self.assertEqual(plan["head_sha"], "b" * 40)
+            self.assertTrue(plan["plan_ok"])
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
+            for event_name in ("push", "workflow_dispatch"):
+                proc, plan_body, text = self._plan(
+                    fx,
+                    workflow="rust",
+                    event_name=event_name,
+                    payload={"before": "e" * 40, "after": tested, "ref": "refs/heads/main"},
+                    tested=tested,
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                self.assertTrue(plan_body["plan_ok"], event_name)
+                self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text, event_name)
+            proc, plan, text = self._plan(
+                fx,
+                workflow="rust",
+                event_name="schedule",
+                payload={"before": "e" * 40, "after": tested, "ref": "refs/heads/main"},
+                tested=tested,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(plan["plan_ok"])
+            self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN")
+            assert_full_selection(self, "rust", plan, "schedule")
+            self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
+
+    def test_matrix_ignores_pr_controlled_inputs_and_keeps_full_legs(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            jobs, err = SEL._rust_workflow_jobs(ROOT)
+            self.assertIsNone(err)
+            rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+            self.assertIsNone(row_err)
+            assert rows is not None
+            reduced = json.loads(SEL.postgres_matrix_json("pull_request", rows))
+            full = json.loads(SEL.postgres_matrix_json("push", rows))
+            self.assertEqual(len(reduced["include"]), 3)
+            self.assertEqual(len(full["include"]), 12)
+            self.assertEqual(
+                [row["check"] for row in reduced["include"]],
+                ["postgres", "postgres-c", "postgres-b"],
+            )
+
+            def emitted(event_name: str, payload: dict) -> dict:
+                proc, _plan, text = self._plan(
+                    fx, workflow="rust", event_name=event_name, payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                marker = "postgres_matrix<<POSTGRES_MATRIX_EOF\n"
+                start = text.index(marker) + len(marker)
+                end = text.index("\nPOSTGRES_MATRIX_EOF", start)
+                return json.loads(text[start:end])
+
+            pr_base = {"base": {"ref": "main", "sha": fx.base_sha}, "head": {"sha": tested}}
+            pr_payloads = [
+                {
+                    "ref": "refs/heads/feature",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "feature", "sha": tested},
+                        "labels": [],
+                        "body": "",
+                    },
+                },
+                {
+                    "ref": "refs/heads/full-matrix",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "run-all-legs", "sha": tested},
+                        "labels": [{"name": "full-ci"}, {"name": "postgres-all"}],
+                        "body": "run all 12 postgres legs including arm64",
+                    },
+                },
+                {
+                    "ref": "refs/heads/pg18-only",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "reduce-matrix", "sha": tested},
+                        "labels": [{"name": "pg18-only"}, {"name": "skip-arm"}],
+                        "body": "only ubuntu-26.04 pg 18",
+                    },
+                },
+            ]
+            for payload in pr_payloads:
+                with self.subTest(event_name="pull_request", ref=payload["ref"]):
+                    self.assertEqual(emitted("pull_request", payload), reduced)
+
+            stuffed = {
+                "ref": "refs/heads/feature",
+                "before": "e" * 40,
+                "after": tested,
+                "pull_request": {
+                    "base": {"ref": "main", "sha": fx.base_sha},
+                    "head": {"ref": "pull_request", "sha": tested},
+                    "labels": [{"name": "pg18-only"}, {"name": "reduce-matrix"}],
+                    "body": "only ubuntu-26.04 pg 18",
+                },
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+            }
+            for event_name in ("merge_group", "push", "schedule", "pull_request_target"):
+                with self.subTest(event_name=event_name):
+                    self.assertEqual(emitted(event_name, stuffed), full)
+                    self.assertEqual(SEL.postgres_matrix_json(event_name, rows), json.dumps(full, separators=(",", ":")))
+
+    def test_required_gate_names_match_under_every_event(self) -> None:
+        rust = (ROOT / ".github/workflows/rust.yml").read_text(encoding="utf-8")
+        self.assertEqual(rust.count("rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}"), 2)
+        self.assertEqual(rust.count("rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}"), 2)
+        self.assertEqual(SEL.verify_workflow_registry(ROOT), [])
+        for workflow, filename in SEL.WORKFLOW_YAML.items():
+            path = ROOT / ".github" / "workflows" / filename
+            data, error = SEL._load_yaml_mapping(path)
+            self.assertIsNone(error, workflow)
+            gate_id = f"{workflow}-ci-gate"
+            gate = data["jobs"][gate_id]
+            triggers = data.get("on", data.get(True))
+            self.assertEqual(gate["name"], gate_id, workflow)
+            self.assertNotIn("github.event", gate["name"], workflow)
+            self.assertEqual(triggers["merge_group"], {"types": ["checks_requested"]}, workflow)
+            self.assertIsNone(triggers["pull_request"], workflow)
+
+    def test_event_specific_gate_name_or_filtered_merge_group_rejected(self) -> None:
+        for workflow, filename in SEL.WORKFLOW_YAML.items():
+            for mutation in ("event-name", "drop-merge-group", "filter-merge-group"):
+                with self.subTest(workflow=workflow, mutation=mutation):
+                    root = Path(tempfile.mkdtemp())
+                    self.addCleanup(shutil.rmtree, root, True)
+                    copy_workflows(root)
+                    write_minimal_rust_registry_stub(root)
+                    path = root / ".github" / "workflows" / filename
+                    text = path.read_text(encoding="utf-8")
+                    gate_line = f"    name: {workflow}-ci-gate\n"
+                    if mutation == "event-name":
+                        changed = text.replace(
+                            gate_line,
+                            "    name: ${{ github.event_name }}-ci-gate\n",
+                            1,
+                        )
+                        needle = f"{workflow}-ci-gate name must stay {workflow}-ci-gate"
+                    elif mutation == "drop-merge-group":
+                        changed = text.replace("  merge_group:\n    types: [checks_requested]\n", "", 1)
+                        needle = "merge_group trigger is required"
+                    else:
+                        changed = text.replace("types: [checks_requested]", "types: [destroyed]", 1)
+                        needle = "merge_group must request checks_requested"
+                    self.assertNotEqual(text, changed)
+                    path.write_text(changed, encoding="utf-8")
+                    errors = "\n".join(SEL.verify_workflow_registry(root))
+                    self.assertIn(needle, errors)
+
+
+def derived_prettier_markdown_paths(
+    script: str, ignore_text: str, repo_root: Path | None = None
+) -> tuple[str, ...]:
+    """Markdown paths selected by format-web.sh targets minus .prettierignore."""
+    targets = SEL.format_web_default_targets(script)
+    patterns = SEL.prettier_ignore_patterns(ignore_text)
+    candidates: list[str] = []
+    for target in targets:
+        if any(char in target for char in "*?["):
+            concrete = (
+                target.replace("**/", "nested/")
+                .replace("**", "nested")
+                .replace("*", "file")
+                .replace("?", "x")
+            )
+            if concrete.endswith(".md"):
+                candidates.append(concrete)
+            continue
+        name = target.rsplit("/", 1)[-1]
+        if "." in name:
+            if target.endswith(".md"):
+                candidates.append(target)
+            continue
+        candidates.append(f"{target}/prettier-lane.md")
+        if repo_root is not None:
+            base = repo_root / target
+            if base.is_dir():
+                candidates.extend(
+                    path.relative_to(repo_root).as_posix() for path in base.rglob("*.md")
+                )
+    derived: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        if SEL.prettier_checks_markdown(path, targets=targets, patterns=patterns):
+            seen.add(path)
+            derived.append(path)
+    return tuple(derived)
+
+
+class MarkdownOnlyLaneTest(unittest.TestCase):
+    """Only-markdown changes use the docs lane except fixture oracles and loaded bytes."""
+
+    _CONTENT_READ = frozenset({
+        "apps/web/NOTICE.md",
+        "packages/editor/src/fonts/README.md",
+        "scripts/release-notes-template.md",
+        "infra/rust/compose.user.INSTALL.md",
+        "scripts/testdata/release/compose.user.INSTALL.md",
+    })
+    _FIXTURE_MD = (
+        "vendor/markdown/x.md",
+        "vendor/markdown/nested/oracle.md",
+        "compat/fixtures/markdown-oracle/x.md",
+        "compat/fixtures/x.md",
+        "tests/fixtures/x.md",
+        "crates/collab-engine/fixtures/x.md",
+        "crates/collab-engine/fixtures/nested/x.md",
+        "scripts/fixtures/x.md",
+        "scripts/fixtures/web-e2e/note.md",
+    )
+    _ORDINARY_MD = (
+        "README.md",
+        "NOTES.md",
+        "docs/rewrite.md",
+        "docs/other.md",
+        "scripts/x.md",
+        "scripts/sub/x.md",
+        "tools/x.md",
+        "tools/ci/x.md",
+    )
+
+    def test_fixture_and_content_read_markdown_stay_full(self) -> None:
+        self.assertEqual(SEL._CONTENT_READ_MARKDOWN, self._CONTENT_READ)
+        for path in (*self._FIXTURE_MD, *self._CONTENT_READ):
+            self.assertEqual(SEL.classify_path(path), "broaden", path)
+            decision = SEL.decide_from_paths([path])
+            self.assertEqual(decision.mode, "full", path)
+            self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN", path)
+
+    def test_ordinary_markdown_is_docs_narrow_on_every_gate(self) -> None:
+        gate = GateSchemaTest()
+        for path in self._ORDINARY_MD:
+            self.assertEqual(SEL.classify_path(path), "docs", path)
+            for workflow, plan in plan_all_workflows([path]).items():
+                self.assertEqual(plan["mode"], "narrow", (path, workflow))
+                self.assertEqual(plan["reason_code"], "NARROW_DOCS", (path, workflow))
+                self.assertTrue(plan["plan_ok"], (path, workflow))
+                self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()), (path, workflow))
+                checked = SEL.build_plan(
+                    workflow=workflow,
+                    event_name="pull_request",
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    merge_base_sha="c" * 40,
+                    tested_sha="a" * 40,
+                    paths=[path],
+                )
+                self.assertEqual(gate._gate(checked, workflow), 0, (path, workflow))
+
+    def test_markdown_with_code_or_loaded_markdown_is_full(self) -> None:
+        self.assertEqual(
+            SEL.decide_from_paths(["docs/other.md", "src/lib.rs"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(
+            SEL.decide_from_paths(["NOTES.md", "apps/web/NOTICE.md"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(
+            SEL.decide_from_paths(["tools/ci/x.md", "compat/fixtures/markdown-oracle/x.md"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(SEL.classify_path("scripts/run-web-e2e.sh"), "broaden")
+        self.assertEqual(SEL.classify_path("vendor/markdown/src/parser.rs"), "broaden")
+        self.assertEqual(SEL.classify_path("crates/collab-engine/src/lib.rs"), "broaden")
+
+    def _assert_prettier_markdown_not_docs_only(self, paths: tuple[str, ...]) -> None:
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            self.assertNotEqual(SEL.classify_path(path), "docs", path)
+            plans = plan_all_workflows([path])
+            for workflow, plan in plans.items():
+                self.assertNotEqual(plan["reason_code"], "NARROW_DOCS", (path, workflow))
+            self.assertTrue(plans["web"]["jobs"]["web-static"]["selected"], path)
+
+    def test_prettier_markdown_selects_web_format_check(self) -> None:
+        script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+        ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+        targets = SEL.format_web_default_targets(script)
+        patterns = SEL.prettier_ignore_patterns(ignore)
+        derived = derived_prettier_markdown_paths(script, ignore, ROOT)
+        for target in targets:
+            if any(char in target for char in "*?["):
+                continue
+            name = target.rsplit("/", 1)[-1]
+            if "." in name and not target.endswith(".md"):
+                continue
+            probe = target if target.endswith(".md") else f"{target}/prettier-lane.md"
+            if not SEL.prettier_checks_markdown(probe, targets=targets, patterns=patterns):
+                continue
+            self.assertIn(probe, derived, target)
+        for path in derived:
+            self.assertFalse(SEL.path_matches_prettier_ignore(path, patterns), path)
+        self._assert_prettier_markdown_not_docs_only(derived)
+
+    def test_added_format_web_directory_fails_until_planner_covers_it(self) -> None:
+        script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+        ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+        fake = "scripts/fake-prettier-dir"
+        self.assertNotIn(fake, script)
+        mutated = script.replace("set -- ", f"set -- {fake} ", 1)
+        targets = SEL.format_web_default_targets(mutated)
+        patterns = SEL.prettier_ignore_patterns(ignore)
+        md = f"{fake}/prettier-lane.md"
+        derived = derived_prettier_markdown_paths(mutated, ignore, ROOT)
+        self.assertIn(fake, targets)
+        self.assertIn(md, derived)
+        self.assertEqual(SEL.classify_path(md), "docs")
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_prettier_markdown_not_docs_only(derived)
+        self.assertIn(md, str(caught.exception))
+        with mock.patch.object(SEL, "_prettier_check_inputs", return_value=(targets, patterns)):
+            self.assertEqual(SEL.classify_path(md), "frontend_web_install")
+            self._assert_prettier_markdown_not_docs_only(derived)
+
+    def test_removing_markdown_lane_entries_drops_their_lane(self) -> None:
+        source = inspect.getsource(SEL._markdown_lane)
+        namespace = {
+            "NarrowFamily": SEL.NarrowFamily,
+            "Literal": __import__("typing").Literal,
+            "_is_fixture_markdown": SEL._is_fixture_markdown,
+            "_CONTENT_READ_MARKDOWN": SEL._CONTENT_READ_MARKDOWN,
+            "_is_prettier_checked_markdown": SEL._is_prettier_checked_markdown,
+            "_PLANNER_CONTRACT_MARKDOWN": SEL._PLANNER_CONTRACT_MARKDOWN,
+            "_PARENT_BROADEN_MARKDOWN": SEL._PARENT_BROADEN_MARKDOWN,
+        }
+        cases = (
+            (
+                '    if path.startswith(".github/"):\n        return "broaden"\n',
+                ".github/workflows/note.md",
+                "broaden",
+            ),
+            (
+                "_PLANNER_CONTRACT_MARKDOWN, ",
+                ".agents/skills/fvoci-fast-verify/SKILL.md",
+                "broaden",
+            ),
+            (
+                ", _PARENT_BROADEN_MARKDOWN",
+                ".agents/skills/fvoci-standard-implementations/references/candidates.md",
+                "broaden",
+            ),
+            (
+                '    if _is_prettier_checked_markdown(path):\n        return "frontend_web_install"\n',
+                "scripts/WEB_LINT.md",
+                "frontend_web_install",
+            ),
+            (
+                '    if _is_prettier_checked_markdown(path):\n        return "frontend_web_install"\n',
+                "packages/i18n/NOTICE.md",
+                "frontend_web_install",
+            ),
+        )
+        for needle, path, expected in cases:
+            self.assertEqual(SEL.classify_path(path), expected, path)
+            self.assertIn(needle, source, path)
+            mutated = source.replace(needle, "", 1)
+            self.assertNotEqual(source, mutated, path)
+            local = dict(namespace)
+            exec(mutated, local)
+            self.assertEqual(local["_markdown_lane"](path), "docs", path)
 
 
 class AgentDocsGateTest(unittest.TestCase):

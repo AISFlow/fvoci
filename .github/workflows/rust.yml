@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 # Only obsolete runs of this workflow on the same PR are cancelled.
@@ -35,6 +36,7 @@ jobs:
       select_postgres: ${{ steps.plan.outputs.select_postgres }}
       select_native_arm64: ${{ steps.plan.outputs.select_native_arm64 }}
       select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
+      postgres_matrix: ${{ steps.plan.outputs.postgres_matrix }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -439,90 +441,120 @@ jobs:
     needs: [ci-plan, postgres-build]
     if: needs.ci-plan.outputs.select_postgres == 'true'
     name: ${{ matrix.check }}
+    # A/C split only task/comment from measured PG16 A: 160.19s moved,
+    # 404.03s retained (cold compile/setup are separate). Both keep 15m.
+    # B retains every target/helper/install/S3: x64 20m, ARM64 25m.
+    # Measured ARM setup/PG 17m59.916s + install 3m30s + S3/post 34s
+    # = 22m03.916s; 25m leaves 2m56.084s for hosted variation/cleanup.
+    # Each major/architecture pair runs every suite exactly once across
+    # A/B/C. PG18 covers both architectures; PG16/17 cover x64.
+    # Pull requests run the PG 18 x64 rows only. merge_group, push, and
+    # every other event run this full catalog. GitHub applies exclude
+    # before include, so the job matrix is the plan JSON itself.
+    # Keep image pins in sync with scripts/start-test-postgres.sh.
+    env:
+      FVOCI_POSTGRES_MATRIX_CATALOG: |
+        [
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres",
+            "shard": "a",
+            "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres-c",
+            "shard": "c",
+            "tests": "--test task_integration --test comment_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres-b",
+            "shard": "b",
+            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+          },
+          {
+            "runner": "ubuntu-26.04-arm",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres-arm64",
+            "shard": "a",
+            "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
+          },
+          {
+            "runner": "ubuntu-26.04-arm",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres-arm64-c",
+            "shard": "c",
+            "tests": "--test task_integration --test comment_integration"
+          },
+          {
+            "runner": "ubuntu-26.04-arm",
+            "pg_major": "18",
+            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "check": "postgres-arm64-b",
+            "shard": "b",
+            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "16",
+            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "check": "postgres-pg16",
+            "shard": "a",
+            "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "16",
+            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "check": "postgres-pg16-c",
+            "shard": "c",
+            "tests": "--test task_integration --test comment_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "16",
+            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "check": "postgres-pg16-b",
+            "shard": "b",
+            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "17",
+            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "check": "postgres-pg17",
+            "shard": "a",
+            "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "17",
+            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "check": "postgres-pg17-c",
+            "shard": "c",
+            "tests": "--test task_integration --test comment_integration"
+          },
+          {
+            "runner": "ubuntu-26.04",
+            "pg_major": "17",
+            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "check": "postgres-pg17-b",
+            "shard": "b",
+            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+          }
+        ]
     strategy:
       fail-fast: false
-      matrix:
-        # A/C split only task/comment from measured PG16 A: 160.19s moved,
-        # 404.03s retained (cold compile/setup are separate). Both keep 15m.
-        # B retains every target/helper/install/S3: x64 20m, ARM64 25m.
-        # Measured ARM setup/PG 17m59.916s + install 3m30s + S3/post 34s
-        # = 22m03.916s; 25m leaves 2m56.084s for hosted variation/cleanup.
-        # Each major/architecture pair runs every suite exactly once across
-        # A/B/C. PG18 covers both architectures; PG16/17 cover x64.
-        # Keep image pins in sync with scripts/start-test-postgres.sh.
-        include:
-          - runner: ubuntu-26.04
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres
-            shard: a
-            tests: --test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
-          - runner: ubuntu-26.04
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres-c
-            shard: c
-            tests: --test task_integration --test comment_integration
-          - runner: ubuntu-26.04
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres-b
-            shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
-          - runner: ubuntu-26.04-arm
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres-arm64
-            shard: a
-            tests: --test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
-          - runner: ubuntu-26.04-arm
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres-arm64-c
-            shard: c
-            tests: --test task_integration --test comment_integration
-          - runner: ubuntu-26.04-arm
-            pg_major: "18"
-            postgres_image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
-            check: postgres-arm64-b
-            shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
-          - runner: ubuntu-26.04
-            pg_major: "16"
-            postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
-            check: postgres-pg16
-            shard: a
-            tests: --test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
-          - runner: ubuntu-26.04
-            pg_major: "16"
-            postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
-            check: postgres-pg16-c
-            shard: c
-            tests: --test task_integration --test comment_integration
-          - runner: ubuntu-26.04
-            pg_major: "16"
-            postgres_image: postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
-            check: postgres-pg16-b
-            shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
-          - runner: ubuntu-26.04
-            pg_major: "17"
-            postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
-            check: postgres-pg17
-            shard: a
-            tests: --test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration
-          - runner: ubuntu-26.04
-            pg_major: "17"
-            postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
-            check: postgres-pg17-c
-            shard: c
-            tests: --test task_integration --test comment_integration
-          - runner: ubuntu-26.04
-            pg_major: "17"
-            postgres_image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
-            check: postgres-pg17-b
-            shard: b
-            tests: --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration
+      matrix: ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}
     runs-on: ${{ matrix.runner }}
     # Main PG16 B measured ~818s PostgreSQL + ~48s S3, exceeding 15m with setup.
     # A/C stay at 15m and x64 B at 20m; ARM64 B uses the measured allowance above.

@@ -23,6 +23,10 @@ type Job = {
   container?: string | { image?: string };
   env?: Record<string, string>;
   outputs?: Record<string, string>;
+  strategy?: {
+    "fail-fast"?: boolean;
+    matrix?: string | { include?: unknown; exclude?: unknown };
+  };
   steps: Step[];
 };
 type Workflow = {
@@ -126,6 +130,12 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
   assert.ok(Object.hasOwn(workflow.on, "pull_request"));
   assert.ok(typeof workflow.on === "object" && !Array.isArray(workflow.on));
   assert.equal(workflow.on.pull_request, null, "required gate cannot have path/branch filters");
+  assert.ok(Object.hasOwn(workflow.on, "merge_group"), "merge_group trigger is required");
+  assert.deepEqual(
+    workflow.on.merge_group,
+    { types: ["checks_requested"] },
+    "merge_group must request checks_requested",
+  );
   const plan = job(workflow, "ci-plan");
   required(plan);
   assert.equal(plan.if, undefined);
@@ -165,6 +175,26 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
   assert.equal(check.env.TESTED_SHA, "${{ github.sha }}");
   assert.match(check.run ?? "", /--needs-json\s+"\$NEEDS_JSON"/);
   assert.match(check.run ?? "", /--tested-sha\s+"\$TESTED_SHA"/);
+  if (name === "rust") postgresMatrixFromPlan(workflow);
+}
+
+const POSTGRES_MATRIX_FROM_PLAN = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}";
+
+function postgresMatrixFromPlan(workflow: Workflow): void {
+  const plan = job(workflow, "ci-plan");
+  assert.equal(
+    plan.outputs?.postgres_matrix,
+    "${{ steps.plan.outputs.postgres_matrix }}",
+    "ci-plan must publish postgres_matrix from the plan step",
+  );
+  const postgres = job(workflow, "postgres");
+  assert.equal(
+    postgres.strategy?.matrix,
+    POSTGRES_MATRIX_FROM_PLAN,
+    "postgres strategy.matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix), not a static include",
+  );
+  assert.notEqual(job(workflow, "postgres-build").strategy?.matrix, POSTGRES_MATRIX_FROM_PLAN);
+  assert.notEqual(job(workflow, "collaboration").strategy?.matrix, POSTGRES_MATRIX_FROM_PLAN);
 }
 
 function actionSteps(value: Job, action: string): Step[] {
@@ -400,6 +430,22 @@ const selectionMutations: Mutation[] = [
     error: "check name",
   },
   {
+    name: "event-specific required check name",
+    mutate: (w) => {
+      job(w, "web-ci-gate").name =
+        "${{ github.event_name == 'pull_request' && 'web-ci-gate' || 'web-merge-gate' }}";
+    },
+    error: "required check name must stay stable",
+  },
+  {
+    name: "missing merge_group",
+    mutate: (w) => {
+      assert.ok(typeof w.on === "object" && !Array.isArray(w.on));
+      delete w.on.merge_group;
+    },
+    error: "merge_group trigger is required",
+  },
+  {
     name: "product missing plan dependency",
     mutate: (w) => {
       delete job(w, "web-static").needs;
@@ -481,6 +527,20 @@ for (const mutation of selectionMutations) {
     }).toThrow(mutation.error);
   });
 }
+
+test("negative: static postgres include restored", () => {
+  const workflow = load("rust");
+  const postgres = job(workflow, "postgres");
+  postgres.strategy = {
+    "fail-fast": false,
+    matrix: {
+      include: [{ runner: "ubuntu-26.04", pg_major: "18", check: "postgres" }],
+    },
+  };
+  expect(() => {
+    selectionPolicy(workflow, "rust");
+  }).toThrow("not a static include");
+});
 
 const artifactMutations: Mutation[] = [
   {
