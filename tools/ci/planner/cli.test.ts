@@ -298,6 +298,21 @@ describe("plan CLI", () => {
         output: null,
       });
       git(work, "checkout", "-q", "--", ".github/workflows/web.yml");
+
+      const rust = join(work, ".github/workflows/rust.yml");
+      writeFileSync(
+        rust,
+        readFileSync(rust, "utf8").replaceAll('"pg_major": "18"', '"pg_major": "19"'),
+      );
+      const docs = fx.branch({ "README.md": "x\n" });
+      const m = fx.merge(fx.base, docs);
+      writeFileSync(join(m.work, ".github/workflows/rust.yml"), readFileSync(rust, "utf8"));
+      const empty = await cli(m.work, "rust", "pull_request", prEvent(fx.base, docs), m.tested);
+      expect(empty).toMatchObject({
+        code: 1,
+        stderr: "plan: rust: postgres matrix has no rows for pull_request\n",
+        output: null,
+      });
     },
     TIMEOUT,
   );

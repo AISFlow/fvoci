@@ -68,12 +68,17 @@ export function postgresMatrixInclude(eventName: string, rows: readonly Map<stri
   return rows.filter((row) => postgresMatrixRowRuns(eventName, row));
 }
 
-/** The `strategy.matrix` JSON line for this event. */
+/**
+ * The `strategy.matrix` JSON line for this event. An event that would run no
+ * row is refused: an empty matrix is never a green postgres lane.
+ */
 export function postgresMatrixJson(
   eventName: string,
   rows: readonly Map<string, PyValue>[],
 ): { json: string; error: null } | { json: null; error: string } {
   const include = postgresMatrixInclude(eventName, rows);
+  if (include.length === 0)
+    return { json: null, error: `rust: postgres matrix has no rows for ${eventName}` };
   return { json: pyDumps(new Map([["include", include]]), { compact: true }), error: null };
 }
 

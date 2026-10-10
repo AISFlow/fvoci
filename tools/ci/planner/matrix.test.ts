@@ -86,6 +86,15 @@ describe("postgres matrix", () => {
     expect(Array.isArray(parsed.include)).toBe(true);
   });
 
+  test("an event that would run no row is refused", () => {
+    const x64Only = realRows().filter((row) => row.get("pg_major") !== "18");
+    expect(postgresMatrixJson("pull_request", x64Only)).toEqual({
+      json: null,
+      error: "rust: postgres matrix has no rows for pull_request",
+    });
+    expect(postgresMatrixJson("merge_group", x64Only).error).toBeNull();
+  });
+
   test("catalog problems are named", () => {
     const job = (catalog: unknown) => ({ env: { FVOCI_POSTGRES_MATRIX_CATALOG: catalog } });
     expect(postgresMatrixRows({}).error).toBe("rust: postgres matrix catalog missing");
