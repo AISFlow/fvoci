@@ -217,7 +217,7 @@ function dirEntry(
   const out = new Uint8Array(128);
   const v = new DataView(out.buffer);
   for (let i = 0; i < name.length; i++) v.setUint16(i * 2, name.charCodeAt(i), true);
-  v.setUint16(64, name.length * 2 + 2, true);
+  if (type !== 0) v.setUint16(64, name.length * 2 + 2, true); // unused entries stay all zero (MS-CFB 2.6.3)
   out[66] = type;
   out[67] = type === 0 ? 0 : 1; // used entries are black: a valid one-node red-black tree
   v.setUint32(68, NOSTREAM, true); // left sibling

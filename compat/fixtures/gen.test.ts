@@ -74,6 +74,20 @@ describe("compat fixture generator", () => {
     expect(strFromU8(Uint8Array.from(out.slice(0, 17)))).toBe("HWP Document File");
   });
 
+  test("HWP unused directory entries are zero apart from NOSTREAM links (MS-CFB 2.6.3)", () => {
+    const bytes = buildHwp();
+    const dir = 512 * (new DataView(bytes.buffer, bytes.byteOffset).getUint32(48, true) + 1);
+    let unused = 0;
+    for (let at = dir; at < dir + 512; at += 128) {
+      if (bytes[at + 66] !== 0) continue;
+      unused++;
+      const entry = [...bytes.subarray(at, at + 128)];
+      expect(entry.slice(68, 80)).toEqual(Array<number>(12).fill(0xff));
+      expect([...entry.slice(0, 68), ...entry.slice(80)]).toEqual(Array<number>(116).fill(0));
+    }
+    expect(unused).toBe(2);
+  });
+
   test("writes the four specimens into an empty directory", () => {
     const root = mkdtempSync(join(tmpdir(), "compat-gen-"));
     try {
@@ -106,6 +120,7 @@ describe("compat fixture generator", () => {
         [],
         ["--output-dir", ""],
         ["--bogus"],
+        ["--output", join(root, "abbreviated")],
         ["--output-dir", full],
         ["--output-dir", file],
         ["--output-dir", here],
@@ -113,6 +128,7 @@ describe("compat fixture generator", () => {
         expect(run(args).code).toBe(2);
       }
       expect(readdirSync(full)).toEqual(["keep"]);
+      expect(readdirSync(root).sort()).toEqual(["file", "full"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
