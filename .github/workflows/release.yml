@@ -170,6 +170,8 @@ jobs:
           if-no-files-found: error
 
   # One multi-arch index pushed BY DIGEST: no tag moves before the smoke.
+  # Like the smoke, the registry tooling runs from github.sha: the job reads
+  # no file of the tagged tree, and an older tag has no tools/release.
   index:
     needs: [verify, build]
     if: always() && needs.verify.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.verify.outputs.existing_digest != ''))
@@ -189,7 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.verify.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -240,7 +242,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version-file: .bun-version
+          bun-version-file: tooling/.bun-version
       - name: Render compose.yml, release.json, notes and SHA256SUMS
         run: |
           bash scripts/release-dist.sh \
@@ -311,6 +313,7 @@ jobs:
   # Tags only after both smokes passed: the immutable :0.y.z first, then the
   # floating :0.y when this is the newest 0.y.* tag at this moment. Release
   # runs are serialized (concurrency above), so :0.y cannot move backwards.
+  # The registry tooling runs from github.sha, as in index.
   publish:
     needs: [verify, index, smoke]
     if: always() && needs.smoke.result == 'success'
@@ -328,7 +331,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.verify.outputs.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:

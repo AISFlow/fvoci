@@ -298,8 +298,7 @@ function caseList(): MutationCase[] {
   const RELEASE_API = "bun tools/release/release-api.ts ";
   const PROVENANCE = 'bun tooling/tools/release/provenance.ts --dist "$RUNNER_TEMP/dist"';
   const SETUP_BUN =
-    "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0\n" +
-    "        with:\n          bun-version-file: .bun-version\n";
+    / {6}- uses: oven-sh\/setup-bun@[^\n]*\n {8}with:\n {10}bun-version-file: [^\n]*\n/;
   const releaseRuntime: [string, Edit, string][] = [
     [
       "push-index-python",
@@ -345,13 +344,55 @@ function caseList(): MutationCase[] {
       "release.yml: verify must set up Bun",
     ],
   ];
+  releaseRuntime.push(
+    [
+      "dist-bun-from-tag-tree",
+      swap("bun-version-file: tooling/.bun-version\n", "bun-version-file: .bun-version\n"),
+      "release.yml: dist must set up Bun (oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6, bun-version-file tooling/.bun-version)",
+    ],
+    [
+      "setup-python",
+      within(
+        "\n  publish:\n",
+        null,
+        swap(
+          "      - name: Tag the smoked index",
+          "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n      - name: Tag the smoked index",
+        ),
+      ),
+      "release.yml: publish runs Python",
+    ],
+    [
+      "python-shell",
+      swap(
+        "      - name: Tag the smoked index 0.y.z (immutable)\n",
+        "      - name: Tag the smoked index 0.y.z (immutable)\n        shell: python\n",
+      ),
+      "release.yml: publish runs Python",
+    ],
+  );
+  for (const job of ["index", "publish"]) {
+    add(
+      `release-${job}-tooling-from-tag`,
+      "release.yml",
+      within(
+        `\n  ${job}:\n`,
+        null,
+        swap(
+          "          ref: ${{ github.sha }}\n",
+          "          ref: ${{ needs.verify.outputs.sha }}\n",
+        ),
+      ),
+      `release.yml: ${job} must check out only the workflow ref`,
+    );
+  }
   for (const [name, edit, needle] of releaseRuntime)
     add(`release-${name}`, "release.yml", edit, needle);
   for (const job of ["verify", "index", "dist", "smoke", "publish", "release"]) {
     add(
       `release-${job}-without-bun`,
       "release.yml",
-      within(`\n  ${job}:\n`, null, swap(SETUP_BUN, "")),
+      within(`\n  ${job}:\n`, null, (text) => text.replace(SETUP_BUN, "")),
       `release.yml: ${job} must set up Bun`,
     );
   }
