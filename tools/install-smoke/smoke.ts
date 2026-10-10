@@ -997,7 +997,10 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "fill-env": {
       const [source = "", dest = ""] = args;
-      writeFileSync(dest, fillEnv(readText(source)), { mode: 0o600 });
+      const filled = fillEnv(readText(source));
+      // A new 0600 file: secrets never go into an existing (0644) DEST.
+      rmSync(dest, { force: true });
+      writeFileSync(dest, filled, { mode: 0o600, flag: "wx" });
       chmodSync(dest, 0o600);
       return 0;
     }

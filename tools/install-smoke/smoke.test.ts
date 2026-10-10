@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -361,6 +369,15 @@ describe("standalone .env", () => {
       expect(readFileSync(join(dir, ".env"), "utf8").split("\n")[2]).toBe("P=v");
       expect(mode(".env")).toBe(0o600);
       expect(cli("set-env", ".env", "Q", "v")).toBe(1);
+      // An existing DEST (the smoke's earlier `cp env.example .env`, 0644) is
+      // replaced by a new 0600 file; its old inode never receives a secret.
+      writeFileSync(join(dir, "shared"), "P=\n", { mode: 0o644 });
+      rmSync(join(dir, ".env"));
+      linkSync(join(dir, "shared"), join(dir, ".env"));
+      expect(cli("fill-env", "env.example", ".env")).toBe(0);
+      expect(mode(".env")).toBe(0o600);
+      expect(readFileSync(join(dir, "shared"), "utf8")).toBe("P=\n");
+      expect(mode("shared")).toBe(0o644);
       writeFileSync(join(dir, "bad.example"), "X_KEYS=\n");
       expect(cli("fill-env", "bad.example", "bad.env")).toBe(1);
       expect(existsSync(join(dir, "bad.env"))).toBe(false);
