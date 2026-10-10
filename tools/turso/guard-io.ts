@@ -10,7 +10,7 @@ import { resolved, sha } from "../selected-backend-ci/io.ts";
 import { dumps, isRecord } from "./python-compat.ts";
 
 /** Process-local filtering, not a change to user/global Git configuration. */
-function gitEnv(): Record<string, string> {
+export function gitEnv(): Record<string, string> {
   return { PATH: process.env.PATH ?? "", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 }
 
@@ -39,7 +39,8 @@ export function sourceDigest(): string {
     stderr: "inherit",
   });
   if (listed.exitCode !== 0) throw new Error("git ls-files failed");
-  const strict = new TextDecoder("utf-8", { fatal: true });
+  // A leading U+FEFF is part of the name, as in Python bytes.decode().
+  const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const hashes = Object.create(null) as Record<string, string>;
   for (const raw of listed.stdout.toString("latin1").split("\0")) {
     if (raw === "") continue;
@@ -108,7 +109,9 @@ const METADATA_CAP = 262144;
 
 /** Parses JSON and keeps the root object's integer "id" token, digits exact. */
 export function parseEnvironmentBody(body: Uint8Array): EnvironmentMetadata {
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  // RFC 8259 JSON carries no BOM: keep one so JSON.parse refuses it (stricter than
+  // json.loads(bytes), which skips it; the API never sends one).
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body);
   const integerIds = new WeakMap<object, string | null>();
   const value: unknown = JSON.parse(
     text,

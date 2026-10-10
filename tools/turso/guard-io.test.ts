@@ -1,13 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import type { RequestOptions } from "node:https";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   fetchEnvironmentMetadata,
+  gitEnv,
   type EnvironmentMetadata,
   type HttpsRequest,
 } from "./guard-io.ts";
 import { AdmissionError, API_ROOT } from "./guard-policy.ts";
+import { dumps } from "./python-compat.ts";
 
 // Offline doubles for the one HTTPS call: no socket is ever opened, and the
 // real node:https request is only the default when no double is passed.
@@ -135,13 +141,15 @@ describe("Environment metadata request boundary", () => {
     }
   });
 
-  test("non-200 status, oversize body, invalid UTF-8 and non-object JSON map to the fixed code", async () => {
+  test("non-200 status, oversize body, invalid UTF-8, a leading BOM and non-object JSON map to the fixed code", async () => {
     const cases: [number, Uint8Array[]][] = [
       [404, [encode('{"message":"FAKE_PRIVATE_BODY"}')]],
       [500, [encode(VALID)]],
       // Valid JSON one byte over the cap, split across chunks: only the cap refuses it.
       [200, [encode(VALID), encode(" ".repeat(262145 - VALID.length))]],
       [200, [new Uint8Array([0x7b, 0xff, 0x7d])]],
+      // RFC 8259 JSON has no BOM; refused even though json.loads(bytes) would skip it.
+      [200, [new Uint8Array([0xef, 0xbb, 0xbf]), encode(VALID)]],
       [200, [encode('{"FAKE_PRIVATE_BODY":')]],
       [200, [encode("[1]")]],
       [200, []],
@@ -187,5 +195,47 @@ describe("Environment metadata request boundary", () => {
     });
     await unavailable(fetchEnvironmentMetadata(timedOut.send));
     expect(timedOut.calls[0]?.request.destroyed).toBe(true);
+  });
+});
+
+describe("source digest", () => {
+  test("a tracked name with a leading U+FEFF is its own file", () => {
+    const repo = mkdtempSync(join(tmpdir(), "guard-digest-"));
+    const env = gitEnv();
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+        cwd: repo,
+        env,
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+    };
+    const module = JSON.stringify(join(import.meta.dir, "guard-io.ts"));
+    const digest = () => {
+      const result = Bun.spawnSync(
+        [process.execPath, "-e", `console.log((await import(${module})).sourceDigest())`],
+        { cwd: repo, env, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+    try {
+      git("init", "-q");
+      writeFileSync(join(repo, "a"), "plain");
+      writeFileSync(join(repo, "\ufeffa"), "first");
+      git("add", "-A");
+      git("commit", "-qm", "one");
+      const expected = createHash("sha256")
+        .update(dumps({ a: sha256("plain"), "\ufeffa": sha256("first") }, true))
+        .digest("hex");
+      expect(digest()).toBe(expected);
+      writeFileSync(join(repo, "\ufeffa"), "second");
+      git("commit", "-qam", "two");
+      expect(digest()).not.toBe(expected);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
