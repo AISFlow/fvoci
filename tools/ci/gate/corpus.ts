@@ -560,6 +560,19 @@ function needsAndSchema(): GateCase[] {
       ...base,
       expect: fail("plan schema error PLAN_BROWSER_PRODUCER_SELECTION"),
     },
+    ...[
+      { "install-smoke": true, "backup-restore-smoke": true },
+      { "install-image": true, "install-smoke": true },
+    ].map((selected): GateCase => ({
+      name: `needs/schema-install-producer-${Object.keys(selected).join("-")}`,
+      argv: gateArgv(
+        "install",
+        needs(plan("install", selected), "install", honestResults(selected)),
+      ),
+      ...base,
+      expect: fail("plan schema error PLAN_IMAGE_PRODUCER_SELECTION"),
+      knownDifference: "planner: Python has no install-image producer selection check",
+    })),
     {
       name: "needs/web-budget-lanes-ok",
       argv: gateArgv(
