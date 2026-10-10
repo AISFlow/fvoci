@@ -11,9 +11,11 @@
 # Both inner wrappers must reject listening-only/early-exit servers and launch
 # Playwright exactly once when setup becomes healthy on the final startup poll.
 # The group retires what it created (database, app role, Meilisearch index and
-# key, server with its child, SMTP sink) on pass, failure and SIGINT; failing
-# steps are named; retention errors never change the verdict; and services a
-# scope shares are started once for its groups.
+# key, server with its child, SMTP sink) on pass, failure and SIGINT; a
+# Meilisearch index counts as deleted only once its deletion task succeeded
+# and the index is gone; failing steps are named; retention errors never
+# change the verdict; and services a scope shares are started once for its
+# groups.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -198,15 +200,72 @@ if [[ "$*" == "-fsS http://127.0.0.1:9/api/v1/setup" ]]; then
   echo "$calls" >"$FVOCI_FIXTURE_NET_STATE.setup-success"
   exit 0
 fi
-# Meilisearch retirement: URL and master key arrive on stdin, never in argv.
-if [[ "$*" == "-fsS --max-time 30 -o /dev/null -X DELETE -K -" ]]; then
+# Meilisearch: URL and master key arrive on stdin (-K -), never in argv. Index
+# deletion answers 202 with a task, as Meilisearch does; the task is still
+# processing on its first poll and then ends per FVOCI_FIXTURE_MEILI_TASK:
+#   succeeded  (default) the index is gone (GET answers 404)
+#   failed     the task fails and the index stays
+#   stuck      the task never ends
+#   present    the task succeeds but the index still answers 200
+#   absent     the index never existed: the task fails with index_not_found
+#              and GET answers 404
+if [[ "$*" == "-sS --max-time 30 -X "@(DELETE|GET)" -w \\n%{http_code} -K -" ]]; then
+  method="$5"
   config="$(cat)"
   url="$(sed -n 's/^url = "\(.*\)"$/\1/p' <<<"$config")"
   [[ "$config" == *'header = "Authorization: Bearer fixture-meili-master-secret"'* ]] || {
-    echo "fixture: Meilisearch DELETE without the master key" >&2
+    echo "fixture: Meilisearch request without the master key" >&2
     exit 1
   }
-  echo "DELETE ${url#http://127.0.0.1:7}" >>"$FVOCI_FIXTURE_NET_STATE.meili-deletes"
+  path="${url#http://127.0.0.1:7}"
+  task_mode="${FVOCI_FIXTURE_MEILI_TASK:-succeeded}"
+  body=""
+  case "$method $path" in
+    "DELETE /indexes/"*)
+      echo "DELETE $path" >>"$FVOCI_FIXTURE_NET_STATE.meili-deletes"
+      code=202
+      body="{\"taskUid\":17,\"indexUid\":\"${path#/indexes/}\",\"status\":\"enqueued\",\"type\":\"indexDeletion\"}"
+      ;;
+    "DELETE /keys/"*)
+      echo "DELETE $path" >>"$FVOCI_FIXTURE_NET_STATE.meili-deletes"
+      code=204
+      ;;
+    "GET /tasks/17")
+      echo poll >>"$FVOCI_FIXTURE_NET_STATE.meili-task-polls"
+      status=processing
+      if (($(wc -l <"$FVOCI_FIXTURE_NET_STATE.meili-task-polls") > 1)); then
+        case "$task_mode" in
+          succeeded | present) status=succeeded ;;
+          failed | absent) status=failed ;;
+          stuck) ;;
+          *) echo "fixture: unknown Meilisearch task mode" >&2; exit 1 ;;
+        esac
+      fi
+      code=200
+      body="{\"uid\":17,\"indexUid\":\"x\",\"status\":\"$status\",\"type\":\"indexDeletion\""
+      if [[ "$task_mode" == absent && "$status" == failed ]]; then
+        body+=",\"error\":{\"message\":\"Index not found.\",\"code\":\"index_not_found\",\"type\":\"invalid_request\"}"
+      elif [[ "$status" == failed ]]; then
+        body+=",\"error\":{\"message\":\"fixture\",\"code\":\"internal\",\"type\":\"internal\"}"
+      fi
+      body+="}"
+      ;;
+    "GET /indexes/"*)
+      echo "GET $path" >>"$FVOCI_FIXTURE_NET_STATE.meili-index-gets"
+      if [[ "$task_mode" == succeeded || "$task_mode" == absent ]]; then
+        code=404
+        body="{\"message\":\"Index not found.\",\"code\":\"index_not_found\",\"type\":\"invalid_request\"}"
+      else
+        code=200
+        body="{\"uid\":\"${path#/indexes/}\"}"
+      fi
+      ;;
+    *)
+      echo "unexpected Meilisearch request: $method $path" >&2
+      exit 1
+      ;;
+  esac
+  printf '%s\n%s' "$body" "$code"
   exit 0
 fi
 echo "unexpected curl invocation: $*" >&2
@@ -217,6 +276,11 @@ STUB
 cat >"$FAKE_BIN/sleep" <<'STUB'
 #!/usr/bin/env bash
 if [[ "$*" == "0.25" && "${FVOCI_FIXTURE_SETUP:-ok}" != "ok" ]]; then
+  exit 0
+fi
+# The Meilisearch task wait keeps its production poll count; only its pause is
+# skipped when the fixture task never ends.
+if [[ "$*" == "0.2" && "${FVOCI_FIXTURE_MEILI_TASK:-}" == stuck ]]; then
   exit 0
 fi
 exec "$FVOCI_FIXTURE_REAL_SLEEP" "$@"
@@ -628,8 +692,61 @@ db="$(sed -n 's/^CREATE DATABASE "\(.*\)"$/\1/p' "$NET_STATE.sql")"
 [[ "$db" == "$index" ]] || fail "meili: index $index does not match database $db" "$log"
 [[ "$(cat "$NET_STATE.meili-deletes")" == "DELETE /indexes/$index"$'\n'"DELETE /keys/fixture-scoped-key-$index" ]] \
   || fail "meili: index or key not deleted" "$NET_STATE.meili-deletes"
+# HTTP 202 only enqueues the deletion: the task was polled past "processing"
+# and the index was confirmed absent.
+[[ "$(wc -l <"$NET_STATE.meili-task-polls")" == 2 ]] || fail "meili: deletion task not awaited" "$log"
+[[ "$(cat "$NET_STATE.meili-index-gets")" == "GET /indexes/$index" ]] || fail "meili: index absence not checked" "$log"
 ! grep -q 'fixture-meili-master-secret' "$log" || fail "meili: master key in the log" "$log"
 check_retired meili "$log"
+
+# A deletion task that fails, never ends, or leaves the index behind is a
+# cleanup failure: it fails a passing group and never replaces a failing
+# test's own exit status. The scoped key is still deleted. An index that never
+# existed (setup stopped before --ensure-meili-key created it) fails its task
+# with index_not_found; with GET answering 404 that is a completed retirement.
+for task_mode in failed stuck present failed-exit7 absent; do
+  log="$WORK/meili-$task_mode.log"
+  gh_output="$WORK/meili-$task_mode.github-output"
+  expected=1
+  status=0
+  (
+    export FVOCI_FIXTURE_MEILI=1 FVOCI_FIXTURE_MEILI_TASK="${task_mode%-exit7}"
+    if [[ "$task_mode" == *-exit7 ]]; then
+      export FVOCI_FIXTURE_PLAYWRIGHT_EXIT=7
+    fi
+    run_group 0 pass quiet "$log" "$gh_output"
+  ) || status=$?
+  case "$task_mode" in
+    *-exit7) expected=7 ;;
+    absent) expected=0 ;;
+  esac
+  ((status == expected)) || fail "meili $task_mode: expected exit $expected, got $status" "$log"
+  if [[ "$task_mode" == absent ]]; then
+    ! grep -q '^web-e2e cleanup failed' "$log" || fail "meili absent: a missing index failed the cleanup" "$log"
+  else
+    grep -qx 'web-e2e cleanup failed: delete-meili-index' "$log" || fail "meili $task_mode: cleanup step not named" "$log"
+  fi
+  if [[ "$task_mode" == *-exit7 ]]; then
+    grep -qx 'web-e2e: the group verdict stays exit 7 (step playwright)' "$log" \
+      || fail "meili $task_mode: precedence not reported" "$log"
+  fi
+  index="$(cat "$NET_STATE.meili-indexes")"
+  grep -qxF "DELETE /keys/fixture-scoped-key-$index" "$NET_STATE.meili-deletes" \
+    || fail "meili $task_mode: scoped key not deleted" "$log"
+  polls="$(wc -l <"$NET_STATE.meili-task-polls")"
+  case "$task_mode" in
+    # Bounded by both the poll count and the wall-clock deadline.
+    stuck)
+      ((polls >= 2 && polls <= 300)) || fail "meili stuck: expected 2..300 task polls, got $polls" "$log"
+      grep -q 'Meilisearch index deletion task 17 did not succeed (status processing)$' "$log" \
+        || fail "meili stuck: unfinished task not named" "$log"
+      ;;
+    *) ((polls == 2)) || fail "meili $task_mode: expected 2 task polls, got $polls" "$log" ;;
+  esac
+  ! grep -q 'fixture-meili-master-secret' "$log" || fail "meili $task_mode: master key in the log" "$log"
+  check_retired "meili-$task_mode" "$log"
+  rm -rf "$(retained_of "$gh_output")"
+done
 
 # Services shared by one scope: started once, each group creates and retires
 # its own database, role and index.

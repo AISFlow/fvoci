@@ -100,12 +100,69 @@ stop_process_group() {
   return 1
 }
 
-# Master key and URL reach curl through its stdin config, never its argv
-# (start-test-meili.sh generates a hex key, so no config quoting is needed).
-meili_delete() {
+# meili_request <method> <path>: the response body, then the HTTP status on
+# its own last line. Master key and URL reach curl through its stdin config,
+# never its argv (start-test-meili.sh generates a hex key, so no config
+# quoting is needed).
+meili_request() {
   printf 'url = "%s%s"\nheader = "Authorization: Bearer %s"\n' \
-    "${FVOCI_MEILI_URL%/}" "$1" "$MEILI_MASTER_KEY" |
-    curl -fsS --max-time 30 -o /dev/null -X DELETE -K -
+    "${FVOCI_MEILI_URL%/}" "$2" "$MEILI_MASTER_KEY" |
+    curl -sS --max-time 30 -X "$1" -w '\n%{http_code}' -K -
+}
+
+# Index deletion is an asynchronous Meilisearch task: HTTP 202 only enqueues
+# it. Wait for the task to end (a completion wait, as wait_meili_task in
+# src/search/meili.rs, not a retry; at most 60 s: 300 polls 0.2 s apart and
+# never past the deadline), require success, then require the index to be gone.
+# A group whose setup stopped before --ensure-meili-key created the index gets
+# a failed task with index_not_found, which the 404 then confirms.
+meili_delete_index() {
+  local response task="" status="" deadline=$((SECONDS + 60)) i
+  response="$(meili_request DELETE "/indexes/$MEILI_INDEX")" || return 1
+  if [[ "${response##*$'\n'}" == 202 && "$response" =~ \"taskUid\":[[:space:]]*([0-9]+) ]]; then
+    task="${BASH_REMATCH[1]}"
+  fi
+  if [[ -z "$task" ]]; then
+    echo "web-e2e cleanup: Meilisearch index delete answered HTTP ${response##*$'\n'} without a task" >&2
+    return 1
+  fi
+  for ((i = 0; i < 300 && SECONDS < deadline; i++)); do
+    response="$(meili_request GET "/tasks/$task")" || return 1
+    if [[ "${response##*$'\n'}" != 200 ]]; then
+      echo "web-e2e cleanup: Meilisearch task ${task} answered HTTP ${response##*$'\n'}" >&2
+      return 1
+    fi
+    status=""
+    if [[ "$response" =~ \"status\":[[:space:]]*\"([a-z]+)\" ]]; then
+      status="${BASH_REMATCH[1]}"
+    fi
+    case "$status" in
+      succeeded | failed | canceled) break ;;
+      *) sleep 0.2 ;;
+    esac
+  done
+  if [[ "$status" == failed && "$response" =~ \"code\":[[:space:]]*\"index_not_found\" ]]; then
+    status=succeeded
+  fi
+  if [[ "$status" != succeeded ]]; then
+    echo "web-e2e cleanup: Meilisearch index deletion task ${task} did not succeed (status ${status:-unknown})" >&2
+    return 1
+  fi
+  response="$(meili_request GET "/indexes/$MEILI_INDEX")" || return 1
+  if [[ "${response##*$'\n'}" != 404 ]]; then
+    echo "web-e2e cleanup: Meilisearch index still answers HTTP ${response##*$'\n'} after its deletion task succeeded" >&2
+    return 1
+  fi
+}
+
+# Key deletion is synchronous (204 No Content).
+meili_delete_key() {
+  local response
+  response="$(meili_request DELETE "/keys/$1")" || return 1
+  [[ "${response##*$'\n'}" == 204 ]] || {
+    echo "web-e2e cleanup: Meilisearch key delete answered HTTP ${response##*$'\n'}" >&2
+    return 1
+  }
 }
 
 cleanup() {
@@ -135,9 +192,9 @@ cleanup() {
       -c "DROP ROLE IF EXISTS \"$ROLE_NAME\"" >/dev/null || failed+=(drop-role)
   fi
   if [[ -n "$MEILI_INDEX" ]]; then
-    meili_delete "/indexes/$MEILI_INDEX" || failed+=(delete-meili-index)
+    meili_delete_index || failed+=(delete-meili-index)
     if [[ -s "$MEILI_SERVER_KEY_FILE" ]]; then
-      meili_delete "/keys/$(tr -d '[:space:]' <"$MEILI_SERVER_KEY_FILE")" || failed+=(delete-meili-key)
+      meili_delete_key "$(tr -d '[:space:]' <"$MEILI_SERVER_KEY_FILE")" || failed+=(delete-meili-key)
     fi
   fi
   if ((${#failed[@]} > 0)); then
