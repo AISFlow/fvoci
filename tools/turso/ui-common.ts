@@ -1,9 +1,9 @@
 // Shared failure, JSON and private-file policy of the hosted Turso UI consumer.
-import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import process from "node:process";
-import { env, parseJson, uid } from "../selected-backend-ci/io.ts";
+import { digest, env, parseJson, uid } from "../selected-backend-ci/io.ts";
+import { pyJsonDumps } from "../web-e2e/compat.ts";
 
 /** Fixed codes only; no SDK, URL, token, actor password or raw trace. */
 export class UiError extends Error {
@@ -73,29 +73,13 @@ export function sortKeys(value: unknown): unknown {
 }
 /** Sorted keys, compact separators, non-ASCII kept: the digest form of a value. */
 export const canonical = (value: unknown): string => JSON.stringify(sortKeys(value));
-export const valueDigest = (value: unknown): string =>
-  createHash("sha256").update(canonical(value)).digest("hex");
-export const textDigest = (value: string): string =>
-  createHash("sha256").update(value).digest("hex");
+export const valueDigest = (value: unknown): string => digest(canonical(value));
+/** The native fixture's stdin: the canonical query, or nothing. */
+export const fixtureInput = (input?: Record_): string =>
+  input && Object.keys(input).length ? canonical(input) : "";
 
-/** Public diagnostic line in the original default separator form (", " and ": "). */
-export function diagnosticJson(value: unknown): string {
-  if (Array.isArray(value)) return "[" + value.map(diagnosticJson).join(", ") + "]";
-  if (isRecord(value))
-    return (
-      "{" +
-      Object.entries(value)
-        .map(([key, item]) => JSON.stringify(key) + ": " + diagnosticJson(item))
-        .join(", ") +
-      "}"
-    );
-  if (typeof value === "string")
-    return JSON.stringify(value).replace(
-      /[\u007f-\uffff]/g,
-      (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
-    );
-  return JSON.stringify(value ?? null);
-}
+/** Public diagnostic line in the original default `json.dumps` form. */
+export const diagnosticJson = (value: unknown): string => pyJsonDumps(value);
 
 export interface Output {
   out(line: string): void;
@@ -113,6 +97,7 @@ export const stdio: Output = {
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 export const decodeUtf8 = (bytes: Uint8Array): string => utf8.decode(bytes);
 export const parseBytes = (bytes: Uint8Array): unknown => parseJson(decodeUtf8(bytes));
+export const parsePlain = (bytes: Uint8Array): unknown => JSON.parse(decodeUtf8(bytes)) as unknown;
 
 export function privateRead(path: string, cap = 1024 * 1024): unknown {
   const info = lstatSync(path);

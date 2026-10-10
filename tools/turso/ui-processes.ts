@@ -256,7 +256,9 @@ export function identity(pid: number): Identity {
   }
 }
 
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+export const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Monotonic seconds, the clock of every deadline in the consumer. */
+export const now = () => performance.now() / 1000;
 const keyOf = (row: Pick<ProcRow, "pid" | "startTicks">) => String(row.pid) + ":" + row.startTicks;
 
 export interface ScopeIo {

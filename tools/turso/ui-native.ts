@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { root as checkout, sha } from "../selected-backend-ci/io.ts";
 import { baselineFailureDiagnostic } from "./ui-audit.ts";
 import {
-  canonical,
+  fixtureInput,
   cleanEnv,
   diagnosticJson,
   executionMode,
@@ -23,6 +23,7 @@ import {
   get,
   isRecord,
   parseBytes,
+  parsePlain,
   privateRead,
   require,
   token,
@@ -35,15 +36,9 @@ import {
   stopAttachedDaemon,
   type ServerHandle,
 } from "./ui-container.ts";
-import { communicate, identity, poll, wait, type Scope } from "./ui-processes.ts";
+import { communicate, identity, now, poll, wait, type Scope } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
-import {
-  awaitListening,
-  now,
-  portClosed,
-  publishStartDiagnostic,
-  requireSetup,
-} from "./ui-server.ts";
+import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 
 const FIXTURE_KEYS = [
@@ -56,8 +51,6 @@ const FIXTURE_KEYS = [
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
 ];
 const nativeCode = /^(?:TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED)$/;
-export const fixtureInput = (input?: Record_) =>
-  input && Object.keys(input).length ? canonical(input) : "";
 
 export async function fixture(
   scope: Scope | null,
@@ -90,7 +83,8 @@ export async function fixture(
     // Observe the bounded native outcome before process finalization can
     // fail. Missing/malformed output never supplies an invented cause.
     require(stdout.length < 64 * 1024 * 1024, "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
-    const parsed = parseBytes(stdout);
+    // Source tokens are kept only for the failure projection that checks integer fields.
+    const parsed = code !== 0 ? parseBytes(stdout) : parsePlain(stdout);
     require(isRecord(parsed), "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
     if (code !== 0) {
       const failure = Object.hasOwn(parsed, "originalFailure")

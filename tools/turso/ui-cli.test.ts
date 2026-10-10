@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 async function cli(args: string[], env: Record<string, string>) {
-  const child = spawn([process.execPath, entry, ...args], {
+  const child = spawn([process.execPath, "--no-env-file", entry, ...args], {
     env: { PATH: process.env.PATH ?? "", ...env },
     stdout: "pipe",
     stderr: "pipe",
@@ -85,6 +85,39 @@ describe("CLI contract", () => {
       code: 78,
     });
     expect(readdirSync(join(directory, "turso-ui"))).toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("guard hand-off", () => {
+  // The guard maps an error to its code only when error.name === "UiError";
+  // anything else is ADMISSION_FAILED.
+  test("consume rejects with a UiError named UiError whose message is the code", async () => {
+    const { consume, UiError: Exported } = await import("./ui.ts");
+    const saved = { ...process.env };
+    try {
+      process.env.RUNNER_TEMP = directory;
+      process.env.FVOCI_SELECTED_EXECUTION_MODE = "other";
+      mkdirSync(join(directory, "turso-ui"), 0o700);
+      write(join(directory, "turso-ui", "current-build.json"), {});
+      const error = await consume("ui-baseline", {}).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(Exported);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).name).toBe("UiError");
+      expect((error as Error).message).toBe("UI_EXECUTION_MODE_REFUSED");
+      rmSync(join(directory, "turso-ui", "current-build.json"));
+      const other = await consume("ui-baseline", {}).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect((other as Error).name).not.toBe("UiError");
+    } finally {
+      for (const key of Object.keys(process.env))
+        if (!(key in saved)) Reflect.deleteProperty(process.env, key);
+      Object.assign(process.env, saved);
+    }
   });
 });
 
@@ -162,7 +195,11 @@ describe.skipIf(process.platform !== "linux")("member actor", () => {
     Reflect.deleteProperty(fixtureEnv, "RUNNER_TEMP");
     const wrapper = join(inputs.run, "member-fixture");
     writeFileSync(wrapper, memberWrapper(directory), { mode: 0o700 });
-    const child = spawn([wrapper], { env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
+    // Playwright runs it from apps/web; a local .env there must not reach the actor.
+    const cwd = join(directory, "apps-web");
+    mkdirSync(cwd);
+    writeFileSync(join(cwd, ".env"), "FVOCI_SELECTED_EXECUTION_MODE=other\n");
+    const child = spawn([wrapper], { cwd, env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),

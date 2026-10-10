@@ -12,9 +12,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { write } from "../selected-backend-ci/io.ts";
+import { digest, write } from "../selected-backend-ci/io.ts";
 import { BACKGROUND_TABLES } from "./ui-audit.ts";
-import { privateRead, textDigest, UiError, valueDigest, type Record_ } from "./ui-common.ts";
+import { privateRead, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { consumeIn, executeUi, memberWrapper, type FlowSteps } from "./ui-flow.ts";
 import { recheckPhysical, type Manifest } from "./ui-record.ts";
@@ -140,7 +140,7 @@ describe("consumer flow", () => {
     const inputs = {
       ui_source_sha: "a".repeat(40),
       ui_baseline_sha256: valueDigest(baseline),
-      ui_target_sha256: textDigest(target),
+      ui_target_sha256: digest(target),
     };
     for (const [endpoint, accepted] of [
       [target, true],
@@ -216,7 +216,7 @@ describe("consumer flow", () => {
         " baseline_sha256=" +
         valueDigest(baseline) +
         " target_sha256=" +
-        textDigest("libsql://pure.invalid") +
+        digest("libsql://pure.invalid") +
         " rows=3 setup_needed=true startup_admissible=true",
     ]);
     expect(output.all).not.toContain("PRIVATE_TOKEN");
@@ -237,7 +237,7 @@ describe("consumer flow", () => {
     ].map((n) => join(directory, n));
     for (const path of paths) writeFileSync(path, "original physical bytes");
     const collect = () => ({
-      files: Object.fromEntries(paths.map((p) => [p, textDigest(readFileSync(p, "utf8"))])),
+      files: Object.fromEntries(paths.map((p) => [p, digest(readFileSync(p, "utf8"))])),
       buildEnvironment: {},
     });
     const recorded = collect();
@@ -269,7 +269,7 @@ describe("consumer flow", () => {
     expect(
       text.startsWith("#!/bin/sh\nRUNNER_TEMP='/runner/temp'\"'\"'s'\nexport RUNNER_TEMP\nexec "),
     ).toBe(true);
-    expect(text).toContain(process.execPath);
+    expect(text).toContain(process.execPath + " --no-env-file ");
     expect(text.endsWith("tools/turso/ui.ts --actor\n")).toBe(true);
     Reflect.deleteProperty(process.env, "RUNNER_TEMP");
     expect(() => memberWrapper()).toThrow();

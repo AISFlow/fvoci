@@ -4,11 +4,8 @@ import { readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { decodeUtf8, get, require } from "./ui-common.ts";
-import { poll, type Child, type Scope } from "./ui-processes.ts";
+import { now, pause, poll, type Child, type Scope } from "./ui-processes.ts";
 import { serverStartDiagnostic } from "./ui-start-diagnostic.ts";
-
-export const now = () => performance.now() / 1000;
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Loopback GET; never through a proxy named by the environment. */
 export function getJson(url: string, seconds: number): Promise<{ status: number; body: unknown }> {

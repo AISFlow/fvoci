@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { root as checkout, sha, write } from "../selected-backend-ci/io.ts";
+import { root as checkout, digest, sha, write } from "../selected-backend-ci/io.ts";
 import {
   assertPreserved,
   attachment,
@@ -37,7 +37,6 @@ import {
   require,
   root,
   stdio,
-  textDigest,
   token,
   valueDigest,
   type Output,
@@ -86,7 +85,8 @@ export const defaultSteps: FlowSteps = {
  * The executable the browser fixture runs to create the member actor. The
  * fixture passes only an allowlisted environment without RUNNER_TEMP, and the
  * actor's process scope writes its closure receipt under RUNNER_TEMP, so the
- * wrapper carries this consumer's own value.
+ * wrapper carries this consumer's own value. Bun loads no .env file from the
+ * fixture's working directory (the original read none either).
  */
 export function memberWrapper(
   runnerTemp: string = get(process.env, "RUNNER_TEMP") as string,
@@ -96,7 +96,7 @@ export function memberWrapper(
     shellQuote(runnerTemp) +
     "\nexport RUNNER_TEMP\nexec " +
     shellQuote(process.execPath) +
-    " " +
+    " --no-env-file " +
     shellQuote(ENTRY) +
     " --actor\n"
   );
@@ -132,7 +132,7 @@ export async function executeUi(
     actors: {},
     workspaces: {},
     servers: [],
-    targetSha256: textDigest(get(environment, "FVOCI_LIBSQL_URL") as string),
+    targetSha256: digest(get(environment, "FVOCI_LIBSQL_URL") as string),
     serverStarts: 0,
     observedFences: [],
   };
@@ -489,7 +489,7 @@ export async function consumeIn(
   const baseline = await steps.fixture(scope, manifest, "baseline", environment);
   steps.write(join(steps.root(), "baseline.private.json"), baseline);
   const baselineSha = valueDigest(baseline);
-  const targetSha = textDigest(environment.FVOCI_LIBSQL_URL as string);
+  const targetSha = digest(environment.FVOCI_LIBSQL_URL as string);
   if (phase === "ui-baseline") {
     steps.output.out(
       "TURSO_UI_BASELINE_PASS source=" +

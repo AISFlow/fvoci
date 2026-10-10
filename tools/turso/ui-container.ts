@@ -20,7 +20,7 @@ import {
 import { dirname, isAbsolute, join } from "node:path";
 import { root as checkout, sha, uid } from "../selected-backend-ci/io.ts";
 import {
-  canonical,
+  fixtureInput,
   cleanEnv,
   decodeUtf8,
   diagnosticJson,
@@ -29,6 +29,7 @@ import {
   get,
   isRecord,
   parseBytes,
+  parsePlain,
   record,
   require,
   token,
@@ -40,6 +41,8 @@ import {
   communicate,
   identity,
   mkfifo,
+  now,
+  pause,
   poll,
   procIdentity,
   readable,
@@ -152,8 +155,6 @@ export interface ServerHandle {
 
 const isInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value);
-const now = () => performance.now() / 1000;
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The orca-local lease loader; tests and the admission wiring set it. */
 export const lease: { load: LocalLease | undefined } = { load: undefined };
@@ -1059,11 +1060,11 @@ export async function localFixture(
       proc,
     );
     goFd = fd;
-    const payload = input && Object.keys(input).length ? canonical(input) : "";
+    const payload = fixtureInput(input);
     const stdout = await communicate(child, payload, budgetRemain(deadline));
     const state = await readDaemonExit(scope, containerId, 10);
     require(stdout.length < 64 * 1024 * 1024, "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
-    const parsed = parseBytes(stdout);
+    const parsed = parsePlain(stdout);
     require(isRecord(parsed), "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
     const nativeExit = isRecord(state) ? state.ExitCode : null;
     const failure = nativeFailureCode(parsed, nativeExit);
