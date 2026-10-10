@@ -16,6 +16,7 @@ const TS = join(HERE, "compare-catalogs.ts");
 // against a stale one. "<DIR>" stands for the per-case temporary directory.
 // report is null when no report file was written and true when the report
 // file bytes equal stdout.
+const CAPTURED_PYTHON_BLOB = "4c7e27b2d5fbd6173de07be856a08837ef7dd9cb";
 const ORACLE_PATH = join(HERE, "fixtures", "compare-catalogs-python-oracle.json");
 const OWNER = "fvoci_owner";
 const APP = "fvoci_app_cmp";
@@ -1040,6 +1041,18 @@ caseTest("list and dict object names fail closed", () => {
       expect(outcome.stderr, label).toContain(`unhashable type: '${kind}'`);
     }
   }
+});
+
+test("a Python original still in the tree is the one the outcomes were captured from", () => {
+  const python = join(HERE, "compare-catalogs.py");
+  if (!existsSync(python)) return;
+  const body = readFileSync(python);
+  const blob = createHash("sha1")
+    .update(`blob ${String(body.length)}\0`)
+    .update(body)
+    .digest("hex");
+  expect(blob).toBe(CAPTURED_PYTHON_BLOB);
+  expect(ORACLE.source).toContain(CAPTURED_PYTHON_BLOB);
 });
 
 test("every captured Python outcome is still exercised", () => {
