@@ -9,6 +9,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 웹 정적 검사: `.github/workflows/web.yml` `web-static`, 루트 `package.json`. Turso: `docs/testing-turso.md`
 - 프론트 기능·상태는 `fvoci-vue-implementation`, 시각·CJK는 `frontend-design`, Rust 구현은 `fvoci-rust-slice`다. 인증·인가·DB·migration은 `fvoci-db-security`, PostgreSQL 성능은 `fvoci-postgres-performance`다.
 - 표준·SDK 선택은 `fvoci-standard-implementations`, 원본 호환 조사에는 `fvoci-source-contract`, 설치·native child·build 경계에는 `fvoci-runtime-boundaries`를 쓴다. 검사 선택은 `fvoci-fast-verify`, 제출·재개·병합은 `fvoci-handoff`다.
+- Python·shell 하네스의 Rust(xtask)·TypeScript(Bun) 이전은 `fvoci-runtime-boundaries`와 `fvoci-fast-verify`를 쓴다. parser·SDK를 교체할 때만 `fvoci-standard-implementations`의 해당 절을 추가한다.
 - 스킬 정본은 `.agents/skills/<이름>/SKILL.md`다. 이름·description으로 해당 작업을 고르고 필요한 본문과 참조만 읽는다. 혼합 변경은 바뀌는 경계만 조합하며 전체 스킬을 일괄 읽지 않는다.
 - `fvoci-role-*`는 명시 호출만 한다. Codex에는 각 스킬의 `agents/openai.yaml` invocation 정책을 두고 Claude Code용 frontmatter와 구분한다. 다른 실행 환경에서는 지원하는 선택·호출 방식을 확인한다. 호출 정책은 실행 권한을 부여하지 않는다.
 
