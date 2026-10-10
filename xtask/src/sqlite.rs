@@ -49,10 +49,11 @@ pub fn archive_root() -> String {
 
 /// Every source, manifest and lockfile compiled into this binary. Adding a
 /// module to `src/` requires listing it here (checked by a test).
-const SOURCES: [(&str, &[u8]); 15] = [
+const SOURCES: [(&str, &[u8]); 18] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     ("Cargo.lock", include_bytes!("../Cargo.lock")),
     ("src/args.rs", include_bytes!("args.rs")),
+    ("src/ci_fixture.rs", include_bytes!("ci_fixture.rs")),
     ("src/host.rs", include_bytes!("host.rs")),
     ("src/lib.rs", include_bytes!("lib.rs")),
     ("src/main.rs", include_bytes!("main.rs")),
@@ -65,6 +66,14 @@ const SOURCES: [(&str, &[u8]); 15] = [
     (
         "src/rust_binaries_cohort.rs",
         include_bytes!("rust_binaries_cohort.rs"),
+    ),
+    (
+        "src/schema_baseline.rs",
+        include_bytes!("schema_baseline.rs"),
+    ),
+    (
+        "src/selected_install.rs",
+        include_bytes!("selected_install.rs"),
     ),
     ("src/shell.rs", include_bytes!("shell.rs")),
     ("src/sqlite.rs", include_bytes!("sqlite.rs")),

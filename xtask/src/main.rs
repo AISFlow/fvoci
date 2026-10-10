@@ -10,6 +10,10 @@ Usage: cargo xtask <command> [arguments...]
 Commands:
   help          Show this help
   rust-binaries Rust workflow executable hand-off (build, pack, unpack, run)
+  schema-baseline
+                Schema baseline controls on rust.yml's PostgreSQL A shard
+  selected-install
+                Root-owned SQLite install lifetime controls (run as root)
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -23,6 +27,8 @@ Options:
 enum Command {
     Help,
     RustBinaries(Vec<OsString>),
+    SchemaBaseline(Vec<OsString>),
+    SelectedInstall(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -52,6 +58,8 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
         Some("rust-binaries") => return Ok(Command::RustBinaries(args.collect())),
+        Some("schema-baseline") => return Ok(Command::SchemaBaseline(args.collect())),
+        Some("selected-install") => return Ok(Command::SelectedInstall(args.collect())),
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -75,6 +83,8 @@ fn run(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::RustBinaries(args) => exit_status(xtask::rust_binaries::main(args)),
+        Command::SchemaBaseline(args) => exit_status(xtask::schema_baseline::main(args)),
+        Command::SelectedInstall(args) => exit_status(xtask::selected_install::main(args)),
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }
@@ -145,6 +155,16 @@ mod tests {
         assert_eq!(
             parse_args(args.clone().into_iter()),
             Ok(Command::RustBinaries(args[1..].to_vec()))
+        );
+        let args = ["schema-baseline"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::SchemaBaseline(Vec::new()))
+        );
+        let args = ["selected-install", "a.jsonl", "engine"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::SelectedInstall(args[1..].to_vec()))
         );
         let args = ["sqlite-build", "--help"].map(OsString::from);
         assert_eq!(
