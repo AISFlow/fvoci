@@ -3981,6 +3981,47 @@ class MergeGroupPlanTest(unittest.TestCase):
                     self.assertIn(needle, errors)
 
 
+def derived_prettier_markdown_paths(
+    script: str, ignore_text: str, repo_root: Path | None = None
+) -> tuple[str, ...]:
+    """Markdown paths selected by format-web.sh targets minus .prettierignore."""
+    targets = SEL.format_web_default_targets(script)
+    patterns = SEL.prettier_ignore_patterns(ignore_text)
+    candidates: list[str] = []
+    for target in targets:
+        if any(char in target for char in "*?["):
+            concrete = (
+                target.replace("**/", "nested/")
+                .replace("**", "nested")
+                .replace("*", "file")
+                .replace("?", "x")
+            )
+            if concrete.endswith(".md"):
+                candidates.append(concrete)
+            continue
+        name = target.rsplit("/", 1)[-1]
+        if "." in name:
+            if target.endswith(".md"):
+                candidates.append(target)
+            continue
+        candidates.append(f"{target}/prettier-lane.md")
+        if repo_root is not None:
+            base = repo_root / target
+            if base.is_dir():
+                candidates.extend(
+                    path.relative_to(repo_root).as_posix() for path in base.rglob("*.md")
+                )
+    derived: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        if SEL.prettier_checks_markdown(path, targets=targets, patterns=patterns):
+            seen.add(path)
+            derived.append(path)
+    return tuple(derived)
+
+
 class MarkdownOnlyLaneTest(unittest.TestCase):
     """Only-markdown changes use the docs lane except fixture oracles and loaded bytes."""
 
@@ -4058,45 +4099,54 @@ class MarkdownOnlyLaneTest(unittest.TestCase):
         self.assertEqual(SEL.classify_path("vendor/markdown/src/parser.rs"), "broaden")
         self.assertEqual(SEL.classify_path("crates/collab-engine/src/lib.rs"), "broaden")
 
+    def _assert_prettier_markdown_not_docs_only(self, paths: tuple[str, ...]) -> None:
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            self.assertNotEqual(SEL.classify_path(path), "docs", path)
+            plans = plan_all_workflows([path])
+            for workflow, plan in plans.items():
+                self.assertNotEqual(plan["reason_code"], "NARROW_DOCS", (path, workflow))
+            self.assertTrue(plans["web"]["jobs"]["web-static"]["selected"], path)
+
     def test_prettier_markdown_selects_web_format_check(self) -> None:
         script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
         ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
         targets = SEL.format_web_default_targets(script)
         patterns = SEL.prettier_ignore_patterns(ignore)
-        samples = {
-            "apps/web": "apps/web/src/format-lane.md",
-            "packages/editor": "packages/editor/src/format-lane.md",
-            "packages/i18n": "packages/i18n/NOTICE.md",
-            "scripts/document-convert": "scripts/document-convert/format-lane.md",
-            "scripts/WEB_LINT.md": "scripts/WEB_LINT.md",
-        }
-        self.assertEqual(set(samples), {target for target in targets if not any(char in target for char in "*?[") and ("." not in target.rsplit("/", 1)[-1] or target.endswith(".md"))})
-        for target, path in samples.items():
-            self.assertIn(target, targets, target)
-            self.assertTrue(SEL.prettier_checks_markdown(path, targets=targets, patterns=patterns), path)
+        derived = derived_prettier_markdown_paths(script, ignore, ROOT)
+        for target in targets:
+            if any(char in target for char in "*?["):
+                continue
+            name = target.rsplit("/", 1)[-1]
+            if "." in name and not target.endswith(".md"):
+                continue
+            probe = target if target.endswith(".md") else f"{target}/prettier-lane.md"
+            if not SEL.prettier_checks_markdown(probe, targets=targets, patterns=patterns):
+                continue
+            self.assertIn(probe, derived, target)
+        for path in derived:
             self.assertFalse(SEL.path_matches_prettier_ignore(path, patterns), path)
-            reduced = tuple(item for item in targets if item != target)
-            self.assertFalse(
-                SEL.prettier_checks_markdown(path, targets=reduced, patterns=patterns),
-                target,
-            )
-            self.assertEqual(SEL.classify_path(path), "frontend_web_install", path)
-            for workflow, plan in plan_all_workflows([path]).items():
-                self.assertEqual(plan["mode"], "narrow", (path, workflow))
-                self.assertEqual(plan["reason_code"], "NARROW_FRONTEND_WEB_INSTALL", (path, workflow))
-                for job, meta in plan["jobs"].items():
-                    selected = workflow in {"web", "install"} and not is_opt_in(workflow, job)
-                    self.assertIs(meta["selected"], selected, (path, workflow, job))
-                if workflow == "web":
-                    self.assertTrue(plan["jobs"]["web-static"]["selected"], path)
-        self.assertTrue(SEL.path_matches_prettier_ignore("apps/web/NOTICE.md", patterns))
-        self.assertTrue(SEL.path_matches_prettier_ignore("packages/editor/NOTICE.md", patterns))
-        self.assertEqual(SEL.classify_path("packages/editor/NOTICE.md"), "docs")
-        self.assertFalse(
-            SEL.prettier_checks_markdown(
-                "tools/selected-backend-ci/note.md", targets=targets, patterns=patterns
-            )
-        )
+        self._assert_prettier_markdown_not_docs_only(derived)
+
+    def test_added_format_web_directory_fails_until_planner_covers_it(self) -> None:
+        script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+        ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+        fake = "scripts/fake-prettier-dir"
+        self.assertNotIn(fake, script)
+        mutated = script.replace("set -- ", f"set -- {fake} ", 1)
+        targets = SEL.format_web_default_targets(mutated)
+        patterns = SEL.prettier_ignore_patterns(ignore)
+        md = f"{fake}/prettier-lane.md"
+        derived = derived_prettier_markdown_paths(mutated, ignore, ROOT)
+        self.assertIn(fake, targets)
+        self.assertIn(md, derived)
+        self.assertEqual(SEL.classify_path(md), "docs")
+        with self.assertRaises(AssertionError) as caught:
+            self._assert_prettier_markdown_not_docs_only(derived)
+        self.assertIn(md, str(caught.exception))
+        with mock.patch.object(SEL, "_prettier_check_inputs", return_value=(targets, patterns)):
+            self.assertEqual(SEL.classify_path(md), "frontend_web_install")
+            self._assert_prettier_markdown_not_docs_only(derived)
 
     def test_removing_markdown_lane_entries_drops_their_lane(self) -> None:
         source = inspect.getsource(SEL._markdown_lane)
