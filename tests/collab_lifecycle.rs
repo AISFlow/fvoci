@@ -2577,22 +2577,25 @@ async fn collab_lifecycle_server_process_is_non_dumpable() {
 
 const SIGNALLED_HARNESS_ENV: &str = "FVOCI_TEST_SIGNALLED_HARNESS";
 const SIGNALLED_HARNESS_TEST: &str = "collab_process_server_dies_with_signal_killed_harness";
+const SIGNALLED_HARNESS_EXIT_WITHIN: Duration = Duration::from_secs(10);
 
-fn pidfd_open(pid: libc::pid_t) -> std::os::fd::OwnedFd {
+fn try_pidfd_open(pid: libc::pid_t) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     // SAFETY: pidfd_open takes plain integers and returns a new fd or -1.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    assert!(
-        fd >= 0,
-        "pidfd_open({pid}): {}",
-        std::io::Error::last_os_error()
-    );
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     // SAFETY: a fresh fd owned by nothing else.
-    unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) })
+}
+
+fn pidfd_open(pid: libc::pid_t) -> std::os::fd::OwnedFd {
+    try_pidfd_open(pid).unwrap_or_else(|error| panic!("pidfd_open({pid}): {error}"))
 }
 
 /// Bounded wait for a pidfd to report process exit (readable).
-fn pidfd_exited_within(fd: &std::os::fd::OwnedFd, within: Duration) -> bool {
+fn poll_pidfd_exit(fd: &std::os::fd::OwnedFd, within: Duration) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     let mut poll = libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -2602,12 +2605,178 @@ fn pidfd_exited_within(fd: &std::os::fd::OwnedFd, within: Duration) -> bool {
     let timeout = libc::c_int::try_from(within.as_millis()).expect("timeout fits");
     // SAFETY: one valid pollfd.
     let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
-    assert!(
-        ready >= 0,
-        "poll pidfd: {}",
-        std::io::Error::last_os_error()
-    );
-    ready == 1
+    if ready < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(ready == 1)
+}
+
+fn pidfd_exited_within(fd: &std::os::fd::OwnedFd, within: Duration) -> bool {
+    poll_pidfd_exit(fd, within).unwrap_or_else(|error| panic!("poll pidfd: {error}"))
+}
+
+/// SIGKILL through a pidfd, which cannot reach a recycled pid.
+fn pidfd_kill(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: plain integers and a null siginfo.
+    let sent = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if sent == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// This test binary re-run as a harness, owned from spawn on: a panic
+/// anywhere in the test (a pidfd or poll failure, a failed assertion) must
+/// not leave the harness parked with its server alive. Drop SIGKILLs and
+/// reaps the harness (`OwnedChild`), which fires the server's parent-death
+/// signal, then observes the reported server's exit and SIGKILLs a survivor
+/// through its pidfd. Cleanup failures go through `cleanup_failure`, so an
+/// earlier assertion stays the reported cause.
+struct SignalledHarness {
+    harness: support::collab_process_server::OwnedChild,
+    server_pid: Option<libc::pid_t>,
+    server_fd: Option<std::os::fd::OwnedFd>,
+}
+
+impl SignalledHarness {
+    fn spawn() -> Self {
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test exe"));
+        command
+            .args([
+                SIGNALLED_HARNESS_TEST,
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SIGNALLED_HARNESS_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
+        let harness =
+            support::collab_process_server::OwnedChild::spawn(&mut command).expect("spawn harness");
+        Self {
+            harness,
+            server_pid: None,
+            server_fd: None,
+        }
+    }
+
+    /// Its own process group id as well.
+    fn pid(&self) -> libc::pid_t {
+        let pid = self.harness.pid().expect("unreaped harness");
+        libc::pid_t::try_from(pid).expect("pid fits pid_t")
+    }
+
+    /// The server pid the harness prints, recorded for cleanup.
+    fn read_server_pid(&mut self) -> libc::pid_t {
+        use std::io::BufRead;
+        let stdout = self
+            .harness
+            .child
+            .as_mut()
+            .and_then(|child| child.stdout.take())
+            .expect("harness stdout");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let server_pid = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    // --nocapture prints it on libtest's `test NAME ... ` line.
+                    if let Some((_, pid)) = line.split_once("fvoci-harness-server-pid=") {
+                        break pid.trim().parse::<libc::pid_t>().expect("server pid");
+                    }
+                    seen.push(line);
+                }
+                Err(error) => {
+                    panic!("harness never reported its server ({error}); stdout={seen:?}")
+                }
+            }
+        };
+        self.server_pid = Some(server_pid);
+        server_pid
+    }
+
+    /// A server pidfd the test failed to open, retried before the harness
+    /// dies. The harness parks after reporting and never reaps its server,
+    /// so a harness still running after the open proves the pid was still
+    /// that server's when it was opened.
+    fn reopen_server_fd(&mut self, server_pid: libc::pid_t) {
+        let Ok(fd) = try_pidfd_open(server_pid) else {
+            return;
+        };
+        if matches!(self.harness.try_wait(), Ok(None)) {
+            self.server_fd = Some(fd);
+        }
+    }
+
+    /// Bounded wait for the server to exit after its harness died.
+    fn server_exited(&self) -> std::io::Result<bool> {
+        let Some(server_pid) = self.server_pid else {
+            return Ok(true);
+        };
+        if let Some(fd) = &self.server_fd {
+            if poll_pidfd_exit(fd, SIGNALLED_HARNESS_EXIT_WITHIN)? {
+                return Ok(true);
+            }
+            pidfd_kill(fd)?;
+            return Ok(false);
+        }
+        // Without a pidfd only a probe is safe: signal 0 to a pid that may
+        // have been recycled. ESRCH needs the new parent to have reaped it.
+        let deadline = std::time::Instant::now() + SIGNALLED_HARNESS_EXIT_WITHIN;
+        loop {
+            if !support::collab_process_server::send_signal(server_pid, 0)? {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for SignalledHarness {
+    fn drop(&mut self) {
+        use support::collab_process_server::cleanup_failure;
+        if let (Some(server_pid), None) = (self.server_pid, &self.server_fd) {
+            self.reopen_server_fd(server_pid);
+        }
+        self.harness.kill_and_wait();
+        match self.server_exited() {
+            Ok(true) => {}
+            Ok(false) => cleanup_failure(format!(
+                "server pid {:?} still present {SIGNALLED_HARNESS_EXIT_WITHIN:?} after its harness died (SIGKILLed if its pidfd was open)",
+                self.server_pid
+            )),
+            Err(error) => cleanup_failure(format!(
+                "observe server pid {:?}: {error}",
+                self.server_pid
+            )),
+        }
+    }
 }
 
 /// A harness killed by a terminal SIGINT runs no Drop, and its separate-group
@@ -2617,9 +2786,8 @@ fn pidfd_exited_within(fd: &std::os::fd::OwnedFd, within: Duration) -> bool {
 /// server is a real child spawned through `OwnedChild::spawn`.
 #[test]
 fn collab_process_server_dies_with_signal_killed_harness() {
-    use std::io::BufRead;
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use support::collab_process_server::OwnedChild;
+    use std::os::unix::process::ExitStatusExt;
+    use support::collab_process_server::{send_signal, OwnedChild};
 
     if std::env::var_os(SIGNALLED_HARNESS_ENV).is_some() {
         let mut server = std::process::Command::new("sleep");
@@ -2635,86 +2803,34 @@ fn collab_process_server_dies_with_signal_killed_harness() {
         }
     }
 
-    let mut harness = std::process::Command::new(std::env::current_exe().expect("test exe"))
-        .args([
-            SIGNALLED_HARNESS_TEST,
-            "--exact",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(SIGNALLED_HARNESS_ENV, "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .process_group(0)
-        .spawn()
-        .expect("spawn harness");
-    let harness_pid = libc::pid_t::try_from(harness.id()).unwrap();
+    let mut harness = SignalledHarness::spawn();
+    let harness_pid = harness.pid();
     let harness_fd = pidfd_open(harness_pid);
-    let stdout = harness.stdout.take().expect("harness stdout");
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-        {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let mut seen = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let server_pid = loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match rx.recv_timeout(remaining) {
-            Ok(line) => {
-                // --nocapture prints it on libtest's `test NAME ... ` line.
-                if let Some((_, pid)) = line.split_once("fvoci-harness-server-pid=") {
-                    break pid.trim().parse::<libc::pid_t>().expect("server pid");
-                }
-                seen.push(line);
-            }
-            Err(error) => {
-                // SAFETY: SIGKILL to our own unreaped child's group.
-                unsafe { libc::kill(-harness_pid, libc::SIGKILL) };
-                let _ = harness.wait();
-                panic!("harness never reported its server ({error}); stdout={seen:?}");
-            }
-        }
-    };
+    let server_pid = harness.read_server_pid();
     // The harness is alive and has not reaped its server: the pid is pinned.
-    let server_fd = pidfd_open(server_pid);
+    harness.server_fd = Some(pidfd_open(server_pid));
     // SAFETY: getpgid takes a plain pid.
     let server_pgid = unsafe { libc::getpgid(server_pid) };
     assert_eq!(server_pgid, server_pid, "server leads its own group");
 
-    // SAFETY: SIGINT to our own unreaped child's group, as a terminal does.
-    assert_eq!(unsafe { libc::kill(-harness_pid, libc::SIGINT) }, 0);
+    // SIGINT to our own unreaped child's group, as a terminal does.
+    assert!(matches!(send_signal(-harness_pid, libc::SIGINT), Ok(true)));
     assert!(
-        pidfd_exited_within(&harness_fd, Duration::from_secs(10)),
+        pidfd_exited_within(&harness_fd, SIGNALLED_HARNESS_EXIT_WITHIN),
         "harness survived SIGINT"
     );
-    let status = harness.wait().expect("reap harness");
+    // Already dead: the group SIGKILL before the reap reaches no one.
+    let status = harness.harness.kill_and_wait().expect("reap harness");
     assert_eq!(
         status.signal(),
         Some(libc::SIGINT),
         "harness must die by SIGINT (no Drop ran), got {status}"
     );
 
-    let server_gone = pidfd_exited_within(&server_fd, Duration::from_secs(10));
+    let server_fd = harness.server_fd.as_ref().expect("server pidfd");
+    let server_gone = pidfd_exited_within(server_fd, SIGNALLED_HARNESS_EXIT_WITHIN);
     if !server_gone {
-        use std::os::fd::AsRawFd;
-        // SAFETY: pidfd_send_signal through our pidfd cannot reach a recycled pid.
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                server_fd.as_raw_fd(),
-                libc::SIGKILL,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        };
+        let _ = pidfd_kill(server_fd);
     }
     assert!(
         server_gone,
@@ -2723,7 +2839,7 @@ fn collab_process_server_dies_with_signal_killed_harness() {
     // The dead server is reaped by its new parent (init or a subreaper)
     // asynchronously; until then its zombie still counts as a group member.
     // Bounded poll for the group to empty.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + SIGNALLED_HARNESS_EXIT_WITHIN;
     loop {
         // SAFETY: signal 0 only probes for existence.
         let probe = unsafe { libc::kill(-server_pgid, 0) };
@@ -2737,4 +2853,36 @@ fn collab_process_server_dies_with_signal_killed_harness() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// A failure after the harness reported its server, before the test opened
+/// the server pidfd (as when that pidfd_open hits EMFILE), still ends and
+/// reaps the harness, sees the server gone, and keeps the original panic.
+#[test]
+fn signalled_harness_guard_cleans_up_after_a_failure() {
+    const INJECTED: &str = "injected failure before the server pidfd";
+    let mut harness = SignalledHarness::spawn();
+    let harness_fd = pidfd_open(harness.pid());
+    let server_pid = harness.read_server_pid();
+    let server_fd = pidfd_open(server_pid);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let _harness = harness;
+        panic!("{INJECTED}");
+    }));
+    let payload = outcome.expect_err("the injected failure propagates");
+    let harness_gone = pidfd_exited_within(&harness_fd, Duration::ZERO);
+    let server_gone = pidfd_exited_within(&server_fd, Duration::ZERO);
+    if !harness_gone || !server_gone {
+        let _ = pidfd_kill(&harness_fd);
+        let _ = pidfd_kill(&server_fd);
+    }
+    assert_eq!(
+        payload.downcast_ref::<String>().map(String::as_str),
+        Some(INJECTED),
+        "the original failure stays the cause"
+    );
+    assert!(
+        harness_gone && server_gone,
+        "guard returned with harness gone={harness_gone}, server pid {server_pid} gone={server_gone}"
+    );
 }

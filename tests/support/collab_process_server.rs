@@ -34,7 +34,7 @@ pub struct OwnedChild {
 }
 
 /// `kill(2)`; `ESRCH` (no such process or group) is `Ok(false)`.
-fn send_signal(target: libc::pid_t, signal: libc::c_int) -> std::io::Result<bool> {
+pub fn send_signal(target: libc::pid_t, signal: libc::c_int) -> std::io::Result<bool> {
     // SAFETY: kill(2) takes plain integers and touches no memory.
     if unsafe { libc::kill(target, signal) } == 0 {
         return Ok(true);
@@ -50,7 +50,7 @@ fn send_signal(target: libc::pid_t, signal: libc::c_int) -> std::io::Result<bool
 /// A cleanup failure fails the test, except while already unwinding (Drop
 /// after an earlier panic), where a second panic would abort and hide the
 /// first one.
-fn cleanup_failure(message: String) {
+pub fn cleanup_failure(message: String) {
     if std::thread::panicking() {
         eprintln!("{message}");
     } else {
