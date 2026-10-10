@@ -10,6 +10,8 @@ Usage: cargo xtask <command> [arguments...]
 Commands:
   help          Show this help
   rust-binaries Rust workflow executable hand-off (build, pack, unpack, run)
+  selected-library
+                Selected SQLite library controls (one build, exact filters)
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -23,6 +25,7 @@ Options:
 enum Command {
     Help,
     RustBinaries(Vec<OsString>),
+    SelectedLibrary(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -52,6 +55,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
         Some("rust-binaries") => return Ok(Command::RustBinaries(args.collect())),
+        Some("selected-library") => return Ok(Command::SelectedLibrary(args.collect())),
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -75,6 +79,7 @@ fn run(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::RustBinaries(args) => exit_status(xtask::rust_binaries::main(args)),
+        Command::SelectedLibrary(args) => exit_status(xtask::selected_library::main(args)),
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }
@@ -145,6 +150,11 @@ mod tests {
         assert_eq!(
             parse_args(args.clone().into_iter()),
             Ok(Command::RustBinaries(args[1..].to_vec()))
+        );
+        let args = ["selected-library", "--target-dir", "t"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::SelectedLibrary(args[1..].to_vec()))
         );
         let args = ["sqlite-build", "--help"].map(OsString::from);
         assert_eq!(

@@ -6,6 +6,7 @@ pub mod process;
 pub mod rust_binaries;
 pub mod rust_binaries_archive;
 pub mod rust_binaries_cohort;
+pub mod selected_library;
 pub mod shell;
 pub mod sqlite;
 pub mod sqlite_build;
