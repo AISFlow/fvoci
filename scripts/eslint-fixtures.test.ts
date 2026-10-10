@@ -1,7 +1,7 @@
 // Positive and negative proofs for the pinned Bun-only Vue toolchain.
 // Run with `bun run lint:fixtures`; one proof with `-t "<test name>"`.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -63,38 +63,125 @@ let directory = "";
 let outputDirectory = "";
 
 // `bun test` injects NODE_ENV=test; the lint/format/compile children must see
-// the same environment as `bun run lint`, not the test runner's.
+// the same environment as `bun run lint`, not the test runner's, so NODE_ENV
+// is removed whatever its value.
 const CHILD_ENV = Object.fromEntries(
   Object.entries(process.env).filter(([name]) => name !== "NODE_ENV"),
 );
 
-function run(args: string[], options: { input?: string; timeout?: number } = {}): Run {
+// Each child leads its own process group, so an expired limit reaches the
+// whole tree (the prepare helper's vue-tsc included), not only the direct child.
+const CHILD_LIMIT_MS = 300_000;
+const KILL_GRACE_MS = 5_000;
+const liveGroups = new Set<number>();
+// Groups killed by cleanup after the runner abandoned their test.
+const abandonedGroups = new Set<number>();
+let outputCount = 0;
+
+function signalGroup(group: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-group, signal);
+  } catch (error) {
+    // ESRCH: every member of the group has already exited.
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function killLiveGroups(): void {
+  for (const group of liveGroups) {
+    signalGroup(group, "SIGKILL");
+    abandonedGroups.add(group);
+  }
+  liveGroups.clear();
+}
+
+// A runner-level test timeout abandons the awaiting test, and detached groups
+// do not receive the terminal's SIGINT; never leave a tree behind either way.
+afterEach(killLiveGroups);
+process.on("exit", killLiveGroups);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.once(signal, () => {
+    killLiveGroups();
+    // The listener is gone, so re-raising applies the default disposition.
+    process.kill(process.pid, signal);
+  });
+}
+
+async function run(
+  args: string[],
+  options: { input?: string; timeout?: number } = {},
+): Promise<Run> {
   // Bun 1.4.2 + ESLint's exit path can truncate >64KiB piped stdout.
   // A regular file preserves the complete print-config/JSON evidence.
-  const outputPath = join(outputDirectory, "stdout");
+  outputCount += 1;
+  const outputPath = join(outputDirectory, `stdout-${String(outputCount)}`);
   const output = openSync(outputPath, "w+");
   try {
     const [command, ...rest] = args;
     if (command === undefined) throw new Error("empty command");
-    const result = spawnSync(command, rest, {
+    const limit = options.timeout ?? CHILD_LIMIT_MS;
+    const child = spawn(command, rest, {
       cwd: ROOT,
       env: CHILD_ENV,
-      encoding: "utf8",
-      input: options.input,
+      detached: true,
       stdio: [options.input === undefined ? "ignore" : "pipe", output, "pipe"],
-      // spawnSync blocks the runner, so its own test timeout cannot interrupt
-      // a hung child; bound every child instead.
-      timeout: options.timeout ?? 300_000,
-      maxBuffer: 256 * 1024 * 1024,
     });
-    if (result.error) throw result.error;
-    if (result.status === null) {
-      throw new Error(`${args.join(" ")} terminated by ${String(result.signal)}`);
+    const stderr: Buffer[] = [];
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    const expiry = { hit: false };
+    let termTimer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let closed: { code: number | null; signal: NodeJS.Signals | null };
+    try {
+      closed = await new Promise((resolveClose, rejectClose) => {
+        child.once("error", rejectClose);
+        // "close" waits until every holder of the stderr pipe (descendants too) is gone.
+        child.once("close", (code, signal) => {
+          resolveClose({ code, signal });
+        });
+        const group = child.pid;
+        if (group === undefined) return;
+        liveGroups.add(group);
+        termTimer = setTimeout(() => {
+          expiry.hit = true;
+          signalGroup(group, "SIGTERM");
+          killTimer = setTimeout(() => {
+            signalGroup(group, "SIGKILL");
+          }, KILL_GRACE_MS);
+        }, limit);
+        if (child.stdin !== null) {
+          child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+            // A child may exit without reading its input; its status is the evidence.
+            if (error.code !== "EPIPE") rejectClose(error);
+          });
+          child.stdin.end(options.input);
+        }
+      });
+    } finally {
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      if (child.pid !== undefined) liveGroups.delete(child.pid);
+    }
+    if (child.pid !== undefined && abandonedGroups.delete(child.pid)) {
+      // The runner already failed this test; settling now would surface a
+      // stray rejection in whichever test runs next.
+      return await new Promise<never>(() => undefined);
+    }
+    const stderrText = Buffer.concat(stderr).toString("utf8");
+    if (expiry.hit) {
+      // A descendant that obeyed neither signal before the leader closed.
+      if (child.pid !== undefined) signalGroup(child.pid, "SIGKILL");
+      throw new Error(
+        `${args.join(" ")} exceeded its ${String(limit)}ms limit; its process group was sent SIGTERM, then SIGKILL within ${String(KILL_GRACE_MS)}ms (exit=${String(closed.code)}, signal=${String(closed.signal)})\n${stderrText}`,
+      );
+    }
+    if (closed.code === null) {
+      throw new Error(`${args.join(" ")} terminated by ${String(closed.signal)}`);
     }
     return {
-      status: result.status,
+      status: closed.code,
       stdout: readFileSync(outputPath, "utf8"),
-      stderr: result.stderr,
+      stderr: stderrText,
     };
   } finally {
     closeSync(output);
@@ -119,20 +206,29 @@ function ruleIds(report: FileReport[]): Set<string | null> {
   return new Set(messages(report).map((message) => message.ruleId));
 }
 
-function lint(name: string, source: string, ...options: string[]): [Run, FileReport[]] {
+async function lint(
+  name: string,
+  source: string,
+  ...options: string[]
+): Promise<[Run, FileReport[]]> {
   const path = writeSource(name, source);
-  const result = run([...ESLINT, path, "--max-warnings=0", "--format=json", ...options]);
+  const result = await run([...ESLINT, path, "--max-warnings=0", "--format=json", ...options]);
   return [result, parseReport(result.stdout)];
 }
 
-function assertRule(name: string, source: string, rule: string): void {
-  const [result, report] = lint(name, source);
+async function assertRule(name: string, source: string, rule: string): Promise<void> {
+  const [result, report] = await lint(name, source);
   const detail = JSON.stringify(report);
   expect(result.status, detail).not.toBe(0);
   expect(ruleIds(report).has(rule), detail).toBe(true);
 }
 
-function compiler(config: string, source: string, extension = "vue", program = "vue-tsc"): Run {
+async function compiler(
+  config: string,
+  source: string,
+  extension = "vue",
+  program = "vue-tsc",
+): Promise<Run> {
   const path = writeSource(`TypeProof.${extension}`, source);
   const configPath = join(directory, "tsconfig.json");
   writeFileSync(
@@ -144,7 +240,7 @@ function compiler(config: string, source: string, extension = "vue", program = "
       exclude: [],
     }),
   );
-  return run([
+  return await run([
     BUN,
     "--bun",
     join(ROOT, "node_modules/.bin", program),
@@ -154,15 +250,15 @@ function compiler(config: string, source: string, extension = "vue", program = "
   ]);
 }
 
-function stdinLint(path: string, input: string): Run {
-  return run(
+async function stdinLint(path: string, input: string): Promise<Run> {
+  return await run(
     [...ESLINT, "--stdin", "--stdin-filename", path, "--max-warnings=0", "--format=json"],
     { input },
   );
 }
 
-function printConfig(path: string): Run {
-  return run([...ESLINT, "--print-config", path]);
+async function printConfig(path: string): Promise<Run> {
+  return await run([...ESLINT, "--print-config", path]);
 }
 
 function ruleOptions(config: PrintedConfig, name: string): RuleOptions {
@@ -202,9 +298,9 @@ prepareVueLintTypes(${JSON.stringify(projects)}, ${JSON.stringify(output)});`,
 // Tests run in the order unittest used (alphabetical), sharing one fixture
 // directory under apps/web so the real root config and projects apply.
 describe("VueToolchain", () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     outputDirectory = mkdtempSync(join(tmpdir(), "eslint-proof-out-"));
-    const verified = run([BUN, "--bun", "scripts/verify-web-tools.mjs"]);
+    const verified = await run([BUN, "--bun", "scripts/verify-web-tools.mjs"]);
     if (verified.status !== 0) throw new Error(verified.stdout + verified.stderr);
     directory = mkdtempSync(join(ROOT, "apps/web/eslint-proof-"));
     writeFileSync(
@@ -219,9 +315,9 @@ describe("VueToolchain", () => {
     if (outputDirectory !== "") rmSync(outputDirectory, { recursive: true, force: true });
   });
 
-  test("actual_nuxt_autoimport_registration_boundary", () => {
+  test("actual_nuxt_autoimport_registration_boundary", async () => {
     // FVOCI disables Nuxt UI autoimports: an unregistered template name must fail.
-    const result = compiler(
+    const result = await compiler(
       "apps/web/tsconfig.vue.json",
       '<template><UButton type="button">ok</UButton></template>',
     );
@@ -229,8 +325,8 @@ describe("VueToolchain", () => {
     expect(result.stdout).toContain("UButton");
   });
 
-  test("actual_web_and_editor_declaration_preparation_is_node_free", () => {
-    const prepared = run([BUN, "--bun", "scripts/prepare-vue-lint-types.mjs"]);
+  test("actual_web_and_editor_declaration_preparation_is_node_free", async () => {
+    const prepared = await run([BUN, "--bun", "scripts/prepare-vue-lint-types.mjs"]);
     expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
     const output = join(ROOT, "node_modules/.cache/fvoci-vue-lint/types");
     const app = join(output, "apps/web/src/vue/App.vue.d.ts");
@@ -239,7 +335,7 @@ describe("VueToolchain", () => {
       name.endsWith(".vue.d.ts"),
     );
     expect(declarations.length).toBe(8);
-    let result = run([
+    let result = await run([
       ...ESLINT,
       "packages/editor/src/vue/node-views.ts",
       "--max-warnings=0",
@@ -251,15 +347,15 @@ describe("VueToolchain", () => {
     const source = `import { createApp } from "vue";
 import App from "./App.vue";
 export const app = createApp(App);`;
-    result = stdinLint("apps/web/src/vue/main.ts", source);
+    result = await stdinLint("apps/web/src/vue/main.ts", source);
     expect(result.status, result.stdout + result.stderr).toBe(0);
   });
 
   test.each(RUNTIME_PATHS)(
     "browser_does_not_receive_node_or_bun_globals %s",
-    (path, environment) => {
+    async (path, environment) => {
       const forbidden = new Set(NODE_RUNTIME_GLOBALS);
-      const result = printConfig(path);
+      const result = await printConfig(path);
       expect(result.status, `${path}: ${result.stderr}`).toBe(0);
       const config = JSON.parse(result.stdout) as PrintedConfig;
       const declared = config.languageOptions.globals ?? {};
@@ -288,7 +384,7 @@ export const app = createApp(App);`;
 
   test.each(RUNTIME_PATHS)(
     "browser_worker_and_i18n_reject_runtime_node_bun %s",
-    (path, environment) => {
+    async (path, environment) => {
       // Stdin with actual file paths exercises the real root config/projects
       // without writing product files or replacing the parser/rule set.
       const negative = `export const forbidden = [process.pid, Bun.version,
@@ -299,9 +395,9 @@ setImmediate, clearImmediate];`;
         worker: 'self.postMessage("ready");',
         library: "export const add = (left: number, right: number): number => left + right;",
       }[environment];
-      const valid = stdinLint(path, positive);
+      const valid = await stdinLint(path, positive);
       expect(valid.status, `${path}: ${valid.stdout}${valid.stderr}`).toBe(0);
-      const invalid = stdinLint(path, negative);
+      const invalid = await stdinLint(path, negative);
       const report = parseReport(invalid.stdout);
       const detail = `${path}: ${JSON.stringify(report)}`;
       expect(invalid.status, detail).not.toBe(0);
@@ -321,7 +417,7 @@ setImmediate, clearImmediate];`;
     },
   );
 
-  test("bun_development_types_and_runtime", () => {
+  test("bun_development_types_and_runtime", async () => {
     const source = `import assert from "node:assert/strict";
 import { mock, test } from "bun:test";
 await mock.module("fvoci-bun-typing-proof", () => ({ value: 1 }));
@@ -330,19 +426,19 @@ test("typed Bun Transpiler and module mock", () => {
   assert.equal(typeof code, "string");
   assert.equal(code.includes("number"), false);
 });`;
-    const [result, report] = lint("ProofBun.test.ts", source);
+    const [result, report] = await lint("ProofBun.test.ts", source);
     expect(result.status, JSON.stringify(report)).toBe(0);
     const path = join(directory, "ProofBun.test.ts");
-    const runtime = run([BUN, "test", "--isolate", path], { timeout: 30_000 });
+    const runtime = await run([BUN, "test", "--isolate", path], { timeout: 30_000 });
     expect(runtime.status, runtime.stdout + runtime.stderr).toBe(0);
     expect(runtime.stderr).toContain("1 pass");
     for (const config of [
       "apps/web/tsconfig.eslint.json",
       "packages/editor/tsconfig.eslint.json",
     ]) {
-      const valid = compiler(config, source, "ts", "tsc");
+      const valid = await compiler(config, source, "ts", "tsc");
       expect(valid.status, `${config}: ${valid.stdout}${valid.stderr}`).toBe(0);
-      const invalid = compiler(
+      const invalid = await compiler(
         config,
         source.replace('loader: "ts"', 'loader: "invalid-loader"'),
         "ts",
@@ -351,12 +447,12 @@ test("typed Bun Transpiler and module mock", () => {
       expect(invalid.status, config).not.toBe(0);
       expect(invalid.stdout + invalid.stderr, config).toContain("TS2322");
     }
-    assertRule(
+    await assertRule(
       "ProofBunUnsafe.test.ts",
       'import { mock } from "bun:test"; mock.module("proof", () => ({ value: 1 }));',
       "@typescript-eslint/no-floating-promises",
     );
-    assertRule(
+    await assertRule(
       "ProofBunUnrelated.test.ts",
       'import { test } from "bun:test"; test("proof", () => { Promise.resolve(1); });',
       "@typescript-eslint/no-floating-promises",
@@ -408,19 +504,19 @@ test("typed Bun Transpiler and module mock", () => {
       "export const save = (): Promise<number> => Promise.resolve(1); void save();",
       "@typescript-eslint/no-floating-promises",
     ],
-  ])("directives_unused_any_and_typed_promises_fail %s", (name, source, rule) => {
-    assertRule(name, source, rule);
+  ])("directives_unused_any_and_typed_promises_fail %s", async (name, source, rule) => {
+    await assertRule(name, source, rule);
   });
 
-  test("dynamic_slots_have_no_unused_false_positive", () => {
+  test("dynamic_slots_have_no_unused_false_positive", async () => {
     const source = `<script setup lang="ts">
 import ProofChild from "./ProofChild.vue";
 const slotName = "default";
 </script>
 <template><ProofChild label="ok"><template #[slotName]="{ row }"><span>{{ row.label }}</span></template></ProofChild></template>`;
-    const [result, report] = lint("ProofDynamic.vue", source);
+    const [result, report] = await lint("ProofDynamic.vue", source);
     expect(result.status, JSON.stringify(report)).toBe(0);
-    const compiled = compiler(
+    const compiled = await compiler(
       "apps/web/tsconfig.vue.json",
       source.replace("#[slotName]", "#[missingSlotName]"),
     );
@@ -430,16 +526,16 @@ const slotName = "default";
 
   test.each(["packages/editor/src/export/docx.ts", "packages/editor/src/export/pptx.ts"])(
     "exact_development_export_buffer_contract %s",
-    (path) => {
-      const valid = stdinLint(path, 'export const bytes = Buffer.from("oracle", "utf8");');
+    async (path) => {
+      const valid = await stdinLint(path, 'export const bytes = Buffer.from("oracle", "utf8");');
       expect(valid.status, `${path}: ${valid.stdout}${valid.stderr}`).toBe(0);
-      const config = JSON.parse(printConfig(path).stdout) as PrintedConfig;
+      const config = JSON.parse((await printConfig(path)).stdout) as PrintedConfig;
       expect(config.languageOptions.globals?.Buffer, path).toBe("readonly");
       const rule = ruleOptions(config, "no-restricted-globals");
       expect(sorted(new Set(rule.globals)), path).toEqual(
         sorted(NODE_RUNTIME_GLOBALS.filter((name) => name !== "Buffer")),
       );
-      const invalid = stdinLint(
+      const invalid = await stdinLint(
         path,
         "export const forbidden = [process.pid, Bun.version, globalThis.process.pid, globalThis.Bun.version];",
       );
@@ -462,35 +558,35 @@ const slotName = "default";
     "packages/editor/src/export/limits.ts",
     "apps/web/src/features/attachments/hwp-worker.ts",
     "packages/i18n/src/index.ts",
-  ])("exact_development_export_buffer_contract browser_path %s", (path) => {
-    const result = stdinLint(path, "export const bytes = Buffer.alloc(0);");
+  ])("exact_development_export_buffer_contract browser_path %s", async (path) => {
+    const result = await stdinLint(path, "export const bytes = Buffer.alloc(0);");
     const report = parseReport(result.stdout);
     const detail = `${path}: ${JSON.stringify(report)}`;
     expect(result.status, detail).not.toBe(0);
     expect(ruleIds(report).has("no-restricted-globals"), detail).toBe(true);
   });
 
-  test("formatter_keeps_import_order_text_and_tailwind", () => {
-    let result = run([...PRETTIER, "--stdin-filepath", "order.ts"], {
+  test("formatter_keeps_import_order_text_and_tailwind", async () => {
+    let result = await run([...PRETTIER, "--stdin-filepath", "order.ts"], {
       input: 'import "./z.css";\nimport "./a.css";\nexport const value = 1;\n',
     });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.indexOf('"./z.css"')).toBeGreaterThanOrEqual(0);
     expect(result.stdout.indexOf('"./z.css"')).toBeLessThan(result.stdout.indexOf('"./a.css"'));
-    result = run([...PRETTIER, "--stdin-filepath", "text.vue"], {
+    result = await run([...PRETTIER, "--stdin-filepath", "text.vue"], {
       input:
         "<template><p>before <strong>middle</strong> after</p><pre>  keep\n spacing </pre></template>",
     });
     expect(result.stdout).toContain("before <strong>middle</strong> after");
     expect(result.stdout).toContain("  keep\n spacing ");
-    result = run([...PRETTIER, "--stdin-filepath", "proof.css"], {
+    result = await run([...PRETTIER, "--stdin-filepath", "proof.css"], {
       input:
         '@import "tailwindcss" source(none);\n@source "./";\n@theme { --color-brand: #123456; }\n@utility proof { @apply flex; }\n',
     });
     expect(result.status, result.stderr).toBe(0);
   });
 
-  test("generated_sfc_types_and_failed_refresh_have_no_waiver", () => {
+  test("generated_sfc_types_and_failed_refresh_have_no_waiver", async () => {
     const component = writeSource(
       "ProofGenerated.vue",
       `<script setup lang="ts">
@@ -509,7 +605,7 @@ defineProps<{ label: string }>();
       }),
     );
     const prepare = prepareScript("prepare.mjs", project, output);
-    let emitted = run([BUN, "--bun", prepare]);
+    let emitted = await run([BUN, "--bun", prepare]);
     expect(emitted.status, emitted.stdout + emitted.stderr).toBe(0);
     const declaration = join(output, "ProofGenerated.vue.d.ts");
     expect(existsSync(declaration) && statSync(declaration).isFile()).toBe(true);
@@ -536,13 +632,13 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
       "--parser-options",
       JSON.stringify({ project: [lintProject] }),
     ];
-    const typed = run(args);
+    const typed = await run(args);
     expect(typed.status, typed.stdout + typed.stderr).toBe(0);
     writeFileSync(
       consumer,
       readFileSync(consumer, "utf8").replace("value.$props.label", "value.$props.label.missing"),
     );
-    const invalid = run([
+    const invalid = await run([
       BUN,
       "--bun",
       join(ROOT, "node_modules/.bin/tsc"),
@@ -561,9 +657,9 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
       component,
       readFileSync(component, "utf8").replace("label: string", "label: any"),
     );
-    emitted = run([BUN, "--bun", prepare]);
+    emitted = await run([BUN, "--bun", prepare]);
     expect(emitted.status, emitted.stdout + emitted.stderr).toBe(0);
-    const unsafe = run(args);
+    const unsafe = await run(args);
     expect(unsafe.status).not.toBe(0);
     expect(ruleIds(parseReport(unsafe.stdout)).has("@typescript-eslint/no-unsafe-return")).toBe(
       true,
@@ -573,33 +669,33 @@ export function read(value: InstanceType<typeof ProofGenerated>): string { retur
       component,
       '<script setup lang="ts">defineProps<{ label: string }>();</script><template><p>{{ label.toFixed() }}</p></template>',
     );
-    const failed = run([BUN, "--bun", prepare]);
+    const failed = await run([BUN, "--bun", prepare]);
     expect(failed.status).not.toBe(0);
     expect(failed.stdout + failed.stderr).toContain("TS2551");
     expect(existsSync(declaration)).toBe(false);
-    const missing = run(args);
+    const missing = await run(args);
     expect(missing.status).not.toBe(0);
     expect(ruleIds(parseReport(missing.stdout)).has("@typescript-eslint/no-unsafe-return")).toBe(
       true,
     );
   });
 
-  test("indexed_access_preserves_missing_route_fallbacks", () => {
+  test("indexed_access_preserves_missing_route_fallbacks", async () => {
     const source = `<script setup lang="ts">
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 const route = useRoute();
 const slug = computed(() => String(route.params.slug ?? ""));
 </script><template><p>{{ slug }}</p></template>`;
-    let [result, report] = lint("ProofRoute.vue", source);
+    let [result, report] = await lint("ProofRoute.vue", source);
     expect(result.status, JSON.stringify(report)).toBe(0);
     const dictionary =
       'export function read(values: Record<string, string>): string { return values.slug ?? ""; }';
-    [result, report] = lint("ProofDictionary.ts", dictionary);
+    [result, report] = await lint("ProofDictionary.ts", dictionary);
     expect(result.status, JSON.stringify(report)).toBe(0);
-    const valid = compiler("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc");
+    const valid = await compiler("apps/web/tsconfig.eslint.json", dictionary, "ts", "tsc");
     expect(valid.status, valid.stdout + valid.stderr).toBe(0);
-    const invalid = compiler(
+    const invalid = await compiler(
       "apps/web/tsconfig.eslint.json",
       dictionary.replace('values.slug ?? ""', "values.slug"),
       "ts",
@@ -608,14 +704,14 @@ const slug = computed(() => String(route.params.slug ?? ""));
     expect(invalid.status).not.toBe(0);
     expect(invalid.stdout + invalid.stderr).toContain("TS2322");
     expect(invalid.stdout + invalid.stderr).toContain("undefined");
-    assertRule(
+    await assertRule(
       "ProofKnownField.ts",
       'export function read(value: { slug: string }): string { return value.slug ?? ""; }',
       "@typescript-eslint/no-unnecessary-condition",
     );
   });
 
-  test("multiple_declaration_projects_fail_closed_together", () => {
+  test("multiple_declaration_projects_fail_closed_together", async () => {
     const app = writeSource(
       "ProofApp.vue",
       `<script setup lang="ts">
@@ -648,7 +744,7 @@ defineProps<NodeViewProps>();
       projects.push(project);
     }
     const prepare = prepareScript("prepare-combined.mjs", projects, output);
-    const emitted = run([BUN, "--bun", prepare]);
+    const emitted = await run([BUN, "--bun", prepare]);
     expect(emitted.status, emitted.stdout + emitted.stderr).toBe(0);
     for (const name of ["ProofApp.vue.d.ts", "ProofEditor.vue.d.ts"]) {
       const path = join(output, name);
@@ -682,18 +778,18 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
       "--parser-options",
       JSON.stringify({ project: [lintProject] }),
     ];
-    const typed = run(args);
+    const typed = await run(args);
     expect(typed.status, typed.stdout + typed.stderr).toBe(0);
     // Reject the second project after the first has emitted fresh output.
     writeFileSync(
       app,
       '<script setup lang="ts">const value: number = "bad";</script><template><p>{{ value }}</p></template>',
     );
-    const failed = run([BUN, "--bun", prepare]);
+    const failed = await run([BUN, "--bun", prepare]);
     expect(failed.status).not.toBe(0);
     expect(failed.stdout + failed.stderr).toContain("TS2322");
     expect(existsSync(output)).toBe(false);
-    const missing = run(args);
+    const missing = await run(args);
     expect(missing.status).not.toBe(0);
     const reported = messages(parseReport(missing.stdout));
     expect(
@@ -703,7 +799,7 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
     ).toBe(2);
   });
 
-  test("node_test_runner_failure_propagation_and_no_waiver", () => {
+  test("node_test_runner_failure_propagation_and_no_waiver", async () => {
     for (const [name, body, expected] of [
       ["Pass", '() => { if (Number("1") !== 1) throw new Error("unexpected"); }', 0],
       ["Throw", '() => { throw new Error("node-test-throw-proof"); }', 1],
@@ -713,23 +809,26 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
         `NodeRunner${name}.test.ts`,
         `import test from "node:test"; test("${name}", ${body});`,
       );
-      const runtime = run([BUN, "test", "--isolate", path], { timeout: 30_000 });
+      const runtime = await run([BUN, "test", "--isolate", path], { timeout: 30_000 });
       expect(runtime.status, `${name}: ${runtime.stdout}${runtime.stderr}`).toBe(expected);
       expect(runtime.stderr, name).toContain(expected === 0 ? "1 pass" : "1 fail");
     }
     // Installed TestContext.test has the SAME typeof test as registration;
     // a known-safe-call type allowance would also mask an unsafe subtest.
-    assertRule(
+    await assertRule(
       "NodeUnhandled.test.ts",
       'import test from "node:test"; await test("parent", (t) => { t.test("child", () => Promise.resolve()); });',
       "@typescript-eslint/no-floating-promises",
     );
     const unrelated =
       'import test from "node:test"; await test("parent", () => { Promise.reject(new Error("unhandled-promise-proof")); });';
-    assertRule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises");
-    const runtime = run([BUN, "test", "--isolate", join(directory, "NodeUnrelated.test.ts")], {
-      timeout: 30_000,
-    });
+    await assertRule("NodeUnrelated.test.ts", unrelated, "@typescript-eslint/no-floating-promises");
+    const runtime = await run(
+      [BUN, "test", "--isolate", join(directory, "NodeUnrelated.test.ts")],
+      {
+        timeout: 30_000,
+      },
+    );
     expect(runtime.status, runtime.stdout + runtime.stderr).not.toBe(0);
     expect(runtime.stderr).toContain("unhandled-promise-proof");
   });
@@ -738,15 +837,15 @@ export function read(value: InstanceType<typeof ProofApp>): string { return valu
     "apps/web/src/vue/features/settings/toggle.ts",
     "apps/web/src/features/attachments/hwp-worker.ts",
     "packages/i18n/src/index.ts",
-  ])("qualified_runtime_globals_and_local_names %s", (path) => {
-    const valid = stdinLint(
+  ])("qualified_runtime_globals_and_local_names %s", async (path) => {
+    const valid = await stdinLint(
       path,
       `export function local(process: { pid: number }): number { return process.pid; }
 export function localObject(window: { process: { pid: number } }): number { return window.process.pid; }
 export const label = { process: "local", Bun: "local" };`,
     );
     expect(valid.status, `${path}: ${valid.stdout}${valid.stderr}`).toBe(0);
-    const invalid = stdinLint(
+    const invalid = await stdinLint(
       path,
       `export const qualified = [globalThis.process.pid,
 window.process.pid, self.process.pid, globalThis.Bun.version,
@@ -769,31 +868,34 @@ window.Bun.version, self.Bun.version];`,
     ).toBe(true);
   });
 
-  test("runtime_and_positive_sfc", () => {
-    const runtime = run([
+  test("runtime_and_positive_sfc", async () => {
+    const runtime = await run([
       BUN,
       "-e",
       "console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))",
     ]);
     expect((JSON.parse(runtime.stdout) as { bun: string }).bun).toBe("1.4.2");
-    const [result, report] = lint("ProofValid.vue", VALID);
+    const [result, report] = await lint("ProofValid.vue", VALID);
     expect(result.status, JSON.stringify(report)).toBe(0);
     for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
-      const compiled = compiler(config, VALID);
+      const compiled = await compiler(config, VALID);
       expect(compiled.status, `${config}: ${compiled.stdout}${compiled.stderr}`).toBe(0);
     }
-    const formatted = run([...PRETTIER, "--stdin-filepath", join(directory, "ProofValid.vue")], {
-      input: VALID,
-    });
+    const formatted = await run(
+      [...PRETTIER, "--stdin-filepath", join(directory, "ProofValid.vue")],
+      {
+        input: VALID,
+      },
+    );
     expect(formatted.status, formatted.stderr).toBe(0);
     expect(formatted.stdout).toContain("color: red;\n");
     expect(formatted.stdout).toContain(':key="row.id"');
     expect(formatted.stdout).toContain('emit("select", id);\n');
     const path = writeSource("ProofValid.vue", formatted.stdout);
-    const checked = run([...PRETTIER, "--check", path]);
+    const checked = await run([...PRETTIER, "--check", path]);
     expect(checked.status, checked.stdout + checked.stderr).toBe(0);
     writeFileSync(path, VALID);
-    expect(run([...PRETTIER, "--check", path]).status).not.toBe(0);
+    expect((await run([...PRETTIER, "--check", path])).status).not.toBe(0);
   });
 
   const strictCases: [string, string][] = [
@@ -826,8 +928,8 @@ window.Bun.version, self.Bun.version];`,
     ),
   )(
     "strict_script_template_props_emits_and_slots_types %s case %d %s",
-    (config, _index, expected, source) => {
-      const result = compiler(config, source);
+    async (config, _index, expected, source) => {
+      const result = await compiler(config, source);
       const detail = `${config} ${expected}: ${result.stdout}${result.stderr}`;
       expect(result.status, detail).not.toBe(0);
       expect(result.stdout + result.stderr, detail).toContain(expected);
@@ -836,14 +938,14 @@ window.Bun.version, self.Bun.version];`,
 
   test.each(["apps/web/tsconfig.app.json", "packages/editor/tsconfig.json"])(
     "strict_script_template_props_emits_and_slots_types tsc %s",
-    (config) => {
-      const result = compiler(config, 'export const value: number = "bad";', "ts", "tsc");
+    async (config) => {
+      const result = await compiler(config, 'export const value: number = "bad";', "ts", "tsc");
       expect(result.status, config).not.toBe(0);
       expect(result.stdout, config).toContain("TS2322");
     },
   );
 
-  test("unprepared_sfc_import_has_no_fake_fallback", () => {
+  test("unprepared_sfc_import_has_no_fake_fallback", async () => {
     writeSource(
       "ProofNode.vue",
       `<script setup lang="ts">
@@ -855,11 +957,11 @@ defineProps<NodeViewProps>();
 import { VueNodeViewRenderer } from "@tiptap/vue-3";
 export const renderer = VueNodeViewRenderer(ProofNode);`;
     // Document the plain-TS program's SFC import gap without a shim/waiver.
-    assertRule("ProofSfcImport.ts", source, "@typescript-eslint/no-unsafe-argument");
+    await assertRule("ProofSfcImport.ts", source, "@typescript-eslint/no-unsafe-argument");
     for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {
-      const typed = compiler(config, source, "ts", "vue-tsc");
+      const typed = await compiler(config, source, "ts", "vue-tsc");
       expect(typed.status, `${config}: ${typed.stdout}${typed.stderr}`).toBe(0);
-      const broken = compiler(
+      const broken = await compiler(
         config,
         `${source}\nexport const invalid: number = "bad";`,
         "ts",
@@ -870,8 +972,8 @@ export const renderer = VueNodeViewRenderer(ProofNode);`;
     }
   });
 
-  test("unused_disables_warnings_and_unmatched_paths_fail", () => {
-    let [result, report] = lint(
+  test("unused_disables_warnings_and_unmatched_paths_fail", async () => {
+    let [result, report] = await lint(
       "ProofDisable.ts",
       "// eslint-disable-next-line no-debugger\nexport const value = 1;\n",
     );
@@ -882,7 +984,7 @@ export const renderer = VueNodeViewRenderer(ProofNode);`;
       ),
       JSON.stringify(report),
     ).toBe(true);
-    [result, report] = lint(
+    [result, report] = await lint(
       "ProofWarning.vue",
       "<template><div v-html=\"'content'\" /></template>",
     );
@@ -896,21 +998,21 @@ export const renderer = VueNodeViewRenderer(ProofNode);`;
       detail,
     ).toBeGreaterThan(0);
     expect(result.status).not.toBe(0);
-    expect(run([...ESLINT, join(directory, "missing.ts")]).status).not.toBe(0);
-    expect(run([...PRETTIER, "--check", join(directory, "missing.ts")]).status).not.toBe(0);
+    expect((await run([...ESLINT, join(directory, "missing.ts")])).status).not.toBe(0);
+    expect((await run([...PRETTIER, "--check", join(directory, "missing.ts")])).status).not.toBe(0);
   });
 
-  test("y_text_declared_string_contract_without_rule_allowance", () => {
+  test("y_text_declared_string_contract_without_rule_allowance", async () => {
     const source =
       'import * as Y from "yjs"; export function text(value: Y.Text): string { return value.toJSON(); }';
-    const [result, report] = lint("ProofYText.ts", source);
+    const [result, report] = await lint("ProofYText.ts", source);
     expect(result.status, JSON.stringify(report)).toBe(0);
-    assertRule(
+    await assertRule(
       "ProofYTextInherited.ts",
       source.replace("value.toJSON()", "value.toString()"),
       "@typescript-eslint/no-base-to-string",
     );
-    assertRule(
+    await assertRule(
       "ProofObjectString.ts",
       "export function text(value: object): string { return value.toString(); }",
       "@typescript-eslint/no-base-to-string",
