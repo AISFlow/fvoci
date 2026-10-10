@@ -10,8 +10,9 @@
 //! output and its receipts are printed before the status and the exact
 //! 4-passed count are checked; the run root is always removed.
 //!
-//! It must run as root: the caller runs the already built binary under sudo
-//! and never runs Cargo as root.
+//! It must run as root, from the workspace (every file it changes lies under
+//! the current directory): the caller runs the already built binary under
+//! sudo and never runs Cargo as root.
 //!
 //! Exit status: 0, 1 (refused or failed), 2 (usage).
 
@@ -167,11 +168,23 @@ fn failed(path: &Path) -> impl Fn(std::io::Error) -> String + '_ {
     move |e| format!("{}: {e}", path.display())
 }
 
-/// Open an absolute path whose final component is itself a regular file: not
-/// a symlink, and a FIFO is refused without blocking on its open.
-fn open_regular(path: &Path) -> Result<File, String> {
+/// Open an absolute path under the workspace (the current directory) whose
+/// final component is itself a regular file: not a symlink, and a FIFO is
+/// refused without blocking on its open.
+fn open_regular(path: &Path, workspace: &Path) -> Result<File, String> {
     if !path.is_absolute() {
         return Err(format!("{} is not absolute", path.display()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", path.display()))?;
+    let parent = parent.canonicalize().map_err(failed(parent))?;
+    if !parent.starts_with(workspace) {
+        return Err(format!(
+            "{} is outside the workspace {}",
+            path.display(),
+            workspace.display()
+        ));
     }
     let file = OpenOptions::new()
         .read(true)
@@ -308,7 +321,9 @@ struct Hashes {
 fn execute(artifacts: &Path, engine: &Path) -> Result<(), String> {
     let text = fs::read_to_string(artifacts).map_err(failed(artifacts))?;
     let selection = select(&text)?;
-    let open = open_regular;
+    let cwd = Path::new(".");
+    let workspace = cwd.canonicalize().map_err(failed(cwd))?;
+    let open = |path: &Path| open_regular(path, &workspace);
     let server = open(&selection.server)?;
     let migrate = open(&selection.migrate)?;
     let test = open(&selection.test)?;

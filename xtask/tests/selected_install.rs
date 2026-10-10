@@ -166,7 +166,7 @@ fn artifact_selection_refusals_change_nothing() {
 fn symlinked_missing_or_nonregular_files_refuse_before_ownership_changes() {
     not_root();
     type Setup = fn(&Path, &Path) -> PathBuf;
-    let cases: [(Setup, &str); 5] = [
+    let cases: [(Setup, &str); 6] = [
         (
             |root, _| {
                 let fifo = root.join("engine-fifo");
@@ -177,6 +177,7 @@ fn symlinked_missing_or_nonregular_files_refuse_before_ownership_changes() {
             },
             "engine-fifo is not a regular file",
         ),
+        (|_, _| PathBuf::from("/bin/sh"), "is outside the workspace"),
         (
             |root, _| {
                 let test = root.join("target/db-tests/debug/deps/selected_install_lifetime");
