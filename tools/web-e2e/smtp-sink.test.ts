@@ -61,7 +61,7 @@ async function startSink(): Promise<Sink> {
 }
 
 type Client = {
-  send(text: string): void;
+  send(text: string | Buffer): void;
   reply(): Promise<string>;
   end(): void;
   closed: Promise<void>;
@@ -107,7 +107,10 @@ async function connect(port: number): Promise<Client> {
   });
   return {
     send(text) {
-      pending = Buffer.concat([pending, Buffer.from(text, "utf8")]);
+      pending = Buffer.concat([
+        pending,
+        typeof text === "string" ? Buffer.from(text, "utf8") : text,
+      ]);
       pump(socket);
     },
     end() {
@@ -239,8 +242,9 @@ describe("smtp-sink CLI", () => {
       ["next@example.com", "b@example.com"],
     ]);
     expect(mails[0]?.data).toBe("Subject: plain\n\nline");
-    expect(mails[0]?.text).toBe("Subject: plain\n\nline");
-    expect(mails[1]?.text).toBe("Subject: café ok\n\nsoftbreak 안");
+    // postal-mime keeps the body's last line break (see the intent table).
+    expect(mails[0]?.text).toBe("Subject: plain\n\nline\n");
+    expect(mails[1]?.text).toBe("Subject: café ok\n\nsoftbreak 안\n");
 
     sink.proc.kill("SIGINT");
     expect(await sink.proc.exited).toBe(130);
@@ -282,41 +286,80 @@ describe("smtp-sink CLI", () => {
 });
 
 describe("decodedText", () => {
-  test("header and body decoding vectors", () => {
-    expect(decodedText("")).toBe("Subject: \n\n");
-    expect(decodedText("Subject: a  b\n\nbody")).toBe("Subject: a  b\n\nbody");
-    expect(decodedText("Subject: =?utf-8?b?7JWI?= tail\n\nx")).toBe("Subject: 안 tail\n\nx");
-    expect(decodedText("Content-Type: text/html\n\n<p>x</p>")).toBe("Subject: \n\n");
-    expect(decodedText("Content-Transfer-Encoding: base64\n\n7JWI")).toBe(
-      "Subject: \n\n\ufffd\ufffd\ufffd",
-    );
-    expect(decodedText("not a header\nSubject: no")).toBe("Subject: \n\nnot a header\nSubject: no");
-    // Vectors checked against the replaced Python sink (email.policy.default).
-    expect(decodedText("Subject: =?utf-8?b?7JWI?=x=?utf-8?b?7JWI?= =?utf-8?b?7JWI?=\n\n")).toBe(
-      "Subject: 안x안안\n\n",
-    );
-    expect(decodedText("Subject: =?utf-8?q?=ZZ?= =?x-bogus?b?7JWI?=\n\n")).toBe(
-      "Subject: =?utf-8?q?=ZZ?= 안\n\n",
+  // Well-formed vectors on which the replaced Python sink (email.policy.default)
+  // agrees except for the body's kept last line break. Malformed input and
+  // multipart joining differ; those rows are in the intent table.
+  test("header and body decoding vectors", async () => {
+    expect(await decodedText("")).toBe("Subject: \n\n");
+    expect(await decodedText("Subject: a  b\n\nbody")).toBe("Subject: a  b\n\nbody\n");
+    expect(await decodedText("Subject: =?utf-8?b?7JWI?= tail\n\nx")).toBe(
+      "Subject: 안 tail\n\nx\n",
     );
     expect(
-      decodedText(
-        "Subject: =?utf-8?q?=ED=95=9C_ok?=\nContent-Type: text/plain; charset=latin-1\n" +
-          "Content-Transfer-Encoding: quoted-printable\n\n=E9=80",
+      await decodedText("Subject: =?utf-8?b?7JWI?=x=?utf-8?b?7JWI?= =?utf-8?b?7JWI?=\n\n"),
+    ).toBe("Subject: 안x안안\n\n");
+    expect(await decodedText("Content-Type: text/html\n\n<p>x</p>")).toBe("Subject: \n\n");
+    expect(
+      await decodedText(
+        "Subject: =?iso-8859-1?q?caf=E9?=\nContent-Type: text/plain; charset=iso-8859-1\n" +
+          "Content-Transfer-Encoding: quoted-printable\n\ncaf=E9",
       ),
-    ).toBe("Subject: 한 ok\n\né\u0080");
-    expect(
-      decodedText("Content-Transfer-Encoding: quoted-printable\n\nsoft=\nbreak==  \nend=ZZ="),
-    ).toBe("Subject: \n\nsoftbreak=  \nend=ZZ");
-    // Intended difference: identity transfer encodings keep received non-ASCII text.
-    expect(decodedText("Subject: x\n\né")).toBe("Subject: x\n\né");
+    ).toBe("Subject: café\n\ncafé\n");
   });
 
-  test("an unknown body charset fails like the Python handler", async () => {
-    expect(() => decodedText("Content-Type: text/plain; charset=x-bogus\n\nplain")).toThrow();
+  // Inputs the hand-written decoder got wrong (PR #400 review B2).
+  test("plain body selection and charset parameters", async () => {
+    const link = "https://example.invalid/reset-password?token=abc_-1";
+    expect(
+      await decodedText(
+        "Subject: multipart\nContent-Type: multipart/alternative; boundary=x\n\n--x\n" +
+          `Content-Type: text/plain; charset=utf-8\n\n${link}\n--x\n` +
+          "Content-Type: text/html; charset=utf-8\n\n<p>html</p>\n--x--",
+      ),
+    ).toBe(`Subject: multipart\n\n${link}\n`);
+    expect(
+      await decodedText(
+        "Subject: attachment\nContent-Type: text/plain; charset=utf-8\n" +
+          `Content-Disposition: attachment\n\n${link}`,
+      ),
+    ).toBe("Subject: attachment\n\n");
+    expect(
+      await decodedText(
+        "Subject: comment\nContent-Type: text/plain; charset=utf-8 (comment)\n" +
+          "Content-Transfer-Encoding: base64\n\n7JWI",
+      ),
+    ).toBe("Subject: comment\n\n안");
+  });
+
+  test("the declared charset applies to the received bytes", async () => {
     const sink = await startSink();
     const client = await connect(sink.port);
     expect(await client.reply()).toBe("220 fvoci-smtp-sink");
-    client.send("DATA\r\nContent-Type: text/plain; charset=x-bogus\r\n\r\nplain\r\n.\r\nNOOP\r\n");
+    expect(await exchange(client, "DATA")).toBe("354 go");
+    client.send(
+      Buffer.concat([
+        Buffer.from("Subject: latin\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\ncaf"),
+        Buffer.from([0xe9]),
+        Buffer.from("\r\n.\r\n"),
+      ]),
+    );
+    expect(await client.reply()).toBe("250 ok");
+    expect(await exchange(client, "QUIT")).toBe("221 bye");
+    await client.closed;
+    const [mail] = captured(sink);
+    expect(mail?.data).toBe("Subject: latin\nContent-Type: text/plain; charset=iso-8859-1\n\ncaf�");
+    expect(mail?.text).toBe("Subject: latin\n\ncafé\n");
+  });
+
+  test("a message the parser rejects drops the connection without a record", async () => {
+    let nested = "";
+    for (let depth = 0; depth < 300; depth += 1) {
+      nested += `Content-Type: multipart/mixed; boundary=b${String(depth)}\r\n\r\n--b${String(depth)}\r\n`;
+    }
+    const sink = await startSink();
+    const client = await connect(sink.port);
+    expect(await client.reply()).toBe("220 fvoci-smtp-sink");
+    client.send(`DATA\r\n${nested}\r\nx\r\n.\r\nNOOP\r\n`);
     expect(await client.reply()).toBe("354 go");
     await client.closed;
     const after = await client.reply().then(
