@@ -1271,7 +1271,8 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
                          'scripts/selected-backend-ci/web-build-handoff.py',
                          'scripts/run-selected-backend-e2e.py',
                          'tools/web-e2e/run.ts', 'tools/web-e2e/groups.ts',
-                         'tools/web-e2e/labels.ts', 'tools/web-e2e/proc.ts'):
+                         'tools/web-e2e/labels.ts', 'tools/web-e2e/proc.ts',
+                         'tools/web-e2e/child-env.ts'):
                 destination = root/name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes((ROOT/name).read_bytes())

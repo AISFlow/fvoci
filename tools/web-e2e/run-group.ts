@@ -138,7 +138,7 @@ async function main() {
   const splits = timerInvocations(args);
   if (splits) {
     for (const extra of splits) {
-      const status = await commandStatus(["bun", import.meta.path, ...args, ...extra], {
+      const status = await commandStatus([process.execPath, import.meta.path, ...args, ...extra], {
         env: process.env,
         stdout: "inherit",
         stderr: "inherit",
@@ -206,7 +206,7 @@ async function main() {
         `NET_MONITOR_LOG=${netMonitorLog}`,
         `NET_MARKS_LOG=${netMarksLog}`,
         `NET_MONITOR_PID=${monitor?.pid ?? ""}`,
-        "bun",
+        process.execPath,
         join(import.meta.dir, "inner.ts"),
         ...args,
       ],

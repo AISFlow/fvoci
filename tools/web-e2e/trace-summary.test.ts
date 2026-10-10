@@ -302,7 +302,7 @@ describe("trace summary", () => {
     first.focus.activeTag = secret;
     first.native.positions = { unknown: secret };
     first.native.text = secret;
-    const safe = diagnostic(archive({ payload: data })) as {
+    const safe = diagnostic(archive({ payload: data })) as unknown as {
       tail: {
         stage: string;
         auth: { scope: string };

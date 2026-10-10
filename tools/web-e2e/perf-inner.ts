@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { playwrightChildEnv } from "./child-env.ts";
 import { command, commandStatus } from "./proc.ts";
 import { redactStartupLog } from "./redact.ts";
 
@@ -210,7 +211,7 @@ async function main() {
   );
   const status = await commandStatus(
     [
-      "bun",
+      process.execPath,
       "--bun",
       "x",
       "--no-install",
@@ -221,12 +222,12 @@ async function main() {
     ],
     {
       cwd: join(root, "apps/web"),
-      env: {
+      env: playwrightChildEnv({
         ...process.env,
         PLAYWRIGHT_BASE_URL: baseUrl,
         FVOCI_PERF_RUN_DIR: runDir,
         CARGO_TARGET_DIR: join(runDir, "fixture-target"),
-      },
+      }),
       stdout: "inherit",
       stderr: "inherit",
     },

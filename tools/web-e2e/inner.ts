@@ -3,8 +3,17 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import { playwrightChildEnv } from "./child-env.ts";
 import { command, commandStatus } from "./proc.ts";
 import { redactStartupLog } from "./redact.ts";
 
@@ -106,7 +115,7 @@ async function settleNetwork() {
 }
 
 function statMtime(path: string): number {
-  return require("node:fs").statSync(path).mtimeMs / 1000;
+  return statSync(path).mtimeMs / 1000;
 }
 
 async function runPlaywright(args: string[], root: string): Promise<number> {
@@ -118,9 +127,10 @@ async function runPlaywright(args: string[], root: string): Promise<number> {
   const before = eventCount(process.env.NET_MONITOR_LOG);
   netMark("playwright start");
   const status = await commandStatus(
-    ["bun", "--bun", "x", "--no-install", "playwright", "test", ...args],
+    [process.execPath, "--bun", "x", "--no-install", "playwright", "test", ...args],
     {
       cwd: join(root, "apps/web"),
+      env: playwrightChildEnv(),
       stdout: "inherit",
       stderr: "inherit",
       stdin: "ignore",
@@ -270,9 +280,9 @@ async function main() {
   const portFile = join(runDir, "smtp.port");
   writeFileSync(capture, "");
   smtp = spawn(
-    "bun",
+    process.execPath,
     [join(import.meta.dir, "smtp-sink.ts"), "--capture", capture, "--port-file", portFile],
-    { stdio: "inherit" },
+    { stdio: "inherit", env: playwrightChildEnv() },
   );
   const deadline = Date.now() + 10_000;
   while (!existsSync(portFile) || readFileSync(portFile, "utf8").trim() === "") {

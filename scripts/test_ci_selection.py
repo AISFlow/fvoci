@@ -3281,7 +3281,7 @@ class ImpactUnionTest(unittest.TestCase):
             "apps/web/src/generated/api.test.ts",
             "apps/web/src/fixtures/backend.sql",
             "apps/web/src/new-contract.json",
-            "scripts/run-web-e2e.sh",
+            "tools/web-e2e/run.ts",
             "scripts/ci_selection.py",
             "src/auth.rs",
             "migrations/045.sql",

@@ -400,7 +400,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         tool("python3"),
         join(templates, "current-" + lane + "-driver.py"),
       ]);
-    const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
+    const caller = readFileSync(join(root, "tools/web-e2e/run.ts"), "utf8");
     for (const mode of modes.filter((value) => value !== "stage"))
       expect(caller).toContain('scripts/run-selected-backend-e2e.py" ' + mode);
     expect(caller.match(/scripts\/run-selected-backend-e2e\.py" stage/g)).toHaveLength(4);

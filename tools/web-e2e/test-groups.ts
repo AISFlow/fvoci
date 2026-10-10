@@ -6,7 +6,7 @@ import { commandStatus } from "./proc.ts";
 
 const root = join(import.meta.dir, "../..");
 const verify = await commandStatus(
-  ["bun", join(root, "tools/web-e2e/groups.ts"), "verify", "--shards", "8"],
+  [process.execPath, join(root, "tools/web-e2e/groups.ts"), "verify", "--shards", "8"],
   {
     cwd: root,
     stdout: "inherit",
@@ -14,7 +14,7 @@ const verify = await commandStatus(
   },
 );
 if (verify !== 0) process.exit(verify);
-const tests = await commandStatus(["bun", "test", "./tools/web-e2e"], {
+const tests = await commandStatus([process.execPath, "test", "./tools/web-e2e"], {
   cwd: root,
   stdout: "inherit",
   stderr: "inherit",

@@ -23,8 +23,8 @@ export type CommandOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   stdin?: "inherit" | "ignore";
-  stdout?: "inherit" | "pipe";
-  stderr?: "inherit" | "pipe";
+  stdout?: "inherit" | "pipe" | "ignore";
+  stderr?: "inherit" | "pipe" | "ignore";
 };
 
 function statusOf(code: number | null, signal: NodeJS.Signals | null): number {
@@ -40,11 +40,7 @@ export function command(args: string[], options: CommandOptions = {}): Promise<C
     const child = spawn(args[0] ?? "", args.slice(1), {
       cwd: options.cwd,
       env: options.env ?? process.env,
-      stdio: [
-        options.stdin ?? "ignore",
-        stdoutMode === "inherit" ? "inherit" : "pipe",
-        stderrMode === "inherit" ? "inherit" : "pipe",
-      ],
+      stdio: [options.stdin ?? "ignore", stdoutMode, stderrMode],
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

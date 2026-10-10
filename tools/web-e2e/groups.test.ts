@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,7 +31,7 @@ function playwrightFile(...parts: string[]) {
   let directory = join(import.meta.dir, "../../apps/web");
   for (;;) {
     const candidate = join(directory, "node_modules/playwright", ...parts);
-    if (require("node:fs").existsSync(candidate)) return candidate;
+    if (existsSync(candidate)) return candidate;
     const parent = join(directory, "..");
     if (parent === directory) throw new Error("playwright is not installed; run bun ci");
     directory = parent;
@@ -86,8 +86,7 @@ describe("web e2e groups", () => {
     expect(new Set(specs).size).toBe(specs.length);
     expect(new Set(specs)).toEqual(
       new Set(
-        require("node:fs")
-          .readdirSync(directory)
+        readdirSync(directory)
           .filter((name: string) => name.endsWith(".spec.ts"))
           .map((name: string) => `e2e/${name}`),
       ),

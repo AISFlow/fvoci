@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { playwrightChildEnv } from "./child-env.ts";
 import { evidenceDirectory, timerInvocations } from "./labels.ts";
+import { command } from "./proc.ts";
 import { redactServerLog, redactStartupLog } from "./redact.ts";
 import { retainFailureArtifacts } from "./run-group.ts";
 
@@ -102,7 +104,7 @@ describe("web e2e harness contracts", () => {
     const directory = mkdtempSync(join(tmpdir(), "fvoci-retain-"));
     const run = join(directory, "run");
     const evidence = join(run, "playwright-output", "w5-evidence");
-    require("node:fs").mkdirSync(evidence, { recursive: true });
+    mkdirSync(evidence, { recursive: true });
     writeFileSync(join(evidence, "native-proof.json"), '{"fixture":true}');
     writeFileSync(join(evidence, "zoom200.png"), "fixture screenshot bytes");
     const output = join(directory, "github-output");
@@ -126,6 +128,71 @@ describe("web e2e harness contracts", () => {
     );
     if (previous === undefined) delete process.env.GITHUB_OUTPUT;
     else process.env.GITHUB_OUTPUT = previous;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("retained server and net logs drop fixture-secret and keep postgres://redacted", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "fvoci-redact-retain-"));
+    const run = join(directory, "run");
+    const nested = join(run, "owned", "group-b");
+    mkdirSync(nested, { recursive: true });
+    const secret = "postgres://app:fixture-secret@127.0.0.1:5432/db";
+    writeFileSync(join(run, "server.log"), `listening ${secret}\n`);
+    writeFileSync(join(nested, "server.log"), `owned ${secret}\n`);
+    writeFileSync(join(run, "net-monitor.log"), `${secret}\n`);
+    writeFileSync(join(run, "net-marks.log"), "mark\n");
+    const retained = await retainFailureArtifacts({
+      runDir: run,
+      serverLog: join(run, "server.log"),
+      netMonitorLog: join(run, "net-monitor.log"),
+      netMarksLog: join(run, "net-marks.log"),
+      label: "redact-fixture",
+      tempDir: directory,
+    });
+    const files = [
+      join(retained, "server.log"),
+      join(retained, "owned-server", "group-b.log"),
+      join(retained, "net-events.log"),
+    ];
+    for (const path of files) {
+      const text = readFileSync(path, "utf8");
+      expect(text).not.toContain("fixture-secret");
+      expect(text).toContain("postgres://redacted");
+    }
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("playwright and smtp child env drops password, meili, database url, and jest worker id", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "fvoci-child-env-"));
+    const output = join(directory, "env.txt");
+    const env = playwrightChildEnv({
+      PATH: process.env.PATH ?? "",
+      ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+      DATABASE_URL: "postgres://app:fixture-secret@127.0.0.1:5432/db",
+      MEILI_MASTER_KEY: "fixture-secret-meili",
+      PASSWORD_PEPPER_KEYS: "fixture-secret-password",
+      PASSWORD_OTHER: "fixture-secret-password-2",
+      JEST_WORKER_ID: "7",
+      FVOCI_CHILD_ENV_VISIBLE: "kept",
+      FVOCI_CHILD_ENV_OUTPUT: output,
+    });
+    const result = await command(
+      [
+        process.execPath,
+        "-e",
+        "require('node:fs').writeFileSync(process.env.FVOCI_CHILD_ENV_OUTPUT, Object.entries(process.env).map(([key,value]) => key+'='+value).sort().join('\\n'))",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.status).toBe(0);
+    const text = readFileSync(output, "utf8");
+    const names = text.split("\n").map((line) => line.split("=")[0] ?? "");
+    expect(names).toContain("FVOCI_CHILD_ENV_VISIBLE");
+    expect(names).not.toContain("DATABASE_URL");
+    expect(names).not.toContain("MEILI_MASTER_KEY");
+    expect(names).not.toContain("JEST_WORKER_ID");
+    expect(names.some((name) => name.startsWith("PASSWORD"))).toBe(false);
+    expect(text).not.toContain("fixture-secret");
     rmSync(directory, { recursive: true, force: true });
   });
 

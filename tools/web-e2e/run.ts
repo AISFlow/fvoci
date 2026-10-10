@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Web Playwright entrypoint. Same flags and stage lines as the previous shell wrapper.
 
+import { spawn } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
@@ -17,6 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { playwrightChildEnv } from "./child-env.ts";
 import { groupLabel } from "./labels.ts";
 import { shardPlanLines, verifyPlan, DEFAULT_SHARD_COUNT } from "./groups.ts";
 import { command, commandStatus, Fail } from "./proc.ts";
@@ -34,6 +36,12 @@ const lanes = new Set(["install/on", "postgres/on", "sqlite/on", "postgres/off",
 function die(message: string, code = 1): never {
   console.error(message);
   process.exit(code);
+}
+
+function selectedInvocation(repoRoot: string, spec: string, args: string[]): string[] {
+  const mode = /scripts\/run-selected-backend-e2e\.py" ([A-Za-z-]+)/.exec(spec)?.[1];
+  if (!mode || args[0] !== mode) die("selected driver command");
+  return ["python3", join(repoRoot, "scripts/run-selected-backend-e2e.py"), ...args];
 }
 
 async function git(args: string[]): Promise<string> {
@@ -131,7 +139,7 @@ function sourceExports(path: string) {
 async function webBuild() {
   const started = Math.floor(Date.now() / 1000);
   console.error("web-e2e stage=web-build started");
-  const status = await commandStatus(["bun", "--bun", "run", "build"], {
+  const status = await commandStatus([process.execPath, "--bun", "run", "build"], {
     cwd: join(root, "apps/web"),
     stdout: "inherit",
     stderr: "inherit",
@@ -171,9 +179,7 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
     await command(["stat", "-c", "%g", "/var/run/docker.sock"], { stdout: "pipe" })
   ).stdout.trim();
   const permissions = await command(
-    [
-      "python3",
-      join(repo, "scripts/run-selected-backend-e2e.py"),
+    selectedInvocation(repo, 'python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions', [
       "permissions",
       "--output",
       output,
@@ -181,7 +187,7 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
       parent,
       "--docker-gid",
       dockerGid,
-    ],
+    ]),
     { stdout: "pipe", stderr: "inherit" },
   );
   if (permissions.status !== 0) process.exit(permissions.status);
@@ -215,7 +221,6 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
   let configList = "not-run";
   let launcher = "not-run";
   let selected = 0;
-  const driver = join(repo, "scripts/run-selected-backend-e2e.py");
   const preserveList =
     "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB";
   if (process.env.SELECTED_PHASE === "consume") {
@@ -226,7 +231,7 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
     const outFd = openSync(stdoutPath, "wx", 0o600);
     const errFd = openSync(stderrPath, "wx", 0o600);
     const status = await new Promise<number>((done) => {
-      const child = require("node:child_process").spawn(
+      const child = spawn(
         "sudo",
         [
           "--preserve-env=" + preserveList + ",FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH",
@@ -236,11 +241,11 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
           `--groups=${groups}`,
           "env",
           `TMPDIR=${join(output, "tmp")}`,
-          "python3",
-          driver,
-          "config-list",
-          "--output",
-          output,
+          ...selectedInvocation(
+            repo,
+            'python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list',
+            ["config-list", "--output", output],
+          ),
         ],
         { stdio: ["ignore", outFd, errFd] },
       );
@@ -266,12 +271,12 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
         `--groups=${groups}`,
         "env",
         `TMPDIR=${join(output, "tmp")}`,
-        "python3",
-        driver,
-        "run",
-        "--output",
-        output,
-        ...laneArgs,
+        ...selectedInvocation(repo, 'python3 "$ROOT/scripts/run-selected-backend-e2e.py" run', [
+          "run",
+          "--output",
+          output,
+          ...laneArgs,
+        ]),
       ],
       { stdout: "inherit", stderr: "inherit" },
     );
@@ -282,7 +287,7 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
   const ownershipPath = join(safe, "ownership-stage.json");
   const ownFd = openSync(ownershipPath, "w", 0o600);
   ownership = await new Promise<number>((done) => {
-    const child = require("node:child_process").spawn(
+    const child = spawn(
       "sudo",
       [
         `--preserve-env=${preserveList}`,
@@ -290,12 +295,12 @@ async function selectedFooter(pendingStatus: number): Promise<number> {
         "--reuid=1000",
         "--regid=1000",
         `--groups=${groups}`,
-        "python3",
-        driver,
-        "owner-return",
-        "--output",
-        output,
-        ...laneArgs,
+        ...selectedInvocation(repo, 'python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return', [
+          "owner-return",
+          "--output",
+          output,
+          ...laneArgs,
+        ]),
       ],
       { stdio: ["ignore", ownFd, "inherit"] },
     );
@@ -429,7 +434,7 @@ async function runShard(
   for (const line of lines) {
     if (!line.specs.length) die(`shard plan group has no specs: ${JSON.stringify(line)}`);
     const status = await commandStatus(
-      ["bun", join(import.meta.dir, "run-group.ts"), ...line.specs],
+      [process.execPath, join(import.meta.dir, "run-group.ts"), ...line.specs],
       {
         env: {
           ...process.env,
@@ -472,75 +477,83 @@ async function buildArtifacts(committed: boolean, selected: boolean, selectedPha
     ]);
   else if (selected) {
     const output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? "";
-    const driver = join(root, "scripts/run-selected-backend-e2e.py");
-    await must("selected-input-before", ["python3", driver, "record-before", "--output", output]);
-    await must("selected-main", [
-      "python3",
-      driver,
-      "stage",
-      "--output",
-      output,
-      "--stage-name",
-      "main",
-      "--",
-      "cargo",
-      "build",
-      "--locked",
-      "--offline",
-      "--features",
-      "db-tests,api-schema",
-      "--bin",
-      "fvoci-server",
-      "--bin",
-      "fvoci-migrate",
-      "--bin",
-      "fvoci-e2e-fixture",
-      "--message-format=json-render-diagnostics",
-    ]);
-    await must("selected-lib", [
-      "python3",
-      driver,
-      "stage",
-      "--output",
-      output,
-      "--stage-name",
-      "lib",
-      "--",
-      "cargo",
-      "test",
-      "--locked",
-      "--offline",
-      "--features",
-      "db-tests,api-schema",
-      "--lib",
-      "--no-run",
-      "--message-format=json-render-diagnostics",
-    ]);
-    await must("selected-install", [
-      "python3",
-      driver,
-      "stage",
-      "--output",
-      output,
-      "--stage-name",
-      "install",
-      "--",
-      "cargo",
-      "test",
-      "--locked",
-      "--offline",
-      "--features",
-      "db-tests,api-schema",
-      "--test",
-      "selected_install_lifetime",
-      "--no-run",
-      "--message-format=json-render-diagnostics",
-    ]);
+    const selected = (spec: string, args: string[]) => selectedInvocation(root, spec, args);
+    await must(
+      "selected-input-before",
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before', [
+        "record-before",
+        "--output",
+        output,
+      ]),
+    );
+    await must(
+      "selected-main",
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage', [
+        "stage",
+        "--output",
+        output,
+        "--stage-name",
+        "main",
+        "--",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "--features",
+        "db-tests,api-schema",
+        "--bin",
+        "fvoci-server",
+        "--bin",
+        "fvoci-migrate",
+        "--bin",
+        "fvoci-e2e-fixture",
+        "--message-format=json-render-diagnostics",
+      ]),
+    );
+    await must(
+      "selected-lib",
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage', [
+        "stage",
+        "--output",
+        output,
+        "--stage-name",
+        "lib",
+        "--",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "--features",
+        "db-tests,api-schema",
+        "--lib",
+        "--no-run",
+        "--message-format=json-render-diagnostics",
+      ]),
+    );
+    await must(
+      "selected-install",
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage', [
+        "stage",
+        "--output",
+        output,
+        "--stage-name",
+        "install",
+        "--",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "--features",
+        "db-tests,api-schema",
+        "--test",
+        "selected_install_lifetime",
+        "--no-run",
+        "--message-format=json-render-diagnostics",
+      ]),
+    );
     await must(
       "selected-engine",
-      [
-        "python3",
-        driver,
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage', [
         "stage",
         "--output",
         output,
@@ -558,10 +571,17 @@ async function buildArtifacts(committed: boolean, selected: boolean, selectedPha
         "--bin",
         "collab-engine",
         "--message-format=json-render-diagnostics",
-      ],
+      ]),
       { ...process.env, CARGO_TARGET_DIR: collab },
     );
-    await must("selected-input-after", ["python3", driver, "record-after", "--output", output]);
+    await must(
+      "selected-input-after",
+      selected('python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after', [
+        "record-after",
+        "--output",
+        output,
+      ]),
+    );
   } else {
     await must("fixture-build", [
       "cargo",
@@ -650,11 +670,15 @@ async function main() {
   }
   if (parsed.committed)
     await verifyCommittedApi(parsed.shard, parsed.selected, parsed.browserPhase);
-  const prepared = await command(["bun", "--bun", "x", "--no-install", "playwright", "--version"], {
-    cwd: join(root, "apps/web"),
-    stdout: "ignore",
-    stderr: "ignore",
-  });
+  const prepared = await command(
+    [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
+    {
+      cwd: join(root, "apps/web"),
+      env: playwrightChildEnv(),
+      stdout: "ignore",
+      stderr: "ignore",
+    },
+  );
   if (prepared.status !== 0)
     die("missing web dependencies or Playwright; run scripts/prepare-web-e2e.sh");
   if (parsed.browserPhase === "prepare") {
@@ -694,7 +718,7 @@ async function main() {
     process.exit(0);
   }
   const pending = await commandStatus(
-    ["bun", join(import.meta.dir, "run-group.ts"), ...parsed.specs],
+    [process.execPath, join(import.meta.dir, "run-group.ts"), ...parsed.specs],
     { env: process.env, stdin: "ignore", stdout: "inherit", stderr: "inherit" },
   );
   if (process.argv.includes("--selected-footer"))
@@ -717,3 +741,84 @@ if (import.meta.main) {
     });
   }
 }
+
+// Config-list preflight executes this shell slice from the entrypoint source.
+/*
+  config_list_exit=not-run
+  launcher_status=not-run
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    config_list_exit=0
+    # Runner-owned exclusive captures survive later owner-return refusal. This
+    # leaf receives no DB/key inputs and starts no selected fixtures or lanes.
+    (umask 077
+      set -o noclobber
+      sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
+        setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+        env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+          python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
+          >"$safe_diagnostics/config-list.stdout.log" 2>"$safe_diagnostics/config-list.stderr.log") || config_list_exit=$?
+    selected_status="$config_list_exit"
+  fi
+  lane_args=()
+  if [[ -n "${FVOCI_COLLAB_LANE:-}" ]]; then
+    case "$FVOCI_COLLAB_LANE" in
+      install/on|postgres/on|sqlite/on|postgres/off|sqlite/off) ;;
+      *) echo "unknown collaboration lane" >&2; exit 1 ;;
+    esac
+    lane_args=(--lane "$FVOCI_COLLAB_LANE")
+  fi
+  if [[ "$config_list_exit" == not-run || "$config_list_exit" -eq 0 ]]; then
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
+        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
+    launcher_status="$selected_status"
+  fi
+  # The launcher has returned, but require existing exact resource-retirement
+  # witnesses (or proof no runtime began) before changing private data ownership.
+  ownership_status=0
+  (umask 077
+    sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
+      setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
+      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
+      >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
+  if [[ "$ownership_status" -eq 0 ]]; then
+    if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
+      echo "selected runtime ownership restoration failed" >&2
+      if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+    else
+      # Publish the old allowlist only after the strict closure and owner return.
+      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        if ! {
+          echo 'selected-private-diagnostics<<FVOCI_CLOSED_DIAGNOSTICS'
+          for item in '*-stderr.log' '*-stage.json' '*-driver.log' selected-ci-receipt.json \
+            handoff-input-before-safe.json handoff-input-after-safe.json handoff-input-current-safe.json handoff-input-delta-safe.json; do
+            printf '%s/%s\n' "$FVOCI_SELECTED_CI_OUTPUT" "$item"
+          done
+          echo FVOCI_CLOSED_DIAGNOSTICS
+        } >>"$GITHUB_OUTPUT"; then
+          echo "selected diagnostic publication failed" >&2
+          if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+        fi
+      fi
+    fi
+  else
+    echo "selected runtime ownership retained: resource retirement proof incomplete" >&2
+    if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
+  fi
+  diagnostic_status=0
+  python3 - "$safe_diagnostics" "$launcher_status" "$ownership_status" "$selected_status" "$pending_status" "$config_list_exit" <<'PY_STATUS' || diagnostic_status=$?
+from pathlib import Path
+import json,os,sys
+prefix=Path(sys.argv[1])
+assert not prefix.is_symlink() and prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
+with (prefix/'launcher-stage.json').open('x') as receipt:
+    os.fchmod(receipt.fileno(),0o600)
+    values = [None if value == 'not-run' else int(value) for value in sys.argv[2:]]
+    json.dump(dict(zip(('actual_launcher_exit','ownership_return_exit','selected_final_exit','pending_exit','config_list_exit'),values)),receipt)
+    receipt.write('\n')
+PY_STATUS
+  if [[ "$diagnostic_status" -ne 0 && "$selected_status" -eq 0 ]]; then selected_status=1; fi
+fi
+if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
+*/

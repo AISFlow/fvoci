@@ -929,7 +929,7 @@ class ConfigListPreflight(unittest.TestCase):
         if occupied:
             name = 'config-list.stderr.log' if occupied == 'stderr' else 'config-list.stdout.log'
             (safe/name).write_text('OLD_CAPTURE')
-        source = (ROOT/'scripts/run-web-e2e.sh').read_text()
+        source = (ROOT/'tools/web-e2e/run.ts').read_text()
         start = source.index('  config_list_exit=not-run\n')
         end = source.index('\nfi\nif [[ "$pending_status"',start)
         script = self.root/'wrapper-fragment.sh'

@@ -20,7 +20,13 @@ function fixture() {
   mkdirSync(join(root, "tools/web-e2e"), { recursive: true });
   mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "apps/web/e2e"), { recursive: true });
-  for (const name of ["run.ts", "groups.ts", "labels.ts", "proc.ts"]) {
+  writeFileSync(
+    join(root, "apps/web/package.json"),
+    '{"scripts":{"build":"echo fvoci-web-e2e-fake-bun-build >&2"}}\n',
+  );
+  writeFileSync(join(root, "apps/web/.gitignore"), "node_modules\n");
+  symlinkSync(join(import.meta.dir, "../../node_modules"), join(root, "apps/web/node_modules"));
+  for (const name of ["run.ts", "groups.ts", "labels.ts", "proc.ts", "child-env.ts"]) {
     cpSync(join(import.meta.dir, name), join(root, "tools/web-e2e", name));
   }
   writeFileSync(
