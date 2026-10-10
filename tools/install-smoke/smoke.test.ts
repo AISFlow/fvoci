@@ -256,3 +256,36 @@ describe("phases and the first error", () => {
     });
   });
 });
+
+describe("has-item CLI", () => {
+  const cli = (body: string): number | null =>
+    Bun.spawnSync([process.execPath, join(import.meta.dir, "smoke.ts"), "has-item", body, "t"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exitCode;
+
+  test("only a valid search listing proves absence", () => {
+    expect(cli(j({ items: [{ id: "t" }], next_cursor: null }))).toBe(0);
+    expect(cli(j({ items: [{ id: "u" }], next_cursor: null }))).toBe(1);
+    expect(cli(j({ items: [], next_cursor: null }))).toBe(1);
+  });
+
+  test("a malformed search reply is unreadable, never absent", () => {
+    for (const body of [
+      "{",
+      "{}",
+      "null",
+      "[]",
+      '"items"',
+      j({ items: null }),
+      j({ items: "bad" }),
+      j({ items: {} }),
+      j({ items: [null] }),
+      j({ items: ["t"] }),
+      j({ items: [{}] }),
+      j({ items: [{ id: 7 }] }),
+      j({ items: [{ id: "u" }, { id: null }] }),
+    ])
+      expect({ body, status: cli(body) }).toEqual({ body, status: 2 });
+  });
+});

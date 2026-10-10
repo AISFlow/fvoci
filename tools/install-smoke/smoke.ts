@@ -722,10 +722,19 @@ export function field(text: string, path: string[]): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+// Only a well-formed search listing (an object whose `items` is an array of
+// objects with a string `id`) can prove absence; any other shape throws, which
+// the CLI reports as the unreadable status 2.
 export function hasItem(text: string, id: string): boolean {
   const body = parse(text);
-  const list = isObject(body) ? (body["items"] ?? []) : [];
-  return Array.isArray(list) && list.some((item) => isObject(item) && item["id"] === id);
+  const list = isObject(body) ? body["items"] : undefined;
+  ensure(Array.isArray(list), "search reply has no items array");
+  const ids = list.map((item) => (isObject(item) ? item["id"] : undefined));
+  ensure(
+    ids.every((value) => typeof value === "string"),
+    "search reply item without a string id",
+  );
+  return ids.includes(id);
 }
 
 // Phases and the first error, kept in a per-run state file so a `fail` inside

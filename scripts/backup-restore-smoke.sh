@@ -943,22 +943,6 @@ log_assert "per-user restored reads equal the source (grants, HID 404, history, 
 
 # The index is derived: restore rebuilds it from PostgreSQL. Meili indexes
 # asynchronously, so poll (read-only, bounded) until the task is searchable.
-SEARCH_FOUND=""
-for _ in $(seq 1 60); do
-  SEARCH_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=Backup%20restore%20task")"
-  if smoke_ts has-item "$SEARCH_JSON" "$TASK_ID"; then
-    SEARCH_FOUND=1
-    break
-  fi
-  sleep 1
-done
-if [[ -z "$SEARCH_FOUND" ]]; then
-  fail "restored task is not searchable after rebuild: ${SEARCH_JSON}"
-fi
-log_assert "restored search index finds the task: ok"
-
-# Rebuilt search keeps per-person visibility: the member finds the PRV task
-# and never the owner's HID task, which the owner finds.
 # search_has JAR QUERY ID: 0 found, 1 absent, 2 the search request or its
 # reply failed (never read as absent).
 search_has() {
@@ -966,9 +950,34 @@ search_has() {
   body="$(curl -fsS -b "$jar" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}")" || return 2
   smoke_ts has-item "$body" "$id"
 }
+# search_found JAR QUERY ID: 0 found, 1 absent from a valid listing; a failed
+# request or an unreadable reply fails the smoke instead of polling on.
+search_found() {
+  local status=0
+  search_has "$@" || status=$?
+  case "$status" in
+    0 | 1) return "$status" ;;
+    *) fail "search for $2 failed or its reply is unreadable (exit ${status})" ;;
+  esac
+}
 SEARCH_FOUND=""
 for _ in $(seq 1 60); do
-  if search_has "$MEMBER_JAR" "Member%20team%20task" "$MEMBER_TASK_ID" && search_has "$COOKIE_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
+  if search_found "$COOKIE_JAR" "Backup%20restore%20task" "$TASK_ID"; then
+    SEARCH_FOUND=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$SEARCH_FOUND" ]]; then
+  fail "restored task is not searchable after rebuild"
+fi
+log_assert "restored search index finds the task: ok"
+
+# Rebuilt search keeps per-person visibility: the member finds the PRV task
+# and never the owner's HID task, which the owner finds.
+SEARCH_FOUND=""
+for _ in $(seq 1 60); do
+  if search_found "$MEMBER_JAR" "Member%20team%20task" "$MEMBER_TASK_ID" && search_found "$COOKIE_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
     SEARCH_FOUND=1
     break
   fi
