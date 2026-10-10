@@ -7,7 +7,10 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 스키마: `migrations/postgres/060`, `migrations/sqlite/060`, `src/db/migrate.rs`
 - CI 선택: `scripts/ci_selection.py`. 게이트: `.github/workflows/{rust,web,install,documents,collab-engine}.yml`
 - 웹 정적 검사: `.github/workflows/web.yml` `web-static`, 루트 `package.json`. Turso: `docs/testing-turso.md`
-- 완료 조건: `.agents/skills/*/SKILL.md`. `fvoci-role-*`는 명시 호출만. 나머지는 description 첫 문장이 트리거.
+- 프론트 기능·상태는 `fvoci-vue-implementation`, 시각·CJK는 `frontend-design`, Rust 구현은 `fvoci-rust-slice`다. 인증·인가·DB·migration은 `fvoci-db-security`, PostgreSQL 성능은 `fvoci-postgres-performance`다.
+- 표준·SDK 선택은 `fvoci-standard-implementations`, 원본 호환 조사에는 `fvoci-source-contract`, 설치·native child·build 경계에는 `fvoci-runtime-boundaries`를 쓴다. 검사 선택은 `fvoci-fast-verify`, 제출·재개·병합은 `fvoci-handoff`다.
+- 스킬 정본은 `.agents/skills/<이름>/SKILL.md`다. 이름·description으로 해당 작업을 고르고 필요한 본문과 참조만 읽는다. 혼합 변경은 바뀌는 경계만 조합하며 전체 스킬을 일괄 읽지 않는다.
+- `fvoci-role-*`는 명시 호출만 한다. Codex에는 각 스킬의 `agents/openai.yaml` invocation 정책을 두고 Claude Code용 frontmatter와 구분한다. 다른 실행 환경에서는 지원하는 선택·호출 방식을 확인한다. 호출 정책은 실행 권한을 부여하지 않는다.
 
 ## 완료 조건
 
@@ -49,4 +52,6 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 ## 스폰
 
-스킬의 기본 절차는 기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. 스폰 프롬프트에는 결과, 제약, 검증 명령, 멈출 지점을 적는다. 에이전트 사이 메시지는 읽을 수 있는 문장으로 쓴다. 지시문은 목표, 허용 경로, 고정 base/head, 검증, 수락, 중단만 적는다.
+스킬의 기본 절차는 기본값이다. 완료 조건과 승인 경계를 지키면 다른 접근을 선택할 수 있다. 공통 파일은 저장소 사실·계약·완료 조건을 담고, 모델·추론 노력·역할별 보충 절차는 현재 실행 환경의 지원 설정이나 배정에 둔다. 모델별로 보안·데이터 보장을 달리하거나 공통 규칙을 복제하지 않는다.
+
+스폰 프롬프트에는 결과, 제약과 허용 경로, 고정 base/head, 필요한 스킬, 검증 명령, 보고 형식, 멈출 지점을 적는다. 독립적인 작업만 병렬화하고 필수 독립 검토를 제외한 같은 조사·실행 검사를 여러 역할에 중복 배정하지 않는다. 탐색·검토는 지원되는 읽기 전용 권한을 우선하며 실제 제한이 없으면 제한했다고 주장하지 않는다. 에이전트 사이 메시지는 읽을 수 있는 문장으로 쓴다.

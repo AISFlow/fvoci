@@ -14,7 +14,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. workflow와 `scripts/ci_selection.py`, 웹 진입점을 먼저 본다.
+workflow와 `scripts/ci_selection.py`, 웹 진입점을 먼저 본다.
 
 ## 손대지 말 것
 

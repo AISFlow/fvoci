@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. tested merge는 게이트 checkout 로그에서 읽고, 없으면 MISSING이다.
+tested merge는 게이트 checkout 로그에서 읽고, 없으면 MISSING이다.
 
 ## 손대지 말 것
 

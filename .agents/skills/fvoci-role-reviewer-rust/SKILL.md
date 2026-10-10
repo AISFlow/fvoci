@@ -13,7 +13,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. diff와 호출자만 보고, blocking이면 REQUEST_CHANGES다.
+diff와 호출자만 보고, blocking이면 REQUEST_CHANGES다.
 
 ## 손대지 말 것
 

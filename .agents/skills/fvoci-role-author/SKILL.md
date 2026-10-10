@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. 검사는 `fvoci-fast-verify`, 추론 노력은 AGENTS.md다. 실패는 실패로 적는다.
+검사는 `fvoci-fast-verify`, 추론 노력은 AGENTS.md다. 실패는 실패로 적는다.
 
 ## 손대지 말 것
 

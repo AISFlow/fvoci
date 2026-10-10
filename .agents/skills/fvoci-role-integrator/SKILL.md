@@ -13,7 +13,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. 병합 직전에 head, parent, 게이트 checkout 로그를 다시 읽는다.
+병합 직전에 head, parent, 게이트 checkout 로그를 다시 읽는다.
 
 ## 손대지 말 것
 

@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다. 최신 attempt만 읽고, check run이 없으면 MISSING이다. 실패 이유는 그 줄 안에만 적는다.
+최신 attempt만 읽고, check run이 없으면 MISSING이다. 실패 이유는 그 줄 안에만 적는다.
 
 ## 손대지 말 것
 
