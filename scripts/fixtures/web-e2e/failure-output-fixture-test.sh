@@ -10,6 +10,10 @@
 # specs never request `page`.
 # Both inner wrappers must reject listening-only/early-exit servers and launch
 # Playwright exactly once when setup becomes healthy on the final startup poll.
+# The group retires what it created (database, app role, Meilisearch index and
+# key, server with its child, SMTP sink) on pass, failure and SIGINT; failing
+# steps are named; retention errors never change the verdict; and services a
+# scope shares are started once for its groups.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -48,9 +52,21 @@ echo "fixture" >"$FIXTURE_ROOT/apps/web/dist/index.html"
 
 for dir in e2e e2e-pending; do
   cat >"$FIXTURE_ROOT/apps/web/$dir/controlled-failure.spec.ts" <<'SPEC'
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 
 test("controlled pass", async () => {
+  if (process.env.FVOCI_FIXTURE_OUTCOME === "hang") {
+    // Interrupt case: a spec-started child that outlives SIGINT (as a server
+    // started during teardown does), then tell the fixture the browser phase
+    // is running and wait.
+    const sleep = process.env.FVOCI_FIXTURE_REAL_SLEEP ?? "sleep";
+    const child = spawn("bash", ["-c", 'trap "" INT; exec "$0" 600', sleep], { stdio: "ignore" });
+    writeFileSync(`${process.env.FVOCI_FIXTURE_NET_STATE}.spec-child-pid`, String(child.pid));
+    writeFileSync(`${process.env.FVOCI_FIXTURE_NET_STATE}.hanging`, "");
+    await new Promise(() => undefined);
+  }
   expect(1).toBe(1);
 });
 
@@ -60,24 +76,49 @@ test("controlled failure", async () => {
 SPEC
 done
 
+# Service stubs record each start, so a shared scope can prove one start.
 cat >"$FIXTURE_ROOT/scripts/start-test-postgres.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+echo "postgres" >>"$FVOCI_FIXTURE_NET_STATE.service-starts"
 export TEST_DATABASE_URL="postgres://postgres:fixture-secret@127.0.0.1:5432/postgres"
 export FVOCI_TEST_PG_CONTAINER="fvoci-fixture-pg"
 "$@"
 STUB
+# Meilisearch is reachable only when FVOCI_FIXTURE_MEILI=1 (fake curl below).
 cat >"$FIXTURE_ROOT/scripts/start-test-meili.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+echo "meili" >>"$FVOCI_FIXTURE_NET_STATE.service-starts"
+if [[ "${FVOCI_FIXTURE_MEILI:-0}" == 1 ]]; then
+  export FVOCI_MEILI_URL="http://127.0.0.1:7"
+  export MEILI_MASTER_KEY="fixture-meili-master-secret"
+  export FVOCI_MEILI_KEY="$MEILI_MASTER_KEY"
+  export FVOCI_TEST_MEILI_CONTAINER="fvoci-fixture-meili"
+fi
 "$@"
 STUB
+# FVOCI_FIXTURE_MIGRATE=fail fails the schema migration; --ensure-meili-key
+# records the index it was given and writes a fake scoped key.
 cat >"$FIXTURE_ROOT/target/debug/fvoci-migrate" <<'STUB'
 #!/usr/bin/env bash
+if [[ "$#" == 0 && "${FVOCI_FIXTURE_MIGRATE:-ok}" == fail ]]; then
+  echo "fixture migration failure" >&2
+  exit 9
+fi
+if [[ "${1:-}" == "--ensure-meili-key" ]]; then
+  echo "${FVOCI_MEILI_INDEX:?}" >>"$FVOCI_FIXTURE_NET_STATE.meili-indexes"
+  echo "fixture-scoped-key-${FVOCI_MEILI_INDEX}" >"$2"
+fi
 exit 0
 STUB
 cat >"$FIXTURE_ROOT/target/debug/fvoci-server" <<'STUB'
 #!/usr/bin/env bash
+# A child of the group server, as the collab engine is: reaped with its group.
+if [[ "${FVOCI_FIXTURE_SERVER_CHILD:-0}" == 1 ]]; then
+  "$FVOCI_FIXTURE_REAL_SLEEP" 600 &
+  echo "$!" >"$FVOCI_FIXTURE_NET_STATE.server-child-pid"
+fi
 echo "fvoci-server listening on http://127.0.0.1:9"
 # Redaction probe: the app-role URL the server does receive (credentials a
 # real server must never log), and the admin URL web-e2e-inner.sh withholds
@@ -94,9 +135,17 @@ fi
 exec sleep 600
 STUB
 # Only the calls the inner script needs are allowed; anything else fails closed.
+# Each psql call's last argument (its SQL) is recorded; FVOCI_FIXTURE_DROP=fail
+# fails the database drop.
 cat >"$FAKE_BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "exec" && "${2:-}" == "-i" && "${3:-}" == "fvoci-fixture-pg" && "${4:-}" == "psql" ]]; then
+  sql="${!#}"
+  echo "$sql" >>"$FVOCI_FIXTURE_NET_STATE.sql"
+  if [[ "$sql" == "DROP DATABASE "* && "${FVOCI_FIXTURE_DROP:-ok}" == fail ]]; then
+    echo "fixture: drop refused" >&2
+    exit 3
+  fi
   exit 0
 fi
 echo "unexpected docker invocation: $*" >&2
@@ -107,6 +156,7 @@ STUB
 #   tentative-3 the first three queries report a tentative address
 #   tentative   every query reports one, so the settle wait hits its bound
 #   no-monitor  the monitor exits at once
+#   crash       the tentative query fails after the first call (check crashes)
 cat >"$FAKE_BIN/ip" <<'STUB'
 #!/usr/bin/env bash
 mode="${FVOCI_FIXTURE_NET:?}"
@@ -122,6 +172,10 @@ fi
 if [[ "$*" == "-6 -o addr show tentative -dadfailed" ]]; then
   calls=$(($(cat "$FVOCI_FIXTURE_NET_STATE.calls" 2>/dev/null || echo 0) + 1))
   echo "$calls" >"$FVOCI_FIXTURE_NET_STATE.calls"
+  if [[ "$mode" == "crash" ]] && ((calls > 1)); then
+    echo "fixture: netlink query failed" >&2
+    exit 1
+  fi
   if [[ "$mode" == "tentative" ]] || { [[ "$mode" == "tentative-3" ]] && ((calls <= 3)); }; then
     echo "9: veth-fixture    inet6 fe80::1/64 scope link tentative \\       valid_lft forever preferred_lft forever"
   fi
@@ -142,6 +196,17 @@ if [[ "$*" == "-fsS http://127.0.0.1:9/api/v1/setup" ]]; then
     *) echo "unexpected setup mode" >&2; exit 1 ;;
   esac
   echo "$calls" >"$FVOCI_FIXTURE_NET_STATE.setup-success"
+  exit 0
+fi
+# Meilisearch retirement: URL and master key arrive on stdin, never in argv.
+if [[ "$*" == "-fsS --max-time 30 -o /dev/null -X DELETE -K -" ]]; then
+  config="$(cat)"
+  url="$(sed -n 's/^url = "\(.*\)"$/\1/p' <<<"$config")"
+  [[ "$config" == *'header = "Authorization: Bearer fixture-meili-master-secret"'* ]] || {
+    echo "fixture: Meilisearch DELETE without the master key" >&2
+    exit 1
+  }
+  echo "DELETE ${url#http://127.0.0.1:7}" >>"$FVOCI_FIXTURE_NET_STATE.meili-deletes"
   exit 0
 fi
 echo "unexpected curl invocation: $*" >&2
@@ -173,12 +238,29 @@ exec "$FVOCI_FIXTURE_REAL_SEQ" "$@"
 STUB
 # Ordinary readiness cases enter the real page-less Playwright CLI. Perf only
 # records entry: its real specs require a database and browser outside this test.
+# The SMTP sink records its pid (it must be reaped); FVOCI_FIXTURE_TRACE_SUMMARY=fail
+# makes the trace summarizer fail with credential-bearing error text, and
+# FVOCI_FIXTURE_PLAYWRIGHT_EXIT=<n> replaces the Playwright run by that exit.
 cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${FVOCI_FIXTURE_RECORD_PLAYWRIGHT:-0}" == "1" && "${1:-}" == "--bun" && "${2:-}" == "x" && "${3:-}" == "--no-install" && "${4:-}" == "playwright" && "${5:-}" == "test" ]]; then
-  echo "launch" >>"$FVOCI_FIXTURE_NET_STATE.playwright-launches"
-  if [[ "${6:-}" == "--config=e2e/perf/perf.config.ts" ]]; then
-    exit 0
+case "${1:-}" in
+  */tools/web-e2e/smtp-sink.ts) echo "$$" >"$FVOCI_FIXTURE_NET_STATE.smtp-pid" ;;
+  */tools/web-e2e/trace-summary.ts)
+    if [[ "${FVOCI_FIXTURE_TRACE_SUMMARY:-ok}" == fail ]]; then
+      echo "fixture summarizer error postgres://u:fixture-secret@h/db MEILI_MASTER_KEY=fixture-meili-master-secret" >&2
+      exit 3
+    fi
+    ;;
+esac
+if [[ "${1:-}" == "--bun" && "${2:-}" == "x" && "${3:-}" == "--no-install" && "${4:-}" == "playwright" && "${5:-}" == "test" ]]; then
+  if [[ "${FVOCI_FIXTURE_RECORD_PLAYWRIGHT:-0}" == "1" ]]; then
+    echo "launch" >>"$FVOCI_FIXTURE_NET_STATE.playwright-launches"
+    if [[ "${6:-}" == "--config=e2e/perf/perf.config.ts" ]]; then
+      exit 0
+    fi
+  fi
+  if [[ -n "${FVOCI_FIXTURE_PLAYWRIGHT_EXIT:-}" ]]; then
+    exit "$FVOCI_FIXTURE_PLAYWRIGHT_EXIT"
   fi
 fi
 exec "$FVOCI_FIXTURE_REAL_BUN" "$@"
@@ -206,6 +288,7 @@ run_group() {
     export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN"
     export FVOCI_FIXTURE_REAL_SLEEP="$REAL_SLEEP"
     export FVOCI_FIXTURE_REAL_SEQ="$REAL_SEQ"
+    export FVOCI_FIXTURE_SERVER_CHILD=1
     if [[ "$pending" == "1" ]]; then
       export FVOCI_E2E_PENDING=1
     else
@@ -233,6 +316,28 @@ check_monitor_stopped() {
 # line_of <file> <fixed string>: first matching line number, or fail.
 line_of() {
   grep -n -F -m1 -- "$2" "$1" | cut -d: -f1 | grep . || fail "missing '$2' in $1" "$1"
+}
+
+# check_retired <label> <log>: every database the run created was dropped with
+# its app role, and the server, the server's own child and the SMTP sink are
+# gone once the group has exited.
+check_retired() {
+  local label="$1" log="$2" name pid_file pid
+  local -a created=()
+  if [[ -f "$NET_STATE.sql" ]]; then
+    mapfile -t created < <(sed -n 's/^CREATE DATABASE "\(.*\)"$/\1/p' "$NET_STATE.sql")
+  fi
+  for name in "${created[@]}"; do
+    grep -qxF "DROP DATABASE IF EXISTS \"$name\" WITH (FORCE)" "$NET_STATE.sql" \
+      || fail "$label: database $name was not dropped" "$log"
+    grep -qxF "DROP ROLE IF EXISTS \"fvoci_app_$name\"" "$NET_STATE.sql" \
+      || fail "$label: app role of $name was not dropped" "$log"
+  done
+  for pid_file in server-pid server-child-pid smtp-pid spec-child-pid; do
+    [[ -f "$NET_STATE.$pid_file" ]] || continue
+    pid="$(cat "$NET_STATE.$pid_file")"
+    ! kill -0 "$pid" 2>/dev/null || fail "$label: $pid_file $pid still running" "$log"
+  done
 }
 
 # pending: 0 ordinary, 1 pending; each failing run keeps a monitor, the ordinary
@@ -306,6 +411,7 @@ for pending in 0 1; do
     (($(cat "$NET_STATE.calls") >= 4)) || fail "$label: settle did not wait out tentative addresses" "$log"
   fi
   check_monitor_stopped "$label" "$log"
+  check_retired "$label" "$log"
   rm -rf "$retained"
 
   log="$WORK/$label-pass.log"
@@ -324,6 +430,7 @@ for pending in 0 1; do
     ! grep -q 'while Playwright ran' "$log" || fail "$label: event count without a monitor" "$log"
   fi
   check_monitor_stopped "$label" "$log"
+  check_retired "$label" "$log"
 done
 
 # The real startup paths run against controlled listening/health/process
@@ -413,11 +520,179 @@ for wrapper in ordinary perf; do
       fi
     fi
     check_monitor_stopped "$label" "$log"
+    if [[ "$wrapper" == "ordinary" ]]; then
+      check_retired "$label" "$log"
+    fi
     [[ -f "$NET_STATE.server-pid" ]] || fail "$label: server never started" "$log"
     ! kill -0 "$(cat "$NET_STATE.server-pid")" 2>/dev/null || fail "$label: owned server still running" "$log"
     echo "readiness fixture: $label status=$status setup-probes=$probes Playwright-launches=$launches"
   done
 done
+
+# retained_of <github-output>: the retained directory a failed group named.
+retained_of() {
+  sed -n 's/^failure-artifacts=//p' "$1"
+}
+
+# A failing setup step is named with its own exit status; nothing later runs
+# and what was already created is retired.
+log="$WORK/step-failure.log"
+gh_output="$WORK/step-failure.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_MIGRATE=fail FVOCI_FIXTURE_RECORD_PLAYWRIGHT=1
+  run_group 0 pass quiet "$log" "$gh_output"
+) || status=$?
+((status == 9)) || fail "step failure: expected the migration's exit 9, got $status" "$log"
+grep -qx 'web-e2e step migrate failed (exit 9)' "$log" || fail "step failure: failing step not named" "$log"
+grep -qx 'fixture migration failure' "$log" || fail "step failure: the step's own error is missing" "$log"
+[[ ! -f "$NET_STATE.playwright-launches" ]] || fail "step failure: Playwright entered after a failed step" "$log"
+grep -q '^CREATE DATABASE ' "$NET_STATE.sql" || fail "step failure: no database was created" "$log"
+check_retired step-failure "$log"
+rm -rf "$(retained_of "$gh_output")"
+
+# A settle check that cannot run fails the group before the browser starts.
+log="$WORK/settle-crash.log"
+gh_output="$WORK/settle-crash.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_RECORD_PLAYWRIGHT=1
+  run_group 0 pass crash "$log" "$gh_output"
+) || status=$?
+((status != 0)) || fail "settle crash: group passed" "$log"
+grep -qx "web-e2e step network-settle failed (exit $status)" "$log" || fail "settle crash: failing step not named" "$log"
+grep -q 'CalledProcessError' "$log" || fail "settle crash: the check's own error is missing" "$log"
+[[ ! -f "$NET_STATE.playwright-launches" ]] || fail "settle crash: Playwright entered" "$log"
+check_retired settle-crash "$log"
+rm -rf "$(retained_of "$gh_output")"
+
+# A trace summary that fails leaves no placeholder summary, names the step
+# with its redacted error text and keeps the test's own failing verdict.
+log="$WORK/summary-failure.log"
+gh_output="$WORK/summary-failure.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_TRACE_SUMMARY=fail
+  run_group 0 fail quiet "$log" "$gh_output"
+) || status=$?
+((status == 1)) || fail "summary failure: expected Playwright's exit 1, got $status" "$log"
+retained="$(retained_of "$gh_output")"
+[[ -n "$retained" && -d "$retained" ]] || fail "summary failure: nothing retained" "$log"
+[[ -z "$(find "$retained" -name 'browser-summary.*' -print -quit)" ]] || fail "summary failure: placeholder summary written" "$log"
+[[ -n "$(find "$retained" -name trace.zip -print -quit)" ]] || fail "summary failure: trace.zip not retained" "$log"
+grep -q 'retention step trace-summary (.*/trace.zip, exit 3) failed: fixture summarizer error postgres://redacted MEILI_MASTER_KEY=redacted' "$log" \
+  || fail "summary failure: step or redacted error missing" "$log"
+! grep -q 'fixture-secret' "$log" || fail "summary failure: credentials in the log" "$log"
+grep -q 'failure artifacts are incomplete; the group verdict stays exit 1$' "$log" \
+  || fail "summary failure: verdict precedence not reported" "$log"
+check_retired summary-failure "$log"
+rm -rf "$retained"
+
+# A fixture that cannot be retired fails a passing group, but never replaces a
+# failing test's own exit status.
+log="$WORK/drop-failure-pass.log"
+gh_output="$WORK/drop-failure-pass.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_DROP=fail
+  run_group 0 pass quiet "$log" "$gh_output"
+) || status=$?
+((status == 1)) || fail "drop failure: passing group exited $status, expected 1" "$log"
+grep -q '2 passed' "$log" || fail "drop failure: tests did not pass" "$log"
+grep -qx 'web-e2e cleanup failed: drop-database' "$log" || fail "drop failure: cleanup step not named" "$log"
+rm -rf "$(retained_of "$gh_output")"
+log="$WORK/drop-failure-exit7.log"
+gh_output="$WORK/drop-failure-exit7.github-output"
+status=0
+(
+  export FVOCI_FIXTURE_DROP=fail FVOCI_FIXTURE_PLAYWRIGHT_EXIT=7
+  run_group 0 pass quiet "$log" "$gh_output"
+) || status=$?
+((status == 7)) || fail "drop failure: Playwright exit 7 became $status" "$log"
+grep -qx 'web-e2e step playwright failed (exit 7)' "$log" || fail "drop failure: Playwright verdict not named" "$log"
+grep -qx 'web-e2e: the group verdict stays exit 7 (step playwright)' "$log" \
+  || fail "drop failure: precedence not reported" "$log"
+rm -rf "$(retained_of "$gh_output")"
+
+# The group's Meilisearch index and its scoped key are the group's own and
+# are deleted; the master key reaches curl only on stdin.
+log="$WORK/meili.log"
+gh_output="$WORK/meili.github-output"
+(
+  export FVOCI_FIXTURE_MEILI=1
+  run_group 0 pass quiet "$log" "$gh_output"
+) || fail "meili: passing run failed" "$log"
+index="$(cat "$NET_STATE.meili-indexes")"
+[[ "$index" =~ ^fvoci_e2e_[0-9a-f]{16}$ ]] || fail "meili: unexpected group index '$index'" "$log"
+db="$(sed -n 's/^CREATE DATABASE "\(.*\)"$/\1/p' "$NET_STATE.sql")"
+[[ "$db" == "$index" ]] || fail "meili: index $index does not match database $db" "$log"
+[[ "$(cat "$NET_STATE.meili-deletes")" == "DELETE /indexes/$index"$'\n'"DELETE /keys/fixture-scoped-key-$index" ]] \
+  || fail "meili: index or key not deleted" "$NET_STATE.meili-deletes"
+! grep -q 'fixture-meili-master-secret' "$log" || fail "meili: master key in the log" "$log"
+check_retired meili "$log"
+
+# Services shared by one scope: started once, each group creates and retires
+# its own database, role and index.
+log="$WORK/shared.log"
+rm -f "$NET_STATE".*
+(
+  export PATH="$FIXTURE_PATH" TMPDIR="$RUN_TMP" ROOT="$FIXTURE_ROOT" CARGO_TARGET_DIR="$FIXTURE_ROOT/target"
+  export FVOCI_FIXTURE_OUTCOME=pass FVOCI_FIXTURE_NET=quiet FVOCI_FIXTURE_NET_STATE="$NET_STATE"
+  export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN" FVOCI_FIXTURE_REAL_SLEEP="$REAL_SLEEP" FVOCI_FIXTURE_REAL_SEQ="$REAL_SEQ"
+  export FVOCI_FIXTURE_SERVER_CHILD=1 FVOCI_FIXTURE_MEILI=1
+  unset FVOCI_E2E_PENDING GITHUB_OUTPUT
+  cd "$FIXTURE_ROOT"
+  bash scripts/start-test-postgres.sh bash scripts/start-test-meili.sh \
+    env FVOCI_E2E_SHARED_SERVICES=1 bash -c \
+    'bash scripts/web-e2e-run-group.sh e2e/controlled-failure.spec.ts && bash scripts/web-e2e-run-group.sh e2e/controlled-failure.spec.ts'
+) >"$log" 2>&1 || fail "shared: groups failed" "$log"
+[[ "$(sort "$NET_STATE.service-starts" | tr '\n' ' ')" == "meili postgres " ]] || fail "shared: services started more than once" "$log"
+[[ "$(grep -c '^CREATE DATABASE ' "$NET_STATE.sql")" == 2 ]] || fail "shared: expected two group databases" "$log"
+[[ "$(sort -u "$NET_STATE.meili-indexes" | wc -l)" == 2 ]] || fail "shared: groups did not get distinct indexes" "$log"
+[[ "$(grep -c '^DELETE /indexes/' "$NET_STATE.meili-deletes")" == 2 ]] || fail "shared: indexes not deleted" "$log"
+check_retired shared "$log"
+log="$WORK/shared-missing.log"
+gh_output="$WORK/shared-missing.github-output"
+: >"$gh_output"
+rm -f "$NET_STATE".*
+status=0
+(
+  export PATH="$FIXTURE_PATH" TMPDIR="$RUN_TMP" ROOT="$FIXTURE_ROOT" CARGO_TARGET_DIR="$FIXTURE_ROOT/target"
+  export FVOCI_FIXTURE_NET=quiet FVOCI_FIXTURE_NET_STATE="$NET_STATE" FVOCI_E2E_SHARED_SERVICES=1
+  export GITHUB_OUTPUT="$gh_output"
+  unset TEST_DATABASE_URL FVOCI_TEST_PG_CONTAINER
+  cd "$FIXTURE_ROOT"
+  bash scripts/web-e2e-run-group.sh e2e/controlled-failure.spec.ts
+) >"$log" 2>&1 || status=$?
+((status == 1)) || fail "shared missing: expected exit 1, got $status" "$log"
+grep -qx 'FVOCI_E2E_SHARED_SERVICES=1 requires TEST_DATABASE_URL from the scope that started the services' "$log" \
+  || fail "shared missing: missing service not named" "$log"
+[[ ! -e "$NET_STATE.service-starts" && ! -e "$NET_STATE.sql" ]] || fail "shared missing: services or database touched" "$log"
+rm -rf "$(retained_of "$gh_output")"
+
+# SIGINT while Playwright runs (a Ctrl-C reaches the whole process group):
+# exit 130, and the database, server, its child and the SMTP sink are retired.
+log="$WORK/sigint.log"
+gh_output="$WORK/sigint.github-output"
+set -m
+run_group 0 hang quiet "$log" "$gh_output" &
+group_pid=$!
+set +m
+for _ in {1..600}; do
+  [[ ! -f "$NET_STATE.hanging" ]] || break
+  kill -0 "$group_pid" 2>/dev/null || break
+  "$REAL_SLEEP" 0.1
+done
+[[ -f "$NET_STATE.hanging" ]] || fail "sigint: Playwright never reached the hanging test" "$log"
+kill -INT -- "-$group_pid"
+status=0
+wait "$group_pid" || status=$?
+((status == 130)) || fail "sigint: expected exit 130, got $status" "$log"
+[[ -f "$NET_STATE.spec-child-pid" ]] || fail "sigint: the spec child never started" "$log"
+check_retired sigint "$log"
+grep -q '^DROP DATABASE ' "$NET_STATE.sql" || fail "sigint: database not dropped" "$log"
+check_monitor_stopped sigint "$log"
+rm -rf "$(retained_of "$gh_output")"
 
 leftover="$(find "$RUN_TMP" -mindepth 1 -maxdepth 1 -name 'fvoci-*' -print -quit)"
 [[ -z "$leftover" ]] || fail "run directory not cleaned: $leftover"
