@@ -286,7 +286,8 @@ export class UiProcesses {
 
   open(): this {
     require(UiProcesses.active === null &&
-      process.platform === "linux", "UI_PROCESS_CAPABILITY_REQUIRED");
+      process.platform === "linux" &&
+      this.pidfdUsable(), "UI_PROCESS_CAPABILITY_REQUIRED");
     require(!this.kernel
       .procRows()
       .some((row) => row.parentPid === this.pid), "UI_PREEXISTING_CHILD_REFUSED");
@@ -313,6 +314,29 @@ export class UiProcesses {
       throw original;
     }
     return this;
+  }
+
+  // Every signal goes through a pidfd, so the scope opens only where both
+  // syscalls work; signal 0 on our own pidfd checks delivery without sending.
+  private pidfdUsable(): boolean {
+    let fd: number;
+    try {
+      fd = this.kernel.pidfdOpen(this.pid);
+    } catch {
+      return false;
+    }
+    let usable = true;
+    try {
+      this.kernel.pidfdSendSignal(fd, 0);
+    } catch {
+      usable = false;
+    }
+    try {
+      this.kernel.close(fd);
+    } catch {
+      usable = false;
+    }
+    return usable;
   }
 
   startWatch(): void {

@@ -421,7 +421,7 @@ describe("browser", () => {
             inputs.workspace,
           ),
         ),
-      ).toContain("UI_BROWSER_SECRET_ENV_REFUSED");
+      ).toBe("UI_BROWSER_SECRET_ENV_REFUSED");
       expect(calls.spawn).toHaveLength(0);
       expect(existsSync(join(inputs.run, "browser.private.log"))).toBe(false);
     }
@@ -435,7 +435,7 @@ describe("browser", () => {
       await failureOf(
         browser(scope, inputs.manifest, inputs.run, {}, ON, undefined, inputs.workspace),
       ),
-    ).toContain("UI_ACTUAL_BROWSER_FAILED");
+    ).toBe("UI_ACTUAL_BROWSER_FAILED");
     expect(calls.finish).toHaveLength(1);
     const failing = fakeScope({
       spawn: () => exitedChild(1),
@@ -449,7 +449,7 @@ describe("browser", () => {
       await failureOf(
         browser(failing.scope, again.manifest, again.run, {}, ON, undefined, again.workspace),
       ),
-    ).toContain("UI_ACTUAL_BROWSER_FAILED");
+    ).toBe("UI_ACTUAL_BROWSER_FAILED");
     expect(JSON.parse(output.stderr[0] as string)).toEqual({
       originalFailure: "UI_ACTUAL_BROWSER_FAILED",
       browserProcessClosure: "UI_PROCESS_CLOSURE_FAILED",

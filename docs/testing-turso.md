@@ -171,9 +171,12 @@ SDK results cannot be labeled actual Turso PASS. Constant per-database
 concurrency remains `cancel-in-progress:false`; no service resource reset,
 provider/account/secret/policy/permission change is made by the worker.
 
-Pure local checks: `bun test tools/turso` (from the repository root; the UI
-consumer `tools/turso/ui*.test.ts` and the guard `tools/turso/guard*.test.ts`)
-and `bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,
+Pure local checks: `bun tools/turso/fixtures.ts` (the admission fixtures, from
+any directory and without `bun install`: it runs the pinned guard
+`tools/turso/guard*.test.ts`, UI consumer `tools/turso/ui*.test.ts` and
+`turso-test.yml` literal `tools/ci/verify/registry.test.ts` suites with only
+`PATH` and `TMPDIR`, and refuses if a pinned suite is missing) and
+`bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,
 SDK/network execution or actual Turso PASS. The UI consumer is
 `tools/turso/ui.ts` (`--record-before`, `--freeze`, and the member `--actor`
 the browser fixture runs); the guard's `--consume` calls its exported

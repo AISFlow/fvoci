@@ -225,6 +225,7 @@ describe("container shape", () => {
     };
     const admitted = creationIdentity(unlimited, argv, ["invented-token"], "fixture");
     expect(admitted.cgroupCaps).toBe("not-observed");
+    expect(admitted).not.toHaveProperty("cpuUnlimited");
     for (const restricted of [
       { CpuQuota: 200000 },
       { NanoCpus: 2000000000 },
