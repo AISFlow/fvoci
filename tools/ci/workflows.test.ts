@@ -143,7 +143,11 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
   );
   assert.ok(typeof workflow.on === "object" && !Array.isArray(workflow.on));
   assert.ok(Object.hasOwn(workflow.on, "pull_request"));
-  assert.equal(workflow.on.pull_request, null, "required gate cannot have path/branch filters");
+  assert.deepEqual(
+    workflow.on.pull_request,
+    { types: ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"] },
+    "required gate runs on ready_for_review and has no path/branch filters",
+  );
   assert.ok(Object.hasOwn(workflow.on, "merge_group"), "merge_group trigger is required");
   assert.deepEqual(
     workflow.on.merge_group,

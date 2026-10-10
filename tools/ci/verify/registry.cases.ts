@@ -56,12 +56,35 @@ function caseList(): MutationCase[] {
   };
 
   // Gate wiring (RegistryMutationCliTest).
-  add(
-    "pr-path-filter",
-    "web.yml",
-    swap("  pull_request:\n", "  pull_request:\n    paths: ['apps/web/**']\n"),
-    "pull_request must be unfiltered",
-  );
+  const prTypes =
+    "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n";
+  const prTrigger: [string, string][] = [
+    ["pr-path-filter", `${prTypes}    paths: ['apps/web/**']\n`],
+    ["pr-paths-ignore", `${prTypes}    paths-ignore: ['docs/**']\n`],
+    ["pr-branch-filter", `${prTypes}    branches: [main]\n`],
+    ["pr-no-types", ""],
+    ["pr-default-types", "    types: [opened, synchronize, reopened]\n"],
+    ["pr-no-converted-to-draft", "    types: [opened, synchronize, reopened, ready_for_review]\n"],
+    [
+      "pr-extra-type",
+      "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]\n",
+    ],
+    [
+      "pr-reordered-types",
+      "    types: [ready_for_review, opened, synchronize, reopened, converted_to_draft]\n",
+    ],
+    ["pr-types-string", "    types: opened\n"],
+  ];
+  for (const [name, replacement] of prTrigger) {
+    for (const file of GATED.map((workflow) => `${workflow}.yml`)) {
+      add(
+        `${name}-${file}`,
+        file,
+        swap(`  pull_request:\n${prTypes}`, `  pull_request:\n${replacement}`),
+        "pull_request must be exactly types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]",
+      );
+    }
+  }
   for (const override of ["ref: attacker-head", "repository: attacker/repo", "fetch-depth: 1"]) {
     add(
       `checkout-${override}`,
