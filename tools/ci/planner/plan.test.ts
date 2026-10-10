@@ -189,9 +189,11 @@ describe("event x change kind", () => {
       ev(`{"action":"ready_for_review","pull_request":{"draft":${draft}}}`);
     expect(pullRequestDraft(pr("true"))).toBe("draft");
     expect(pullRequestDraft(pr("false"))).toBe("ready");
-    expect(pullRequestDraft(pr("null"))).toBe("ready");
-    expect(pullRequestDraft(ev('{"pull_request":{}}'))).toBe("ready");
-    for (const bad of ['"true"', "1", "[]", "{}"])
+    // Only an explicit boolean false is ready: missing or null is not.
+    expect(pullRequestDraft(pr("null"))).toBe("invalid");
+    expect(pullRequestDraft(ev('{"pull_request":{}}'))).toBe("invalid");
+    expect(pullRequestDraft(ev("{}"))).toBe("invalid");
+    for (const bad of ['"true"', '"false"', "0", "1", "[]", "{}"])
       expect(pullRequestDraft(pr(bad)), bad).toBe("invalid");
   });
 

@@ -142,7 +142,7 @@ export class PrCheckout {
 }
 
 export const prEvent = (base: unknown, head: unknown) => ({
-  pull_request: { base: { sha: base }, head: { sha: head } },
+  pull_request: { draft: false, base: { sha: base }, head: { sha: head } },
 });
 
 export function isOptIn(workflow: Workflow, job: string): boolean {

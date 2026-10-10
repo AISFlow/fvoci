@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { postgresMatrixJson, postgresMatrixRows, rustCatalogRows } from "./matrix.ts";
 import { PLANNER_ROOT } from "./paths.ts";
 import { pyDumps, pyLoads, type PyValue } from "./pyjson.ts";
-import { loadRegistryContext } from "./registry.ts";
+import {
+  loadRegistryContext,
+  parseWorkflow,
+  POSTGRES_MATRIX_EXPR,
+  type ParsedWorkflow,
+  type RegistryContext,
+} from "./registry.ts";
 
 type Row = Map<string, PyValue>;
 const realRows = (): Row[] => {
@@ -152,5 +160,57 @@ describe("postgres matrix", () => {
         workflows: new Map([["rust.yml", { ok: true, data: { jobs: {} } }]]),
       }).error,
     ).toBe("rust: postgres job missing");
+  });
+});
+
+describe("postgres matrix consumer", () => {
+  const MATRIX_LINE = `      matrix: ${POSTGRES_MATRIX_EXPR}\n`;
+  const rustText = () => readFileSync(join(PLANNER_ROOT, ".github/workflows/rust.yml"), "utf8");
+  const withRust = (edit: (text: string) => string): RegistryContext => {
+    const ctx = loadRegistryContext(PLANNER_ROOT);
+    const text = rustText();
+    const changed = edit(text);
+    expect(changed).not.toBe(text);
+    const workflows = new Map<string, ParsedWorkflow>(ctx.workflows ?? []);
+    workflows.set("rust.yml", parseWorkflow("rust.yml", changed));
+    return { root: ctx.root, workflows };
+  };
+  const oneRow = () => pyDumps(new Map([["include", [realRows()[0] as Row]]]), { compact: true });
+
+  test("the checked-in postgres job consumes exactly the plan output", () => {
+    expect(rustText()).toContain(MATRIX_LINE);
+    expect(rustCatalogRows(loadRegistryContext(PLANNER_ROOT)).error).toBeNull();
+  });
+
+  test("any other strategy.matrix is refused, even with a complete catalog", () => {
+    const replace = (by: string) => (text: string) => text.replace(MATRIX_LINE, by);
+    const fromOutput = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix).include }}";
+    const cases: [string, (text: string) => string][] = [
+      ["one-row literal include", replace(`      matrix: ${oneRow()}\n`)],
+      [
+        "another plan output",
+        replace("      matrix: ${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}\n"),
+      ],
+      ["inline fromJSON literal", replace(`      matrix: \${{ fromJSON('${oneRow()}') }}\n`)],
+      ["include read from the output", replace(`      matrix:\n        include: ${fromOutput}\n`)],
+      [
+        "output plus an exclude",
+        replace(
+          `      matrix:\n        include: ${fromOutput}\n        exclude:\n          - shard: b\n`,
+        ),
+      ],
+      ["no matrix", replace("")],
+      [
+        "no strategy",
+        (text) => text.replace(`    strategy:\n      fail-fast: false\n${MATRIX_LINE}`, ""),
+      ],
+    ];
+    for (const [label, edit] of cases) {
+      const out = rustCatalogRows(withRust(edit));
+      expect(out.rows, label).toBeNull();
+      expect(out.error, label).toBe(
+        `rust: postgres strategy.matrix must be exactly ${POSTGRES_MATRIX_EXPR}`,
+      );
+    }
   });
 });

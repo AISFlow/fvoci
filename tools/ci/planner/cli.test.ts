@@ -256,8 +256,27 @@ describe("plan CLI", () => {
         );
         expect(outputs(ready.output ?? "").get("plan_ok")).toBe("true");
       }
-      const odd = await cli(m.work, "web", "pull_request", event("opened", "yes"), m.tested);
-      expect(odd.stdout).toBe('{"mode": "full", "reason_code": "PR_DRAFT_INVALID"}\n');
+      // Only an explicit boolean false is ready; a draft state the event does
+      // not state is refused (full selection, plan not ok), never ready.
+      const missing = {
+        action: "ready_for_review",
+        pull_request: { base: { sha: fx.base }, head: { sha: code } },
+      };
+      for (const [label, payload] of [
+        ["missing", missing],
+        ["null", event("ready_for_review", null)],
+        ['"false"', event("ready_for_review", "false")],
+        ['"yes"', event("opened", "yes")],
+        ["0", event("opened", 0)],
+      ] as const) {
+        for (const workflow of WORKFLOWS) {
+          const odd = await cli(m.work, workflow, "pull_request", payload, m.tested);
+          expect(odd.stdout, `${label} ${workflow}`).toBe(
+            '{"mode": "full", "reason_code": "PR_DRAFT_INVALID"}\n',
+          );
+          expect(outputs(odd.output ?? "").get("plan_ok"), `${label} ${workflow}`).toBe("false");
+        }
+      }
     },
     TIMEOUT,
   );
@@ -369,6 +388,34 @@ describe("plan CLI", () => {
           code: 1,
           stderr:
             "plan: rust: postgres matrix catalog must hold exactly the 12 policy rows (missing 18/ubuntu-26.04/c)\n",
+          plan: null,
+          output: null,
+        });
+      }
+
+      // A complete catalog whose consumer runs one literal row instead of the
+      // plan output: the plan must refuse, or the gate would pass on one row.
+      const tested = join(m.work, ".github/workflows/rust.yml");
+      const full = readFileSync(join(work, ".github/workflows/rust.yml"), "utf8");
+      git(work, "checkout", "-q", "--", ".github/workflows/rust.yml");
+      const intact = readFileSync(join(work, ".github/workflows/rust.yml"), "utf8");
+      expect(intact).not.toBe(full);
+      const rowStart = intact.indexOf("{", intact.indexOf("FVOCI_POSTGRES_MATRIX_CATALOG: |"));
+      const rowEnd = intact.indexOf("}", rowStart) + 1;
+      const row = JSON.stringify(JSON.parse(intact.slice(rowStart, rowEnd)));
+      const consumer = "      matrix: ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n";
+      expect(intact).toContain(consumer);
+      writeFileSync(tested, intact.replace(consumer, `      matrix: {"include": [${row}]}\n`));
+      for (const [eventName, event] of [
+        ["pull_request", prEvent(fx.base, docs)],
+        ["merge_group", group],
+      ] as const) {
+        const literal = await cli(m.work, "rust", eventName, event, m.tested);
+        expect(literal, eventName).toMatchObject({
+          code: 1,
+          stdout: "",
+          stderr:
+            "plan: rust: postgres strategy.matrix must be exactly ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n",
           plan: null,
           output: null,
         });

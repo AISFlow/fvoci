@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { resolveSelectionInputs } from "./events.ts";
 import { diffPathsForPr, ensureCommitShas, parseNameStatusZ, repoGit, type Git } from "./git.ts";
 import { decideFromPaths } from "./paths.ts";
+import type { PyValue } from "./pyjson.ts";
 import { git, PrCheckout, Repo, SHA_A, SHA_B, writeFile } from "./test-support.ts";
 
 const TIMEOUT = 60_000;
@@ -22,7 +23,8 @@ const resolve = (
     new Map([
       [
         "pull_request",
-        new Map([
+        new Map<string, PyValue>([
+          ["draft", false],
           ["base", new Map([["sha", base as string]])],
           ["head", new Map([["sha", head as string]])],
         ]),

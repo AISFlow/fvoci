@@ -107,15 +107,16 @@ export type ResolvedInputs = {
 };
 
 /**
- * pull_request.draft: true is a draft, false or absent is ready (including
- * the ready_for_review action). Any other value is refused.
+ * pull_request.draft: only an explicit boolean false is ready and true is a
+ * draft, whatever the action (ready_for_review included). A missing or null
+ * value, or any other type, cannot be trusted as ready and is refused.
  */
 export function pullRequestDraft(event: PyValue): "draft" | "ready" | "invalid" {
   const pr = field(event, "pull_request", "event");
-  if (pr === null) return "ready";
+  if (pr === null) return "invalid";
   const draft = field(pr, "draft", "pull_request");
   if (draft === true) return "draft";
-  return draft === false || draft === null ? "ready" : "invalid";
+  return draft === false ? "ready" : "invalid";
 }
 
 /**

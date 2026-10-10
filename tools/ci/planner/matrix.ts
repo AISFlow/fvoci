@@ -1,5 +1,5 @@
 import { isMapping as isPyMapping, pyDumps, pyLoads, PyJsonError, type PyValue } from "./pyjson.ts";
-import { isMapping, type Mapping, type RegistryContext } from "./registry.ts";
+import { isMapping, POSTGRES_MATRIX_EXPR, type Mapping, type RegistryContext } from "./registry.ts";
 
 // The rust postgres matrix. rust.yml keeps the full catalog in the postgres
 // job env; ci-plan emits the rows this event runs as the whole
@@ -48,6 +48,16 @@ export function rustCatalogRows(ctx: RegistryContext): Rows {
   if (!isMapping(jobs)) return { rows: null, error: "rust: jobs mapping missing" };
   const postgres = jobs.postgres;
   if (!isMapping(postgres)) return { rows: null, error: "rust: postgres job missing" };
+  // The emitted rows only run if the job consumes exactly that output; any
+  // other matrix (a literal row, another output, an added exclude) could
+  // shrink the run while the gate still checks the emitted rows.
+  const strategy = postgres.strategy;
+  if (!isMapping(strategy) || strategy.matrix !== POSTGRES_MATRIX_EXPR) {
+    return {
+      rows: null,
+      error: `rust: postgres strategy.matrix must be exactly ${POSTGRES_MATRIX_EXPR}`,
+    };
+  }
   return postgresMatrixRows(postgres);
 }
 
