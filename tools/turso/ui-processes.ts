@@ -286,7 +286,8 @@ export class UiProcesses {
 
   open(): this {
     require(UiProcesses.active === null &&
-      process.platform === "linux", "UI_PROCESS_CAPABILITY_REQUIRED");
+      process.platform === "linux" &&
+      this.pidfdUsable(), "UI_PROCESS_CAPABILITY_REQUIRED");
     require(!this.kernel
       .procRows()
       .some((row) => row.parentPid === this.pid), "UI_PREEXISTING_CHILD_REFUSED");
@@ -313,6 +314,23 @@ export class UiProcesses {
       throw original;
     }
     return this;
+  }
+
+  // Every signal goes through a pidfd, so the scope opens only where one can
+  // be taken. pidfd_send_signal (Linux 5.1) predates pidfd_open (5.3).
+  private pidfdUsable(): boolean {
+    let fd: number;
+    try {
+      fd = this.kernel.pidfdOpen(this.pid);
+    } catch {
+      return false;
+    }
+    try {
+      this.kernel.close(fd);
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   startWatch(): void {
