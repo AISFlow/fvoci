@@ -42,7 +42,7 @@ const CHILD_ENV_DENY = [
 ] as const;
 
 export const SERVER_BIN_MISSING =
-  "FVOCI_E2E_SERVER_BIN must be the built fvoci-server path from scripts/web-e2e-inner.sh";
+  "FVOCI_E2E_SERVER_BIN must be the built fvoci-server path from tools/web-e2e/inner.ts";
 
 export type ProcMember = {
   pid: number;

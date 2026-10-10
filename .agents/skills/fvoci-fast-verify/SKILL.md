@@ -54,9 +54,9 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 (Rust/crates/migration, manifest·lock, build script·vendor·생성 입력, 빌드에 영향을 주는 설정)이 모두 같다는 것을
 같은 실행 안에서 hash로 대조한 경우에만 재사용한다. 일부 경로의 `git diff --quiet`나 디렉터리 존재 확인은 입력 동등성 증명이 아니다.
 제품 Rust가 바뀌면 옛 bundle 성공을 새 후보에 적용하지 않는다. 대조할 근거가 레포·Actions artifact에 없으면 재사용하지 않고 새로 빌드한다.
-[group wrapper](../../../scripts/web-e2e-run-group.sh)는 build 없이 `$ROOT/apps/web/dist`를 복사하므로 `ROOT`는 검사할 작업 트리의 절대 경로로 지정하고
+[group wrapper](../../../tools/web-e2e/run-group.ts)는 build 없이 `$ROOT/apps/web/dist`를 복사하므로 `ROOT`는 검사할 작업 트리의 절대 경로로 지정하고
 그 후보에서 생성한 fresh dist·served asset hash를 확인한다. `CARGO_TARGET_DIR`·`FVOCI_COLLAB_ENGINE`·`FVOCI_E2E_PROFILE`은 실제로 빌드한 산출물과 profile에 맞춰 전달한다.
-[inner wrapper](../../../scripts/web-e2e-inner.sh)가 고르는 server/migrate와 필요한 helper를 먼저 확인한다. wrapper의 dist 존재 확인은 최신성이나 입력 동등성 검증이 아니다.
+[inner wrapper](../../../tools/web-e2e/inner.ts)가 고르는 server/migrate와 필요한 helper를 먼저 확인한다. wrapper의 dist 존재 확인은 최신성이나 입력 동등성 검증이 아니다.
 빌려 쓰는 target/source에서 cargo·generate-api·run-web-e2e 전체 wrapper를 실행하지 않는다.
 
 ## 알려진 도구 제약
@@ -69,10 +69,10 @@ SDK가 테스트됐다는 이유로 FVOCI 경합·복구 검사를 생략하지 
 
 ## Web Playwright CI shard (browser job only)
 
-1. 정책·플래너: `python3 scripts/web-e2e-groups.py verify --shards 8` 와 `python3 -m unittest scripts.test_web_e2e_groups` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.
-2. 샤드 래퍼 고정 검사: `bash scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh` 가 stub 빌드·run-group으로 `--ci-shard` 플로우(플랜 선검증, 샤드당 빌드 1회, 그룹 실패 전파, 샤드 수 override 거부)를 검증한다. 프로덕션 래퍼에는 dry-run·디렉터리 override가 없다.
-3. 통합 스크립트: `bash scripts/test-web-e2e-groups.sh` 가 위를 묶는다. CI `web-checks` 와 동일 명령을 로컬에서 먼저 돌린다.
-4. 대표 브라우저 샤드( PostgreSQL·Chromium )는 리드 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N` 으로만 실행한다. 전체 8 샤드·원격 `web.yml` 은 통합 수락 경로에서 확인한다.
+1. 정책·플래너: `bun tools/web-e2e/groups.ts verify --shards 8` 와 `bun test ./tools/web-e2e/groups.test.ts` 는 DB·브라우저 없이 실행한다. `apps/web/e2e/*.spec.ts` 만 정상 범위이며, 중첩·`.test.ts` 등 미지원 패턴은 플래너가 실패로 막는다.
+2. 샤드 래퍼 고정 검사: `bun test ./tools/web-e2e/run.shard.test.ts` 가 stub 빌드·run-group으로 `--ci-shard` 플로우(플랜 선검증, 샤드당 빌드 1회, 그룹 실패 전파, 샤드 수 override 거부)를 검증한다. 프로덕션 래퍼에는 dry-run·디렉터리 override가 없다.
+3. 통합 스크립트: `bun tools/web-e2e/test-groups.ts` 가 위를 묶는다. CI `web-checks` 와 동일 명령을 로컬에서 먼저 돌린다.
+4. 대표 브라우저 샤드( PostgreSQL·Chromium )는 리드 배정 후 `bun tools/web-e2e/run.ts --ci-shard N` 으로만 실행한다. 전체 8 샤드·원격 `web.yml` 은 통합 수락 경로에서 확인한다.
 
 ## CI selection planner/gate (workflow changes)
 

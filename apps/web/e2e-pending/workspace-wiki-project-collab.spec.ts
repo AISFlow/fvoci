@@ -3,7 +3,7 @@ import type { components } from "../src/generated/api";
  * Project documents on the same /collab room, persist barrier and derived body
  * as wiki documents, under project permission. Runs in the collaboration-flow
  * job after workspace-wiki-collab.spec.ts (same worker server; that spec owns
- * instance setup). Invocation: FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
+ * instance setup). Invocation: FVOCI_E2E_PENDING=1 bun tools/web-e2e/run.ts
  */
 import {
   admin,

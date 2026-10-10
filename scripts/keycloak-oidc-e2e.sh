@@ -383,7 +383,7 @@ for mode in "${MODES[@]}"; do
     OIDC_GENERIC_ISSUER="$ISSUER" OIDC_GENERIC_CLIENT_ID="$CLIENT_ID" \
     OIDC_GENERIC_CLIENT_SECRET="$secret" OIDC_GENERIC_LABEL="$LABEL" OIDC_ALLOW_INSECURE=1 \
     FVOCI_KC_E2E_CONFIG="$CONFIG" FVOCI_KC_E2E_MODE="$mode" FVOCI_KC_E2E_OUT="$WORK/out" \
-    bun "$ROOT/scripts/web-e2e/run-group.ts" e2e-keycloak/oidc-keycloak-flow.spec.ts \
+    bun "$ROOT/tools/web-e2e/run-group.ts" e2e-keycloak/oidc-keycloak-flow.spec.ts \
       --config=e2e-keycloak/keycloak.config.ts </dev/null 2>&1 |
     redact_stream | log_stream "$WORK/run.log" || status=$?
   GROUP_STATUS[$mode]=$status

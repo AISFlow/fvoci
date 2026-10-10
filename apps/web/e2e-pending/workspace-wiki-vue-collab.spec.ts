@@ -6,7 +6,7 @@ import type { components } from "../src/generated/api";
  * the room cap, where it refuses a room with close 1013. Runs in the
  * collaboration-flow job after workspace-wiki-collab.spec.ts (same worker
  * server).
- * Invocation: FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
+ * Invocation: FVOCI_E2E_PENDING=1 bun tools/web-e2e/run.ts
  */
 import type { WebSocket } from "@playwright/test";
 import {

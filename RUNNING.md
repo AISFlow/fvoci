@@ -711,7 +711,7 @@ completed and rebuilds current contracts, assets and binaries offline:
 
 ```sh
 scripts/prepare-web-e2e.sh
-scripts/run-web-e2e.sh
+bun tools/web-e2e/run.ts
 ```
 
 The UI reuses source auth/workspace/settings styling for setup, login, workspace

@@ -3,7 +3,7 @@ import type { components } from "../src/generated/api";
  * Product /collab acceptance for two real FvociEditor clients.
  * Registered separately in the collaboration-flow CI job. Full product
  * acceptance still requires the recorded security/review gates. Invocation:
- * FVOCI_E2E_PENDING=1 bash scripts/run-web-e2e.sh
+ * FVOCI_E2E_PENDING=1 bun tools/web-e2e/run.ts
  */
 import {
   admin,

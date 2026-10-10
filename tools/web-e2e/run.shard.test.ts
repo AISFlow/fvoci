@@ -17,13 +17,14 @@ import { shardPlanLines } from "./groups.ts";
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "fvoci-shard-"));
   const bin = mkdtempSync(join(tmpdir(), "fvoci-shard-bin-"));
-  mkdirSync(join(root, "scripts/web-e2e"), { recursive: true });
+  mkdirSync(join(root, "tools/web-e2e"), { recursive: true });
+  mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "apps/web/e2e"), { recursive: true });
   for (const name of ["run.ts", "groups.ts", "labels.ts", "proc.ts"]) {
-    cpSync(join(import.meta.dir, name), join(root, "scripts/web-e2e", name));
+    cpSync(join(import.meta.dir, name), join(root, "tools/web-e2e", name));
   }
   writeFileSync(
-    join(root, "scripts/web-e2e/run-group.ts"),
+    join(root, "tools/web-e2e/run-group.ts"),
     `console.log("fvoci-web-e2e-run-group " + process.argv.slice(2).join(" "));\nprocess.exit(Number(process.env.FVOCI_TEST_RUN_GROUP_EXIT ?? 0));\n`,
   );
   writeFileSync(
@@ -66,7 +67,7 @@ function specs(root: string, count: number) {
 }
 
 function run(fx: ReturnType<typeof fixture>, args: string[], env: Record<string, string> = {}) {
-  return spawnSync("bun", [join(fx.root, "scripts/web-e2e/run.ts"), ...args], {
+  return spawnSync("bun", [join(fx.root, "tools/web-e2e/run.ts"), ...args], {
     cwd: fx.root,
     env: {
       ...process.env,

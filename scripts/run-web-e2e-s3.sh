@@ -50,4 +50,4 @@ export STORAGE_DRIVER=s3
 export S3_PUBLIC_ENDPOINT="${S3_ENDPOINT/127.0.0.1/localhost}"
 # Two parts for a file just over 5 MiB (the S3 minimum part size).
 export FVOCI_UPLOAD_PART_SIZE_BYTES=5242880
-exec bun "$ROOT/scripts/web-e2e/run.ts" --config=e2e-s3/playwright.config.ts "$SPEC"
+exec bun "$ROOT/tools/web-e2e/run.ts" --config=e2e-s3/playwright.config.ts "$SPEC"

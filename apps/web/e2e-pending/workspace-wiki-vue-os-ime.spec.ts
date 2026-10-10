@@ -15,7 +15,7 @@ import type { components } from "../src/generated/api";
  *     ibus engine hangul
  *     export IBUS_ADDRESS=$(ibus address) GTK_IM_MODULE=ibus XMODIFIERS=@im=ibus
  *     export HOME=<your home> FVOCI_E2E_PENDING=1 FVOCI_E2E_OS_IME=1
- *     bash scripts/web-e2e-run-group.sh e2e-pending/workspace-wiki-vue-os-ime.spec.ts
+ *     bun tools/web-e2e/run-group.ts e2e-pending/workspace-wiki-vue-os-ime.spec.ts
  *     ibus exit'
  *
  * The CDP composition test in e2e/workspace-wiki-vue-flow.spec.ts is the

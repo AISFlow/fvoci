@@ -1217,7 +1217,7 @@ class WorkflowRegistryTest(unittest.TestCase):
                 "(cd packages/editor && bun run test)",
                 "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
                 "python3 scripts/selected-backend-ci/test_off_registration.py",
-                "bun scripts/web-e2e/test-groups.ts",
+                "bun tools/web-e2e/test-groups.ts",
                 "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
             ],
             "web-native-checks": [

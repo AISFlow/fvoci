@@ -566,7 +566,7 @@ def run(output, only=None):
                 source=ORIGINAL_C7_SELECTED_FOOTER
                 footer=source[source.index('selected_status=0\n'):]
             else:
-                source=(ROOT/'scripts/web-e2e/run.ts').read_text()
+                source=(ROOT/'tools/web-e2e/run.ts').read_text()
                 self.assertIn('let selectedPhase = "whole"', source)
                 footer=''
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
@@ -598,7 +598,7 @@ def run(output, only=None):
                 if original:
                     command += ['/bin/bash',str(script)]
                 else:
-                    command += [shutil.which('bun'),str(ROOT/'scripts/web-e2e/run.ts'),'--selected-footer']
+                    command += [shutil.which('bun'),str(ROOT/'tools/web-e2e/run.ts'),'--selected-footer']
                 result=subprocess.run(command,capture_output=True,text=True)
                 collector="""import json,pathlib,sys
 root=pathlib.Path(sys.argv[1]);o=root/'fvoci-selected-current';s=root/'fvoci-sqlite'
@@ -1270,8 +1270,8 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
             for name in ('scripts/fixtures/web-e2e/test-build-handoff.py',
                          'scripts/selected-backend-ci/web-build-handoff.py',
                          'scripts/run-selected-backend-e2e.py',
-                         'scripts/web-e2e/run.ts', 'scripts/web-e2e/groups.ts',
-                         'scripts/web-e2e/labels.ts', 'scripts/web-e2e/proc.ts'):
+                         'tools/web-e2e/run.ts', 'tools/web-e2e/groups.ts',
+                         'tools/web-e2e/labels.ts', 'tools/web-e2e/proc.ts'):
                 destination = root/name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes((ROOT/name).read_bytes())
