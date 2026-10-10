@@ -311,24 +311,31 @@ function changeManifest(manifest: Row): void {
 // Rewrites payload.tar with node-tar headers; `change` may alter any member.
 async function rewriteArchive(
   manifest: Manifest,
-  change: (member: { name: string; data: Buffer; type: string; linkpath?: string }) => void,
+  change: (member: {
+    name: string;
+    data: Buffer;
+    type: string;
+    linkpath?: string;
+    mode?: number;
+  }) => void,
+  extra?: { name: string; type: string },
 ): Promise<void> {
   const archive = join(f.packet, "payload.tar");
   const listed = await members(archive, () => true);
   const fd = openSync(archive, "w");
   try {
     for (const item of listed) {
-      const member = { name: item.name, data: item.data ?? Buffer.alloc(0), type: "File" } as {
-        name: string;
-        data: Buffer;
-        type: string;
-        linkpath?: string;
-      };
+      const member = {
+        name: item.name,
+        data: item.data ?? Buffer.alloc(0),
+        type: "File",
+        mode: item.mode,
+      } as { name: string; data: Buffer; type: string; linkpath?: string; mode?: number };
       change(member);
       const header = Buffer.alloc(512);
       new Header({
         path: member.name,
-        mode: item.mode,
+        mode: member.mode,
         size: member.type === "File" ? member.data.length : 0,
         type: member.type as "File",
         linkpath: member.linkpath,
@@ -343,6 +350,17 @@ async function rewriteArchive(
         entry.bytes = member.data.length;
         entry.sha256 = digest(member.data);
       }
+    }
+    if (extra) {
+      const header = Buffer.alloc(512);
+      new Header({
+        path: extra.name,
+        mode: 0o600,
+        size: 0,
+        type: extra.type as "File",
+        mtime: new Date(0),
+      }).encode(header, 0);
+      writeSync(fd, header);
     }
     writeSync(fd, Buffer.alloc(1024));
   } finally {
@@ -627,6 +645,23 @@ describe.serial("collaboration build packet", () => {
       member.linkpath = "/foreign";
     });
     await assert.rejects(consume(f.host));
+    expect(existsSync(join(f.output, "before.json"))).toBe(false);
+  });
+  test("a raw member mode with file type bits is refused before installing", async () => {
+    const manifest = transfer();
+    let first = true;
+    await rewriteArchive(manifest, (member) => {
+      if (!first) return;
+      first = false;
+      member.mode = 0o100000 | (member.mode ?? 0); // node-tar alone would read 0600
+    });
+    await assert.rejects(consume(f.host));
+    expect(existsSync(join(f.output, "before.json"))).toBe(false);
+  });
+  test("an unsupported member type outside the manifest is refused", async () => {
+    const manifest = transfer();
+    await rewriteArchive(manifest, () => undefined, { name: "acl", type: "SolarisACL" });
+    await assert.rejects(consume(f.host), { message: /unsupported type/ });
     expect(existsSync(join(f.output, "before.json"))).toBe(false);
   });
   test("input diagnostics are bounded hashes, never paths or values", () => {

@@ -657,7 +657,8 @@ export async function members(
         type: entry.type,
         linkpath: entry.linkpath ?? "",
         size: entry.size,
-        mode: entry.mode ?? -1,
+        // The raw header field: ReadEntry.mode drops type bits (0100600 -> 0600).
+        mode: entry.header.mode ?? -1,
       };
       const hash = new Bun.CryptoHasher("sha256"),
         chunks: Buffer[] = [];
@@ -682,6 +683,10 @@ export async function members(
     parser.on("error", fail);
     parser.on("warn", (code: string) => {
       fail(new Error("refused tar member: " + code));
+    });
+    // Unsupported member types (e.g. SolarisACL "A") never reach onReadEntry.
+    parser.on("ignoredEntry", () => {
+      fail(new Error("refused tar member: unsupported type"));
     });
     createReadStream(archive).on("error", fail).pipe(parser);
   });
