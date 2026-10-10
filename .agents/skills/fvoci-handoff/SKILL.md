@@ -10,7 +10,7 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
 - 제출 보고에 base SHA, 커밋 SHA(여럿이면 순서), 작업 브랜치, 커밋별 파일, 실행한 명령, cwd, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 남은 위험이 있다. 실행하지 않은 검사는 미실행이다.
 - 리뷰는 그 고정 SHA의 diff·호출자·계약·검사에 대한 ACCEPT 또는 REQUEST_CHANGES다. ACCEPT에는 검토한 SHA가 적힌다. 검토 문장은 원격 CI를 대신하지 않는다. SHA가 바뀌면 바뀐 범위를 다시 본다.
 - 통합 push는 그 커밋 객체의 fast-forward다. push된 head는 ACCEPT(2인이 필요한 경로는 2/2 ACCEPT)된 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA, tested merge SHA, push한 주체를 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
-- 0.x(1.0.0 미만, 0.9.x 포함) main 병합은 아래가 모두 맞을 때 가능하다. 1.0.0 도달 또는 영환님 철회 전까지의 상시 조건이다.
+- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x(1.0.0 미만, 0.9.x 포함)에서 그 검사는 아래이고, 1.0.0 도달 또는 영환님 철회 전까지의 상시 조건이다. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
   - 독립 리뷰어 두 명의 ACCEPT. 두 사람이 ACCEPT한 최종 head SHA를, 게이트 5개가 그 SHA를 검사한 뒤에 팀 방에 먼저 게시한다.
   - 그 head의 check run 전체(최신 attempt, `filter=latest`, 모든 페이지). `filter=all`은 쓰지 않는다. pull_request check run은 PR head에 붙는다.
   - 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`)는 conclusion success만 PASS다. FAIL, CANCELLED, SKIPPED, NEUTRAL, TIMED_OUT, NOTRUN, MISSING은 병합을 막는다.
@@ -19,6 +19,9 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
   - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
   - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
 - Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
+- 브랜치 삭제는 그 브랜치가 main에 포함됐는지 다시 확인한 뒤 목록을 게시한 다음에 허용된다.
+- ruleset 변경은 리뷰어 2명 ACCEPT 뒤에 허용된다.
+- 태그와 릴리스는 영환님 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
 
 ## 기본 절차
@@ -36,10 +39,10 @@ PR 수락·머지는 포팅 종료가 아니다. 의존성이 갖춰진 다음 �
 ## 손대지 말 것
 
 - 리뷰어는 검토 중인 커밋을 고치지 않는다. 통합은 cherry-pick·patch로 SHA를 바꾸지 않는다. 작성자와 리뷰어는 다른 주체다.
-- 작성자는 PR 브랜치를 push하지 않는다. 원본 GitHub는 읽기 전용이다. main에 직접 push하지 않는다.
+- 작성자는 PR 브랜치를 push하지 않는다. 원본 GitHub는 읽기 전용이다. main 갱신은 완료 조건의 병합으로만 허용된다.
 - 진행 중 CI를 직접 취소하지 않는다. `gh run rerun --failed`로 일부만 다시 돌리지 않는다.
-- force push, `reset --hard`, 원격 브랜치 강제 삭제, 광범위한 kill·prune을 하지 않는다. 되돌림(revert)은 영환님 말이 있어야 한다.
-- auto-merge를 켜지 않는다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 태그, 릴리스, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 영환님 말이 있어야 한다.
+- force push와 `reset --hard`는 허용 조건이 없다. 브랜치 삭제는 완료 조건의 포함 확인과 목록 게시 뒤에만 허용된다. 되돌림은 영환님 말이 있을 때 허용된다.
+- auto-merge는 허용 조건이 없다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 영환님 말이 있을 때 허용된다.
 - 사용자 승인 없이 계정·인증·결제, 상주 프로세스, scheduler, routine, MCP 서버를 새로 만들지 않는다. 멈춘 다른 작업 체인을 다시 켜지 않는다.
 - 시크릿·cookie·credential·접속 URL·host·전체 환경을 보고·커밋·artifact에 남기지 않는다.
 - 지정된 도구나 모델을 조용히 바꾸지 않는다. 대체는 알린 뒤 영환님 승인이 있을 때만 한다.

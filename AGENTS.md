@@ -24,10 +24,12 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 ## 허용 범위
 
-- 0.x: 리뷰어 2/2 ACCEPT, 필수 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS, 병합 SHA를 게시한 뒤 병합할 수 있다. 확인 순서는 `fvoci-handoff` 완료 조건이다.
-- 작은 커밋은 리뷰어 1명. `workflows`, `xtask`, `AGENTS.md`, `.agents/`, 게이트, ruleset, `scripts/ci_selection.py`는 리뷰어 2명. `docs/rewrite.md`는 리뷰어 1명.
+- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x 검사는 리뷰어 2/2 ACCEPT와 필수 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS다. 확인 순서는 `fvoci-handoff` 완료 조건이다. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
+- 브랜치 삭제는 main에 포함됐는지 다시 확인한 뒤 그 목록을 게시한 다음에 허용된다.
+- ruleset 변경은 리뷰어 2명 ACCEPT 뒤에 허용된다. 작은 커밋은 리뷰어 1명. `workflows`, `xtask`, `AGENTS.md`, `.agents/`, 게이트, `scripts/ci_selection.py`는 리뷰어 2명. `docs/rewrite.md`는 리뷰어 1명.
 - 작성자와 리뷰어는 다른 주체다. 리뷰어는 검토하는 커밋을 고치지 않는다.
-- 1.0.0 병합, 태그, 릴리스, 배포, 시크릿, 패키지 공개 범위, 유료 사용은 영환님 말이 있어야 한다.
+- 태그와 릴리스는 영환님 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
+- 배포, 시크릿, 패키지 공개 범위, 유료 사용은 영환님 말이 있을 때 허용된다.
 - 저장소 배치는 같은 커밋에서 호출자를 고치면 바꿀 수 있다. 무료 티어만 쓴다.
 
 ## 손대지 말 것
@@ -40,8 +42,8 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 새 Python은 커밋하지 않는다. Python 도구는 uv다. 예외: 하네스 이전 중 기존 Python 경로 문자열은 바꿀 수 있다.
 - 하니스의 Rust 검증은 xtask, TypeScript는 Bun, 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
 - 자식 프로세스는 `process.execPath`로 띄운다. 새 테스트는 기본 25회와 CPU 부하 5회를 통과한다.
-- force push, `reset --hard`, 진행 중 CI 직접 취소, main 직접 push, 운영 DB 변경은 범위 밖이다. 예외는 `draft/*` push의 자동 취소뿐이고 main·#347 push에는 없다. 그 run은 `CANCELLED(대체됨)`이라 판정 근거가 아니다.
-- 시크릿·credential·접속 URL·host는 로그·커밋·보고·artifact 밖에 둔다. 게시된 태그, `:0.y.z` 이미지, Release 파일은 그대로 둔다.
+- force push, `reset --hard`, 진행 중 CI 직접 취소, 운영 DB 변경은 허용 조건이 없다. 예외는 `draft/*` push의 자동 취소뿐이고 main·#347 push에는 없다. 그 run은 `CANCELLED(대체됨)`이라 판정 근거가 아니다.
+- 시크릿·credential·접속 URL·host는 로그·커밋·보고·artifact 밖에 둔다. main 직접 push는 병합 허용 조건에 없다.
 
 ## 스폰
 
