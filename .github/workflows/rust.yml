@@ -35,6 +35,7 @@ jobs:
       select_postgres: ${{ steps.plan.outputs.select_postgres }}
       select_native_arm64: ${{ steps.plan.outputs.select_native_arm64 }}
       select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
+      postgres_exclude: ${{ steps.plan.outputs.postgres_exclude }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -442,6 +443,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        exclude: ${{ fromJSON(needs.ci-plan.outputs.postgres_exclude) }}
         # A/C split only task/comment from measured PG16 A: 160.19s moved,
         # 404.03s retained (cold compile/setup are separate). Both keep 15m.
         # B retains every target/helper/install/S3: x64 20m, ARM64 25m.
