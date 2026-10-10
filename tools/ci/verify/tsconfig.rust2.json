@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "types": ["bun", "node"]
   },
-  "include": ["./py.ts", "./rust-*.ts", "./web-browser.ts", "./rust2*.ts"]
+  "include": ["./py.ts", "./raw-yaml.ts", "./rust-*.ts", "./web-browser.ts", "./rust2*.ts"]
 }
