@@ -156,7 +156,7 @@ describe("trace summary redaction", () => {
     }
   });
 
-  test("paths are redacted as Python split them: no backslash or dot-segment rewriting", () => {
+  test("paths are redacted as Python split them: no backslash or dot-segment rewriting", async () => {
     const token = "SYNTHETIC_PRIVATE";
     // Expected values are the replaced Python script's output for the same URLs.
     const expected: [string, string][] = [];
@@ -194,7 +194,7 @@ describe("trace summary redaction", () => {
         },
       }),
     );
-    const summary = summarize(zipOf([["0-trace.network", rows.join("\n")]]));
+    const summary = await summarize(zipOf([["0-trace.network", rows.join("\n")]]));
     expect(summary).not.toContain(token);
     expect(summary.split("\n").filter((line) => line.includes("<redacted>"))).toHaveLength(20);
   });
@@ -228,11 +228,12 @@ describe("trace summary redaction", () => {
     const cases: [string, Uint8Array, number, string][] = [
       ["normal empty deflate", zipOf([[name, ""]]), 0, "(no requests"],
       ["corrupt deflate declared empty", corrupt(zipOf([[name, "{}"]])), 1, ""],
+      // Python kept the declared prefix; yauzl's size check refuses a stream longer than declared.
       [
-        "CRC-matching truncation keeps the declared prefix",
+        "CRC-matching truncation is refused",
         declare(zipOf([[name, first + row("/second.js", 2)]]), first.length, crc32(first) >>> 0),
-        0,
-        "GET 200 - /first.js",
+        1,
+        "",
       ],
     ];
     const work = mkdtempSync(join(tmpdir(), "fvoci-trace-summary."));
@@ -248,7 +249,6 @@ describe("trace summary redaction", () => {
         expect(result.exitCode, label).toBe(exitCode);
         if (exitCode === 0) expect(stdout, label).toContain(contains);
         else expect(stdout, label).toBe("");
-        if (label.startsWith("CRC")) expect(stdout, label).not.toContain("/second.js");
       }
     } finally {
       rmSync(work, { recursive: true, force: true });
@@ -373,7 +373,7 @@ describe("template diagnostic", () => {
     modes?: Record<string, Mode>;
     edit?: (archive: Uint8Array) => Uint8Array;
   }
-  const run = (label: string, options: Options = {}): Json => {
+  const run = async (label: string, options: Options = {}): Promise<Json> => {
     const payload = "payload" in options ? options.payload : data;
     const members: [string, Value][] = [
       ["0-trace.network", JSON.stringify(network)],
@@ -386,7 +386,7 @@ describe("template diagnostic", () => {
     ];
     if (options.duplicate) members.push([member, JSON.stringify(data)]);
     const archive = zipOf(members, options.modes);
-    const output = summarize(options.edit ? options.edit(archive) : archive);
+    const output = await summarize(options.edit ? options.edit(archive) : archive);
     expect(output, `${label}: base digest lost`).toContain("GET 200 script /assets/fixture.js");
     for (const forbidden of [
       secret,
@@ -413,8 +413,8 @@ describe("template diagnostic", () => {
   };
   const reject = (reason: string) => ({ available: false, reason });
 
-  test("valid input exports the allowlist only", () => {
-    const valid = run("valid") as {
+  test("valid input exports the allowlist only", async () => {
+    const valid = (await run("valid")) as {
       available: boolean;
       counts: Json;
       actions: Record<string, Json | null>;
@@ -501,8 +501,8 @@ describe("template diagnostic", () => {
     return value;
   };
 
-  test("caret boundaries: exact, private and nullable inputs", () => {
-    const caretValid = run("caret_valid", { payload: caretData() }) as {
+  test("caret boundaries: exact, private and nullable inputs", async () => {
+    const caretValid = (await run("caret_valid", { payload: caretData() })) as {
       missingActions: string[];
       actions: Record<string, Json & { native: Json; focus: Json }>;
     };
@@ -534,7 +534,7 @@ describe("template diagnostic", () => {
       at: 7,
       native: { anchor: { inside: null, noneditableLeaf: null, position: null }, head: {} },
     };
-    const caretUnknown = run("caret_unknown", { payload: unknown }) as {
+    const caretUnknown = (await run("caret_unknown", { payload: unknown })) as {
       actions: Record<string, Json>;
     };
     expect(caretUnknown.actions["caret:after-End"]?.caret).toEqual({
@@ -545,7 +545,7 @@ describe("template diagnostic", () => {
     });
   });
 
-  test("caret boundaries: 15 typed, shape and overflow rejection controls", () => {
+  test("caret boundaries: 15 typed, shape and overflow rejection controls", async () => {
     const rejects: [string, Data, string][] = [];
     const base = caretData();
     const boundaries = base.caretBoundaries as Json[];
@@ -586,11 +586,11 @@ describe("template diagnostic", () => {
     }
     expect(rejects).toHaveLength(15);
     for (const [label, payload, reason] of rejects) {
-      expect(run(`caret_reject_${label}`, { payload }), label).toEqual(reject(reason));
+      expect(await run(`caret_reject_${label}`, { payload }), label).toEqual(reject(reason));
     }
   });
 
-  test("hostile, partial and legacy inputs", () => {
+  test("hostile, partial and legacy inputs", async () => {
     const hostile = clone(data);
     const hostileFrame = hostile.frames[0] as Json & { auth: Json; focus: Json; native: Json };
     hostileFrame.stage = "keydown:" + secret;
@@ -598,7 +598,7 @@ describe("template diagnostic", () => {
     hostileFrame.focus.activeTag = secret;
     hostileFrame.native.positions = { unknown: secret };
     hostileFrame.native.text = secret;
-    const safe = (run("hostile", { payload: hostile }).tail as Json[])[0] as Json & {
+    const safe = ((await run("hostile", { payload: hostile })).tail as Json[])[0] as Json & {
       auth: Json;
       native: Json;
     };
@@ -612,17 +612,19 @@ describe("template diagnostic", () => {
     truncated.totals.frames = 501;
     truncated.dropped.frames = 500;
     expect(
-      (run("truncated", { payload: truncated }).counts as Record<string, Json>).frames?.dropped,
+      ((await run("truncated", { payload: truncated })).counts as Record<string, Json>).frames
+        ?.dropped,
     ).toBe(500);
     const legacy: Partial<typeof data> = clone(data);
     delete legacy.totals;
     delete legacy.dropped;
     expect(
-      (run("legacy_unknown", { payload: legacy }).counts as Record<string, Json>).frames?.unknown,
+      ((await run("legacy_unknown", { payload: legacy })).counts as Record<string, Json>).frames
+        ?.unknown,
     ).toBe(true);
   });
 
-  test("14 rejection controls", () => {
+  test("14 rejection controls", async () => {
     const inconsistent = clone(data);
     inconsistent.totals.frames = 2;
     const malformedSnapshot = clone(data);
@@ -674,15 +676,15 @@ describe("template diagnostic", () => {
     ];
     expect(rejects).toHaveLength(14);
     for (const [label, options, reason] of rejects) {
-      expect(run(label, options), label).toEqual(reject(reason));
+      expect(await run(label, options), label).toEqual(reject(reason));
     }
   });
 
-  test("the attachment record must be a plain, unencrypted file", () => {
+  test("the attachment record must be a plain, unencrypted file", async () => {
     const unix = (mode: number) => ({ [member]: { mode, os: 3 } });
-    expect(run("regular_mode", { modes: unix(0o100644) }).available).toBe(true);
+    expect((await run("regular_mode", { modes: unix(0o100644) })).available).toBe(true);
     const dosRegular = { [member]: { mode: 0o100644, os: 0 } };
-    expect(run("dos_regular_mode", { modes: dosRegular }).available).toBe(true);
+    expect((await run("dos_regular_mode", { modes: dosRegular })).available).toBe(true);
     const rejects: [string, Options][] = [
       ["symlink", { modes: unix(0o120777) }],
       ["fifo", { modes: unix(0o010644) }],
@@ -699,15 +701,17 @@ describe("template diagnostic", () => {
       ],
     ];
     for (const [label, options] of rejects) {
-      expect(run(label, options), label).toEqual(reject("missing_or_invalid_attachment_member"));
+      expect(await run(label, options), label).toEqual(
+        reject("missing_or_invalid_attachment_member"),
+      );
     }
   });
 
-  test("a CRC-32 mismatch is invalid data, never a valid digest", () => {
+  test("a CRC-32 mismatch is invalid data, never a valid digest", async () => {
     for (const target of [member, "test.trace"]) {
-      expect(run(`bad_crc ${target}`, { edit: (archive) => corruptCrc(archive, target) })).toEqual(
-        reject("invalid_attachment_data"),
-      );
+      expect(
+        await run(`bad_crc ${target}`, { edit: (archive) => corruptCrc(archive, target) }),
+      ).toEqual(reject("invalid_attachment_data"));
     }
     // Outside the digest a corrupt member fails the summary, as Python's read did.
     const work = mkdtempSync(join(tmpdir(), "fvoci-trace-summary."));
@@ -726,7 +730,48 @@ describe("template diagnostic", () => {
     }
   });
 
-  test("Python float and integer tokens keep their types", () => {
+  test("budgets stop decoding and parsing before memory follows the input", async () => {
+    // A 16 MiB stream declared as one byte stops at the first oversized chunk.
+    const bomb = (archive: Uint8Array) =>
+      editRecords(archive, member, (view, at, central) => {
+        if (central) view.setUint32(at + 24, 1, true);
+      });
+    expect(
+      await run("declared_one_byte_bomb", {
+        payload: new Uint8Array(16 * 1024 * 1024).fill(0x20),
+        edit: bomb,
+      }),
+    ).toEqual(reject("invalid_attachment_data"));
+
+    const work = mkdtempSync(join(tmpdir(), "fvoci-trace-summary."));
+    try {
+      const path = join(work, "trace.zip");
+      const fails = (archive: Uint8Array) => {
+        writeFileSync(path, archive);
+        const result = Bun.spawnSync([process.execPath, cli, path], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString()).toBe("");
+        expect(result.stderr.toString()).toContain("BudgetExceeded");
+      };
+      // A .network member declared past its budget is refused before it is inflated.
+      fails(
+        editRecords(zipOf([["0-trace.network", "{}"]]), "0-trace.network", (view, at, central) => {
+          if (central) view.setUint32(at + 24, 64 * 1024 * 1024 + 1, true);
+        }),
+      );
+      // More central records than the budget are refused before they are read.
+      fails(
+        zipOf(Array.from({ length: 20_001 }, (_, i): [string, string] => [`r/${String(i)}`, ""])),
+      );
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("Python float and integer tokens keep their types", async () => {
     const floats = clone(data);
     (floats.frames[0] as Json).at = 10.5;
     const text = JSON.stringify(floats).replace('"bindingGeneration":1', '"bindingGeneration":1.0');
@@ -736,7 +781,7 @@ describe("template diagnostic", () => {
       [member, text],
     ]);
     const line =
-      summarize(archive)
+      (await summarize(archive))
         .split("\n")
         .find((row) => row.startsWith("w3-template-diagnostic ")) ?? "";
     // A float `at` keeps Python's repr; a float where an int is required is unknown.
