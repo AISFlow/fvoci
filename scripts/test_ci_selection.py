@@ -1367,6 +1367,15 @@ class WorkflowRegistryTest(unittest.TestCase):
         errors = SEL.verify_rust_suite_registry(ROOT)
         self.assertEqual(errors, [], msg="\n".join(errors))
 
+    def test_fast_lane_runs_xtask_package_tests(self) -> None:
+        data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")
+        self.assertIsNone(error)
+        self.assertEqual(SEL.verify_xtask_fast_execution(data["jobs"]), [])
+        steps = data["jobs"]["fast"]["steps"]
+        steps[:] = [step for step in steps if step.get("run") != SEL.XTASK_FAST_RUN]
+        errors = SEL.verify_xtask_fast_execution(data["jobs"])
+        self.assertTrue(any("xtask package tests" in item for item in errors), errors)
+
     def test_requirements_pin_pyyaml(self) -> None:
         text = (ROOT / "scripts" / "ci_selection_requirements.txt").read_text(encoding="utf-8")
         self.assertIn("PyYAML==6.0.3", text)

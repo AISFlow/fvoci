@@ -1731,6 +1731,36 @@ def schema_baseline_inventory(jobs: dict) -> tuple[set[str], str | None]:
     return {"schema_baseline_integration"}, None
 
 
+XTASK_FAST_RUN = (
+    "cargo test --locked --offline --manifest-path xtask/Cargo.toml "
+    "--target-dir target/default/xtask"
+)
+
+
+def verify_xtask_fast_execution(jobs: dict) -> list[str]:
+    """The fast lane runs the independent xtask package tests once, before cache saves."""
+    steps = jobs.get("fast", {}).get("steps", [])
+    if not isinstance(steps, list):
+        return ["rust: fast job steps missing"]
+    matches = [
+        step for step in steps
+        if isinstance(step, dict) and step.get("run") == XTASK_FAST_RUN
+    ]
+    if len(matches) != 1:
+        return ["rust: fast lane must run the xtask package tests exactly once"]
+    step = matches[0]
+    if any(key in step for key in ("if", "continue-on-error", "env")):
+        return ["rust: xtask fast step must be unconditional and keep its target dir in the command"]
+    saves = [
+        item for item in steps
+        if isinstance(item, dict) and str(item.get("name", "")).startswith("Save ")
+        and "build outputs" in str(item.get("name", ""))
+    ]
+    if saves and steps.index(step) > min(steps.index(item) for item in saves):
+        return ["rust: xtask tests must run before fast cache saves"]
+    return []
+
+
 def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     """Ensure explicit root [[test]] db-tests targets map to rust.yml execution rows."""
     errors: list[str] = []
@@ -1755,6 +1785,7 @@ def verify_rust_suite_registry(repo_root: Path = ROOT) -> list[str]:
     assert jobs is not None
 
     errors.extend(verify_selected_library_execution(jobs))
+    errors.extend(verify_xtask_fast_execution(jobs))
     errors.extend(verify_native_arm64_execution(jobs))
     errors.extend(verify_postgres_budget_matrix(jobs))
     errors.extend(verify_postgres_integration_execution(jobs))

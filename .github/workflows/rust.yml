@@ -187,6 +187,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/default
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/default/vendor-markdown
+      - run: cargo test --locked --offline --manifest-path xtask/Cargo.toml --target-dir target/default/xtask
       - name: Save server build outputs after validation
         if: steps.default_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
