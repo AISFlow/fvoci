@@ -3,7 +3,18 @@
 // cleanup ledger. Receipts keep the field names the runner already reads.
 import { deepEquals, spawn, type Subprocess } from "bun";
 import { strict as assert } from "node:assert";
-import { closeSync, existsSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative } from "node:path";
 import process from "node:process";
@@ -149,15 +160,44 @@ export const pythonJson = sourceInputText;
 export function writeJson(path: string, value: unknown): void {
   writeFileSync(path, pythonJson(value), { flag: "wx" });
 }
-export function privateWrite(path: string, value: unknown): void {
+// Exclusive create at mode 0600 from the first byte.
+export function privateText(path: string, text: string): void {
   const fd = openSync(path, "wx", 0o600);
   try {
     fchmodSync(fd, 0o600);
-    writeFileSync(fd, pythonJson(value));
+    writeFileSync(fd, text);
   } finally {
     closeSync(fd);
   }
 }
+export const privateWrite = (path: string, value: unknown) => {
+  privateText(path, pythonJson(value));
+};
+
+export const hex40 = /^[0-9a-f]{40}$/;
+export const isRecord = (value: unknown): value is Json =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+// A JSON member the caller requires: a missing key refuses (Python KeyError)
+// instead of comparing as undefined.
+export function field(value: unknown, key: string): unknown {
+  assert.ok(isRecord(value) && Object.hasOwn(value, key), "required JSON member missing");
+  return value[key];
+}
+// [st_dev, st_ino] as JSON: an integer while it is exact as a number, its
+// decimal text beyond 2**53 (64-bit inode file systems). Equal files give
+// equal values, so receipts compare them with deepEquals.
+export type Inode = [number | string, number | string];
+export function inodeOf(path: string, link = false): Inode {
+  const facts = link ? lstatSync(path, { bigint: true }) : statSync(path, { bigint: true });
+  const exact = (value: bigint) => {
+    const number = Number(value);
+    return Number.isSafeInteger(number) ? number : value.toString();
+  };
+  return [exact(facts.dev), exact(facts.ino)];
+}
+// The digest column of `sha256sum` output, one per printed line.
+export const copiedHashes = (stdout: string) =>
+  lines(stdout).map((line) => line.trim().split(/\s+/)[0]);
 
 // shlex.quote
 export const shellQuote = (value: string) =>
@@ -419,8 +459,6 @@ export interface BrowserCheckpoint {
   known_browser_checkpoint: string | null;
   browser_report_state: string;
 }
-const record = (value: unknown): value is Json =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 function knownSource(path: unknown, suffix: string): boolean {
   if (typeof path !== "string" || path.length > 4096 || /[\n\r]/.test(path)) return false;
   const normalized = path.replaceAll("\\", "/");
@@ -431,9 +469,9 @@ function knownSource(path: unknown, suffix: string): boolean {
   );
 }
 function locationOf(result: Json): Json | null {
-  if (record(result.errorLocation)) return result.errorLocation;
+  if (isRecord(result.errorLocation)) return result.errorLocation;
   const errors = result.errors;
-  if (Array.isArray(errors) && record(errors[0]) && record(errors[0].location))
+  if (Array.isArray(errors) && isRecord(errors[0]) && isRecord(errors[0].location))
     return errors[0].location;
   return null;
 }
@@ -450,17 +488,17 @@ export function knownBrowserCheckpoint(report: unknown, restart = false): Browse
     browser_report_state: state,
   });
   try {
-    if (!record(report)) return empty("report-unreadable");
+    if (!isRecord(report)) return empty("report-unreadable");
     const config = report.config;
-    if (!record(config) || !integral(config, "workers") || config.workers !== 1)
+    if (!isRecord(config) || !integral(config, "workers") || config.workers !== 1)
       return empty("workers-not-one");
     if (!Array.isArray(report.suites)) return empty("spec-mismatch");
     const found: Json[] = [];
     const stack: unknown[] = [...(report.suites as unknown[])];
     while (stack.length) {
       const suite = stack.pop();
-      if (!record(suite)) return empty("report-unreadable");
-      if (Array.isArray(suite.specs)) found.push(...(suite.specs as unknown[]).filter(record));
+      if (!isRecord(suite)) return empty("report-unreadable");
+      if (Array.isArray(suite.specs)) found.push(...(suite.specs as unknown[]).filter(isRecord));
       if (Array.isArray(suite.suites)) stack.push(...(suite.suites as unknown[]));
     }
     const matched = found.filter(
@@ -468,10 +506,10 @@ export function knownBrowserCheckpoint(report: unknown, restart = false): Browse
     );
     if (matched.length !== 1) return empty("spec-mismatch");
     const tests = matched[0]?.tests;
-    if (!Array.isArray(tests) || tests.length !== 1 || !record(tests[0]))
+    if (!Array.isArray(tests) || tests.length !== 1 || !isRecord(tests[0]))
       return empty("spec-mismatch");
     const results = tests[0].results;
-    if (!Array.isArray(results) || results.length !== 1 || !record(results[0]))
+    if (!Array.isArray(results) || results.length !== 1 || !isRecord(results[0]))
       return empty("spec-mismatch");
     const result = results[0];
     const status = result.status;
@@ -515,4 +553,35 @@ export function frameLine(error: unknown, file: string): number | null {
 export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
 export function assertNoEnvFile(): void {
   assert.ok(process.execArgv.includes("--no-env-file"), "lane driver requires bun --no-env-file");
+}
+
+// The restart/normal-server I/O both selected normal lanes share.
+export const emit = (line: string) => {
+  writeSync(1, line + "\n");
+};
+export const actor = () => [process.getuid?.(), process.getgid?.()] as const;
+export function probeSetup(base: string): Promise<{ status: number; body: unknown }> {
+  // node:http never consults proxy variables; the owned server is loopback.
+  return new Promise((resolvePromise, reject) => {
+    const request = get(base + "/api/v1/setup", { timeout: 10_000 }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("error", reject);
+      response.on("end", () => {
+        try {
+          resolvePromise({
+            status: response.statusCode ?? 0,
+            body: JSON.parse(decode(Buffer.concat(chunks))),
+          });
+        } catch (error) {
+          reject(error instanceof Error ? error : runtimeError("owned setup probe failed"));
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy(runtimeError("owned setup probe timed out")));
+    request.on("error", reject);
+  });
+}
+export function spawnServer(args: string[], log: number): Child {
+  return spawn(args, { stdin: "ignore", stdout: log, stderr: log });
 }

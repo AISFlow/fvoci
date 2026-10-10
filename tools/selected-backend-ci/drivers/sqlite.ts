@@ -25,33 +25,41 @@ import type { Environment } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
 import {
+  actor,
   assertNoEnvFile,
   checkInterrupt,
   cleanupAttempt,
   cleanupScope,
   command,
+  copiedHashes,
+  emit,
   failureCheckpoint,
   failureDigest,
   identityGone,
+  inodeOf,
   inputCheck,
   list,
   now,
   ownedRows,
   portClosed,
+  privateText,
+  probeSetup,
   readText,
   running,
   runtimeError,
   secondary,
   shellQuote,
+  spawnServer,
   trapInterrupts,
   treeHashes,
   waitFor,
   writeJson,
   type Child,
+  type Inode,
   type Receipt,
   type Row,
 } from "./common.ts";
-import { actor, browserArgs, emit, probeSetup, spawnServer } from "./postgres.ts";
+import { browserArgs } from "./postgres.ts";
 import {
   browserPort,
   restartSameApp,
@@ -144,7 +152,7 @@ export interface State {
   serverRow: Row | null;
   browserEnv: Record<string, string>;
   browserInputs: Browser | null;
-  databaseInode: [number, number] | null;
+  databaseInode: Inode | null;
   code: number;
 }
 
@@ -302,18 +310,6 @@ export function summary(receipt: Receipt, code: number, cleanupErrors: unknown[]
 
 // ---- owned I/O ------------------------------------------------------------
 
-// Exact (st_dev, st_ino); restart.ts applies the same safe-integer guard.
-const inode = (path: string): [number, number] => {
-  const meta = statSync(path, { bigint: true });
-  const result: [number, number] = [Number(meta.dev), Number(meta.ino)];
-  assert.ok(result.every(Number.isSafeInteger) && BigInt(result[1]) === meta.ino);
-  return result;
-};
-// Exclusive mode 0600 text: the private server environment inputs.
-function privateText(path: string, text: string): void {
-  writeFileSync(path, text, { flag: "wx", mode: 0o600 });
-  chmodSync(path, 0o600);
-}
 // Records the first outcome before any cleanup. A preparation exception also
 // names its fixed step and the last preparation command exit observed.
 export function recordFailure(
@@ -406,10 +402,7 @@ export async function prepareContainer(state: State, seam: Seam): Promise<void> 
   const binaries = state.current.build.binaries;
   assert.ok(
     deepEquals(
-      hashes
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => line.split(/\s+/)[0]),
+      copiedHashes(hashes),
       [state.server, state.migrate, state.engine].map((path) => binaries[path]?.sha256),
     ),
   );
@@ -492,7 +485,7 @@ async function qualifyServer(state: State, seam: Seam): Promise<void> {
     .map((file) => ({ stem: file.slice(0, -4), sha256: sha(join(directory, file)) }));
   const expected = expectedMigrations(definitions, readText(join(root, "src/db/migrate.rs")));
   assert.ok(deepEquals(applied, expected) && applied.length === 12);
-  state.databaseInode = [meta.dev, meta.ino];
+  state.databaseInode = inodeOf(db);
   Object.assign(receipt, {
     baseURL: state.base,
     actual_server: server,
@@ -569,7 +562,7 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   if (flow === "on")
     assert.ok(/\b1 passed\b/.test(readText(log)), "exact one selected browser test");
   else receipt.actual_off_titles = seam.validateOffReport(read(report), "sqlite");
-  assert.ok(deepEquals(inode(db), state.databaseInode), "no replacement/reset DB");
+  assert.ok(deepEquals(inodeOf(db), state.databaseInode), "no replacement/reset DB");
   Object.assign(receipt, {
     actual_browser_tests: flow === "off" ? 8 : 1,
     retries: 0,
@@ -785,7 +778,7 @@ export async function main(
   const bun = env("FVOCI_CI_BUN", source);
   assert.equal(source.FVOCI_ROOT_RUN_OWNER, owner);
   const before = current.before;
-  const sourceBefore = await seam.inputCheck(before, head, tree);
+  const sourceBefore = current.sourceBefore;
   const binaries = Object.keys(current.build.binaries);
   const pick = (suffix: string) => {
     const path = binaries.find((candidate) => candidate.endsWith(suffix));

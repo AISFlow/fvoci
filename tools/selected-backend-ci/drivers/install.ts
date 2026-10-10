@@ -17,6 +17,7 @@ import {
   cleanupAttempt,
   cleanupScope,
   command,
+  emit,
   failureCheckpoint,
   failureDigest,
   list,
@@ -28,7 +29,6 @@ import {
   type Command,
   type Receipt,
 } from "./common.ts";
-import { emit } from "./postgres.ts";
 
 export const installDriver = import.meta.path;
 export const image =

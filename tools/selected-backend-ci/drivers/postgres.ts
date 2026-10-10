@@ -7,7 +7,7 @@
 // owned Meilisearch wrapper as `--inside <run>`. Every mode first rebinds the
 // whole current artifact/preparation proof. Each process prints at most its
 // final JSON summary on stdout and exits with the lane's first failure code.
-import { deepEquals, spawn } from "bun";
+import { deepEquals } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -15,16 +15,13 @@ import {
   chmodSync,
   closeSync,
   existsSync,
-  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
   statSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
-import { get } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { env, jsonInteger, parseJson, read, resolved, root, sha } from "../io.ts";
@@ -39,10 +36,17 @@ import {
   cleanupAttempt,
   cleanupScope,
   command,
-  decode,
+  actor,
+  copiedHashes,
+  emit,
   errorFacts,
   failureCheckpoint,
   failureDigest,
+  field,
+  isRecord,
+  privateText,
+  privateWrite,
+  probeSetup,
   identityGone,
   inputCheck,
   knownBrowserCheckpoint,
@@ -56,6 +60,7 @@ import {
   runtimeError,
   secondary,
   shellQuote,
+  spawnServer,
   trapInterrupts,
   treeHashes,
   waitFor,
@@ -92,8 +97,6 @@ export function canonicalUuid(value: unknown): string {
   return value;
 }
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
-const isRecord = (value: unknown): value is Json =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 // Playwright's direct CLI: the pinned package's own bin file, a regular file in
 // the admitted external input closure.
@@ -155,7 +158,7 @@ export async function rebind(): Promise<Lane> {
     process.env.FVOCI_E2E_SELECTED_AUXILIARY === (flow === "on" ? "normal-api" : undefined),
   );
   const before = current.before;
-  const sourceBefore = await inputCheck(before, head, tree);
+  const sourceBefore = current.sourceBefore;
   const binaries = current.build.binaries;
   const named = (suffix: string) => {
     const path = Object.keys(binaries).find((item) => item.endsWith(suffix));
@@ -285,35 +288,6 @@ export async function verifyFixturesClosed(
 export interface Seam extends RestartSeam {
   postInputs: () => Promise<Inputs>;
 }
-export const emit = (line: string) => {
-  writeSync(1, line + "\n");
-};
-export const actor = () => [process.getuid?.(), process.getgid?.()] as const;
-export function probeSetup(base: string): Promise<{ status: number; body: unknown }> {
-  // node:http never consults proxy variables; the owned server is loopback.
-  return new Promise((resolvePromise, reject) => {
-    const request = get(base + "/api/v1/setup", { timeout: 10_000 }, (response) => {
-      const chunks: Buffer[] = [];
-      response.on("data", (chunk: Buffer) => chunks.push(chunk));
-      response.on("error", reject);
-      response.on("end", () => {
-        try {
-          resolvePromise({
-            status: response.statusCode ?? 0,
-            body: JSON.parse(decode(Buffer.concat(chunks))),
-          });
-        } catch (error) {
-          reject(error instanceof Error ? error : runtimeError("owned setup probe failed"));
-        }
-      });
-    });
-    request.on("timeout", () => request.destroy(runtimeError("owned setup probe timed out")));
-    request.on("error", reject);
-  });
-}
-export function spawnServer(args: string[], log: number): Child {
-  return spawn(args, { stdin: "ignore", stdout: log, stderr: log });
-}
 
 const environmentNames = [
   "FVOCI_ROOT_CURRENT_BINDING",
@@ -413,9 +387,14 @@ export async function parent(run: string, facts: ParentFacts, seam: ParentSeam):
       failureCheckpoint(summary, run, code, {
         bodyLog: join(run, "owned-fixtures.log"),
         packetName: packet,
+        extraKeys: browserPacketKeys,
       });
   } catch (error) {
-    failureCheckpoint(summary, run, summary.wrapper_exit, { error, packetName: packet });
+    failureCheckpoint(summary, run, summary.wrapper_exit, {
+      error,
+      packetName: packet,
+      extraKeys: browserPacketKeys,
+    });
     code ||= 1;
   }
   return cleanupScope(async () => {
@@ -867,15 +846,8 @@ export async function inside(lane: Lane, run: string): Promise<number> {
         .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`)
         .join(""),
     ],
-  ] as const) {
-    const fd = openSync(file, "wx", 0o600);
-    try {
-      fchmodSync(fd, 0o600);
-      writeFileSync(fd, body);
-    } finally {
-      closeSync(fd);
-    }
-  }
+  ] as const)
+    privateText(file, body);
   const bundleHashes = Object.fromEntries(
     Object.entries(lane.binaries).map(([path, record]) => [path, record.sha256]),
   );
@@ -1028,10 +1000,7 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   const hashes = (await seam.command(["docker", "exec", name, "sha256sum", ...executables])).stdout;
   assert.ok(
     deepEquals(
-      hashes
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => line.trim().split(/\s+/)[0]),
+      copiedHashes(hashes),
       [lane.server, lane.migrate, lane.engine].map((path) => lane.binaries[path]?.sha256),
     ),
   );
@@ -1226,26 +1195,31 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
     assert.ok(cases.length === 1 && cases[0]?.results.length === 1);
     const actual = cases[0].results[0] as Json;
     assert.ok(actual.status === "passed" && actual.retry === 0);
-    const tracer = attachment(actual, "selected-vue-native-readback.json");
+    const tracerJson = attachment(actual, "selected-vue-native-readback.json");
+    const tracer = (key: string) => field(tracerJson, key);
     assert.ok(
-      tracer.selected === "postgres" &&
-        (tracer.canonicalEmojiOracleControls as unknown[]).length === 6,
+      tracer("selected") === "postgres" &&
+        (tracer("canonicalEmojiOracleControls") as unknown[]).length === 6,
     );
-    assert.ok((tracer.nativeHistoryOracleControls as unknown[]).length === 2);
-    assert.ok(tracer.firstAck !== tracer.finalAck && tracer.creatorId !== tracer.freshActorId);
-    const document = tracer.document as Json;
-    privateJson(join(run, "selected-vue-native-readback.private.json"), tracer);
+    assert.ok((tracer("nativeHistoryOracleControls") as unknown[]).length === 2);
+    assert.ok(
+      tracer("firstAck") !== tracer("finalAck") && tracer("creatorId") !== tracer("freshActorId"),
+    );
+    const document = (key: string) => field(tracer("document"), key);
+    privateWrite(join(run, "selected-vue-native-readback.private.json"), tracerJson);
     receipt.typed_tracer_receipt_sha256 = sha(
       join(run, "selected-vue-native-readback.private.json"),
     );
-    const aux = attachment(actual, "selected-wiki-auxiliary-mounted.json");
-    assert.ok(aux.source === head && aux.compiledSource === head);
-    assert.ok(aux.workspaceId === tracer.workspaceId && aux.documentId === document.id);
+    const auxJson = attachment(actual, "selected-wiki-auxiliary-mounted.json");
+    const aux = (key: string) => field(auxJson, key);
+    assert.ok(aux("source") === head && aux("compiledSource") === head);
+    assert.ok(aux("workspaceId") === tracer("workspaceId") && aux("documentId") === document("id"));
     assert.ok(
-      aux.readerId === tracer.freshActorId && aux.nativeBodyAndManualRevisionUnchanged === true,
+      aux("readerId") === tracer("freshActorId") &&
+        aux("nativeBodyAndManualRevisionUnchanged") === true,
     );
     for (const phase of ["ownerMounted", "freshMounted", "reloadedMounted", "afterDenialMounted"]) {
-      const observed = aux[phase] as Json & { responses: Json[] };
+      const observed = aux(phase) as Json & { responses: Json[] };
       assert.ok(
         deepEquals(
           observed.responses.map((r) => r.consumer),
@@ -1259,9 +1233,9 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
         ),
       );
     }
-    const denials = aux.denials as Json[];
+    const denials = aux("denials") as Json[];
     assert.ok(denials.length === 8 && denials.every((r) => r.status === 404));
-    privateJson(join(run, "selected-wiki-auxiliary-mounted.private.json"), aux);
+    privateWrite(join(run, "selected-wiki-auxiliary-mounted.private.json"), auxJson);
     receipt.typed_auxiliary_receipt_sha256 = sha(
       join(run, "selected-wiki-auxiliary-mounted.private.json"),
     );
@@ -1275,11 +1249,11 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
       false,
     )) as { workspace: unknown; actors: Json[]; open_client_roles: unknown };
     const tenant = canonicalUuid(facts.workspace);
-    assert.ok(tenant === tracer.workspaceId && document.workspaceId === tenant);
+    assert.ok(tenant === tracer("workspaceId") && document("workspaceId") === tenant);
     assert.ok(
       deepEquals(
         new Set(facts.actors.map((a) => a.id)),
-        new Set([tracer.creatorId, tracer.freshActorId]),
+        new Set([tracer("creatorId"), tracer("freshActorId")]),
       ),
     );
     assert.ok(
@@ -1313,10 +1287,10 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
       true,
     )) as Record<string, number>;
     if (process.env.FVOCI_E2E_SELECTED_AUXILIARY === "normal-api") {
-      const project = (aux.fixture as { project: Json }).project;
-      const projectId = canonicalUuid(project.id),
-        rootId = canonicalUuid(project.rootDocumentId);
-      assert.ok(rootId !== document.id);
+      const project = field(aux("fixture"), "project");
+      const projectId = canonicalUuid(field(project, "id")),
+        rootId = canonicalUuid(field(project, "rootDocumentId"));
+      assert.ok(rootId !== document("id"));
       const extra = await seam.pgSql(
         `BEGIN READ ONLY; SET LOCAL app.tenant_id='${tenant}'; SELECT jsonb_build_object('root',(SELECT id FROM fvoci.documents WHERE workspace_id='${tenant}' AND project_id='${projectId}' AND id='${rootId}' AND parent_id IS NULL AND deleted_at IS NULL),'wiki_count',(SELECT count(*) FROM fvoci.documents WHERE project_id IS NULL),'project_count',(SELECT count(*) FROM fvoci.documents WHERE project_id='${projectId}')); COMMIT;`,
         true,
@@ -1402,11 +1376,6 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
 // Python tuple ordering for (email, role) pairs.
 const compareTuples = (a: [string, string], b: [string, string]) =>
   a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0;
-// Exclusive JSON write, then mode 0600.
-function privateJson(path: string, value: unknown): void {
-  write(path, value);
-  chmodSync(path, 0o600);
-}
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   assertNoEnvFile();

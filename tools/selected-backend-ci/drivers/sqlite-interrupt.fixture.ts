@@ -33,6 +33,7 @@ const current = {
   grant: { runId: "1", runAttempt: "1" },
   run: join(directory, "runtime", "root-current-sqlite-0123456789ab"),
   before,
+  sourceBefore: structuredClone(before),
   build: { binaries },
   assets: { source: before.head, dist_files: {} },
   abi: { host_runtime_files: {} },

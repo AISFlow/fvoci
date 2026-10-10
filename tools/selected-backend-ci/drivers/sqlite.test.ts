@@ -133,6 +133,7 @@ function world(
     grant: { runId: "1", runAttempt: "1" },
     run,
     before,
+    sourceBefore: structuredClone(before),
     build: { binaries },
     compileReceipt: {},
     assets: { source: SOURCE, dist_files: { "index.html": "3".repeat(64) } },

@@ -24,7 +24,11 @@ import {
   attachmentJson,
   checkInterrupt,
   cleanupScope,
+  copiedHashes,
   errorFacts,
+  field,
+  hex40,
+  inodeOf,
   frameLine,
   knownBrowserCheckpoint,
   privateWrite,
@@ -32,11 +36,10 @@ import {
   running,
   waitFor,
 } from "./common.ts";
-import type { Child, Command, Json, Receipt, Row } from "./common.ts";
+import type { Child, Command, Inode, Json, Receipt, Row } from "./common.ts";
 
 export const restartHelper = import.meta.path;
 const title = "selected normal main restart:";
-const hex40 = /^[0-9a-f]{40}$/;
 
 export interface RestartBinding {
   runId: string;
@@ -251,12 +254,6 @@ export async function restartedRoleFacts(
   return facts;
 }
 
-function inode(path: string, link = false): [number, number] {
-  const facts = link ? lstatSync(path, { bigint: true }) : statSync(path, { bigint: true });
-  const result = [Number(facts.dev), Number(facts.ino)] as [number, number];
-  assert.ok(result.every(Number.isSafeInteger) && BigInt(result[1]) === facts.ino);
-  return result;
-}
 const mode = (value: number) => value & 0o7777;
 const readyPattern = /fvoci-server listening on (http:\/\/127\.0\.0\.1:\d+)/;
 const meiliKey = "/run/fvoci/meili/api_key";
@@ -333,27 +330,25 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     ]);
     assert.ok(
       deepEquals(
-        copied.stdout
-          .split("\n")
-          .filter((line) => line !== "")
-          .map((line) => line.trim().split(/\s+/)[0]),
+        copiedHashes(copied.stdout),
         [g.server, g.migrate, g.engine].map((path) => g.binaries[path]?.sha256),
       ),
     );
   };
   try {
     await inputs();
-    const storageInode = inode(g.storage);
+    const storageInode = inodeOf(g.storage);
     receipt.storageInode = storageInode;
     const seed = singleAttachment(
       join(run, "playwright-result.private.json"),
       "selected-vue-native-readback.json",
     );
-    assert.ok(seed.selected === selected && seed.firstAck !== seed.finalAck);
-    assert.ok(seed.creatorId !== seed.freshActorId);
+    const at = (key: string) => field(seed, key);
+    assert.ok(at("selected") === selected && at("firstAck") !== at("finalAck"));
+    assert.ok(at("creatorId") !== at("freshActorId"));
     assert.ok(
-      (seed.canonicalEmojiOracleControls as unknown[]).length === 6 &&
-        (seed.nativeHistoryOracleControls as unknown[]).length === 2,
+      (at("canonicalEmojiOracleControls") as unknown[]).length === 6 &&
+        (at("nativeHistoryOracleControls") as unknown[]).length === 2,
     );
     receipt.seedReportSha256 = sha(join(run, "playwright-result.private.json"));
     const label = (
@@ -366,9 +361,9 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
       ])
     ).stdout.trim();
     assert.ok(label === owner);
-    let originalInode: [number, number] | null = null;
+    let originalInode: Inode | null = null;
     if (selected === "sqlite") {
-      originalInode = inode(g.db as string);
+      originalInode = inodeOf(g.db as string);
       assert.ok(deepEquals(originalInode, g.receipt.database_inode));
     }
     const beforeRows = (await seam.ownedRows(name)).filter((row) =>
@@ -433,14 +428,16 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
           actor.connectionClose === "confirmed" &&
           Boolean(actor.operationSucceeded),
       );
-      assert.ok(actorName === "actor-" + String(seed.freshActorId) + ".json");
+      assert.ok(actorName === "actor-" + String(field(seed, "freshActorId")) + ".json");
       const savedHash = sha(actorFile),
         destination = join(run, "preserved-" + actorName),
-        actorInode = inode(actorFile, true);
-      assert.ok(!existsSync(destination) && inode(run)[0] === actorInode[0]);
+        actorInode = inodeOf(actorFile, true);
+      assert.ok(!existsSync(destination) && inodeOf(run)[0] === actorInode[0]);
       renameSync(actorFile, destination);
       const moved = lstatSync(destination);
-      assert.ok(deepEquals(inode(destination, true), actorInode) && sha(destination) === savedHash);
+      assert.ok(
+        deepEquals(inodeOf(destination, true), actorInode) && sha(destination) === savedHash,
+      );
       assert.ok(mode(moved.mode) === mode(metadata.mode));
       receipt.preservedActorReceipt = {
         path: destination,
@@ -448,7 +445,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
         sameInode: true,
         originalMode: mode(metadata.mode),
       };
-      assert.ok(deepEquals(inode(g.db as string), originalInode));
+      assert.ok(deepEquals(inodeOf(g.db as string), originalInode));
     }
     const checkpoint = {
       schema: 1,
@@ -506,7 +503,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     assert.ok(setup.status === 200 && (setup.body as Json | null)?.needed === false);
     if (selected === "sqlite") {
       const meta = lstatSync(g.db as string);
-      assert.ok(meta.isFile() && deepEquals(inode(g.db as string, true), originalInode));
+      assert.ok(meta.isFile() && deepEquals(inodeOf(g.db as string, true), originalInode));
       assert.ok(
         meta.uid === 1000 && meta.gid === 1000 && mode(meta.mode) === 0o600 && meta.nlink === 1,
       );
@@ -529,7 +526,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
       assert.ok(log.includes("outbox dispatcher started"));
       receipt.restartedScopedSearchStartup = true;
     }
-    assert.ok(deepEquals(inode(g.storage), storageInode));
+    assert.ok(deepEquals(inodeOf(g.storage), storageInode));
     Object.assign(receipt, {
       stage: "restarted normal main ready",
       restartedBaseURL: restartBase,
@@ -571,22 +568,25 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     if (existsSync(reportPath)) chmodSync(reportPath, 0o600);
     assert.ok(result.returncode === 0, "preserve original restart browser failure");
     const readback = singleAttachment(reportPath, "selected-vue-restart-readback.json");
+    const back = (key: string) => field(readback, key);
     assert.ok(
-      readback.source === g.head && readback.tree === g.tree && readback.selected === selected,
+      back("source") === g.head && back("tree") === g.tree && back("selected") === selected,
     );
     assert.ok(
-      readback.workspaceId === seed.workspaceId &&
-        readback.documentId === (seed.document as Json | undefined)?.id,
+      back("workspaceId") === field(seed, "workspaceId") &&
+        back("documentId") === field(field(seed, "document"), "id"),
     );
     assert.ok(
-      readback.freshActorId === seed.freshActorId &&
-        deepEquals(readback.persisted, seed.persisted, true) &&
-        deepEquals(readback.revision, seed.revision, true),
+      back("freshActorId") === field(seed, "freshActorId") &&
+        deepEquals(back("persisted"), field(seed, "persisted"), true) &&
+        deepEquals(back("revision"), field(seed, "revision"), true),
     );
-    assert.ok(readback.firstAck === seed.firstAck && readback.finalAck === seed.finalAck);
     assert.ok(
-      (readback.canonicalEmojiOracleControls as unknown[]).length === 6 &&
-        (readback.nativeHistoryOracleControls as unknown[]).length === 2,
+      back("firstAck") === field(seed, "firstAck") && back("finalAck") === field(seed, "finalAck"),
+    );
+    assert.ok(
+      (back("canonicalEmojiOracleControls") as unknown[]).length === 6 &&
+        (back("nativeHistoryOracleControls") as unknown[]).length === 2,
     );
     privateWrite(join(run, "selected-vue-restart-readback.private.json"), readback);
     Object.assign(receipt, {
