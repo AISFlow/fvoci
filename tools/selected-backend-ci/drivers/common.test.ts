@@ -259,27 +259,31 @@ describe("owned commands", () => {
   });
 });
 
-test("a process-group SIGINT lets an owned fixture wrapper run its EXIT cleanup", async () => {
-  const directory = temporary();
-  try {
-    const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
-    // Its own process group: the interrupt reaches the wrapper like a terminal ^C.
-    const child = Bun.spawn([process.execPath, fixture, directory], {
-      stdout: "pipe",
-      stderr: "inherit",
-      detached: true,
-    });
-    const log = join(directory, "wrapper.log");
-    while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
-    process.kill(-child.pid, "SIGINT");
-    const output = await new Response(child.stdout).text();
-    expect(await child.exited).toBe(0);
-    expect(JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({ exit: 130 });
-    expect(existsSync(join(directory, "cleaned"))).toBe(true);
-  } finally {
-    rmSync(directory, { recursive: true });
-  }
-});
+for (const target of ["group", "direct"] as const)
+  test(`a ${target} SIGINT lets an owned fixture wrapper run its EXIT cleanup`, async () => {
+    const directory = temporary();
+    try {
+      const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
+      // Its own process group: a group interrupt reaches the wrapper like a
+      // terminal ^C; a direct one reaches the driver alone and is forwarded.
+      const child = Bun.spawn([process.execPath, fixture, directory, target], {
+        stdout: "pipe",
+        stderr: "inherit",
+        detached: true,
+      });
+      const log = join(directory, "wrapper.log");
+      while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
+      process.kill(target === "group" ? -child.pid : child.pid, "SIGINT");
+      const output = await new Response(child.stdout).text();
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({
+        error: "KeyboardInterrupt",
+      });
+      expect(existsSync(join(directory, "cleaned"))).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  });
 
 describe("Docker process identities", () => {
   const top =

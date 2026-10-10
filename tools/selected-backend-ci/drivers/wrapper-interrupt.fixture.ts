@@ -6,11 +6,15 @@ import process from "node:process";
 import { command, trapInterrupts } from "./common.ts";
 
 const directory = process.argv[2] as string;
+// "direct": only this process is signalled, so the wrapper sees only the
+// forwarded SIGINT; its wait builtin returns to the trap at once.
+const direct = process.argv[3] === "direct";
 const wrapper = join(directory, "wrapper.sh");
 // The same trap shape as scripts/start-test-{postgres,meili}.sh.
 writeFileSync(
   wrapper,
-  `trap 'touch "${directory}/cleaned"' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\necho ready >&2\nsleep 30\n`,
+  `trap 'kill $! 2>/dev/null; touch "${directory}/cleaned"' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\necho ready >&2\n` +
+    (direct ? "sleep 30 & wait $!\n" : "sleep 30\n"),
 );
 trapInterrupts();
 const result: Record<string, unknown> = {};

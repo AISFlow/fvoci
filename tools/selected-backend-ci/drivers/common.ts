@@ -85,7 +85,8 @@ export interface CommandOptions {
   input?: string;
   // The child is a fixture wrapper whose EXIT trap removes what it owns. On
   // SIGINT it is not killed: it gets SIGINT (as from a process-group ^C) and
-  // is waited for, so its cleanup runs and its own exit is returned.
+  // is waited for, so its cleanup runs; the interrupt is then raised as for
+  // any other owned command (Python: KeyboardInterrupt out of subprocess.run).
   waitOnInterrupt?: boolean;
 }
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
@@ -112,6 +113,7 @@ export const command: Command = async (args, options = {}) => {
     });
     if (options.waitOnInterrupt)
       forward = () => {
+        controller.abort(interruptError());
         child.kill("SIGINT");
       };
     const [stdout, stderr] = await Promise.all([
