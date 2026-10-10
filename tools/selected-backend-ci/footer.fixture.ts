@@ -1,7 +1,9 @@
 // Runner entry for footer.test.ts only. It keeps the real CLI parser and the
 // real permissions and owner-return bodies, and replaces the Git allocation
 // identity, the browser copy and the lane drivers. No product, database,
-// container or browser starts.
+// container or browser starts. It does not run the production main(): the
+// output physical/owner/0700 and argument-combination checks of main() are
+// covered by runner.test.ts against the real CLI, not by the footer runs.
 import { strict as assert } from "node:assert";
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";

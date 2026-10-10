@@ -878,6 +878,15 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     });
   });
   test("runtime admits only the whole-flow and five lane jobs", async () => {
+    // The fixed contract, independent of the production list it checks.
+    expect(runtimeJobs).toEqual([
+      "collaboration-flow",
+      "collaboration-install-on",
+      "collaboration-postgres-on",
+      "collaboration-sqlite-on",
+      "collaboration-postgres-off",
+      "collaboration-sqlite-off",
+    ]);
     for (const job of runtimeJobs)
       await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
         expect(identity("run")).toBe("github:fixture/repo:123:1:" + job);
