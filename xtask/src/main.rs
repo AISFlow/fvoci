@@ -5,20 +5,24 @@ use std::process::ExitCode;
 const HELP: &str = "\
 FVOCI development tasks
 
-Usage: cargo xtask <command>
+Usage: cargo xtask <command> [arguments...]
 
 Commands:
   help          Show this help
+  sqlite-build  Authenticated native SQLite static build
+                (entry point: scripts/prepare-sqlite-build.sh)
+  sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
+                (entry point: scripts/prepare-sqlite-ci.sh)
 
 Options:
   -h, --help    Show this help
-
-No task commands are registered yet.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    SqliteBuild(Vec<OsString>),
+    SqliteCi(Vec<OsString>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,6 +48,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     let argument = args.next().ok_or(CliError::MissingCommand)?;
     let command = match argument.to_str() {
         Some("help" | "-h" | "--help") => Command::Help,
+        // Task commands own their remaining arguments.
+        Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
+        Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
     };
     if let Some(argument) = args.next() {
@@ -52,12 +59,20 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     Ok(command)
 }
 
+/// Exit with a Python-compatible status: `-N` (consumer killed by signal N)
+/// becomes `256 - N`, exactly as `sys.exit(-N)` did.
+fn exit_status(code: i32) -> ExitCode {
+    ExitCode::from((code & 0xff) as u8)
+}
+
 fn run(command: Command) -> ExitCode {
     match command {
         Command::Help => {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
+        Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
+        Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }
 }
 
@@ -73,8 +88,9 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, CliError, Command};
+    use super::{exit_status, parse_args, CliError, Command};
     use std::ffi::OsString;
+    use std::process::ExitCode;
 
     #[test]
     fn accepts_help_forms() {
@@ -112,6 +128,26 @@ mod tests {
                 Err(CliError::UnknownCommand(OsString::from(argument)))
             );
         }
+    }
+
+    #[test]
+    fn task_commands_keep_their_arguments() {
+        let args = ["sqlite-ci", "--parent", "p", "--", "cargo", "--help"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::SqliteCi(args[1..].to_vec()))
+        );
+        let args = ["sqlite-build", "--help"].map(OsString::from);
+        assert_eq!(
+            parse_args(args.clone().into_iter()),
+            Ok(Command::SqliteBuild(args[1..].to_vec()))
+        );
+    }
+
+    #[test]
+    fn signal_return_codes_match_python_sys_exit() {
+        assert_eq!(exit_status(-9), ExitCode::from(247));
+        assert_eq!(exit_status(23), ExitCode::from(23));
     }
 
     #[test]
