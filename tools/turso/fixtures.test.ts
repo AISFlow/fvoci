@@ -96,7 +96,7 @@ describe("admission fixtures", () => {
   });
 
   test("a missing suite is refused before any child", async () => {
-    for (const suite of [FIXTURE_SUITES[0], FIXTURE_SUITES[FIXTURE_SUITES.length - 1]]) {
+    for (const suite of ["tools/turso/fixtures.test.ts", "tools/ci/verify/registry.test.ts"]) {
       const root = checkout(suite);
       const bun = fakeBun(root, "exit 0");
       const [code, stderr] = await quiet(() => main({ PATH: "/usr/bin:/bin" }, root, bun));
