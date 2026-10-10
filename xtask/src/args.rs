@@ -1,7 +1,8 @@
 //! Minimal long-option parser with the argparse behaviour the SQLite entry
 //! points relied on: `--name value`, `--name=value`, boolean flags, required
-//! options, `-h/--help`, and an optional trailing command (argparse
-//! `REMAINDER`) that starts at the first positional or after `--`.
+//! options, repeatable values (argparse `append`), `-h/--help`, and an
+//! optional trailing command (argparse `REMAINDER`) that starts at the first
+//! positional or after `--`.
 //! Without a trailing command, a standalone `--` ends option parsing and the
 //! tokens after it are unrecognized positionals. A separate option value that
 //! looks like an option (`-h`, `--`, `--x`) is a missing value, as in argparse.
@@ -15,6 +16,8 @@ pub struct Spec {
     pub name: &'static str,
     pub takes_value: bool,
     pub required: bool,
+    /// Every occurrence is kept in order (argparse `action="append"`).
+    pub repeated: bool,
 }
 
 pub const fn value(name: &'static str) -> Spec {
@@ -22,6 +25,7 @@ pub const fn value(name: &'static str) -> Spec {
         name,
         takes_value: true,
         required: false,
+        repeated: false,
     }
 }
 
@@ -30,6 +34,16 @@ pub const fn required(name: &'static str) -> Spec {
         name,
         takes_value: true,
         required: true,
+        repeated: false,
+    }
+}
+
+pub const fn repeated(name: &'static str) -> Spec {
+    Spec {
+        name,
+        takes_value: true,
+        required: false,
+        repeated: true,
     }
 }
 
@@ -38,12 +52,15 @@ pub const fn flag(name: &'static str) -> Spec {
         name,
         takes_value: false,
         required: false,
+        repeated: false,
     }
 }
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Parsed {
     pub values: BTreeMap<&'static str, String>,
+    /// Values of `repeated` options, in command-line order.
+    pub lists: BTreeMap<&'static str, Vec<String>>,
     pub flags: Vec<&'static str>,
     /// Trailing command; `None` when the spec takes no command.
     pub command: Vec<OsString>,
@@ -52,6 +69,10 @@ pub struct Parsed {
 impl Parsed {
     pub fn get(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
+    }
+
+    pub fn all(&self, name: &str) -> &[String] {
+        self.lists.get(name).map_or(&[], Vec::as_slice)
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -261,7 +282,11 @@ pub fn parse(argv: Vec<OsString>, specs: &[Spec], remainder: bool) -> Outcome {
                     }
                 },
             };
-            parsed.values.insert(spec.name, value);
+            if spec.repeated {
+                parsed.lists.entry(spec.name).or_default().push(value);
+            } else {
+                parsed.values.insert(spec.name, value);
+            }
         } else if inline.is_some() {
             return Outcome::Usage(format!("argument --{name}: ignored explicit argument"));
         } else if !parsed.flags.contains(&spec.name) {
@@ -325,6 +350,28 @@ mod tests {
             );
         }
         assert_eq!(parse(os(&["--help"]), SPECS, false), Outcome::Help);
+    }
+
+    #[test]
+    fn repeated_values_keep_every_occurrence_in_order() {
+        let specs = &[repeated("test"), flag("nocapture")];
+        let Outcome::Parsed(parsed) = parse(
+            os(&["--test", "b", "--nocapture", "--test=a", "--test", "b"]),
+            specs,
+            false,
+        ) else {
+            panic!()
+        };
+        assert_eq!(parsed.all("test"), ["b", "a", "b"]);
+        assert!(parsed.values.is_empty());
+        assert_eq!(
+            parse(os(&[]), specs, false),
+            Outcome::Parsed(Parsed::default())
+        );
+        assert!(matches!(
+            parse(os(&["--test", "--nocapture"]), specs, false),
+            Outcome::Usage(_)
+        ));
     }
 
     #[test]
