@@ -157,7 +157,7 @@ jobs:
       - name: Verify normal web e2e shard plan
         run: |
           python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
-          bash scripts/test-web-e2e-groups.sh
+          bun scripts/web-e2e/test-groups.ts
           python3 scripts/fixtures/web-e2e/test-build-handoff.py
 
   web-native-checks:
@@ -298,7 +298,7 @@ jobs:
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-browser-current"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-browser-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-browser
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-prepare-browser
       - name: Publish the exact successful browser packet
         id: publish
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -418,7 +418,7 @@ jobs:
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-browser-current"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-browser-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-browser --ci-shard ${{ matrix.shard }}
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-browser --ci-shard ${{ matrix.shard }}
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -549,7 +549,7 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-prepare-selected
       - name: Publish only the successful current-source build packet
         id: publish
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -715,7 +715,7 @@ jobs:
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected
       - name: Publish the qualified install receipt
         id: publish-install
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -876,7 +876,7 @@ jobs:
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1029,7 +1029,7 @@ jobs:
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1182,7 +1182,7 @@ jobs:
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1335,7 +1335,7 @@ jobs:
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
           export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-          bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
+          bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

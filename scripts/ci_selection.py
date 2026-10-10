@@ -1894,7 +1894,7 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
     steps = producer.get("steps", [])
     prepare = [step for step in steps if step.get("id") == "prepare"]
     require(len(prepare) == 1 and prepare[0].get("env") == {"FVOCI_E2E_PENDING": "1"}
-            and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected" in prepare[0].get("run", "")
+            and "bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-prepare-selected" in prepare[0].get("run", "")
             and not any(k in prepare[0] for k in ("if", "continue-on-error")), "unconditional qualified producer")
     publish = [step for step in steps if step.get("id") == "publish"]
     require(len(publish) == 1 and publish[0].get("uses") == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -1919,7 +1919,7 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
         require(len(runtime) == 1 and runtime[0].get("env") == {"FVOCI_E2E_PENDING": "1",
                     "FVOCI_WEB_BUILD_HANDOFF_SHA256": "${{ needs.collaboration-build.outputs.handoff_sha256 }}",
                     "FVOCI_COLLAB_LANE": token, **extra}
-                and "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
+                and "bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected" in runtime[0].get("run", "")
                 and not any(k in runtime[0] for k in ("if", "continue-on-error")), "mandatory full original runtime after qualification")
         require(not any(step.get("with", {}).get("path") in ("target", "crates/collab-engine/target")
                 for step in steps if str(step.get("uses", "")).startswith("actions/cache@")), "consumer cannot borrow target cache")

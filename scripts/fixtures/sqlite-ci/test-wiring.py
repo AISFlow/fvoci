@@ -409,7 +409,7 @@ exit "${PREREQ_EXIT:-0}"
                         self.assertIn('needs: [ci-plan, collaboration-build, collaboration-install-on]\n', body)
                     self.assertIn('artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}', body)
                     self.assertIn('FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}', body)
-                    self.assertIn('bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected', body)
+                    self.assertIn('bun scripts/web-e2e/run.ts --ci-use-committed-api --ci-consume-selected', body)
                     self.assertLess(body.index('id: sqlite'), body.index('Download this run'))
                     self.assertLess(body.index('Download this run'), body.index('id: browser'))
                 else:
@@ -471,7 +471,7 @@ exit "${PREREQ_EXIT:-0}"
                     # Documents defaults to the independent native crate; root steps override it.
                     if (workflow != 'documents' or 'working-directory: .' in text):
                         root_work = ('working-directory: crates/' not in text and any(
-                            re.search(r'cargo (?:build|test|clippy|check)\b|scripts/ci_selection.py rust-binaries build|bash scripts/run-web-e2e.sh', line)
+                            re.search(r'cargo (?:build|test|clippy|check)\b|scripts/ci_selection.py rust-binaries build|bun scripts/web-e2e/run.ts', line)
                             and not re.search(r'--manifest-path [\"\']?crates/', line) for line in text.splitlines()))
                         if root_work:
                             self.assertLessEqual(ready.end(), block.start())

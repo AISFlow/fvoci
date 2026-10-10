@@ -65,7 +65,7 @@ for ds in "${DATASETS[@]}"; do
     bash "$ROOT/scripts/start-test-meili.sh" \
     env ROOT="$ROOT" RUN_DIR="$RUN_DIR" RELEASE="$RELEASE" FVOCI_COLLAB_ENGINE="$COLLAB_ENGINE" \
       FVOCI_PERF_OUT="$FVOCI_PERF_OUT" FVOCI_PERF_DATASET="$ds" \
-    bash "$ROOT/scripts/perf/perf-inner.sh"
+    bun "$ROOT/scripts/web-e2e/perf-inner.ts"
   rm -rf "$RUN_DIR"
   trap - EXIT
 done

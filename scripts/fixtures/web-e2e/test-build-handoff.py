@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -561,12 +562,13 @@ def run(output, only=None):
                     'fixture_bun':str(bun),'fixture_chrome':str(chrome),'fixture_exit':exit_code,'fixture_incomplete':fault=='incomplete','fixture_fault':fault}
             for name in ('before.json','after.json'):(output/name).write_text(json.dumps(before));(output/name).chmod(0o600)
             (output/'bundle.json').write_text(json.dumps({'binaries':{str(chrome):{}}}));(output/'bundle.json').chmod(0o600)
-            source=(ROOT/'scripts/run-web-e2e.sh').read_text()
             if original:
                 source=ORIGINAL_C7_SELECTED_FOOTER
-            if not original:
-                self.assertIn('\nSELECTED_PHASE="whole"\n', source[:source.index('selected_status=0\n')])
-            footer=source[source.index('selected_status=0\n'):]
+                footer=source[source.index('selected_status=0\n'):]
+            else:
+                source=(ROOT/'scripts/web-e2e/run.ts').read_text()
+                self.assertIn('let selectedPhase = "whole"', source)
+                footer=''
             environment={'PATH':str(fake)+':'+os.defpath,'ROOT':str(repo),'RUNNER_TEMP':str(temp),
                 # Footer extraction omits the wrapper's real argument-parser default.
                 'SELECTED_PHASE':'whole',
@@ -574,7 +576,10 @@ def run(output, only=None):
                 'FVOCI_SELECTED_CI_SQLITE_PARENT':str(sqlite),'SQLITE3_LIB_DIR':str(lib),
                 'CI':'true','GITHUB_ACTIONS':'true','GITHUB_JOB':'collaboration-flow',
                 'GITHUB_OUTPUT':str(temp/'github-output'),'GITHUB_SHA':SHA,'GITHUB_REPOSITORY':'fixture/owned','GITHUB_RUN_ID':'1','GITHUB_RUN_ATTEMPT':'1'}
-            script=temp/'footer.sh';script.write_text('set -euo pipefail\npending_status='+str(pending_exit)+'\n'+footer)
+            script=temp/'footer.sh'
+            if original:
+                script.write_text('set -euo pipefail\npending_status='+str(pending_exit)+'\n'+footer)
+            environment['PENDING_STATUS']=str(pending_exit)
             if fault in ('destination-occupied','destination-symlink','destination-foreign','destination-mode'):
                 destination=temp/'fvoci-selected-diagnostics'
                 if fault=='destination-symlink':destination.symlink_to(output,target_is_directory=True)
@@ -589,9 +594,12 @@ def run(output, only=None):
             if fault=='symlink':
                 subprocess.run(['sudo','-n','ln','-s',str(header),str(sqlite/'foreign-link')],check=True)
             try:
-                result=subprocess.run(['sudo','-n','setpriv','--reuid=0','--regid=1001','--clear-groups',
-                    'env','-i',*[k+'='+v for k,v in environment.items()],'/bin/bash',str(script)],
-                    capture_output=True,text=True)
+                command=['sudo','-n','setpriv','--reuid=0','--regid=1001','--clear-groups','env','-i',*[k+'='+v for k,v in environment.items()]]
+                if original:
+                    command += ['/bin/bash',str(script)]
+                else:
+                    command += [shutil.which('bun'),str(ROOT/'scripts/web-e2e/run.ts'),'--selected-footer']
+                result=subprocess.run(command,capture_output=True,text=True)
                 collector="""import json,pathlib,sys
 root=pathlib.Path(sys.argv[1]);o=root/'fvoci-selected-current';s=root/'fvoci-sqlite'
 def facts(p):
@@ -1261,7 +1269,9 @@ class HistoricalFixturePortabilityTest(unittest.TestCase):
             root = Path(tmp)
             for name in ('scripts/fixtures/web-e2e/test-build-handoff.py',
                          'scripts/selected-backend-ci/web-build-handoff.py',
-                         'scripts/run-selected-backend-e2e.py', 'scripts/run-web-e2e.sh'):
+                         'scripts/run-selected-backend-e2e.py',
+                         'scripts/web-e2e/run.ts', 'scripts/web-e2e/groups.ts',
+                         'scripts/web-e2e/labels.ts', 'scripts/web-e2e/proc.ts'):
                 destination = root/name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes((ROOT/name).read_bytes())

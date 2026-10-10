@@ -174,7 +174,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         `/proc/${String(original.parentPid)}/cmdline`,
         "utf8",
       ).split("\0");
-      expect(launcherArguments).toContain(path.resolve("../../scripts/web-e2e-inner.sh"));
+      expect(launcherArguments).toContain(path.resolve("../../scripts/web-e2e/inner.ts"));
       const inherited = Object.fromEntries(
         Object.entries(process.env).filter(([name]) => !preparationVariable(name)),
       );
@@ -621,7 +621,7 @@ function captureTimerNative(page: Page) {
       const parentPid = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1];
       if (!parentPid || !/^\d+$/.test(parentPid)) continue;
       const parentArgv = readFileSync(`/proc/${parentPid}/cmdline`, "utf8").split("\0");
-      const launcher = path.resolve("../../scripts/web-e2e-inner.sh");
+      const launcher = path.resolve("../../scripts/web-e2e/inner.ts");
       if (!parentArgv.includes(launcher)) continue;
       const allowed = new Set([
         "RUN_DIR",
