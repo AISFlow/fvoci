@@ -126,8 +126,12 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
   assert.ok(Object.hasOwn(workflow.on, "pull_request"));
   assert.ok(typeof workflow.on === "object" && !Array.isArray(workflow.on));
   assert.equal(workflow.on.pull_request, null, "required gate cannot have path/branch filters");
-  assert.ok(Object.hasOwn(workflow.on, "merge_group"));
-  assert.equal(workflow.on.merge_group, null, "required gate cannot have merge_group filters");
+  assert.ok(Object.hasOwn(workflow.on, "merge_group"), "merge_group trigger is required");
+  assert.deepEqual(
+    workflow.on.merge_group,
+    { types: ["checks_requested"] },
+    "merge_group must request checks_requested",
+  );
   const plan = job(workflow, "ci-plan");
   required(plan);
   assert.equal(plan.if, undefined);
@@ -410,12 +414,12 @@ const selectionMutations: Mutation[] = [
     error: "required check name must stay stable",
   },
   {
-    name: "merge_group filter",
+    name: "missing merge_group",
     mutate: (w) => {
       assert.ok(typeof w.on === "object" && !Array.isArray(w.on));
-      w.on.merge_group = { types: ["checks_requested"] };
+      delete w.on.merge_group;
     },
-    error: "merge_group filters",
+    error: "merge_group trigger is required",
   },
   {
     name: "product missing plan dependency",

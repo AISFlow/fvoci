@@ -3946,7 +3946,7 @@ class MergeGroupPlanTest(unittest.TestCase):
             triggers = data.get("on", data.get(True))
             self.assertEqual(gate["name"], gate_id, workflow)
             self.assertNotIn("github.event", gate["name"], workflow)
-            self.assertIsNone(triggers["merge_group"], workflow)
+            self.assertEqual(triggers["merge_group"], {"types": ["checks_requested"]}, workflow)
             self.assertIsNone(triggers["pull_request"], workflow)
 
     def test_event_specific_gate_name_or_filtered_merge_group_rejected(self) -> None:
@@ -3968,15 +3968,11 @@ class MergeGroupPlanTest(unittest.TestCase):
                         )
                         needle = f"{workflow}-ci-gate name must stay {workflow}-ci-gate"
                     elif mutation == "drop-merge-group":
-                        changed = text.replace("  merge_group:\n", "", 1)
+                        changed = text.replace("  merge_group:\n    types: [checks_requested]\n", "", 1)
                         needle = "merge_group trigger is required"
                     else:
-                        changed = text.replace(
-                            "  merge_group:\n",
-                            "  merge_group:\n    types: [checks_requested]\n",
-                            1,
-                        )
-                        needle = "merge_group must be unfiltered"
+                        changed = text.replace("types: [checks_requested]", "types: [destroyed]", 1)
+                        needle = "merge_group must request checks_requested"
                     self.assertNotEqual(text, changed)
                     path.write_text(changed, encoding="utf-8")
                     errors = "\n".join(SEL.verify_workflow_registry(root))

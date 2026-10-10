@@ -2080,8 +2080,8 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{workflow}: pull_request must be unfiltered so required gates always run")
         if not isinstance(triggers, dict) or "merge_group" not in triggers:
             errors.append(f"{workflow}: merge_group trigger is required for the stable gate")
-        elif triggers["merge_group"] is not None:
-            errors.append(f"{workflow}: merge_group must be unfiltered so required gates always run")
+        elif triggers["merge_group"] != {"types": ["checks_requested"]}:
+            errors.append(f"{workflow}: merge_group must request checks_requested")
         jobs = data.get("jobs")
         if not isinstance(jobs, dict) or not jobs:
             errors.append(f"{workflow}: jobs mapping missing")
