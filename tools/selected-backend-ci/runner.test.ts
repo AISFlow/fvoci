@@ -399,11 +399,18 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         join(templates, "current-" + lane + "-driver.py"),
       ]);
     const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
-    for (const mode of modes.filter((value) => value !== "stage"))
+    // The build-side modes go through one `selected` array; the rest are spelled out.
+    expect(caller).toContain('selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")');
+    for (const mode of ["record-before", "record-after"])
+      expect(caller).toContain('"${selected[@]}" ' + mode + " ");
+    for (const mode of modes.filter(
+      (value) => !["record-before", "stage", "record-after"].includes(value),
+    ))
       expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" ' + mode);
-    expect(caller.match(/bun "\$ROOT\/scripts\/run-selected-backend-e2e\.ts" stage/g)).toHaveLength(
-      4,
+    expect(caller).toContain(
+      'for stage in main lib install engine; do\n      run_native_stage "selected-${stage}" selected "$stage" \\\n        "${selected[@]}" stage ',
     );
+    expect(caller.match(/"\$\{selected\[@\]\}" stage /g)).toHaveLength(1);
     expect(caller).not.toContain("run-selected-backend-e2e.py");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
