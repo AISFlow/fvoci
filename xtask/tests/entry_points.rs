@@ -51,6 +51,48 @@ fn build_entry_usage_and_help() {
     let out = run(script("prepare-sqlite-build.sh").arg("--help"));
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage:"));
+    // argparse usage errors (exit 2), not archive failures (exit 1).
+    let target = "--target=x86_64-unknown-linux-gnu";
+    for (argv, message) in [
+        (
+            &[
+                "--",
+                "--archive=/nonexistent",
+                "--prefix=/nonexistent",
+                target,
+            ][..],
+            "the following arguments are required: --archive, --prefix, --target",
+        ),
+        (
+            &[
+                "--archive=/nonexistent",
+                "--prefix=/nonexistent",
+                target,
+                "--cc",
+                "-h",
+            ],
+            "argument --cc: expected one argument",
+        ),
+        (
+            &[
+                "--archive=/nonexistent",
+                "--prefix=/nonexistent",
+                target,
+                "--",
+                "--identity-only",
+            ],
+            "unrecognized arguments: -- --identity-only",
+        ),
+    ] {
+        let out = run(script("prepare-sqlite-build.sh").args(argv));
+        assert_eq!(out.status.code(), Some(2), "{argv:?}");
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("usage:") && stderr.contains(message),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]
