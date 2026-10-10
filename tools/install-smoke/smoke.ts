@@ -13,11 +13,14 @@
 //   smoke.ts object-versions          mcli --json ls --versions lines -> one line per version
 //   smoke.ts zotero-keyring ROOT      synthetic keyring of the Zotero fixture
 //   smoke.ts redact                   stdin -> stdout, every FVOCI_REDACT line replaced
+//   smoke.ts init STATE NAME [ASSERT_LOG] / phase STATE NAME / fail STATE MESSAGE...
+//            error STATE STATUS LINE COMMAND / report STATE STATUS / finish STATE STATUS
+//            group TITLE / endgroup / quote (stdin)   phases and first error (below)
 //
 // A JSON or text argument `-` is read from stdin (so a producer's failure
 // still fails the pipeline under pipefail).
 
-import { readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -725,6 +728,164 @@ export function hasItem(text: string, id: string): boolean {
   return Array.isArray(list) && list.some((item) => isObject(item) && item["id"] === id);
 }
 
+// Phases and the first error, kept in a per-run state file so a `fail` inside
+// a `$(...)` subshell still names the first error. In GitHub Actions a phase is
+// a `::group::` block and a failure is also an `::error::` annotation;
+// elsewhere they are `== phase NAME` lines. The shell keeps only the trap glue.
+type PhaseState = {
+  name: string;
+  assertLog: string;
+  phase: string;
+  failure: string;
+  lastError: string;
+  report: string;
+};
+
+const inActions = (): boolean => process.env["GITHUB_ACTIONS"] === "true";
+
+function readState(path: string): PhaseState {
+  const raw = parse(readFileSync(path, "utf8"));
+  ensure(isObject(raw), `bad phase state ${path}`);
+  const field = (key: keyof PhaseState): string => (typeof raw[key] === "string" ? raw[key] : "");
+  return {
+    name: field("name"),
+    assertLog: field("assertLog"),
+    phase: field("phase"),
+    failure: field("failure"),
+    lastError: field("lastError"),
+    report: field("report"),
+  };
+}
+
+const writeState = (path: string, state: PhaseState): void => {
+  writeFileSync(path, JSON.stringify(state));
+};
+
+// Annotation text is data, not a workflow command.
+const escapeAnnotation = (text: string): string =>
+  text.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+
+type PhaseOutput = { out: string; err: string };
+
+export function phaseCommand(
+  command: string,
+  args: string[],
+  stdin: () => Promise<string>,
+): Promise<PhaseOutput> | PhaseOutput {
+  const [path = "", ...rest] = args;
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const group = (title: string) => lines.push(inActions() ? `::group::${title}` : `== ${title}`);
+  const endgroup = () => {
+    if (inActions()) lines.push("::endgroup::");
+  };
+  switch (command) {
+    case "init":
+      writeState(path, {
+        name: rest[0] ?? "smoke",
+        assertLog: rest[1] ?? "",
+        phase: "",
+        failure: "",
+        lastError: "",
+        report: "",
+      });
+      break;
+    case "phase": {
+      const state = readState(path);
+      if (state.phase) endgroup();
+      writeState(path, { ...state, phase: rest[0] ?? "", failure: "", lastError: "" });
+      lines.push(inActions() ? `::group::phase ${rest[0] ?? ""}` : `== phase ${rest[0] ?? ""}`);
+      break;
+    }
+    case "fail": {
+      const state = readState(path);
+      const message = rest.join(" ");
+      errors.push(`FAIL: ${message}`);
+      if (state.assertLog) appendFileSync(state.assertLog, `FAIL: ${message}\n`);
+      writeState(path, { ...state, failure: message });
+      break;
+    }
+    case "error": {
+      // ERR trap of the main shell: STATUS LINE COMMAND (recorded, never exits).
+      const [status = "", line = "", ...commandText] = rest;
+      writeState(path, {
+        ...readState(path),
+        lastError: `line ${line}: ${commandText.join(" ")} (exit ${status})`,
+      });
+      break;
+    }
+    case "report": {
+      // First call of the EXIT trap: closes the group, names the failed phase.
+      const state = readState(path);
+      const status = Number(rest[0] ?? "1");
+      if (state.phase) endgroup();
+      let report = "";
+      if (status !== 0) {
+        const first =
+          status === 130 || status === 143
+            ? `interrupted (SIG${status === 130 ? "INT" : "TERM"})`
+            : state.failure || state.lastError || "see the output above";
+        report = `phase ${state.phase || "setup"} failed (exit ${String(status)}): ${first}`;
+        errors.push(report);
+        if (inActions()) lines.push(`::error title=${state.name}::${escapeAnnotation(report)}`);
+      }
+      writeState(path, { ...state, report });
+      break;
+    }
+    case "finish": {
+      // Last call of the EXIT trap: the failure is the final line; a teardown
+      // failure after passing checks is reported here. Removes the state file.
+      const state = readState(path);
+      const status = Number(rest[0] ?? "1");
+      if (status !== 0) {
+        let report = state.report;
+        if (!report) {
+          report = `phase cleanup failed (exit ${String(status)}): teardown left resources or failed`;
+          if (inActions()) lines.push(`::error title=${state.name}::${escapeAnnotation(report)}`);
+        }
+        errors.push(`${state.name}: ${report}`);
+      }
+      rmSync(path, { force: true });
+      break;
+    }
+    case "group":
+      group(args.join(" "));
+      break;
+    case "endgroup":
+      endgroup();
+      break;
+    case "quote":
+      // Log text between the markers cannot act as a workflow command.
+      return stdin().then((text) => {
+        if (!inActions()) return { out: text, err: "" };
+        const token = crypto.randomUUID().replaceAll("-", "");
+        return {
+          out: `::stop-commands::${token}\n${text}${text.endsWith("\n") || !text ? "" : "\n"}::${token}::\n`,
+          err: "",
+        };
+      });
+    default:
+      throw new CheckFailed(`unknown phase command ${command}`);
+  }
+  // The caller prints out before err, so a closed group precedes the failure line.
+  return {
+    out: lines.length ? `${lines.join("\n")}\n` : "",
+    err: errors.length ? `${errors.join("\n")}\n` : "",
+  };
+}
+
+export const phaseCommands = new Set([
+  "init",
+  "phase",
+  "fail",
+  "error",
+  "report",
+  "finish",
+  "group",
+  "endgroup",
+  "quote",
+]);
+
 function freePort(): number {
   const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
   const { port } = server;
@@ -733,6 +894,13 @@ function freePort(): number {
 }
 
 async function main(argv: string[]): Promise<number> {
+  const [first = "", ...raw] = argv;
+  if (phaseCommands.has(first)) {
+    const { out, err } = await phaseCommand(first, raw, () => Bun.stdin.text());
+    process.stdout.write(out);
+    process.stderr.write(err);
+    return 0;
+  }
   let stdin: string | undefined;
   const input = async (arg: string | undefined): Promise<string> => {
     if (arg !== "-") return arg ?? "";

@@ -37,12 +37,25 @@
 # leftover fails the run, keeps the work dir and prints the cleanup commands.
 # The evidence dir (default: a new 0700 dir under TMPDIR) holds redacted logs
 # only and is kept on success and failure. Phases are `::group::` blocks in
-# GitHub Actions (scripts/lib/smoke-phases.sh).
+# GitHub Actions (tools/install-smoke/smoke.ts).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/smoke-phases.sh
-source "$ROOT/scripts/lib/smoke-phases.sh"
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image and leftover checks are
+# `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/upgrade-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" upgrade-smoke
+# Until `cleanup` owns the EXIT trap (usage and early failures).
+trap 'rm -f "$SMOKE_STATE"' EXIT
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 OLD_REF=""
 NEW_REF=""
 MAIN_REF="origin/main"
@@ -79,7 +92,7 @@ require_cmd() {
     command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
-require_cmd git docker openssl curl bun sha256sum tar awk diff
+require_cmd git docker openssl curl bun cargo sha256sum tar awk diff
 
 RUN_ID="$(openssl rand -hex 8)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade.${RUN_ID}.XXXXXX")"
@@ -114,7 +127,8 @@ log_assert() {
   printf '%s\n' "$1" | tee -a "$ASSERT_LOG"
 }
 
-SMOKE_ASSERT_LOG="$ASSERT_LOG"
+# FAIL lines also go to the assertion log in the evidence dir.
+smoke_ts init "$SMOKE_STATE" upgrade-smoke "$ASSERT_LOG"
 
 # Replace every generated secret with a marker before a log reaches the evidence dir.
 # The secrets go through the environment, not argv, so ps does not list them.
@@ -135,7 +149,7 @@ project_compose() {
 
 # `down -v` with the tree the project was started from, then prove nothing is left.
 teardown_project() {
-  local project="$1" env_file="$2" tree="$3" left rc=0
+  local project="$1" env_file="$2" tree="$3" rc=0
   if [[ -f "$env_file" ]]; then
     project_compose "$project" "$env_file" "$tree" down -v --remove-orphans 2>&1 \
       | redact >"$EVIDENCE_DIR/teardown-${project}.log"
@@ -144,37 +158,31 @@ teardown_project() {
       rc=1
     fi
   fi
-  if ! left="$(owned_resources "$project")"; then
-    echo "cleanup: could not list the resources of $project" >&2
-    return 1
-  fi
-  if [[ -n "$left" ]]; then
-    echo "cleanup: $project still has: $left" >&2
-    rc=1
-  fi
+  xtask install-image leftovers --project "$project" || rc=1
   return "$rc"
 }
 
 cleanup() {
   local status=$? torn=0
   set +e
-  smoke_report "$status"
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
   if (( status != 0 && STACK_STARTED )); then
-    smoke_group "collect: redacted ps and logs into $EVIDENCE_DIR"
+    smoke_ts group "collect: redacted ps and logs into $EVIDENCE_DIR"
     [[ -f "$UPGRADE_ENV" ]] && { project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" ps -a \
       && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${UPGRADE_PROJECT}.log"
     [[ -f "$ROLLBACK_ENV" ]] && { project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" ps -a \
       && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
-    smoke_group_end
+    smoke_ts endgroup
   fi
   if (( STACK_STARTED )); then
-    smoke_group "cleanup: ${ROLLBACK_PROJECT} ${UPGRADE_PROJECT}"
+    smoke_ts group "cleanup: ${ROLLBACK_PROJECT} ${UPGRADE_PROJECT}"
     # Rollback first: with S3 its server joins the upgrade project's network.
     teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
     teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
-    smoke_group_end
+    smoke_ts endgroup
   fi
   if (( torn )); then
     printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
@@ -188,10 +196,9 @@ cleanup() {
   fi
   (( status == 0 )) || echo "upgrade-smoke failed after $((SECONDS - START_TS))s" >&2
   echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
-  smoke_done "$status"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
-smoke_init upgrade-smoke
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -334,6 +341,19 @@ sql() {
 
 applied_versions() {
   sql "$1" "$2" "$3" "SELECT string_agg(version::text, ',' ORDER BY version) FROM fvoci.schema_migrations"
+}
+
+service_ids() {
+  docker ps -a -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2"
+}
+
+running_ids() {
+  docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2"
+}
+
+# One container of the service, running, from the expected image.
+expect_service_image() {
+  xtask install-image running "$1" "$2" "$3" || fail "$1/$2 does not run image $3 (see install-image above)"
 }
 
 login() {

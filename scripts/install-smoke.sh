@@ -3,17 +3,27 @@
 #
 #   FVOCI_INSTALL_IMAGE=<ref> [FVOCI_INSTALL_IMAGE_ID=<id>] scripts/install-smoke.sh
 #
-# The image must come from scripts/install-image.sh (build or load) for this
+# The image must come from `cargo xtask install-image` (build or load) for this
 # checkout; a mismatched image is refused, never rebuilt. Without
-# FVOCI_INSTALL_IMAGE a local run first builds it with that script; CI refuses.
+# FVOCI_INSTALL_IMAGE a local run first builds it with that command; CI refuses.
 # The run owns one Compose project with a unique name; its containers, volumes
 # and network are removed on success, failure and INT/TERM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/smoke-phases.sh
-source "$ROOT/scripts/lib/smoke-phases.sh"
-smoke_init install-smoke
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image identity, running-image and leftover
+# checks are `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/install-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" install-smoke
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 COMPOSE_FILE="$ROOT/infra/rust/compose.yml"
 RUN_ID="$(openssl rand -hex 8)"
 PROJECT="fvoci-install-smoke-${RUN_ID}"
@@ -45,30 +55,41 @@ require_cmd() {
   done
 }
 
+# teardown PROJECT COMPOSE...: down -v, then nothing labelled PROJECT may remain.
+teardown() {
+  local project="$1" out rc=0
+  shift
+  if ! out="$("$@" down -v --remove-orphans 2>&1)"; then
+    printf 'cleanup: down failed for %s:\n%s\n' "$project" "$out" >&2
+    rc=1
+  fi
+  xtask install-image leftovers --project "$project" || rc=1
+  return "$rc"
+}
+
 cleanup() {
   local status=$?
   set +e
-  smoke_report "$status"
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
   if (( status != 0 && STACK_STARTED )); then
-    smoke_group "collect: server/init logs (last 200 lines)"
-    smoke_quote_begin
-    "${COMPOSE[@]}" logs --no-color --tail 200 init server >&2
-    smoke_quote_end
-    smoke_group_end
+    smoke_ts group "collect: server/init logs (last 200 lines)"
+    "${COMPOSE[@]}" logs --no-color --tail 200 init server 2>&1 | smoke_ts quote >&2
+    smoke_ts endgroup
   fi
-  smoke_group "cleanup: ${PROJECT}"
+  smoke_ts group "cleanup: ${PROJECT}"
   docker rm -f "fvoci-install-smoke-probe-${RUN_ID}" >/dev/null 2>&1
   if (( STACK_STARTED )); then
-    smoke_teardown "$PROJECT" "${COMPOSE[@]}" || { (( status != 0 )) || status=1; }
+    teardown "$PROJECT" "${COMPOSE[@]}" || { (( status != 0 )) || status=1; }
   fi
   rm -f "$ENV_FILE" "$DOCUMENT_STATE" "$COOKIE_JAR" "$DOWNLOAD_PATH" "$COLLAB_PROBE"
-  smoke_group_end
+  smoke_ts endgroup
   if (( status != 0 )); then
     echo "install-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
     cat "$ASSERT_LOG" >&2
   fi
   rm -f "$ASSERT_LOG"
-  smoke_done "$status"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
 trap cleanup EXIT
@@ -76,10 +97,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 phase image
-require_cmd docker openssl curl bun python3 sha256sum
+require_cmd docker openssl curl bun cargo python3 sha256sum
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
-smoke_acquire_image "$ROOT"
+IMAGE_ENV="$(xtask install-image acquire)" || fail "install image refused or not built (see install-image above)"
+IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
+IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
+[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image printed no image reference"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 HOST_PORT="$(smoke_ts port)"
 BASE_URL="http://127.0.0.1:${HOST_PORT}"
@@ -138,7 +162,7 @@ STACK_STARTED=1
 "${COMPOSE[@]}" up -d --wait server
 SERVER_CID="$("${COMPOSE[@]}" ps -q server)"
 [[ -n "$SERVER_CID" ]] || fail "server container id missing"
-expect_service_image "$PROJECT" server "$IMAGE_ID"
+xtask install-image running "$PROJECT" server "$IMAGE_ID" || fail "server of $PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
 MAPPED_PORT="$(docker port "$SERVER_CID" 8080 | head -1 | awk -F: '{print $NF}')"
 if [[ "$MAPPED_PORT" != "$HOST_PORT" ]]; then
   fail "published port mismatch: expected ${HOST_PORT}, docker published ${MAPPED_PORT}"
@@ -320,7 +344,7 @@ SERVER_CID="$("${COMPOSE[@]}" ps -q server)"
 if [[ -z "$SERVER_CID" || "$SERVER_CID" == "$STOP_CID" ]]; then
   fail "server container was not recreated (old=${STOP_CID} new=${SERVER_CID})"
 fi
-expect_service_image "$PROJECT" server "$IMAGE_ID"
+xtask install-image running "$PROJECT" server "$IMAGE_ID" || fail "server of $PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
 wait_http "/api/v1/setup"
 log_assert "server SIGTERM clean exit 0 + new container on the same volumes: ok"
 

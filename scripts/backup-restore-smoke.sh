@@ -6,15 +6,25 @@
 #
 #   FVOCI_INSTALL_IMAGE=<ref> [FVOCI_INSTALL_IMAGE_ID=<id>] scripts/backup-restore-smoke.sh
 #
-# The image must come from scripts/install-image.sh (build or load) for this
+# The image must come from `cargo xtask install-image` (build or load) for this
 # checkout; a mismatched image is refused, never rebuilt. Without
-# FVOCI_INSTALL_IMAGE a local run first builds it with that script; CI refuses.
+# FVOCI_INSTALL_IMAGE a local run first builds it with that command; CI refuses.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/smoke-phases.sh
-source "$ROOT/scripts/lib/smoke-phases.sh"
-smoke_init backup-restore-smoke
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image identity, running-image and leftover
+# checks are `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/backup-restore-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" backup-restore-smoke
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 COMPOSE_FILE="$ROOT/infra/rust/compose.yml"
 RUN_ID="$(openssl rand -hex 8)"
 SOURCE_PROJECT="fvoci-br-src-${RUN_ID}"
@@ -89,45 +99,58 @@ require_cmd() {
   done
 }
 
+# teardown PROJECT COMPOSE...: down -v, then nothing labelled PROJECT may remain.
+teardown() {
+  local project="$1" out rc=0
+  shift
+  if ! out="$("$@" down -v --remove-orphans 2>&1)"; then
+    printf 'cleanup: down failed for %s:\n%s\n' "$project" "$out" >&2
+    rc=1
+  fi
+  xtask install-image leftovers --project "$project" || rc=1
+  return "$rc"
+}
+
 cleanup() {
   local status=$? project torn=0
   set +e
-  smoke_report "$status"
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
   if (( status != 0 )); then
-    smoke_group "collect: server/init logs (last 200 lines per stack)"
-    smoke_quote_begin
-    (( SOURCE_STARTED )) && "${SOURCE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2
-    (( RESTORE_STARTED )) && "${RESTORE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2
-    if [[ -s "$ZF_STDERR" ]]; then
-      echo "== zotero fixture stderr (last 50 lines)" >&2
-      tail -n 50 "$ZF_STDERR" >&2
-    fi
-    smoke_quote_end
-    smoke_group_end
+    smoke_ts group "collect: server/init logs (last 200 lines per stack)"
+    {
+      (( SOURCE_STARTED )) && "${SOURCE_COMPOSE[@]}" logs --no-color --tail 200 init server
+      (( RESTORE_STARTED )) && "${RESTORE_COMPOSE[@]}" logs --no-color --tail 200 init server
+      if [[ -s "$ZF_STDERR" ]]; then
+        echo "== zotero fixture stderr (last 50 lines)"
+        tail -n 50 "$ZF_STDERR"
+      fi
+    } 2>&1 | smoke_ts quote >&2
+    smoke_ts endgroup
   fi
-  smoke_group "cleanup: ${SOURCE_PROJECT} ${RESTORE_PROJECT}"
+  smoke_ts group "cleanup: ${SOURCE_PROJECT} ${RESTORE_PROJECT}"
   docker rm -f "$ZF_NAME" >/dev/null 2>&1
   (( ZF_BUILT )) && docker image rm "$ZF_IMAGE" >/dev/null 2>&1
   if (( SOURCE_STARTED )); then
-    smoke_teardown "$SOURCE_PROJECT" "${SOURCE_COMPOSE[@]}" || torn=1
+    teardown "$SOURCE_PROJECT" "${SOURCE_COMPOSE[@]}" || torn=1
     for project in "${WRONG_PROJECTS[@]}"; do
-      smoke_teardown "$project" docker compose -f "$COMPOSE_FILE" --project-name "$project" --env-file "$SOURCE_ENV" || torn=1
+      teardown "$project" docker compose -f "$COMPOSE_FILE" --project-name "$project" --env-file "$SOURCE_ENV" || torn=1
     done
   fi
   if (( RESTORE_STARTED )); then
-    smoke_teardown "$RESTORE_PROJECT" "${RESTORE_COMPOSE[@]}" || torn=1
+    teardown "$RESTORE_PROJECT" "${RESTORE_COMPOSE[@]}" || torn=1
   fi
   (( torn == 0 || status != 0 )) || status=1
   rm -rf "$BACKUP_DIR"
   rm -f "$SOURCE_ENV" "$RESTORE_ENV" "$COOKIE_JAR" "$MEMBER_JAR" "$COLLAB_STDERR" "$DOWNLOAD_PATH" \
     "$ZF_ENV" "$ZF_STDERR" "$MOVE_FILE"
-  smoke_group_end
+  smoke_ts endgroup
   if (( status != 0 )); then
     echo "backup-restore-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
     cat "$ASSERT_LOG" >&2
   fi
   rm -f "$ASSERT_LOG"
-  smoke_done "$status"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
 trap cleanup EXIT
@@ -135,7 +158,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 phase image
-require_cmd docker openssl curl bun python3 sha256sum
+require_cmd docker openssl curl bun cargo python3 sha256sum
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 pick_port() {
@@ -345,7 +368,10 @@ native_counts() {
   poll_count "$1" "$2" "SELECT 'document_states='||(SELECT count(*) FROM fvoci.document_states)||';document_collab_updates='||(SELECT count(*) FROM fvoci.document_collab_updates)||';document_collab_op_receipts='||(SELECT count(*) FROM fvoci.document_collab_op_receipts)||';task_states='||(SELECT count(*) FROM fvoci.task_states)||';task_collab_updates='||(SELECT count(*) FROM fvoci.task_collab_updates)||';task_collab_op_receipts='||(SELECT count(*) FROM fvoci.task_collab_op_receipts)"
 }
 
-smoke_acquire_image "$ROOT"
+IMAGE_ENV="$(xtask install-image acquire)" || fail "install image refused or not built (see install-image above)"
+IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
+IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
+[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image printed no image reference"
 log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
   log_assert "build isolated Zotero fixture image on ${IMAGE_TAG}"
@@ -370,7 +396,7 @@ phase start-source
 UP_START=$SECONDS
 SOURCE_STARTED=1
 "${SOURCE_COMPOSE[@]}" up -d --wait server
-expect_service_image "$SOURCE_PROJECT" server "$IMAGE_ID"
+xtask install-image running "$SOURCE_PROJECT" server "$IMAGE_ID" || fail "server of $SOURCE_PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
 log_assert "source compose up on the verified image: ok ($((SECONDS - UP_START))s) base=${SOURCE_BASE}"
 
 wait_http "$SOURCE_BASE" "/api/v1/setup"
@@ -859,7 +885,7 @@ fi
 log_assert "restored current-model rows (moved graph, timers, wiki collection, Zotero mirror) equal the backed-up rows: ok"
 
 phase verify-restore
-expect_service_image "$RESTORE_PROJECT" server "$IMAGE_ID"
+xtask install-image running "$RESTORE_PROJECT" server "$IMAGE_ID" || fail "server of $RESTORE_PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
 wait_http "$RESTORE_BASE" "/api/v1/setup"
 : >"$COOKIE_JAR"
 LOGIN_RESTORED="$(curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \

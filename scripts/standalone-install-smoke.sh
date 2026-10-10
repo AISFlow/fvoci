@@ -15,15 +15,26 @@
 # the `${FVOCI_IMAGE:-...}` default is replaced, nothing else changes. The file
 # publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq,
 # bun. Secret values are compared in memory and never printed.
-# Each `step` is a phase (scripts/lib/smoke-phases.sh). The trap removes every
+# Each `step` is a phase (tools/install-smoke/smoke.ts). The trap removes every
 # project the run created on success, failure and INT/TERM and fails a passing
 # run if a container, volume or network of one remains. Two runs on one host
 # collide on 127.0.0.1:8080: that port is part of the user compose file under test.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/smoke-phases.sh
-source "$ROOT/scripts/lib/smoke-phases.sh"
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image identity, running-image and leftover
+# checks are `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/standalone-install-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" standalone-install-smoke
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 IMAGE="${FVOCI_INSTALL_IMAGE:?FVOCI_INSTALL_IMAGE must name a built product image}"
 RUN_ID="$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 export COMPOSE_PROJECT_NAME="fvoci-install-smoke-${RUN_ID}"
@@ -36,30 +47,40 @@ PROJECTS=("$MAIN")
 
 step() { phase "$*"; }
 
+# teardown PROJECT COMPOSE...: down -v, then nothing labelled PROJECT may remain.
+teardown() {
+  local project="$1" out rc=0
+  shift
+  if ! out="$("$@" down -v --remove-orphans 2>&1)"; then
+    printf 'cleanup: down failed for %s:\n%s\n' "$project" "$out" >&2
+    rc=1
+  fi
+  xtask install-image leftovers --project "$project" || rc=1
+  return "$rc"
+}
+
 cleanup() {
   local status=$? p torn=0
   set +e
-  smoke_report "$status"
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
   if [[ -f "$WORK/compose.yml" ]]; then
     if (( status != 0 )); then
-      smoke_group "collect: compose ps and logs (last 80 lines)"
-      smoke_quote_begin
-      (cd "$WORK" && docker compose ps -a >&2; docker compose logs --no-color --tail 80 >&2)
-      smoke_quote_end
-      smoke_group_end
+      smoke_ts group "collect: compose ps and logs (last 80 lines)"
+      (cd "$WORK" && docker compose ps -a; docker compose logs --no-color --tail 80) 2>&1 | smoke_ts quote >&2
+      smoke_ts endgroup
     fi
-    smoke_group "cleanup: ${PROJECTS[*]}"
+    smoke_ts group "cleanup: ${PROJECTS[*]}"
     for p in "${PROJECTS[@]}"; do
-      smoke_teardown "$p" docker compose --project-directory "$WORK" -f "$WORK/compose.yml" -p "$p" || torn=1
+      teardown "$p" docker compose --project-directory "$WORK" -f "$WORK/compose.yml" -p "$p" || torn=1
     done
-    smoke_group_end
+    smoke_ts endgroup
   fi
   (( torn == 0 || status != 0 )) || status=1
   rm -rf "$WORK"
-  smoke_done "$status"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
-smoke_init standalone-install-smoke
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

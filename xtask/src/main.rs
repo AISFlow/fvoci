@@ -9,6 +9,8 @@ Usage: cargo xtask <command> [arguments...]
 
 Commands:
   help          Show this help
+  install-image Build, verify, hand off the install image; smoke leftovers
+                (callers: scripts/{install,backup-restore}-smoke.sh, install.yml)
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -21,6 +23,7 @@ Options:
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    InstallImage(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -49,6 +52,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     let command = match argument.to_str() {
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
+        Some("install-image") => return Ok(Command::InstallImage(args.collect())),
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -71,6 +75,7 @@ fn run(command: Command) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
+        Command::InstallImage(args) => exit_status(xtask::install_image::main(args)),
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }

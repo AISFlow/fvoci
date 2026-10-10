@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod host;
+pub mod install_image;
 pub mod process;
 pub mod shell;
 pub mod sqlite;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,8 @@ import {
   hasItem,
   objectVersions,
   oracle,
+  phaseCommand,
+  phaseCommands,
   truthy,
   zoteroKeyring,
 } from "./smoke.ts";
@@ -182,5 +184,75 @@ describe("install smoke checks", () => {
     args[17] = j({ serverNow: "t2", items: [] });
     expect(oracle(args)).toBe(a);
     expect(() => oracle(args.slice(1))).toThrow(CheckFailed);
+  });
+});
+
+describe("phases and the first error", () => {
+  test("the CLI dispatches every phase command the smokes call", () => {
+    for (const name of [
+      "init",
+      "phase",
+      "fail",
+      "error",
+      "report",
+      "finish",
+      "group",
+      "endgroup",
+      "quote",
+    ]) {
+      expect(phaseCommands.has(name)).toBe(true);
+    }
+  });
+
+  const run = (command: string, ...args: string[]) =>
+    (phaseCommand(command, args, () => Promise.resolve("")) as { out: string }).out;
+  const withActions = (value: string | undefined, body: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "smoke-phase-"));
+    const previous = process.env["GITHUB_ACTIONS"];
+    if (value === undefined) delete process.env["GITHUB_ACTIONS"];
+    else process.env["GITHUB_ACTIONS"] = value;
+    try {
+      body(dir);
+    } finally {
+      if (previous === undefined) delete process.env["GITHUB_ACTIONS"];
+      else process.env["GITHUB_ACTIONS"] = previous;
+      rmSync(dir, { recursive: true });
+    }
+  };
+
+  test("a fail inside a phase is the reported first error, also in Actions", () => {
+    withActions("true", (dir) => {
+      const state = join(dir, "state");
+      const assertLog = join(dir, "assert.log");
+      run("init", state, "unit", assertLog);
+      expect(run("phase", state, "one")).toBe("::group::phase one\n");
+      expect(run("phase", state, "two")).toBe("::endgroup::\n::group::phase two\n");
+      run("error", state, "1", "12", "curl", "-f");
+      run("fail", state, "body differs");
+      expect(readFileSync(assertLog, "utf8")).toBe("FAIL: body differs\n");
+      expect(run("report", state, "1")).toBe(
+        "::endgroup::\n::error title=unit::phase two failed (exit 1): body differs\n",
+      );
+      expect(run("finish", state, "1")).toBe("");
+      expect(existsSync(state)).toBe(false);
+    });
+  });
+
+  test("the failing command, an interrupt and a teardown-only failure", () => {
+    withActions(undefined, (dir) => {
+      const state = join(dir, "state");
+      const report = () => (JSON.parse(readFileSync(state, "utf8")) as { report: string }).report;
+      run("init", state, "unit");
+      expect(run("phase", state, "test")).toBe("== phase test\n");
+      run("error", state, "7", "40", "curl", "-fsS", "x");
+      run("report", state, "7");
+      expect(report()).toBe("phase test failed (exit 7): line 40: curl -fsS x (exit 7)");
+      run("report", state, "143");
+      expect(report()).toBe("phase test failed (exit 143): interrupted (SIGTERM)");
+      run("report", state, "0");
+      expect(report()).toBe("");
+      run("finish", state, "1");
+      expect(existsSync(state)).toBe(false);
+    });
   });
 });

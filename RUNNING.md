@@ -1188,17 +1188,17 @@ secure cookies. Proxy body-size and timeout limits for uploads are under
 ### Verification
 
 `scripts/install-smoke.sh` runs on an image built from the checkout by
-`scripts/install-image.sh`:
+`cargo xtask install-image`:
 
 ```sh
-bash scripts/install-image.sh build              # labels: source tree, arch, Dockerfile hash, toolchain
+cargo xtask install-image build                 # labels: source tree, arch, Dockerfile hash, toolchain
 FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/install-smoke.sh
 FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/backup-restore-smoke.sh
 ```
 
 An image whose labels do not match the checkout is refused, not rebuilt.
 Without `FVOCI_INSTALL_IMAGE` a local run builds it first; CI builds it once
-per architecture, hands it to both smokes with `install-image.sh save`/`load`,
+per architecture, hands it to both smokes with `install-image save`/`load`,
 and refuses a smoke without it. The smoke starts an isolated Compose project
 (unique name, ephemeral published port, run-owned volumes), exercises setup/login,
 wiki collab body projection, HWPX upload + extraction, `/collab` availability,
