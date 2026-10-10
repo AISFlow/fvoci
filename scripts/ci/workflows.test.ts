@@ -687,3 +687,44 @@ test("secret context inspection ignores ordinary text and expression string lite
   });
   securityPolicy(workflow, "web");
 });
+
+// Two jobs saving the Rust target caches under one key race on the same
+// cache entry; each writer of target/ or crates/collab-engine/target keeps
+// its own key.
+function uniqueBuildCacheWriters(workflow: Workflow): void {
+  const writers: [string, unknown][] = [];
+  for (const [name, config] of Object.entries(workflow.jobs))
+    for (const step of config.steps) {
+      const action = step.uses ?? "",
+        paths = typeof step.with?.path === "string" ? step.with.path : "";
+      if (
+        (action.startsWith("actions/cache@") || action.startsWith("actions/cache/save@")) &&
+        paths
+          .split("\n")
+          .some((path) => ["target", "crates/collab-engine/target"].includes(path.trim()))
+      )
+        writers.push([name, step.with?.key]);
+    }
+  assert.ok(writers.length, "no build-cache writers checked");
+  const keys = writers.map(([, key]) => key);
+  assert.equal(new Set(keys).size, keys.length, "duplicate Web build-cache writer keys");
+}
+test("Web build-cache writers keep unique keys", () => {
+  uniqueBuildCacheWriters(load("web"));
+});
+for (const path of ["target", "crates/collab-engine/target"])
+  test(`negative: browser build reuses the collaboration ${path} cache key`, () => {
+    const workflow = load("web");
+    const save = (name: string) =>
+      oneStep(
+        job(workflow, name),
+        (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
+      );
+    const ordinary = save("workspace-browser-build"),
+      selected = save("collaboration-build");
+    assert.ok(ordinary.with && selected.with);
+    ordinary.with.key = selected.with.key;
+    expect(() => {
+      uniqueBuildCacheWriters(workflow);
+    }).toThrow("duplicate Web build-cache writer keys");
+  });
