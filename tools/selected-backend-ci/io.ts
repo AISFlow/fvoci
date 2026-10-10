@@ -23,7 +23,6 @@ import process from "node:process";
 
 export type Environment = Record<string, string | undefined>;
 export const root = resolve(import.meta.dir, "../..");
-export const templates = join(root, "scripts/selected-backend-ci");
 export const uid = () => {
   assert.ok(process.getuid);
   return process.getuid();
@@ -127,8 +126,9 @@ export function spawnSelectedCommand(
   });
 }
 export const jsonText = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
-// This byte form is a consumer contract: restart_checkpoint/current_binding hash
-// json.dumps(source_written, indent=2), including ASCII escapes and final LF.
+// This byte form is a consumer contract: the runner's restart grant and
+// drivers/binding.ts hash it, and the drivers write their receipts in it.
+// Two-space indent, ASCII escapes and a final LF.
 export const sourceInputText = (value: unknown) =>
   jsonText(value).replace(
     /[\u007f-\uffff]/g,

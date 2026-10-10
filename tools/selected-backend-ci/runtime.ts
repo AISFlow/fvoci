@@ -27,6 +27,10 @@ import {
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
+import { bindingModule } from "./drivers/binding.ts";
+import { bunDriver, failureDigest } from "./drivers/common.ts";
+import { restartHelper } from "./drivers/restart.ts";
+import { publicCheckpoint } from "./drivers/sqlite.ts";
 import {
   accessible,
   ancestors,
@@ -45,7 +49,6 @@ import {
   sha,
   sourceInputText,
   spawnSelectedCommand,
-  templates,
   tool,
   uid,
   write,
@@ -107,15 +110,6 @@ const reportStates = [
   "spec-mismatch",
   "status-not-known",
 ];
-// Diagnostics are hashes of canonical JSON, never a Python exception repr.
-function failureDigest(value: unknown): string {
-  const keys = new Set<string>();
-  JSON.stringify(value, (key, child: unknown) => {
-    if (key) keys.add(key);
-    return child;
-  });
-  return digest(JSON.stringify(value, [...keys].sort()));
-}
 export function publicFailureFields(facts: DriverReceipt): Record<string, unknown> {
   const phase = facts.failed_phase,
     original = facts.original_driver_failure;
@@ -148,12 +142,7 @@ export function publicFailureFields(facts: DriverReceipt): Record<string, unknow
     failureTypes.includes(kind) &&
     typeof code === "string" &&
     failureCodes.includes(code);
-  const driverCheckpoint =
-    preparation &&
-    typeof driver === "string" &&
-    /^scripts\/selected-backend-ci\/current-sqlite-driver\.py:[1-9][0-9]{0,3}$/.test(driver)
-      ? driver
-      : null;
+  const driverCheckpoint = preparation ? publicCheckpoint(driver) : null;
   return {
     failed_phase: typeof phase === "string" && publicPhases.includes(phase) ? phase : null,
     known_driver_checkpoint: driverCheckpoint,
@@ -476,7 +465,10 @@ export interface RunBoundary {
     signal: AbortSignal,
   ) => number | Promise<number>;
 }
-export const driverCommand = (driver: string) => [tool("python3"), driver];
+// The lane drivers run on this Bun without .env autoload; each refuses to start
+// without `--no-env-file`.
+export const driverCommand = bunDriver;
+export const laneDriver = (lane: Lane) => join(root, "tools/selected-backend-ci/drivers", lane + ".ts");
 const runBoundary: RunBoundary = {
   identity,
   access: runtimeAccess,
@@ -496,8 +488,6 @@ const runBoundary: RunBoundary = {
     };
   },
   async execute(driver, environment, log, signal) {
-    // Same interpreter selected by the Python caller's PATH, same driver argv.
-    // These retained lane drivers are not a fallback to the old runner.
     const fd = openSync(log, "wx");
     try {
       const child = spawnSelectedCommand(driverCommand(driver), environment, fd, fd, signal);
@@ -543,7 +533,6 @@ export async function run(
     FVOCI_CI_BUN: browser.bun.path,
     FVOCI_CI_SELECTED_RUNS: runtime,
     FVOCI_ROOT_RUN_OWNER: owner,
-    PYTHONDONTWRITEBYTECODE: "1",
   };
   const local = process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local";
   const authority = local
@@ -584,7 +573,7 @@ export async function run(
   try {
     for (const [lane, flow] of runs) {
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),
-        driver = join(templates, "current-" + lane + "-driver.py");
+        driver = laneDriver(lane);
       const manifest: Record<string, unknown> = {
         schema: 1,
         ready: true,
@@ -613,7 +602,7 @@ export async function run(
           backend: lane,
           runRoot,
           parentDriverSha256: sha(driver),
-          restartHelperSha256: sha(join(templates, "restart_checkpoint.py")),
+          restartHelperSha256: sha(restartHelper),
           sourceInputsSha256: digest(sourceInputText(sourceWritten)),
           artifactHashes: Object.fromEntries(
             Object.entries(bundle.binaries).map(([p, r]) => [p, r.sha256]),
@@ -654,7 +643,7 @@ export async function run(
         runRoot,
         driverSha256: sha(driver),
         bindingSha256: sha(manifestPath),
-        bindingModuleSha256: sha(join(templates, "current_binding.py")),
+        bindingModuleSha256: sha(bindingModule),
       });
       environment.FVOCI_ROOT_CURRENT_BINDING = manifestPath;
       environment.FVOCI_ROOT_CURRENT_ALLOCATION = allocation;

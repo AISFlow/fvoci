@@ -93,18 +93,21 @@ export function localAllocation(
     isAbsolute(grant.outputRoot) &&
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),
   );
-  for (const name of [
-    "run-selected-backend-e2e.py",
-    "selected-backend-ci/current_binding.py",
-    "selected-backend-ci/restart_checkpoint.py",
-    "selected-backend-ci/current-install-driver.py",
-    "selected-backend-ci/current-postgres-driver.py",
-    "selected-backend-ci/current-sqlite-driver.py",
-  ]) {
-    assert.equal(grant.registrationHashes[name], sha(join(root, "scripts", name)));
-  }
+  for (const name of registeredModules)
+    assert.ok(grant.registrationHashes[name] === sha(join(root, name)), "unregistered module");
   return grant;
 }
+// The runner entry and lane driver modules a local lease is issued for,
+// repo-relative; the lease producer hashes the same files.
+export const registeredModules = [
+  "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/binding.ts",
+  "tools/selected-backend-ci/drivers/restart.ts",
+  "tools/selected-backend-ci/drivers/install.ts",
+  "tools/selected-backend-ci/drivers/postgres.ts",
+  "tools/selected-backend-ci/drivers/sqlite.ts",
+] as const;
 
 // The whole-flow job and the five per-lane jobs that start the selected runtime.
 export const runtimeJobs = [
