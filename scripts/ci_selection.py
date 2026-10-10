@@ -34,7 +34,7 @@ WORKFLOW_JOBS: dict[str, tuple[str, ...]] = {
     "rust": ("fast", "native-arm64", "postgres-build", "postgres", "collaboration"),
     "documents": ("native-extraction",),
     "collab-engine": ("native-collab-engine",),
-    "install": ("install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
+    "install": ("install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"),
 }
 
 # Manual opt-in jobs: no path or event policy selects them (not even full mode or
@@ -389,6 +389,8 @@ def select_output_key(job: str) -> str:
         job = "web-checks"
     if job == "workspace-browser-build":
         job = "workspace-browser-shard"
+    if job == "install-image":
+        job = "install-smoke"
     if job == "postgres-build":
         job = "postgres"
     return f"select_{job.replace('-', '_')}"

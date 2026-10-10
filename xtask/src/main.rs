@@ -9,6 +9,8 @@ Usage: cargo xtask <command> [arguments...]
 
 Commands:
   help          Show this help
+  install-image Build, verify, hand off the install image; smoke leftovers
+                (callers: scripts/{install,backup-restore}-smoke.sh, install.yml)
   prepare-rustup-ci-metadata
                 Canonical Rustup component order before CI input capture
   rust-binaries Rust workflow executable hand-off (build, pack, unpack, run)
@@ -30,6 +32,7 @@ Options:
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Help,
+    InstallImage(Vec<OsString>),
     PrepareRustupCiMetadata(Vec<OsString>),
     RustBinaries(Vec<OsString>),
     SchemaBaseline(Vec<OsString>),
@@ -63,6 +66,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
     let command = match argument.to_str() {
         Some("help" | "-h" | "--help") => Command::Help,
         // Task commands own their remaining arguments.
+        Some("install-image") => return Ok(Command::InstallImage(args.collect())),
         Some("prepare-rustup-ci-metadata") => {
             return Ok(Command::PrepareRustupCiMetadata(args.collect()))
         }
@@ -92,6 +96,7 @@ fn run(command: Command) -> ExitCode {
             print!("{HELP}");
             ExitCode::SUCCESS
         }
+        Command::InstallImage(args) => exit_status(xtask::install_image::main(args)),
         Command::PrepareRustupCiMetadata(args) => {
             exit_status(xtask::rustup_ci_metadata::main(args))
         }

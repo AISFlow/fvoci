@@ -25,7 +25,7 @@ export const WORKFLOW_JOBS = {
   rust: ["fast", "native-arm64", "postgres-build", "postgres", "collaboration"],
   documents: ["native-extraction"],
   "collab-engine": ["native-collab-engine"],
-  install: ["install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
+  install: ["install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Workflow = keyof typeof WORKFLOW_JOBS;
@@ -137,6 +137,14 @@ export function validatePlanSchema(plan: unknown, workflow: Workflow): string | 
     selected("workspace-browser-build") !== selected("workspace-browser-shard")
   ) {
     return "PLAN_BROWSER_PRODUCER_SELECTION";
+  }
+  // Both container smokes run the image that install-image builds.
+  if (
+    workflow === "install" &&
+    (selected("install-image") !== selected("install-smoke") ||
+      selected("install-image") !== selected("backup-restore-smoke"))
+  ) {
+    return "PLAN_IMAGE_PRODUCER_SELECTION";
   }
   return null;
 }

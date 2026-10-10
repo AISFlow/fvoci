@@ -106,7 +106,7 @@ function caseList(): MutationCase[] {
       "upgrade-smoke-arm64 if must be",
     ],
     [
-      "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
+      "    needs: [ci-plan, install-image, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
       "    needs: [ci-plan, install-smoke, backup-restore-smoke]\n",
       "install-ci-gate needs must be",
     ],

@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
 # Isolated backup/restore smoke for the infra/rust Compose install.
-# Owns two Compose projects and their volumes; trap deletes only those.
+# Owns two Compose projects (plus the two refused-restore project names) and
+# their volumes, all named by a per-run id; the trap deletes only those, on
+# success, failure and INT/TERM, and fails a passing run if any remain.
+#
+#   FVOCI_INSTALL_IMAGE=<ref> [FVOCI_INSTALL_IMAGE_ID=<id>] scripts/backup-restore-smoke.sh
+#
+# The image must come from `cargo xtask install-image` (build or load) for this
+# checkout; a mismatched image is refused, never rebuilt. Without
+# FVOCI_INSTALL_IMAGE a local run first builds it with that command; CI refuses.
+# Compose (and any derived fixture) runs the verified image ID, never the tag.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image identity, running-image and leftover
+# checks are `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/backup-restore-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" backup-restore-smoke
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 COMPOSE_FILE="$ROOT/infra/rust/compose.yml"
-IMAGE_TAG="${FVOCI_INSTALL_IMAGE:-fvoci-rust-install:local}"
 RUN_ID="$(openssl rand -hex 8)"
 SOURCE_PROJECT="fvoci-br-src-${RUN_ID}"
 RESTORE_PROJECT="fvoci-br-dst-${RUN_ID}"
@@ -35,20 +56,9 @@ RESTORE_MEILI_MASTER_KEY="$(openssl rand -hex 16)"
 # install pepper and key k1 are random. Never point this at real data.
 ZOTERO_FIXTURE_RECIPE="${FVOCI_BR_ZOTERO_FIXTURE_DOCKERFILE:-}"
 if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
-  read -r PEPPER_ID PEPPER_VALUE ZOTERO_FIXTURE_KEY < <(python3 - "$ROOT" <<'PY'
-import json, re, sys
-root = sys.argv[1]
-fixture = open(f"{root}/src/bin/e2e-fixture/zotero.rs", encoding="utf-8").read()
-upstream = open(f"{root}/src/integrations/zotero.rs", encoding="utf-8").read()
-(key_id, value), = json.loads(re.search(r'const PEPPER: &str =\s*r#"(.*?)"#;', fixture, re.S).group(1)).items()
-api_key = re.search(r'pub const KEY: &str = "([A-Z_]+)";', upstream).group(1)
-assert re.fullmatch(r"[a-z0-9]+", key_id) and re.fullmatch(r"[0-9a-f]{64}", value) and api_key.startswith("SYNTHETIC_ONLY_")
-print(key_id, value, api_key)
-PY
-)
+  read -r PEPPER_ID PEPPER_VALUE ZOTERO_FIXTURE_KEY < <(smoke_ts zotero-keyring "$ROOT")
   if [[ -z "${ZOTERO_FIXTURE_KEY:-}" ]]; then
-    echo "could not read the Zotero fixture's synthetic keyring" >&2
-    exit 1
+    fail "could not read the Zotero fixture's synthetic keyring"
   fi
   ENC_ID="$PEPPER_ID"
   ENC_K1="$PEPPER_VALUE"
@@ -63,13 +73,23 @@ PEPPER="{\"${PEPPER_ID}\":\"${PEPPER_VALUE}\"}"
 SOURCE_ENCRYPTION_KEYS="{\"${ENC_ID}\":\"${ENC_K1}\"}"
 RESTORE_ENCRYPTION_KEYS="{\"${ENC_ID}\":\"${ENC_K1}\",\"k2\":\"$(openssl rand -hex 32)\"}"
 ZF_NAME="fvoci-br-zf-${RUN_ID}"
-ZF_IMAGE="${IMAGE_TAG}-zotero-fixture"
+ZF_IMAGE="fvoci-br-zotero-fixture:${RUN_ID}"
+# Per-run tag of the verified image ID: BuildKit resolves a bare ID as a
+# registry name, and only this run creates this tag.
+ZF_BASE="fvoci-br-zotero-base:${RUN_ID}"
 ZF_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-zf-env.${RUN_ID}.XXXXXX")"
 ZF_STDERR="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-zf-stderr.${RUN_ID}.XXXXXX")"
 MOVE_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-move-file.${RUN_ID}.XXXXXX")"
 chmod 600 "$ZF_ENV"
 OWNER_EMAIL="owner@backup.test"
 OWNER_PASSWORD_LOGIN="installpass1"
+# The refused restores must create nothing; their project names are torn down
+# anyway so an interrupted refusal leaves nothing. `down` needs only the project
+# name and an env file that sets FVOCI_IMAGE, so they use the source env file.
+WRONG_PROJECTS=("${RESTORE_PROJECT}-wrongpepper" "${RESTORE_PROJECT}-wrongkeys")
+SOURCE_STARTED=0
+RESTORE_STARTED=0
+ZF_BUILT=0
 
 START_TS=$SECONDS
 
@@ -79,49 +99,74 @@ log_assert() {
 
 require_cmd() {
   for cmd in "$@"; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      echo "missing required command: $cmd" >&2
-      exit 1
-    }
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
 
+# teardown PROJECT COMPOSE...: down -v, then nothing labelled PROJECT may remain.
+teardown() {
+  local project="$1" out rc=0
+  shift
+  if ! out="$("$@" down -v --remove-orphans 2>&1)"; then
+    printf 'cleanup: down failed for %s:\n%s\n' "$project" "$out" >&2
+    rc=1
+  fi
+  xtask install-image leftovers --project "$project" || rc=1
+  return "$rc"
+}
+
 cleanup() {
-  local status=$?
+  local status=$? project torn=0
+  set +e
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
   if (( status != 0 )); then
-    echo "== server/init logs (last 200 lines per stack)" >&2
-    "${SOURCE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
-    "${RESTORE_COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
+    smoke_ts group "collect: server/init logs (last 200 lines per stack)"
+    {
+      (( SOURCE_STARTED )) && "${SOURCE_COMPOSE[@]}" logs --no-color --tail 200 init server
+      (( RESTORE_STARTED )) && "${RESTORE_COMPOSE[@]}" logs --no-color --tail 200 init server
+      if [[ -s "$ZF_STDERR" ]]; then
+        echo "== zotero fixture stderr (last 50 lines)"
+        tail -n 50 "$ZF_STDERR"
+      fi
+    } 2>&1 | smoke_ts quote >&2
+    smoke_ts endgroup
   fi
-  if (( status != 0 )) && [[ -s "$ZF_STDERR" ]]; then
-    echo "== zotero fixture stderr (last 50 lines)" >&2
-    tail -n 50 "$ZF_STDERR" >&2 || true
+  smoke_ts group "cleanup: ${SOURCE_PROJECT} ${RESTORE_PROJECT}"
+  docker rm -f "$ZF_NAME" >/dev/null 2>&1
+  (( ZF_BUILT )) && docker image rm "$ZF_IMAGE" "$ZF_BASE" >/dev/null 2>&1
+  if (( SOURCE_STARTED )); then
+    teardown "$SOURCE_PROJECT" "${SOURCE_COMPOSE[@]}" || torn=1
+    for project in "${WRONG_PROJECTS[@]}"; do
+      teardown "$project" docker compose -f "$COMPOSE_FILE" --project-name "$project" --env-file "$SOURCE_ENV" || torn=1
+    done
   fi
-  docker rm -f "$ZF_NAME" >/dev/null 2>&1 || true
-  "${SOURCE_COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  "${RESTORE_COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  if (( RESTORE_STARTED )); then
+    teardown "$RESTORE_PROJECT" "${RESTORE_COMPOSE[@]}" || torn=1
+  fi
+  (( torn == 0 || status != 0 )) || status=1
   rm -rf "$BACKUP_DIR"
   rm -f "$SOURCE_ENV" "$RESTORE_ENV" "$COOKIE_JAR" "$MEMBER_JAR" "$COLLAB_STDERR" "$DOWNLOAD_PATH" \
     "$ZF_ENV" "$ZF_STDERR" "$MOVE_FILE"
+  smoke_ts endgroup
   if (( status != 0 )); then
     echo "backup-restore-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
-    cat "$ASSERT_LOG" >&2 || true
+    cat "$ASSERT_LOG" >&2
   fi
   rm -f "$ASSERT_LOG"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-require_cmd docker openssl curl bun python3 sha256sum
-if [[ ! -f "$FIXTURE_HWPX" ]]; then
-  echo "missing HWPX fixture: $FIXTURE_HWPX" >&2
-  exit 1
-fi
+phase image
+require_cmd docker openssl curl bun cargo python3 sha256sum
+[[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 pick_port() {
-  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+  smoke_ts port
 }
 
 write_env() {
@@ -134,7 +179,7 @@ write_env() {
   local encryption_keys="$7"
   local encryption_active="$8"
   cat >"$dest" <<EOF
-FVOCI_IMAGE=${IMAGE_TAG}
+FVOCI_IMAGE=${IMAGE_ID}
 POSTGRES_DB=fvoci
 POSTGRES_USER=fvoci_owner
 POSTGRES_PASSWORD=${owner_pw}
@@ -163,8 +208,7 @@ wait_http() {
     fi
     sleep 0.5
   done
-  echo "timed out waiting for $base$path" >&2
-  return 1
+  fail "timed out waiting for $base$path"
 }
 
 poll_extract_field() {
@@ -183,17 +227,6 @@ poll_count() {
   local sql="$3"
   docker compose -f "$COMPOSE_FILE" --project-name "$project" --env-file "$env_file" \
     exec -T postgres psql -U fvoci_owner -d fvoci -tAc "$sql" | tr -d '[:space:]'
-}
-
-# JSON field of a reply: json_field JSON key [key|index ...].
-json_field() {
-  python3 -c '
-import json, sys
-value = json.loads(sys.argv[1])
-for key in sys.argv[2:]:
-    value = value[int(key)] if key.isdigit() else value[key]
-print(value)
-' "$@"
 }
 
 # One workspace API call with a cookie jar; prints the reply (fails on HTTP errors).
@@ -224,7 +257,7 @@ status_of() {
 }
 
 new_uuid() {
-  python3 -c 'import uuid; print(uuid.uuid4())'
+  smoke_ts uuid
 }
 
 # What one person reads through the app role: workspaces, projects, the
@@ -280,48 +313,7 @@ user_oracle() {
   else
     zotero="\"$(status_of "$base" "$jar" "/api/v1/workspaces/${PERSONAL_ID}/zotero")\""
   fi
-  python3 -c '
-import json, sys
-workspaces, projects, hid, task, activity, comments, revisions, query = sys.argv[1:9]
-task_revisions, task_revision, document_revision = sys.argv[9:12]
-(moved_document, moved_body, moved_revisions, moved_task, moved_backlinks, personal_status, moved_history,
- member_history, member_summary, wiki_fields, wiki_items, wiki_views, document_backlinks,
- member_backlinks, zotero) = sys.argv[12:27]
-def stable(value):
-    if isinstance(value, dict):
-        return {k: stable(v) for k, v in value.items() if k != "serverNow"}
-    if isinstance(value, list):
-        return [stable(v) for v in value]
-    return value
-print(json.dumps({
-    "workspaces": sorted(w["id"] for w in json.loads(workspaces)["items"]),
-    "projects": sorted((p["id"], p["key"], p["name"], p["visibility"]) for p in json.loads(projects)["items"]),
-    "hidTaskStatus": hid,
-    "memberTask": json.loads(task),
-    "activity": json.loads(activity),
-    "comments": json.loads(comments),
-    "revisions": json.loads(revisions),
-    "teamItems": json.loads(query)["items"],
-    "taskRevisions": json.loads(task_revisions),
-    "memberTaskRevision": json.loads(task_revision),
-    "memberDocumentRevision": json.loads(document_revision),
-    "movedDocument": json.loads(moved_document),
-    "movedBody": json.loads(moved_body),
-    "movedRevisions": json.loads(moved_revisions),
-    "movedTask": json.loads(moved_task),
-    "movedBacklinks": json.loads(moved_backlinks),
-    "personalMovedTaskStatus": personal_status,
-    "movedTimerHistory": stable(json.loads(moved_history)),
-    "memberTaskTimerHistory": stable(json.loads(member_history)),
-    "memberTaskTimerSummary": stable(json.loads(member_summary)),
-    "wikiFields": json.loads(wiki_fields),
-    "wikiItems": json.loads(wiki_items)["items"],
-    "wikiViews": json.loads(wiki_views),
-    "documentBacklinks": json.loads(document_backlinks),
-    "memberTaskBacklinks": json.loads(member_backlinks),
-    "zotero": json.loads(zotero),
-}, sort_keys=True))
-' "$workspaces" "$projects" "$hid_status" "$task" "$activity" "$comments" "$revisions" "$query" \
+  smoke_ts oracle "$workspaces" "$projects" "$hid_status" "$task" "$activity" "$comments" "$revisions" "$query" \
     "$task_revisions" "$task_revision" "$document_revision" \
     "$moved_document" "$moved_body" "$moved_revisions" "$moved_task" "$moved_backlinks" "$personal_status" "$moved_history" \
     "$member_history" "$member_summary" "$wiki_fields" "$wiki_items" "$wiki_views" "$document_backlinks" \
@@ -380,6 +372,24 @@ native_counts() {
   poll_count "$1" "$2" "SELECT 'document_states='||(SELECT count(*) FROM fvoci.document_states)||';document_collab_updates='||(SELECT count(*) FROM fvoci.document_collab_updates)||';document_collab_op_receipts='||(SELECT count(*) FROM fvoci.document_collab_op_receipts)||';task_states='||(SELECT count(*) FROM fvoci.task_states)||';task_collab_updates='||(SELECT count(*) FROM fvoci.task_collab_updates)||';task_collab_op_receipts='||(SELECT count(*) FROM fvoci.task_collab_op_receipts)"
 }
 
+IMAGE_ENV="$(xtask install-image acquire)" || fail "install image refused or not built (see install-image above)"
+IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
+IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
+[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image printed no image reference"
+log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
+if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
+  log_assert "build isolated Zotero fixture image on ${IMAGE_ID}"
+  BUILD_START=$SECONDS
+  ZF_BUILT=1
+  docker tag "$IMAGE_ID" "$ZF_BASE"
+  [[ "$(docker image inspect -f '{{.Id}}' "$ZF_BASE")" == "$IMAGE_ID" ]] || fail "fixture base ${ZF_BASE} is not ${IMAGE_ID}"
+  docker build --pull=false -f "$ZOTERO_FIXTURE_RECIPE" --build-arg "FVOCI_IMAGE=${ZF_BASE}" -t "$ZF_IMAGE" "$ROOT"
+  # Exactly the image under test plus one layer (the fixture binary).
+  smoke_check layers-plus-one "$(docker image inspect -f '{{json .RootFS.Layers}}' "$IMAGE_ID")" \
+    "$(docker image inspect -f '{{json .RootFS.Layers}}' "$ZF_IMAGE")"
+  log_assert "fixture image is the image under test plus one fixture layer: ok ($((SECONDS - BUILD_START))s)"
+fi
+
 SOURCE_PORT="$(pick_port)"
 SOURCE_BASE="http://127.0.0.1:${SOURCE_PORT}"
 write_env "$SOURCE_ENV" "$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$SOURCE_BASE" "$SOURCE_PORT" \
@@ -388,40 +398,24 @@ write_env "$SOURCE_ENV" "$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$
 python3 "$ROOT/scripts/encryption_keys.py" self-test
 log_assert "encryption keyring fingerprint self-test: ok"
 
-log_assert "== build image ${IMAGE_TAG}"
-BUILD_START=$SECONDS
-docker build -f "$ROOT/infra/rust/Dockerfile" -t "$IMAGE_TAG" "$ROOT"
-log_assert "build image: ok ($((SECONDS - BUILD_START))s)"
-if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
-  log_assert "== build isolated Zotero fixture image on ${IMAGE_TAG}"
-  BUILD_START=$SECONDS
-  docker build -f "$ZOTERO_FIXTURE_RECIPE" --build-arg "FVOCI_IMAGE=${IMAGE_TAG}" -t "$ZF_IMAGE" "$ROOT"
-  # Exactly the image under test plus one layer (the fixture binary).
-  python3 - "$(docker image inspect -f '{{json .RootFS.Layers}}' "$IMAGE_TAG")" \
-    "$(docker image inspect -f '{{json .RootFS.Layers}}' "$ZF_IMAGE")" <<'PY'
-import json, sys
-base, fixture = json.loads(sys.argv[1]), json.loads(sys.argv[2])
-assert fixture[:len(base)] == base and len(fixture) == len(base) + 1, (len(base), len(fixture))
-PY
-  log_assert "fixture image is the image under test plus one fixture layer: ok ($((SECONDS - BUILD_START))s)"
-fi
-
-log_assert "== start source compose stack"
+phase start-source
 UP_START=$SECONDS
+SOURCE_STARTED=1
 "${SOURCE_COMPOSE[@]}" up -d --wait server
-log_assert "source compose up: ok ($((SECONDS - UP_START))s) base=${SOURCE_BASE}"
+xtask install-image running "$SOURCE_PROJECT" server "$IMAGE_ID" || fail "server of $SOURCE_PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
+log_assert "source compose up on the verified image: ok ($((SECONDS - UP_START))s) base=${SOURCE_BASE}"
 
 wait_http "$SOURCE_BASE" "/api/v1/setup"
 log_assert "setup endpoint ready: ok"
 
+phase seed
 SETUP_BODY="{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_PASSWORD_LOGIN}\",\"givenName\":\"Owner\",\"workspaceSlug\":\"backup\",\"workspaceName\":\"Backup\"}"
 curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/setup" -d "$SETUP_BODY" >/dev/null
 SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 if [[ -z "$SESSION" ]]; then
-  echo "setup did not return fvoci_session cookie" >&2
-  exit 1
+  fail "setup did not return fvoci_session cookie"
 fi
 log_assert "owner setup + session cookie: ok"
 
@@ -429,18 +423,18 @@ LOGIN_RESPONSE="$(curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/auth/login" \
   -d "{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_PASSWORD_LOGIN}\"}")"
-python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("userId")' "$LOGIN_RESPONSE"
+smoke_check user-id "$LOGIN_RESPONSE"
 log_assert "password login on source: ok"
 
 WORKSPACES="$(curl -fsS -b "$COOKIE_JAR" "$SOURCE_BASE/api/v1/me/workspaces")"
-WORKSPACE_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["items"][0]["id"])' "$WORKSPACES")"
+WORKSPACE_ID="$(json_field "$WORKSPACES" items 0 id)"
 # Choose the command/body once, preserving its identity on any replay.
 DOC_COMMAND_ID="$(new_uuid)"
 DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Backup doc\"}"
 DOC_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" \
   -d "$DOC_CREATE_BODY")"
-DOCUMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$DOC_CREATE")"
+DOCUMENT_ID="$(json_field "$DOC_CREATE" id)"
 log_assert "workspace document create: ok (${DOCUMENT_ID})"
 
 BODY_BEFORE="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
@@ -450,16 +444,14 @@ BODY_BEFORE="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --workspace-id "$WORKSPACE_ID" \
   --document-id "$DOCUMENT_ID")"
 if ! grep -q '"contentJson"' <<<"$BODY_BEFORE"; then
-  echo "collab body projection failed: $BODY_BEFORE" >&2
-  exit 1
+  fail "collab body projection failed: $BODY_BEFORE"
 fi
 log_assert "collab wiki body save + projection: ok"
 for bad in "--document-id ${DOCUMENT_ID} --task-id ${DOCUMENT_ID}" "" "--document-id ${DOCUMENT_ID} --fixture unknown" "--document-id ${DOCUMENT_ID} --client-id x42" "--document-id ${DOCUMENT_ID} --client-id 4294967296"; do
   # shellcheck disable=SC2086 # the bad argument set is split on purpose
   if bun "$ROOT/scripts/install-smoke-collab.mjs" --base-url "$SOURCE_BASE" --origin "$SOURCE_BASE" \
     --session "$SESSION" --workspace-id "$WORKSPACE_ID" $bad >/dev/null 2>&1; then
-    echo "collab helper accepted an invalid target: ${bad}" >&2
-    exit 1
+    fail "collab helper accepted an invalid target: ${bad}"
   fi
 done
 log_assert "collab helper refuses both/neither target, an unknown fixture and invalid client ids: ok"
@@ -468,8 +460,8 @@ FIXTURE_SHA="$(sha256sum "$FIXTURE_HWPX" | awk '{print $1}')"
 UPLOAD_INIT="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
   -d "{\"name\":\"sample.hwpx\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
-ATTACHMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$UPLOAD_INIT")"
-PART_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$UPLOAD_INIT")"
+ATTACHMENT_ID="$(json_field "$UPLOAD_INIT" attachmentId)"
+PART_URL="$(json_field "$UPLOAD_INIT" parts 0 url)"
 ETAG="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $SOURCE_BASE" -X PUT "$SOURCE_BASE${PART_URL}" \
   --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ && !etag { etag = $2 } END { print etag }' | tr -d '\r')"
 curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
@@ -489,29 +481,27 @@ while (( SECONDS < EXTRACT_DEADLINE )); do
   sleep 1
 done
 if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; then
-  echo "extraction did not finish as expected: status=$EXTRACT_STATUS text=$EXTRACT_TEXT" >&2
-  exit 1
+  fail "extraction did not finish as expected: status=$EXTRACT_STATUS text=$EXTRACT_TEXT"
 fi
 log_assert "extraction status done with expected text: ok (${EXTRACT_STATUS})"
 
 PROJECT_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/projects" \
   -d '{"key":"BKP","name":"Backup project","visibility":"workspace"}')"
-PROJECT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$PROJECT_CREATE")"
+PROJECT_ID="$(json_field "$PROJECT_CREATE" id)"
 TASK_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/projects/${PROJECT_ID}/tasks" \
   -d '{"title":"Backup restore task"}')"
-TASK_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$TASK_CREATE")"
-TASK_TITLE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["title"])' "$TASK_CREATE")"
+TASK_ID="$(json_field "$TASK_CREATE" id)"
+TASK_TITLE="$(json_field "$TASK_CREATE" title)"
 if [[ "$TASK_TITLE" != "Backup restore task" ]]; then
-  echo "unexpected task title: $TASK_TITLE" >&2
-  exit 1
+  fail "unexpected task title: $TASK_TITLE"
 fi
 log_assert "project + task create: ok (${TASK_ID})"
 COMMENT_CREATE="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
   -d '{"body":"백업 복원 댓글 🙂"}')"
-COMMENT_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$COMMENT_CREATE")"
+COMMENT_ID="$(json_field "$COMMENT_CREATE" id)"
 log_assert "document comment create: ok (${COMMENT_ID})"
 
 # Team / multi-author rows through the ordinary routes: an invited second
@@ -525,7 +515,9 @@ OWNER_ID="$(json_field "$LOGIN_RESPONSE" userId)"
 MEMBER_EMAIL="member@backup.test"
 MEMBER_PASSWORD_LOGIN="$(openssl rand -hex 12)"
 INVITE="$(api "$SOURCE_BASE" "$COOKIE_JAR" POST /invitations "{\"email\":\"${MEMBER_EMAIL}\",\"role\":\"member\"}")"
-INVITE_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["acceptUrl"].rsplit("/invite/", 1)[1])' "$INVITE")"
+ACCEPT_URL="$(json_field "$INVITE" acceptUrl)"
+[[ "$ACCEPT_URL" == */invite/* ]] || fail "invitation acceptUrl has no /invite/ token: $ACCEPT_URL"
+INVITE_TOKEN="${ACCEPT_URL##*/invite/}"
 ACCEPTED="$(curl -fsS -c "$MEMBER_JAR" -b "$MEMBER_JAR" -H "content-type: application/json" -H "origin: $SOURCE_BASE" \
   -X POST "$SOURCE_BASE/api/v1/invitations/${INVITE_TOKEN}/accept" \
   -d "{\"email\":\"${MEMBER_EMAIL}\",\"givenName\":\"Member\",\"password\":\"${MEMBER_PASSWORD_LOGIN}\"}")"
@@ -566,8 +558,7 @@ MEMBER_TASK_BODY="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --task-id "$MEMBER_TASK_ID" \
   --client-id 43)"
 if ! grep -q '"contentJson"' <<<"$MEMBER_TASK_BODY"; then
-  echo "member task collab body save failed" >&2
-  exit 1
+  fail "member task collab body save failed"
 fi
 log_assert "member task body collab save + persist ACK + readback: ok"
 MEMBER_TASK_REVISION_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST "/tasks/${MEMBER_TASK_ID}/revisions")" id)"
@@ -587,10 +578,7 @@ OWNER_REJOIN="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --session "$SESSION" \
   --workspace-id "$WORKSPACE_ID" \
   --document-id "$DOCUMENT_ID")"
-python3 -c '
-import json, sys
-assert json.loads(sys.argv[1])["contentJson"] == json.loads(sys.argv[2])["contentJson"]
-' "$OWNER_REJOIN" "$BODY_BEFORE"
+smoke_check same-body "$OWNER_REJOIN" "$BODY_BEFORE"
 log_assert "owner rejoins the wiki room with client id 42 (body unchanged): ok"
 if bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --base-url "$SOURCE_BASE" \
@@ -599,12 +587,10 @@ if bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --workspace-id "$WORKSPACE_ID" \
   --document-id "$DOCUMENT_ID" \
   --fixture pending_u1 >/dev/null 2>"$COLLAB_STDERR"; then
-  echo "the member's claim of the owner's recent client id 42 was not refused" >&2
-  exit 1
+  fail "the member's claim of the owner's recent client id 42 was not refused"
 fi
 if ! grep -q 'collab auth denied: not found' "$COLLAB_STDERR"; then
-  echo "client id 42 join failed for another reason: $(grep -m1 -o 'Error: .*' "$COLLAB_STDERR")" >&2
-  exit 1
+  fail "client id 42 join failed for another reason: $(grep -m1 -o 'Error: .*' "$COLLAB_STDERR")"
 fi
 log_assert "member join with the owner's recent client id 42 refused (collab auth denied: not found): ok"
 MEMBER_WIKI_BODY="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
@@ -616,14 +602,9 @@ MEMBER_WIKI_BODY="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --fixture pending_u1 \
   --client-id 44 2>"$COLLAB_STDERR")"
 if ! grep -qx 'collab auth scope: read-write' "$COLLAB_STDERR"; then
-  echo "member wiki join with client id 44 was not read-write: $(head -c 200 "$COLLAB_STDERR")" >&2
-  exit 1
+  fail "member wiki join with client id 44 was not read-write: $(head -c 200 "$COLLAB_STDERR")"
 fi
-python3 -c '
-import json, sys
-before, after = json.loads(sys.argv[1])["contentJson"], json.loads(sys.argv[2])["contentJson"]
-assert after != before and all(node in after["content"] for node in before["content"]), (before, after)
-' "$BODY_BEFORE" "$MEMBER_WIKI_BODY"
+smoke_check body-extends "$BODY_BEFORE" "$MEMBER_WIKI_BODY"
 BODY_BEFORE="$MEMBER_WIKI_BODY"
 log_assert "member distinct wiki edit (owner content kept) + persist ACK + readback: ok"
 MEMBER_DOCUMENT_REVISION_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST "/documents/${DOCUMENT_ID}/revisions")" id)"
@@ -653,15 +634,7 @@ MOVE_ETAG="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $SOURCE_BASE" -H "content-ty
   | awk '/^[Ee]tag:/ && !etag { etag = $2 } END { print etag }' | tr -d '\r')"
 api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" POST "/attachments/${MOVED_ATTACHMENT_ID}/complete" \
   "{\"parts\":[{\"partNumber\":1,\"etag\":\"${MOVE_ETAG}\"}]}" >/dev/null
-MOVED_DOC_BODY="$(python3 -c '
-import json, sys
-task, attachment = sys.argv[1:3]
-print(json.dumps({"contentJson": {"type": "doc", "content": [
-    {"type": "paragraph", "content": [
-        {"type": "text", "text": "개인 문서 본문 "},
-        {"type": "mention", "attrs": {"entity": "task", "id": task, "label": "이동 작업"}}]},
-    {"type": "attachment", "attrs": {"id": attachment, "name": "이동 증빙.txt"}}]}}))
-' "$MOVED_TASK_ID" "$MOVED_ATTACHMENT_ID")"
+MOVED_DOC_BODY="$(smoke_ts build moved-doc-body "$MOVED_TASK_ID" "$MOVED_ATTACHMENT_ID")"
 api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" PUT "/documents/${MOVED_DOC_ID}/body" "$MOVED_DOC_BODY" >/dev/null
 MOVED_TASK_BODY="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --base-url "$SOURCE_BASE" \
@@ -670,14 +643,12 @@ MOVED_TASK_BODY="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --workspace-id "$PERSONAL_ID" \
   --task-id "$MOVED_TASK_ID")"
 if ! grep -q '"contentJson"' <<<"$MOVED_TASK_BODY"; then
-  echo "personal task collab body save failed" >&2
-  exit 1
+  fail "personal task collab body save failed"
 fi
 NATIVE_DEADLINE=$((SECONDS + 30))
 until [[ "$(poll_count "$SOURCE_PROJECT" "$SOURCE_ENV" "SELECT (SELECT count(*) FROM fvoci.document_states WHERE document_id='${MOVED_DOC_ID}')+(SELECT count(*) FROM fvoci.document_collab_updates WHERE document_id='${MOVED_DOC_ID}')")" != "0" ]]; do
   if (( SECONDS >= NATIVE_DEADLINE )); then
-    echo "personal document body left no native rows" >&2
-    exit 1
+    fail "personal document body left no native rows"
   fi
   sleep 0.5
 done
@@ -700,38 +671,19 @@ timer_run() {
 OWNER_RUN_ID="$(timer_run "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" "$MOVED_TASK_ID")"
 log_assert "owner timer run on the personal task (start/stop): ok"
 PRV_STATUS_ID="$(json_field "$(api "$SOURCE_BASE" "$COOKIE_JAR" GET "/projects/${PRV_ID}/workflow")" statuses 0 id)"
-MOVE_SELECTION="$(python3 -c '
-import json, sys
-doc, task, doc_version, task_version, ws, project, status = sys.argv[1:8]
-print(json.dumps({"action": "move", "documentId": doc, "taskId": task,
-    "expectedDocumentVersion": int(doc_version), "expectedTaskVersion": int(task_version),
-    "destinationWorkspaceId": ws, "destinationProjectId": project, "destinationStatusId": status}))
-' "$MOVED_DOC_ID" "$MOVED_TASK_ID" \
+MOVE_SELECTION="$(smoke_ts build move-selection "$MOVED_DOC_ID" "$MOVED_TASK_ID" \
   "$(json_field "$(api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" GET "/documents/${MOVED_DOC_ID}")" version)" \
   "$(json_field "$(api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" GET "/tasks/${MOVED_TASK_ID}")" version)" \
   "$WORKSPACE_ID" "$PRV_ID" "$PRV_STATUS_ID")"
 MOVE_PREVIEW="$(api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" POST /personal-transfers/preview "$MOVE_SELECTION")"
 MOVED="$(api_ws "$SOURCE_BASE" "$COOKIE_JAR" "$PERSONAL_ID" POST /personal-transfers \
   "{\"requestId\":\"$(new_uuid)\",\"selection\":${MOVE_SELECTION},\"previewDigest\":\"$(json_field "$MOVE_PREVIEW" digest)\",\"confirmed\":true}")"
-python3 -c '
-import json, sys
-moved = json.loads(sys.argv[1])
-want = dict(zip(["workspaceId", "projectId", "documentId", "taskId"], sys.argv[2:6]))
-assert {k: moved[k] for k in want} == want and moved["replayed"] is False, moved
-' "$MOVED" "$WORKSPACE_ID" "$PRV_ID" "$MOVED_DOC_ID" "$MOVED_TASK_ID"
+smoke_check moved "$MOVED" "$WORKSPACE_ID" "$PRV_ID" "$MOVED_DOC_ID" "$MOVED_TASK_ID"
 log_assert "explicit same-ID MOVE of the personal graph into PRV (same document/task ids): ok"
 REF_DOC_COMMAND_ID="$(new_uuid)"
 REF_DOC_CREATE_BODY="{\"commandId\":\"${REF_DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"멤버 참조 문서\"}"
 REF_DOC_ID="$(json_field "$(api "$SOURCE_BASE" "$MEMBER_JAR" POST /documents "$REF_DOC_CREATE_BODY")" id)"
-api "$SOURCE_BASE" "$MEMBER_JAR" PUT "/documents/${REF_DOC_ID}/body" "$(python3 -c '
-import json, sys
-def mention(entity, target, label):
-    return {"type": "mention", "attrs": {"entity": entity, "id": target, "label": label}}
-document, member_task, moved_task = sys.argv[1:4]
-print(json.dumps({"contentJson": {"type": "doc", "content": [{"type": "paragraph", "content": [
-    {"type": "text", "text": "멤버 참조 "}, mention("document", document, "백업 문서"),
-    mention("task", member_task, "멤버 작업"), mention("task", moved_task, "이동 작업")]}]}}))
-' "$DOCUMENT_ID" "$MEMBER_TASK_ID" "$MOVED_TASK_ID")" >/dev/null
+api "$SOURCE_BASE" "$MEMBER_JAR" PUT "/documents/${REF_DOC_ID}/body" "$(smoke_ts build ref-doc-body "$DOCUMENT_ID" "$MEMBER_TASK_ID" "$MOVED_TASK_ID")" >/dev/null
 MEMBER_RUN_ID="$(timer_run "$SOURCE_BASE" "$MEMBER_JAR" "$WORKSPACE_ID" "$MEMBER_TASK_ID")"
 log_assert "member wiki document naming the shared document, member task and moved task; member timer run: ok"
 VIEW_CONFIG='{"query":{"filters":{}},"groupBy":null,"dateBy":null}'
@@ -763,7 +715,7 @@ log_assert "wiki collection with choice and person values, shared (owner) and pr
 # original password, connects and syncs. The fixture then stops and the
 # product server (default reader, no upstream use) resumes.
 if [[ -n "$ZOTERO_FIXTURE_RECIPE" ]]; then
-  log_assert "== isolated Zotero producer (source server stopped)"
+  log_assert "isolated Zotero producer (source server stopped)"
   "${SOURCE_COMPOSE[@]}" stop server
   cat >"$ZF_ENV" <<ZFENV
 DATABASE_APP_URL=postgres://fvoci_app:${APP_PASSWORD}@postgres:5432/fvoci
@@ -790,88 +742,34 @@ ZFENV
       docker exec "$ZF_NAME" curl -fsS -c /tmp/zf-jar -b /tmp/zf-jar -H "origin: $ZF_ORIGIN" -X "$1" "$ZF_ORIGIN$2"
     fi
   }
-  IFS= read -r -t 180 ZF_REPLY <&"${ZF[0]}" || { echo "zotero fixture did not start" >&2; exit 1; }
+  IFS= read -r -t 180 ZF_REPLY <&"${ZF[0]}" || fail "zotero fixture did not start"
   ZF_ORIGIN="$(json_field "$ZF_REPLY" origin)"
   zf_api POST /api/v1/auth/login "{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_PASSWORD_LOGIN}\"}" >/dev/null
   zf_send '{"command":"mode","mode":22}'
-  python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == {"ok": True}, sys.argv[1]' "$ZF_REPLY"
+  smoke_check zf-ok "$ZF_REPLY"
   ZOTERO_CONNECTOR_ID="$(json_field "$(zf_api POST "/api/v1/workspaces/${PERSONAL_ID}/zotero" \
     "{\"libraryType\":\"user\",\"remoteLibraryId\":\"42\",\"apiKey\":\"${ZOTERO_FIXTURE_KEY}\",\"libraryUrl\":\"https://www.zotero.org/users/42\"}")" id)"
-  python3 -c '
-import json, sys
-library = json.loads(sys.argv[1])
-connector = library["connector"]
-assert connector["state"] == "connected" and connector["generation"] == "1" and connector["completedVersion"] == "99", connector
-assert len(library["references"]) == 1 and library["collections"], library
-' "$(zf_api POST "/api/v1/workspaces/${PERSONAL_ID}/zotero/libraries/${ZOTERO_CONNECTOR_ID}/sync")"
+  smoke_check zf-sync "$(zf_api POST "/api/v1/workspaces/${PERSONAL_ID}/zotero/libraries/${ZOTERO_CONNECTOR_ID}/sync")"
   zf_send "{\"command\":\"observe\",\"userId\":\"${OWNER_ID}\",\"workspaceId\":\"${PERSONAL_ID}\",\"connectorId\":\"${ZOTERO_CONNECTOR_ID}\"}"
-  python3 -c '
-import json, sys
-seen = json.loads(sys.argv[1])
-assert seen["restrictedRole"] is True and seen["credentialRows"] == 1 and seen["connector"]["state"] == "connected", seen
-assert len(seen["rows"]) == 1, seen["rows"]
-' "$ZF_REPLY"
+  smoke_check zf-observe "$ZF_REPLY"
   zf_send '{"command":"requests"}'
-  python3 -c 'import json,sys; assert json.loads(sys.argv[1])["requests"], "no synthetic upstream request"' "$ZF_REPLY"
+  smoke_check zf-requests "$ZF_REPLY"
   zf_send '{"command":"stop"}'
-  python3 -c 'import json,sys; assert json.loads(sys.argv[1]) == {"stopped": True, "ownedResources": 0}, sys.argv[1]' "$ZF_REPLY"
+  smoke_check zf-stopped "$ZF_REPLY"
   wait "$ZF_CHILD"
   SEALED_ZOTERO="$(poll_count "$SOURCE_PROJECT" "$SOURCE_ENV" "SELECT count(*) FROM fvoci.zotero_credentials WHERE sealed_key LIKE 'enc:v2:${ENC_ID}:%'")"
-  [[ "$SEALED_ZOTERO" == "1" ]] || { echo "expected one sealed Zotero credential, got ${SEALED_ZOTERO}" >&2; exit 1; }
+  [[ "$SEALED_ZOTERO" == "1" ]] || fail "expected one sealed Zotero credential, got ${SEALED_ZOTERO}"
   "${SOURCE_COMPOSE[@]}" start server
   wait_http "$SOURCE_BASE" "/api/v1/setup"
   log_assert "Zotero connect + mode 22 sync by the owner (app role, synthetic upstream only, sealed credential), fixture stopped, product server resumed: ok"
 fi
 SOURCE_OWNER_ORACLE="$(user_oracle "$SOURCE_BASE" "$COOKIE_JAR")"
 SOURCE_MEMBER_ORACLE="$(user_oracle "$SOURCE_BASE" "$MEMBER_JAR")"
-python3 -c '
-import json, sys
-owner, member, prv, hid = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3], sys.argv[4]
-assert owner["hidTaskStatus"] == "200" and member["hidTaskStatus"] == "404", (owner["hidTaskStatus"], member["hidTaskStatus"])
-assert prv in [p[0] for p in member["projects"]] and hid not in [p[0] for p in member["projects"]], member["projects"]
-assert hid in [p[0] for p in owner["projects"]], owner["projects"]
-assert len(owner["comments"]["items"]) == 2 and len(owner["revisions"]["items"]) >= 2
-for view in (owner, member):
-    for key, kind, target in (("memberTaskRevision", "task", sys.argv[6]), ("memberDocumentRevision", "document", sys.argv[7])):
-        rev = view[key]
-        assert rev["createdBy"] == sys.argv[5] and rev["targetKind"] == kind and rev["targetId"] == target, rev
-        assert isinstance(rev["contentJson"], dict) and rev["ySnapshot"], key
-    assert any(r["id"] == view["memberTaskRevision"]["id"] for r in view["taskRevisions"]["items"]), view["taskRevisions"]
-' "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$PRV_ID" "$HID_ID" "$MEMBER_ID" "$MEMBER_TASK_ID" "$DOCUMENT_ID"
+smoke_check source-reads "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$PRV_ID" "$HID_ID" "$MEMBER_ID" "$MEMBER_TASK_ID" "$DOCUMENT_ID"
 log_assert "per-user source reads (member sees PRV, HID 404; owner sees both; member revisions by the member): ok"
-python3 - "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$MOVED_DOC_ID" "$MOVED_TASK_ID" "$MOVED_ATTACHMENT_ID" \
+smoke_check source-models "$SOURCE_OWNER_ORACLE" "$SOURCE_MEMBER_ORACLE" "$MOVED_DOC_ID" "$MOVED_TASK_ID" "$MOVED_ATTACHMENT_ID" \
   "$REF_DOC_ID" "$OWNER_RUN_ID" "$MEMBER_RUN_ID" "$SHARED_VIEW_ID" "$PRIVATE_VIEW_ID" "$ZOTERO_CONNECTOR_ID" \
-  "$(json_field "$TEXT_FIELD" id)" "$WIKI_TEXT" <<'PY'
-import json, sys
-owner, member = json.loads(sys.argv[1]), json.loads(sys.argv[2])
-moved_doc, moved_task, attachment, ref_doc, owner_run, member_run, shared, private, connector = sys.argv[3:12]
-text_field, wiki_text = sys.argv[12:14]
-def froms(listing):
-    return {item["from"]["id"] for item in listing["items"]}
-def runs(history):
-    return {item.get("runId") for item in history["items"]}
-for view in (owner, member):
-    assert view["movedTask"]["id"] == moved_task and view["personalMovedTaskStatus"] in ("403", "404"), view["personalMovedTaskStatus"]
-    body = json.dumps(view["movedBody"]["contentJson"])
-    assert moved_task in body and attachment in body, "moved body lost its task mention or file"
-    assert {moved_doc, ref_doc} <= froms(view["movedBacklinks"]), view["movedBacklinks"]
-    assert ref_doc in froms(view["documentBacklinks"]) and ref_doc in froms(view["memberTaskBacklinks"])
-    assert all(r["items"] for r in view["movedRevisions"]), "moved document/task revisions missing"
-    assert len(view["wikiItems"]) == 1 and len(view["wikiFields"]["items"]) == 3, (view["wikiItems"], view["wikiFields"])
-    assert view["wikiItems"][0]["values"][text_field] == {"text": wiki_text}, view["wikiItems"][0]["values"]
-assert owner_run in runs(owner["movedTimerHistory"]) and owner_run not in runs(member["movedTimerHistory"])
-assert member_run in runs(member["memberTaskTimerHistory"]) and member_run not in runs(owner["memberTaskTimerHistory"])
-owner_views = {v["id"] for v in owner["wikiViews"]["items"]}
-member_views = {v["id"] for v in member["wikiViews"]["items"]}
-assert shared in owner_views and private not in owner_views and {shared, private} <= member_views, (owner_views, member_views)
-assert member["zotero"] in ("403", "404"), member["zotero"]
-if connector:
-    listing, library = owner["zotero"]
-    assert [c["id"] for c in listing["connectors"]] == [connector] and library["connector"]["state"] == "connected", owner["zotero"]
-    assert len(library["references"]) == 1, library
-else:
-    assert owner["zotero"]["connectors"] == [], owner["zotero"]
-PY
+  "$(json_field "$TEXT_FIELD" id)" "$WIKI_TEXT"
 log_assert "per-user source model reads (moved ids/body/file/history/backlinks, own timer only, wiki values and view privacy, Zotero mirror owner-only): ok"
 
 # A secret sealed with ENCRYPTION_KEYS (MFA setup stores the TOTP secret
@@ -881,12 +779,12 @@ curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $SOUR
   -d "{\"currentPassword\":\"${OWNER_PASSWORD_LOGIN}\"}" >/dev/null
 SEALED_MFA="$(poll_count "$SOURCE_PROJECT" "$SOURCE_ENV" "SELECT count(*) FROM fvoci.user_mfa WHERE totp_secret LIKE 'enc:v2:${ENC_ID}:%'")"
 if [[ "$SEALED_MFA" != "1" ]]; then
-  echo "expected one sealed MFA secret, got ${SEALED_MFA}" >&2
-  exit 1
+  fail "expected one sealed MFA secret, got ${SEALED_MFA}"
 fi
 log_assert "sealed MFA secret on source: ok"
 
-log_assert "== backup source stack"
+phase backup
+log_assert "backup source stack"
 BACKUP_START=$SECONDS
 bash "$ROOT/scripts/backup.sh" \
   --project "$SOURCE_PROJECT" \
@@ -898,42 +796,18 @@ MODE_DUMP="$(stat -c '%a' "$BACKUP_DIR/database.dump")"
 MODE_TAR="$(stat -c '%a' "$BACKUP_DIR/storage.tar")"
 MODE_MANIFEST="$(stat -c '%a' "$BACKUP_DIR/manifest.json")"
 if [[ "$MODE_DIR" != "700" || "$MODE_DUMP" != "600" || "$MODE_TAR" != "600" || "$MODE_MANIFEST" != "600" ]]; then
-  echo "backup permissions expected dir 700 files 600, got dir=${MODE_DIR} dump=${MODE_DUMP} tar=${MODE_TAR} manifest=${MODE_MANIFEST}" >&2
-  exit 1
+  fail "backup permissions expected dir 700 files 600, got dir=${MODE_DIR} dump=${MODE_DUMP} tar=${MODE_TAR} manifest=${MODE_MANIFEST}"
 fi
-ENC_K1="$ENC_K1" ENC_ID="$ENC_ID" python3 - "$BACKUP_DIR/manifest.json" <<'PY'
-import json, os, sys
-backup_dir = os.path.dirname(sys.argv[1])
-names = sorted(os.listdir(backup_dir))
-assert names == ["database.dump", "manifest.json", "storage.tar"], names
-manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-assert manifest["search"]["included"] is False, manifest
-blob = json.dumps(manifest)
-assert "PASSWORD_PEPPER" not in blob
-assert "MEILI_MASTER" not in blob
-assert "FVOCI_APP_PASSWORD" not in blob
-keys = manifest["encryptionKeys"]
-assert keys["configured"] is True, keys
-assert sorted(keys["keyFingerprints"]) == [os.environ["ENC_ID"]], keys
-assert os.environ["ENC_K1"] not in blob, "raw ENCRYPTION_KEYS key in manifest"
-PY
+ENC_K1="$ENC_K1" ENC_ID="$ENC_ID" smoke_check backup-manifest "$BACKUP_DIR/manifest.json"
 log_assert "backup archive private + no extra secrets, search omitted: ok ($((SECONDS - BACKUP_START))s)"
 # The server stays stopped after the dump: these rows are the backed-up state.
 SOURCE_TEAM_FINGERPRINT="$(team_fingerprint "$SOURCE_PROJECT" "$SOURCE_ENV")"
 if [[ -z "$SOURCE_TEAM_FINGERPRINT" ]]; then
-  echo "source team fingerprint is empty" >&2
-  exit 1
+  fail "source team fingerprint is empty"
 fi
 log_assert "source team metadata fingerprint taken (not printed): ok"
 SOURCE_NATIVE_COUNTS="$(native_counts "$SOURCE_PROJECT" "$SOURCE_ENV")"
-python3 -c '
-import sys
-counts = dict(item.split("=") for item in sys.argv[1].split(";"))
-# Nonempty source witness: the collab-saved wiki body and member task body
-# left native rows.
-assert int(counts["document_states"]) + int(counts["document_collab_updates"]) >= 1, counts
-assert int(counts["task_states"]) + int(counts["task_collab_updates"]) >= 1, counts
-' "$SOURCE_NATIVE_COUNTS"
+smoke_check native-counts "$SOURCE_NATIVE_COUNTS"
 SOURCE_NATIVE_FINGERPRINT="$(native_fingerprint "$SOURCE_PROJECT" "$SOURCE_ENV")"
 log_assert "source native history rows (${SOURCE_NATIVE_COUNTS}) fingerprint taken (not printed): ok"
 MODEL_COUNT_SQL=""
@@ -941,61 +815,47 @@ for table in "${MODEL_TABLES[@]}"; do
   MODEL_COUNT_SQL+="SELECT '${table}='||count(*) FROM fvoci.${table} UNION ALL "
 done
 SOURCE_MODEL_COUNTS="$(poll_count "$SOURCE_PROJECT" "$SOURCE_ENV" "SELECT string_agg(x, ';' ORDER BY x) FROM (${MODEL_COUNT_SQL% UNION ALL }) AS q(x)")"
-python3 - "$SOURCE_MODEL_COUNTS" "${ZOTERO_CONNECTOR_ID:+zotero}" <<'PY'
-import sys
-counts = {k: int(v) for k, v in (item.split("=") for item in sys.argv[1].split(";"))}
-nonempty = ["documents", "personal_transfer_commands", "task_origins", "time_entries", "task_timer_runs",
-            "task_timer_segments", "task_timer_commands", "task_timer_audit", "collections", "collection_items",
-            "collection_options", "collection_choices", "collection_values", "collection_views"]
-if sys.argv[2]:
-    nonempty += ["zotero_connectors", "zotero_credentials", "zotero_references", "zotero_collections"]
-assert all(counts[t] >= 1 for t in nonempty), counts
-assert counts["collection_views"] >= 2 and counts["task_timer_runs"] >= 2, counts
-PY
+smoke_check model-counts "$SOURCE_MODEL_COUNTS" "${ZOTERO_CONNECTOR_ID:+zotero}"
 SOURCE_MODEL_FINGERPRINT="$(team_fingerprint "$SOURCE_PROJECT" "$SOURCE_ENV" "${MODEL_TABLES[@]}")"
 log_assert "source current-model rows (${SOURCE_MODEL_COUNTS}) fingerprint taken (not printed): ok"
 
-log_assert "== destroy source stack and volumes"
+phase restore-refusals
+log_assert "destroy source stack and volumes"
 "${SOURCE_COMPOSE[@]}" down -v --remove-orphans
 if docker volume inspect "${SOURCE_PROJECT}_storage" >/dev/null 2>&1; then
-  echo "source storage volume still exists after down -v" >&2
-  exit 1
+  fail "source storage volume still exists after down -v"
 fi
 log_assert "source stack and volumes removed: ok"
 
 RESTORE_PORT="$(pick_port)"
 RESTORE_BASE="http://127.0.0.1:${RESTORE_PORT}"
-log_assert "== restore with a different pepper must be refused"
+log_assert "restore with a different pepper must be refused"
 WRONG_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-wrong-env.${RUN_ID}.XXXXXX")"
 chmod 600 "$WRONG_ENV"
 sed -E "s#^PASSWORD_PEPPER_KEYS=.*#PASSWORD_PEPPER_KEYS={\"${PEPPER_ID}\":\"$(openssl rand -hex 32)\"}#" "$SOURCE_ENV" >"$WRONG_ENV"
 WRONG_PROJECT="${RESTORE_PROJECT}-wrongpepper"
 if bash "$ROOT/scripts/restore.sh" --project "$WRONG_PROJECT" --env-file "$WRONG_ENV" --input "$BACKUP_DIR" >/dev/null 2>&1; then
   rm -f "$WRONG_ENV"
-  echo "restore with a different pepper keyring must fail" >&2
-  exit 1
+  fail "restore with a different pepper keyring must fail"
 fi
 rm -f "$WRONG_ENV"
 if docker volume ls --format '{{.Name}}' | grep -q "^${WRONG_PROJECT}_"; then
-  echo "refused restore must not create volumes" >&2
-  exit 1
+  fail "refused restore must not create volumes"
 fi
 log_assert "restore with a different pepper refused before touching anything: ok"
 
-log_assert "== restore with a different key under a backed-up ENCRYPTION_KEYS id must be refused"
+log_assert "restore with a different key under a backed-up ENCRYPTION_KEYS id must be refused"
 WRONG_ENV="$(mktemp "${TMPDIR:-/tmp}/fvoci-br-wrong-env.${RUN_ID}.XXXXXX")"
 chmod 600 "$WRONG_ENV"
 sed -E "s#^ENCRYPTION_KEYS=.*#ENCRYPTION_KEYS={\"${ENC_ID}\":\"$(openssl rand -hex 32)\"}#" "$SOURCE_ENV" >"$WRONG_ENV"
 WRONG_PROJECT="${RESTORE_PROJECT}-wrongkeys"
 if bash "$ROOT/scripts/restore.sh" --project "$WRONG_PROJECT" --env-file "$WRONG_ENV" --input "$BACKUP_DIR" >/dev/null 2>&1; then
   rm -f "$WRONG_ENV"
-  echo "restore with a different ENCRYPTION_KEYS key must fail" >&2
-  exit 1
+  fail "restore with a different ENCRYPTION_KEYS key must fail"
 fi
 rm -f "$WRONG_ENV"
 if docker volume ls --format '{{.Name}}' | grep -q "^${WRONG_PROJECT}_"; then
-  echo "refused restore must not create volumes" >&2
-  exit 1
+  fail "refused restore must not create volumes"
 fi
 log_assert "restore with a mis-keyed ENCRYPTION_KEYS refused before touching anything: ok"
 
@@ -1003,47 +863,47 @@ write_env "$RESTORE_ENV" "$RESTORE_OWNER_PASSWORD" "$RESTORE_APP_PASSWORD" \
   "$RESTORE_MEILI_MASTER_KEY" "$RESTORE_BASE" "$RESTORE_PORT" \
   "$RESTORE_ENCRYPTION_KEYS" k2
 
-log_assert "== restore into a fresh project"
+phase restore
+log_assert "restore into a fresh project"
+RESTORE_STARTED=1
 RESTORE_START=$SECONDS
 RESTORE_OUT="$(bash "$ROOT/scripts/restore.sh" \
   --project "$RESTORE_PROJECT" \
   --env-file "$RESTORE_ENV" \
   --input "$BACKUP_DIR")"
 printf '%s\n' "$RESTORE_OUT"
-python3 -c 'import json,sys; body=json.loads(sys.argv[1].strip().splitlines()[-1]); assert body.get("secretsVerified") is True, body' "$RESTORE_OUT"
+smoke_check secrets-verified "$RESTORE_OUT"
 if grep -Fq "$ENC_K1" <<<"$RESTORE_OUT"; then
-  echo "restore output printed an ENCRYPTION_KEYS key" >&2
-  exit 1
+  fail "restore output printed an ENCRYPTION_KEYS key"
 fi
 log_assert "restore compose up with a rotated superset keyring, secrets opened: ok ($((SECONDS - RESTORE_START))s) base=${RESTORE_BASE}"
 if [[ "$(team_fingerprint "$RESTORE_PROJECT" "$RESTORE_ENV")" != "$SOURCE_TEAM_FINGERPRINT" ]]; then
-  echo "restored team rows differ from the backed-up rows (fingerprint mismatch)" >&2
-  exit 1
+  fail "restored team rows differ from the backed-up rows (fingerprint mismatch)"
 fi
 log_assert "restored team metadata equals the backed-up rows: ok"
 if [[ "$(native_fingerprint "$RESTORE_PROJECT" "$RESTORE_ENV")" != "$SOURCE_NATIVE_FINGERPRINT" ]]; then
-  echo "restored native history / attachment metadata differ from the backed-up rows" >&2
-  exit 1
+  fail "restored native history / attachment metadata differ from the backed-up rows"
 fi
 log_assert "restored native history and immutable attachment metadata equal the backed-up rows: ok"
 if [[ "$(team_fingerprint "$RESTORE_PROJECT" "$RESTORE_ENV" "${MODEL_TABLES[@]}")" != "$SOURCE_MODEL_FINGERPRINT" ]]; then
-  echo "restored current-model rows differ from the backed-up rows" >&2
-  exit 1
+  fail "restored current-model rows differ from the backed-up rows"
 fi
 log_assert "restored current-model rows (moved graph, timers, wiki collection, Zotero mirror) equal the backed-up rows: ok"
 
+phase verify-restore
+xtask install-image running "$RESTORE_PROJECT" server "$IMAGE_ID" || fail "server of $RESTORE_PROJECT is not the one running container on $IMAGE_ID (see install-image above)"
 wait_http "$RESTORE_BASE" "/api/v1/setup"
 : >"$COOKIE_JAR"
 LOGIN_RESTORED="$(curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -H "content-type: application/json" -H "origin: $RESTORE_BASE" \
   -X POST "$RESTORE_BASE/api/v1/auth/login" \
   -d "{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_PASSWORD_LOGIN}\"}")"
-python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("userId")' "$LOGIN_RESTORED"
+smoke_check user-id "$LOGIN_RESTORED"
 log_assert "login with original password after restore: ok"
 
 curl -fsS -b "$COOKIE_JAR" -H "origin: $RESTORE_BASE" \
   "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
-  | python3 -c 'import json,sys; body=json.load(sys.stdin); expected=json.loads(sys.argv[1]); assert body["contentJson"]==expected["contentJson"], body' "$BODY_BEFORE"
+  | smoke_check same-body - "$BODY_BEFORE"
 log_assert "restored wiki body matches: ok"
 
 curl -fsS -b "$COOKIE_JAR" -H "origin: $RESTORE_BASE" \
@@ -1051,30 +911,23 @@ curl -fsS -b "$COOKIE_JAR" -H "origin: $RESTORE_BASE" \
   -o "$DOWNLOAD_PATH"
 DOWNLOAD_SHA="$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')"
 if [[ "$DOWNLOAD_SHA" != "$FIXTURE_SHA" ]]; then
-  echo "restored download sha256 mismatch: $DOWNLOAD_SHA != $FIXTURE_SHA" >&2
-  exit 1
+  fail "restored download sha256 mismatch: $DOWNLOAD_SHA != $FIXTURE_SHA"
 fi
 log_assert "restored attachment sha256 matches: ok"
 
 EXTRACT_STATUS="$(poll_extract_field "$RESTORE_PROJECT" "$RESTORE_ENV" extract_status "$ATTACHMENT_ID")"
 EXTRACT_TEXT="$(poll_extract_field "$RESTORE_PROJECT" "$RESTORE_ENV" extract_text "$ATTACHMENT_ID")"
 if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; then
-  echo "restored extraction lost: $EXTRACT_STATUS $EXTRACT_TEXT" >&2
-  exit 1
+  fail "restored extraction lost: $EXTRACT_STATUS $EXTRACT_TEXT"
 fi
 log_assert "restored extraction text: ok"
 
 COMMENTS_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments")"
-python3 -c '
-import json, sys
-body = json.loads(sys.argv[1])
-items = body.get("items", body if isinstance(body, list) else [])
-assert any(c.get("id") == sys.argv[2] and c.get("body") == "백업 복원 댓글 🙂" for c in items), body
-' "$COMMENTS_JSON" "$COMMENT_ID"
+smoke_check comment "$COMMENTS_JSON" "$COMMENT_ID" "백업 복원 댓글 🙂"
 log_assert "restored document comment: ok"
 
 TASK_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/tasks/${TASK_ID}")"
-python3 -c 'import json,sys; body=json.loads(sys.argv[1]); assert body.get("title")=="Backup restore task", body; assert body.get("id")==sys.argv[2], body' "$TASK_JSON" "$TASK_ID"
+smoke_check task "$TASK_JSON" "$TASK_ID" "Backup restore task"
 log_assert "restored task: ok"
 
 : >"$MEMBER_JAR"
@@ -1083,86 +936,92 @@ LOGIN_MEMBER="$(curl -fsS -c "$MEMBER_JAR" -b "$MEMBER_JAR" \
   -X POST "$RESTORE_BASE/api/v1/auth/login" \
   -d "{\"email\":\"${MEMBER_EMAIL}\",\"password\":\"${MEMBER_PASSWORD_LOGIN}\"}")"
 if [[ "$(json_field "$LOGIN_MEMBER" userId)" != "$MEMBER_ID" ]]; then
-  echo "restored member login returned another user" >&2
-  exit 1
+  fail "restored member login returned another user"
 fi
 log_assert "second member login with original password after restore: ok"
 if [[ "$(user_oracle "$RESTORE_BASE" "$COOKIE_JAR")" != "$SOURCE_OWNER_ORACLE" ]]; then
-  echo "restored owner reads differ from the source" >&2
-  exit 1
+  fail "restored owner reads differ from the source"
 fi
 if [[ "$(user_oracle "$RESTORE_BASE" "$MEMBER_JAR")" != "$SOURCE_MEMBER_ORACLE" ]]; then
-  echo "restored member reads differ from the source" >&2
-  exit 1
+  fail "restored member reads differ from the source"
 fi
 log_assert "per-user restored reads equal the source (grants, HID 404, history, comments, revisions incl. member task/wiki revision detail, person value, moved graph, own timers, wiki values/views, backlinks, Zotero mirror): ok"
 
 # The index is derived: restore rebuilds it from PostgreSQL. Meili indexes
 # asynchronously, so poll (read-only, bounded) until the task is searchable.
+# search_has JAR QUERY ID: 0 found, 1 absent, 2 the search request or its
+# reply failed (never read as absent).
+search_has() {
+  local jar="$1" query="$2" id="$3" body
+  body="$(curl -fsS -b "$jar" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}")" || return 2
+  smoke_ts has-item "$body" "$id"
+}
+# search_found JAR QUERY ID: 0 found, 1 absent from a valid listing; a failed
+# request or an unreadable reply fails the smoke instead of polling on.
+search_found() {
+  local status=0
+  search_has "$@" || status=$?
+  case "$status" in
+    0 | 1) return "$status" ;;
+    *) fail "search for $2 failed or its reply is unreadable (exit ${status})" ;;
+  esac
+}
 SEARCH_FOUND=""
 for _ in $(seq 1 60); do
-  SEARCH_JSON="$(curl -fsS -b "$COOKIE_JAR" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=Backup%20restore%20task")"
-  if python3 -c 'import json,sys; body=json.loads(sys.argv[1]); sys.exit(0 if any(i.get("id")==sys.argv[2] for i in body.get("items",[])) else 1)' "$SEARCH_JSON" "$TASK_ID"; then
+  if search_found "$COOKIE_JAR" "Backup%20restore%20task" "$TASK_ID"; then
     SEARCH_FOUND=1
     break
   fi
   sleep 1
 done
 if [[ -z "$SEARCH_FOUND" ]]; then
-  echo "restored task is not searchable after rebuild: ${SEARCH_JSON}" >&2
-  exit 1
+  fail "restored task is not searchable after rebuild"
 fi
 log_assert "restored search index finds the task: ok"
 
 # Rebuilt search keeps per-person visibility: the member finds the PRV task
 # and never the owner's HID task, which the owner finds.
-search_has() {
-  local jar="$1" query="$2" id="$3"
-  python3 -c 'import json,sys; body=json.loads(sys.argv[1]); sys.exit(0 if any(i.get("id")==sys.argv[2] for i in body.get("items",[])) else 1)' \
-    "$(curl -fsS -b "$jar" "$RESTORE_BASE/api/v1/workspaces/${WORKSPACE_ID}/search?q=${query}")" "$id"
-}
 SEARCH_FOUND=""
 for _ in $(seq 1 60); do
-  if search_has "$MEMBER_JAR" "Member%20team%20task" "$MEMBER_TASK_ID" && search_has "$COOKIE_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
+  if search_found "$MEMBER_JAR" "Member%20team%20task" "$MEMBER_TASK_ID" && search_found "$COOKIE_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
     SEARCH_FOUND=1
     break
   fi
   sleep 1
 done
 if [[ -z "$SEARCH_FOUND" ]]; then
-  echo "restored team tasks are not searchable after rebuild" >&2
-  exit 1
+  fail "restored team tasks are not searchable after rebuild"
 fi
-if search_has "$MEMBER_JAR" "Hidden%20owner%20task" "$HID_TASK_ID"; then
-  echo "restored search shows the owner's hidden task to the member" >&2
-  exit 1
-fi
+HIDDEN_STATUS=0
+search_has "$MEMBER_JAR" "Hidden%20owner%20task" "$HID_TASK_ID" || HIDDEN_STATUS=$?
+case "$HIDDEN_STATUS" in
+  0) fail "restored search shows the owner's hidden task to the member" ;;
+  1) ;;
+  *) fail "member search for the hidden task failed (exit ${HIDDEN_STATUS})" ;;
+esac
 log_assert "restored search is per-person (member PRV yes, HID no; owner HID yes): ok"
 
 RESTORE_CID="$("${RESTORE_COMPOSE[@]}" ps -q server)"
 RUNNING_UID="$(docker exec "$RESTORE_CID" id -u)"
 SERVER_PID1_UID="$(docker exec "$RESTORE_CID" stat -c '%u' /proc/1)"
 if [[ "$RUNNING_UID" != "1000" || "$SERVER_PID1_UID" != "1000" ]]; then
-  echo "restored server must run as uid 1000, got exec=${RUNNING_UID} pid1=${SERVER_PID1_UID}" >&2
-  exit 1
+  fail "restored server must run as uid 1000, got exec=${RUNNING_UID} pid1=${SERVER_PID1_UID}"
 fi
 log_assert "restored server runs as non-root uid 1000: ok"
 SERVER_ENV="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$RESTORE_CID")"
 if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)=' <<<"$SERVER_ENV"; then
-  echo "restored server must not receive the migration owner URL" >&2
-  exit 1
+  fail "restored server must not receive the migration owner URL"
 fi
 if ! grep -Eq '^DATABASE_APP_URL=' <<<"$SERVER_ENV"; then
-  echo "restored server missing DATABASE_APP_URL" >&2
-  exit 1
+  fail "restored server missing DATABASE_APP_URL"
 fi
 log_assert "restored server holds only the app database URL: ok"
 if grep -Eq '^(MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY)=' <<<"$SERVER_ENV"; then
-  echo "restored server must not receive the Meilisearch master key" >&2
-  exit 1
+  fail "restored server must not receive the Meilisearch master key"
 fi
 log_assert "restored server does not hold the Meili master key: ok"
 
+phase collect
 TOTAL=$((SECONDS - START_TS))
-log_assert "== backup-restore-smoke complete (${TOTAL}s)"
+log_assert "backup-restore-smoke complete (${TOTAL}s)"
 cat "$ASSERT_LOG"

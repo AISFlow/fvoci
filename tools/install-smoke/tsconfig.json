@@ -17,12 +17,5 @@
     "skipLibCheck": true,
     "types": ["bun", "node"]
   },
-  "include": [
-    "./workflows.test.ts",
-    "./planner.test.ts",
-    "../../scripts/eslint-fixtures.test.ts",
-    "./ci-base-image.ts",
-    "./ci-base-image.test.ts",
-    "./seal-archive.test.ts"
-  ]
+  "include": ["./**/*.ts"]
 }

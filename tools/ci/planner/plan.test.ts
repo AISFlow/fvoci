@@ -20,7 +20,7 @@ const ALL_BUT_OPT_IN: Record<Workflow, string[]> = {
   rust: [...WORKFLOW_JOBS.rust],
   documents: [...WORKFLOW_JOBS.documents],
   "collab-engine": [...WORKFLOW_JOBS["collab-engine"]],
-  install: ["install-smoke", "backup-restore-smoke"],
+  install: ["install-image", "install-smoke", "backup-restore-smoke"],
 };
 const NONE: Record<Workflow, string[]> = {
   web: [],
@@ -32,7 +32,7 @@ const NONE: Record<Workflow, string[]> = {
 const FRONTEND = {
   ...NONE,
   web: [...WORKFLOW_JOBS.web],
-  install: ["install-smoke", "backup-restore-smoke"],
+  install: ["install-image", "install-smoke", "backup-restore-smoke"],
 };
 const WEB_ONLY = { ...NONE, web: [...WORKFLOW_JOBS.web] };
 
@@ -235,6 +235,7 @@ describe("buildPlan", () => {
       "jobs",
     ]);
     expect(plan.jobs).toEqual({
+      "install-image": { selected: true },
       "install-smoke": { selected: true },
       "backup-restore-smoke": { selected: true },
       "upgrade-smoke-arm64": { selected: false },

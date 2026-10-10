@@ -44,6 +44,7 @@ export default defineConfig(
           "apps/web/tsconfig.eslint.json",
           "packages/editor/tsconfig.eslint.json",
           "packages/i18n/tsconfig.eslint.json",
+          "tools/install-smoke/tsconfig.json",
         ],
         tsconfigRootDir: import.meta.dirname,
         extraFileExtensions: [".vue"],
