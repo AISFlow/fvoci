@@ -61,6 +61,7 @@ describe("consumer flow", () => {
     for (const fault of ["none", "receipt", "log", "closure"]) {
       const root = mkdtempSync(join(directory, "root-"));
       writeFileSync(join(root, "current-build.json"), "pure pinned metadata");
+      process.env.RUNNER_TEMP = root;
       const modes: string[] = [];
       const output = new Captured();
       const { scope } = fakeScope({ closure: () => fault !== "closure" });
@@ -263,10 +264,14 @@ describe("consumer flow", () => {
     expect(() => privateRead(path, 1)).toThrow("UI_PRIVATE_INPUT_REFUSED");
   });
 
-  test("the member wrapper re-enters this CLI with the running Bun", () => {
-    const text = memberWrapper();
-    expect(text.startsWith("#!/bin/sh\nexec ")).toBe(true);
+  test("the member wrapper re-enters this CLI with the running Bun and its RUNNER_TEMP", () => {
+    const text = memberWrapper("/runner/temp's");
+    expect(
+      text.startsWith("#!/bin/sh\nRUNNER_TEMP='/runner/temp'\"'\"'s'\nexport RUNNER_TEMP\nexec "),
+    ).toBe(true);
     expect(text).toContain(process.execPath);
     expect(text.endsWith("tools/turso/ui.ts --actor\n")).toBe(true);
+    Reflect.deleteProperty(process.env, "RUNNER_TEMP");
+    expect(() => memberWrapper()).toThrow();
   });
 });

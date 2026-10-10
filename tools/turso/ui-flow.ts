@@ -82,9 +82,24 @@ export const defaultSteps: FlowSteps = {
   output: stdio,
 };
 
-/** The executable the browser fixture runs to create the member actor. */
-export function memberWrapper(): string {
-  return "#!/bin/sh\nexec " + shellQuote(process.execPath) + " " + shellQuote(ENTRY) + " --actor\n";
+/**
+ * The executable the browser fixture runs to create the member actor. The
+ * fixture passes only an allowlisted environment without RUNNER_TEMP, and the
+ * actor's process scope writes its closure receipt under RUNNER_TEMP, so the
+ * wrapper carries this consumer's own value.
+ */
+export function memberWrapper(
+  runnerTemp: string = get(process.env, "RUNNER_TEMP") as string,
+): string {
+  return (
+    "#!/bin/sh\nRUNNER_TEMP=" +
+    shellQuote(runnerTemp) +
+    "\nexport RUNNER_TEMP\nexec " +
+    shellQuote(process.execPath) +
+    " " +
+    shellQuote(ENTRY) +
+    " --actor\n"
+  );
 }
 
 export interface Receipt {

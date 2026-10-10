@@ -17,6 +17,7 @@ import { join } from "node:path";
 import process from "node:process";
 import { sha, write } from "../selected-backend-ci/io.ts";
 import { must } from "./ui-fakes.ts";
+import { memberWrapper } from "./ui-flow.ts";
 
 const entry = join(import.meta.dir, "ui.ts");
 let directory: string;
@@ -151,6 +152,26 @@ describe.skipIf(process.platform !== "linux")("member actor", () => {
       confirmed: true,
       normalClosure: true,
     });
+  });
+
+  test("the member wrapper runs the actor with the browser fixture's environment", async () => {
+    // selected-backend-fixture.ts passes PATH, LANG, the E2E actor values, the
+    // private input and the namespace; RUNNER_TEMP is not among them.
+    const inputs = actorInputs("cat >/dev/null\nprintf '%s' '" + JSON.stringify(member) + "'\n");
+    const fixtureEnv: Record<string, string> = { ...inputs.env, PATH: process.env.PATH ?? "" };
+    Reflect.deleteProperty(fixtureEnv, "RUNNER_TEMP");
+    const wrapper = join(inputs.run, "member-fixture");
+    writeFileSync(wrapper, memberWrapper(directory), { mode: 0o700 });
+    const child = spawn([wrapper], { env: fixtureEnv, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect({ stdout, stderr, code }).toEqual({ stdout: member.userId + "\n", stderr: "", code: 0 });
+    expect(
+      readdirSync(join(directory, "turso-ui")).some((n) => n.startsWith("process-closure-")),
+    ).toBe(true);
   });
 
   test("refuses changed inputs and a failing or lingering native fixture", async () => {
