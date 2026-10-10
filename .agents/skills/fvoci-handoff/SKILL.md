@@ -9,8 +9,8 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
 
 - 제출 보고에 base SHA, 커밋 SHA(여럿이면 순서), 작업 브랜치, 커밋별 파일, 실행한 명령, cwd, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 남은 위험이 있다. 실행하지 않은 검사는 미실행이다.
 - 리뷰는 그 고정 SHA의 diff·호출자·계약·검사에 대한 ACCEPT 또는 REQUEST_CHANGES다. ACCEPT에는 검토한 SHA가 적힌다. 검토 문장은 원격 CI를 대신하지 않는다. SHA가 바뀌면 바뀐 범위를 다시 본다.
-- main 병합을 실행하는 역할은 `fvoci-role-integrator`다. #347 fast-forward는 그 역할이 아니다. 확인 순서의 나머지는 아래와 그 스킬이 같다. push된 head는 ACCEPT(2인이 필요한 경로는 2/2 ACCEPT)된 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA와 tested merge SHA를 구분해서 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
-- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x(1.0.0 미만, 0.9.x 포함)에서 그 검사는 아래이고, 1.0.0 도달 또는 영환님 철회 전까지의 상시 조건이다. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
+- main 병합을 실행하는 역할은 `fvoci-role-integrator`다. #347 fast-forward는 그 역할이 아니다. 리뷰 수는 AGENTS.md다. push된 head는 그 수를 만족한 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA와 tested merge SHA를 구분해서 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
+- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x(1.0.0 미만, 0.9.x 포함)에서 그 검사는 아래이고, 1.0.0 도달 또는 메인테이너 철회 전까지의 상시 조건이다. 1.0.0 병합은 메인테이너 말이 있을 때 허용된다.
   - 독립 리뷰어 두 명의 ACCEPT. 두 사람이 ACCEPT한 최종 head SHA를, 게이트 5개가 그 SHA를 검사한 뒤에 팀 방에 먼저 게시한다.
   - 그 head의 check run 전체(최신 attempt, `filter=latest`, 모든 페이지). `filter=all`은 쓰지 않는다. pull_request check run은 PR head에 붙는다.
   - 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`)는 conclusion success만 PASS다. FAIL, CANCELLED, SKIPPED, NEUTRAL, TIMED_OUT, NOTRUN, MISSING은 병합을 막는다.
@@ -19,15 +19,10 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
   - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
   - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
 - Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
-- 브랜치 삭제와 ruleset 변경의 완료 조건은 `fvoci-role-integrator`다.
-- 태그와 릴리스는 영환님 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
+- 브랜치 삭제는 각 브랜치가 적은 커밋을 여전히 가리키는지와 main 포함을 다시 확인한 뒤, 삭제한 목록을 남긴다. ruleset 변경은 AGENTS.md 리뷰 수를 만족하고, 변경 전 JSON과 변경 후 JSON의 sha256이 있다.
 - 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
 
 ## 기본 절차
-
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
-
-역할별 완료 조건은 `fvoci-role-lead`, `fvoci-role-author`, `fvoci-role-reviewer-rust`, `fvoci-role-reviewer-ci-web`, `fvoci-role-reviewer-db`, `fvoci-role-integrator`, `fvoci-role-ci-watch`, `fvoci-role-evidence`, `fvoci-role-brainstorm`이다. 증거는 장부다.
 
 작성자가 남긴 회귀 검사는, 리뷰어가 계약 근거와 실제 실패 포착(필요하면 변조)을 확인한다. 인가·저장 ACK·동시성은 거부·유실·경합과 실제 시스템 근거를 대조한다.
 
@@ -39,12 +34,11 @@ PR 수락·머지는 포팅 종료가 아니다. 의존성이 갖춰진 다음 �
 
 - 리뷰어는 검토 중인 커밋을 고치지 않는다. 통합은 cherry-pick·patch로 SHA를 바꾸지 않는다. 작성자와 리뷰어는 다른 주체다.
 - 작성자는 PR 브랜치를 push하지 않는다. 원본 GitHub는 읽기 전용이다. main 갱신은 완료 조건의 병합으로만 허용된다.
-- 진행 중 CI를 직접 취소하지 않는다. `gh run rerun --failed`로 일부만 다시 돌리지 않는다.
-- force push와 `reset --hard`는 허용 조건이 없다. 브랜치 삭제는 완료 조건의 포함 확인과 목록 게시 뒤에만 허용된다. 되돌림은 영환님 말이 있을 때 허용된다.
-- auto-merge는 허용 조건이 없다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 영환님 말이 있을 때 허용된다.
+- 재실행·force push·`reset --hard`는 AGENTS.md에 허용 조건이 없다. 브랜치 삭제는 완료 조건이다. 되돌림은 메인테이너 말이 있을 때 허용된다.
+- auto-merge는 허용 조건이 없다. 0.x 병합 순서 밖의 Ready 전환, 그 병합의 `Closes`가 아닌 이슈 종료, 배포, 시크릿, 패키지 공개 범위, 유료 사용, 권한 확대는 메인테이너 말이 있을 때 허용된다.
 - 사용자 승인 없이 계정·인증·결제, 상주 프로세스, scheduler, routine, MCP 서버를 새로 만들지 않는다. 멈춘 다른 작업 체인을 다시 켜지 않는다.
 - 시크릿·cookie·credential·접속 URL·host·전체 환경을 보고·커밋·artifact에 남기지 않는다.
-- 지정된 도구나 모델을 조용히 바꾸지 않는다. 대체는 알린 뒤 영환님 승인이 있을 때만 한다.
+- 지정된 도구나 모델을 조용히 바꾸지 않는다. 대체는 알린 뒤 메인테이너 승인이 있을 때만 한다.
 - 한 경로에는 작성자 한 명이다. manifest, lockfile, toolchain, workflow, migration 순서, 공유 API, 에이전트 문서, `apps/web/src/vue/{main.ts,App.vue,router.ts}`, `packages/i18n/src/locales/`는 담당이 정해진 뒤에 고친다. 소유하지 않은 경로까지 formatter·generator를 돌리지 않는다.
 - 실행마다 DB·Redis prefix, 검색 index, 스토리지, 브라우저 profile, report를 나누고 port 0에 bind한 뒤 실제 포트를 전달한다. 작업 트리를 보안 격리라고 하지 않는다.
 - 수락 전 probe를 제품 협업 지원으로 적지 않는다. opt-in·후속 분류로 수락 범위에서 빼지 않는다.

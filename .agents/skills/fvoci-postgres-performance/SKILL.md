@@ -12,8 +12,6 @@ description: "PostgreSQL 쿼리, 인덱스, 페이지네이션, N+1, 잠금, 풀
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
-
 대상은 현재 SQLx/PostgreSQL이다. 호출자, SQL, bind 분포, 반환 행, 왕복, DB 버전, 앱 역할·RLS, 데이터 규모, 동시성, cache warm/cold를 고정한다. endpoint 지연을 pool acquire, lock wait, DB 실행, 전송·직렬화로 나눈다.
 
 소유한 테스트 DB에서 `EXPLAIN`으로 계획을 본다. 필요할 때만 `EXPLAIN (ANALYZE, BUFFERS)`로 실제 행·loops·filter·sort spill·buffer와 추정 오차를 본다. ANALYZE는 쿼리를 실행한다. 쓰기나 부작용 함수는 폐기 가능한 fixture에서만 실행한다. rollback이 sequence와 외부 부작용까지 되돌린다고 가정하지 않는다.

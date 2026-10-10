@@ -679,8 +679,8 @@ cd packages/editor && bun --bun run typecheck   # tsc, and vue-tsc for the Vue e
 ```
 
 The editor package's tests load the Vue editor's single-file components
-through `test/setup/vue-sfc.ts` (a `bun test --preload` plugin that compiles
-them with Vue's own compiler, as the build does).
+through `test/setup/vue-sfc.ts` (the package `test` script preload that compiles
+them with Vue's own compiler, as the build does). Run that script with `bun run test`, not a bare test command.
 
 vue-tsc under Bun needs `patches/@volar%2Ftypescript@2.4.28.patch` (Bun
 `patchedDependencies` in the root `package.json`, applied by `bun ci`/`bun

@@ -13,8 +13,6 @@ description: "RFC, 프로토콜, 토큰, 파서, 직렬화, 암호, SDK를 고�
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
-
 선택 기준: 새 상태·추상화·의존성 전에, 기존 코드 → 표준 라이브러리·플랫폼 → 이미 설치된 의존성 순으로 필요한 보장을 만족하는지 본다. 요구를 줄이거나, 표준·보안 처리를 짧은 자체 코드로 바꾸지 않는다. 단순화할 함수의 흐름과 호출자를 먼저 본다. 오류는 증상이 아니라 원인이 있는 경계를 고친다. 공통화 전에 호출자별 정책 차이를 확인한다. 삭제의 이득은 줄 수가 아니라 직접 소유할 상태·정책·의존성이 줄어드는지로 본다. 이 기준은 [Ponytail의 선택 원칙](https://github.com/DietrichGebert/ponytail/blob/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/skills/ponytail/SKILL.md)을 참고해 FVOCI에 맞춰 새로 썼다([MIT](https://github.com/DietrichGebert/ponytail/blob/e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156/LICENSE)). 외부 스킬의 전문, 지속 모드, 출력 제한, 최단 diff, 검사 수 제한은 가져오지 않는다.
 
 표준 경계일 때: 명세 버전, 필수·선택, errata, 보안 BCP, 실제 클라이언트 범위를 고정한다. 모든 RFC의 강제력이 같다고 보지 않는다. 현재 의존성 → 공식 SDK·유지보수되는 Rust 구현 → 얇은 adapter 순으로 비교한다. 암호 primitive만 재사용하고 JWT/OIDC 전체를 위임했다고 하지 않는다. `references/candidates.md`는 관련 절만 읽는 시작점이다. tar header·entry 검사는 유지보수되는 parser에 맡기고, 경로·타입 허용만 제품에 둔다.

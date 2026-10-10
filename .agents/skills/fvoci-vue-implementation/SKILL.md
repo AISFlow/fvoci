@@ -8,12 +8,10 @@ description: "Vue SFC, composable, 라우팅, 서버 상태, 에디터 생명주
 ## 완료 조건
 
 - 바꾼 URL에서 대상 전환, 빠른 연속 입력, 언마운트, 요청 실패가 이전 응답을 새 화면에 붙이지 않는다.
-- `apps/web`과 바꾼 패키지의 `bun --bun run typecheck`가 exit 0이고, 그 변경의 `bun test`가 exit 0이다.
+- 타입체크와 테스트 명령은 AGENTS.md 완료 조건이다. 웹 테스트는 패키지의 `bun run test`이고 bare `bun test`는 쓰지 않는다.
 - 에디터·협업을 건드렸으면 저장, 재접속, 권한 철회가 `useCollabRoom`의 room generation, persist ACK, flush, destroy 순서와 맞다.
 
 ## 기본 절차
-
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
 
 현재 흐름은 Vite + Vue 3 + Vue Router + Nuxt UI Vue plugin + TanStack Vue Query다. 버전은 `apps/web/package.json`과 lock이 정본이다. 진입은 `apps/web/src/vue/main.ts`, `router.ts`, 해당 `features`/`composables`와 실제 URL이다. 서버 상태는 `apps/web/src/lib/query-options.ts`와 Vue Query의 key·mutation·invalidation을 따른다. workspace·resource·세션이 바뀌면 이전 응답을 버린다.
 

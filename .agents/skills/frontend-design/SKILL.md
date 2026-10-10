@@ -13,8 +13,6 @@ license: Complete terms in LICENSE.txt
 
 ## 기본 절차
 
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
-
 아래 문단은 업스트림 frontend-design의 설계 절차다. FVOCI에서는 `FVOCI-BRIEF.md`가 제품 화면의 기준이고, 그 기준과 어긋나면 brief가 이긴다.
 
 Approach this as the design lead at a design studio known for giving every client a distinct visual identity that is not mistaken for anyone else's. This client has already rejected proposals that felt cliché or templated, and is paying for a distinctive point of view: make deliberate, opinionated choices about palette, typography, and layout that are specific to this brief, and take aesthetic risk if justified.

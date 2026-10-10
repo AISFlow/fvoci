@@ -11,12 +11,10 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 - 보고에 검사명, 명령, cwd, SHA, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 소요, 생략 이유, 남은 위험이 있다. 0개 실행, cargo check, 미실행 DB·브라우저는 통과가 아니다.
 - `.github/workflows/` 또는 `scripts/ci_selection.py`가 바뀌면 `bash scripts/test-ci-selection.sh`가 exit 0이다. 이 명령은 `verify-workflows`와 `python3 -m unittest scripts.test_ci_selection`이다.
 - 웹 샤드 정책을 바꾸면 `python3 scripts/web-e2e-groups.py verify --shards 8`, `python3 -m unittest scripts.test_web_e2e_groups`, `bash scripts/test-web-e2e-groups.sh`가 exit 0이다.
-- 새 테스트는 기본 조건 25회와 CPU 부하 5회를 통과한다.
+- 반복 횟수는 AGENTS.md 손대지 말 것이다.
 - 원격 수락은 그 head의 CI다. 같은 코드·같은 범위의 원격 성공은 재사용하고, 바뀐 부분만 더 본다. 리뷰 판정은 그 CI를 대신하지 않는다.
 
 ## 기본 절차
-
-기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
 
 1. diff와 기존 테스트에서 가장 직접적인 검사와 필수 연결 검사를 고른다. 공통 인가·DB·CI가 바뀌면 범위를 넓힌다. 문서만 바뀌었다고 제품 검사 전체를 추가하지 않는다.
 2. 빠른 경로에 외부 서비스·설치·네트워크가 없는지 본다. SQLx 매크로는 offline metadata로 일반 check가 DB에 기대지 않게 하고, metadata는 별도 스키마 검사에서 확인한다.
@@ -29,11 +27,7 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 
 ## 손대지 말 것
 
-- 타임아웃 증액, retry, sleep, skip으로 실패를 통과시키지 않는다. 쓰기를 성공할 때까지 반복하지 않는다. bounded read-only polling은 된다.
-- regression, resolved, flaky 라벨은 로그·재현 근거 없이 붙이지 않는다. 원인이 알려진 flaky는 다시 돌리지 않는다. 같은 실패가 두 번 나오면 그때 고친다.
-- REJECT는 두 라운드까지다. 3라운드부터는 보안·fail-closed만 막는다.
-- 이전 SHA의 성공을 현재 head에 합치지 않는다. `gh run rerun --failed`로 실패한 job만 다시 돌리지 않는다. `GITHUB_RUN_ATTEMPT`를 생산자·소비자와 대조하는 검사는 남긴다.
-- 유료 runner, 결제, 운영 배포는 쓰지 않는다. 무료 티어만 쓴다.
+- 타임아웃·retry·sleep·skip·flaky·REJECT·재실행·무료 티어·이전 SHA 합산은 AGENTS.md다. 쓰기를 성공할 때까지 반복하지 않는다. bounded read-only polling은 된다.
 - full-web emit TS2742나 잘못된 TypeScript 버전을 any shim·rule 완화로 넘기지 않는다. strict lint의 SFC 선언은 pinned compiler로 만들고 stale 출력을 지운다.
 - Bun Playwright는 실제 실행 결과만 유효하다. `@volar/typescript` Bun patch는 그 버전 갱신과 함께 검사한다. Bun unit timeout 60초, XLSX hostile stream 비용, chunk advisory를 숨기지 않는다.
-- 게이트 workflow에 `paths:`를 넣지 않는다. 대표 브라우저 샤드는 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N`으로만 실행한다.
+- 게이트 `paths:`는 AGENTS.md. 대표 브라우저 샤드는 배정 후 `bash scripts/run-web-e2e.sh --ci-shard N`으로만 실행한다.
