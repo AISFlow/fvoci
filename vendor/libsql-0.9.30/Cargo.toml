@@ -25,9 +25,6 @@ readme = "README.md"
 license = "MIT"
 repository = "https://github.com/tursodatabase/libsql"
 
-[package.metadata.cargo-udeps.ignore]
-normal = ["hyper-rustls"]
-
 [package.metadata.docs.rs]
 rustdoc-args = [
     "--cfg",
@@ -135,7 +132,7 @@ sync = [
     "dep:uuid",
     "tokio/fs",
 ]
-tls = ["dep:hyper-rustls"]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs"]
 wasm = ["hrana"]
 
 [lib]
@@ -266,9 +263,20 @@ features = [
 ]
 optional = true
 
-[dependencies.hyper-rustls]
-version = "0.25"
-features = ["webpki-roots"]
+[dependencies.rustls]
+version = "=0.23.45"
+default-features = false
+features = ["ring", "std", "tls12"]
+optional = true
+
+[dependencies.tokio-rustls]
+version = "=0.26.5"
+default-features = false
+features = ["ring", "tls12"]
+optional = true
+
+[dependencies.rustls-native-certs]
+version = "=0.7.3"
 optional = true
 
 [dependencies.libsql-hrana]
