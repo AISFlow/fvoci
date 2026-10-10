@@ -10,6 +10,7 @@ if [[ $# == 0 || $1 == -* ]]; then
     'scripts/**/*.mjs' 'scripts/run-selected-backend-e2e.ts' scripts/eslint-fixtures.test.ts \
     'tools/selected-backend-ci/**/*.ts' 'tools/ci/**/*.ts' 'tools/web-e2e/**/*.ts' \
     'tools/oracle/**/*.ts' 'tools/perf/**/*.ts' 'tools/release/**/*.ts' 'tools/turso/**/*.ts' \
+    'tools/install-smoke/**/*.ts' \
     'scripts/schema-baseline/*.ts' eslint.config.mjs "$@"
 fi
 exec bun --bun node_modules/eslint/bin/eslint.js --max-warnings=0 "$@"

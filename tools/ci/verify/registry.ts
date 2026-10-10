@@ -38,7 +38,7 @@ export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> =
   rust: ["fast", "native-arm64", "postgres-build", "postgres", "collaboration"],
   documents: ["native-extraction"],
   "collab-engine": ["native-collab-engine"],
-  install: ["install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
+  install: ["install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
 };
 
 export const WORKFLOW_YAML: Readonly<Record<GatedWorkflow, string>> = {
@@ -115,11 +115,13 @@ export function gateJobId(workflow: string): string {
 }
 
 export function selectOutputKey(job: string): string {
-  // Both mandatory web budget lanes and the binary producer share a selection.
+  // Both mandatory web budget lanes and each producer share a selection with
+  // their consumers.
   const shared: Record<string, string> = {
     "web-native-checks": "web-checks",
     "workspace-browser-build": "workspace-browser-shard",
     "postgres-build": "postgres",
+    "install-image": "install-smoke",
   };
   return `select_${(shared[job] ?? job).replaceAll("-", "_")}`;
 }

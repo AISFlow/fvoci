@@ -39,6 +39,7 @@ describe("plan registry", () => {
     expect(selectOutputKey("web-native-checks")).toBe("select_web_checks");
     expect(selectOutputKey("workspace-browser-build")).toBe("select_workspace_browser_shard");
     expect(selectOutputKey("postgres-build")).toBe("select_postgres");
+    expect(selectOutputKey("install-image")).toBe("select_install_smoke");
     expect(selectOutputKey("upgrade-smoke-arm64")).toBe("select_upgrade_smoke_arm64");
   });
 

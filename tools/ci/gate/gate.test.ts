@@ -51,6 +51,8 @@ describe("corpus", () => {
       "needs/nan-in-needs",
       "needs/reason-code-trailing-newline",
       "needs/tested-sha-trailing-newline",
+      "needs/schema-install-producer-install-smoke-backup-restore-smoke",
+      "needs/schema-install-producer-install-image-install-smoke",
       "opt-in/nan-event",
       "usage/short-help-tail",
       "usage/short-help-tail-before-invalid",

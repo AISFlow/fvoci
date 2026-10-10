@@ -1031,7 +1031,7 @@ class OptInSelectionTest(unittest.TestCase):
             self.assertTrue(plan["plan_ok"])
             self.assertEqual(
                 {job: meta["selected"] for job, meta in plan["jobs"].items()},
-                {"install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True},
+                {"install-image": True, "install-smoke": True, "backup-restore-smoke": True, "upgrade-smoke-arm64": True},
             )
 
     def test_opt_in_input_ignored_by_other_workflows_and_fatal_plans(self) -> None:
@@ -2740,7 +2740,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                 "upgrade-smoke-arm64 if must be",
             ),
             (
-                "    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
+                "    needs: [ci-plan, install-image, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]\n",
                 "    needs: [ci-plan, install-smoke, backup-restore-smoke]\n",
                 "install-ci-gate needs must be",
             ),

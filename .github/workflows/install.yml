@@ -48,8 +48,39 @@ jobs:
             --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \
             --github-output "$GITHUB_OUTPUT"
 
-  install-smoke:
+  # One image build per architecture; both smokes of that architecture load it.
+  install-image:
     needs: ci-plan
+    if: needs.ci-plan.outputs.select_install_smoke == 'true'
+    name: ${{ matrix.check }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            check: install-image
+          - runner: ubuntu-26.04-arm
+            check: install-image-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Build and label the install image
+        run: cargo xtask install-image build
+      - name: Save the install image
+        run: cargo xtask install-image save fvoci-rust-install:local "$RUNNER_TEMP/install-image"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/install-image/
+          if-no-files-found: error
+          retention-days: 1
+
+  install-smoke:
+    needs: [ci-plan, install-image]
     if: needs.ci-plan.outputs.select_install_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
@@ -68,12 +99,19 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/install-image
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Load and verify the install image
+        run: cargo xtask install-image load "$RUNNER_TEMP/install-image" >>"$GITHUB_ENV"
       - name: Run container install smoke
         run: bash scripts/install-smoke.sh
 
   # Native GitHub-hosted ubuntu-26.04 and ubuntu-26.04-arm (not a cross-build).
   backup-restore-smoke:
-    needs: ci-plan
+    needs: [ci-plan, install-image]
     if: needs.ci-plan.outputs.select_backup_restore_smoke == 'true'
     name: ${{ matrix.check }}
     strategy:
@@ -91,6 +129,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/install-image
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Load and verify the install image
+        run: cargo xtask install-image load "$RUNNER_TEMP/install-image" >>"$GITHUB_ENV"
       - name: Run container backup/restore smoke
         run: bash scripts/backup-restore-smoke.sh
 
@@ -157,7 +202,7 @@ jobs:
 
   install-ci-gate:
     name: install-ci-gate
-    needs: [ci-plan, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]
+    needs: [ci-plan, install-image, install-smoke, backup-restore-smoke, upgrade-smoke-arm64]
     if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 5

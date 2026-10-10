@@ -9,6 +9,7 @@ if [[ $# == 0 || $1 == -* ]]; then
     scripts/run-selected-backend-e2e.ts scripts/eslint-fixtures.test.ts \
     'tools/selected-backend-ci/**/*.ts' 'tools/ci/**/*.ts' 'tools/web-e2e/**/*.ts' \
     'tools/oracle/**/*.ts' 'tools/perf/**/*.ts' 'tools/release/**/*.ts' 'tools/turso/**/*.ts' \
+    'tools/install-smoke/**/*.ts' 'tools/install-smoke/**/*.json' \
     'scripts/schema-baseline/*.ts' 'scripts/schema-baseline/*.md' \
     eslint.config.mjs package.json .prettierrc.json "$@"
 fi

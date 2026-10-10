@@ -23,7 +23,7 @@ export const WORKFLOW_JOBS = {
   rust: ["fast", "native-arm64", "postgres-build", "postgres", "collaboration"],
   documents: ["native-extraction"],
   "collab-engine": ["native-collab-engine"],
-  install: ["install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
+  install: ["install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
 } as const satisfies Record<string, readonly string[]>;
 export type Workflow = keyof typeof WORKFLOW_JOBS;
 export const WORKFLOWS = Object.keys(WORKFLOW_JOBS) as Workflow[];
@@ -80,6 +80,7 @@ export function selectOutputKey(job: string): string {
     "web-native-checks": "web-checks",
     "workspace-browser-build": "workspace-browser-shard",
     "postgres-build": "postgres",
+    "install-image": "install-smoke",
   };
   return `select_${(shared[job] ?? job).replaceAll("-", "_")}`;
 }
