@@ -7,7 +7,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 스키마: `migrations/postgres/060`, `migrations/sqlite/060`, `src/db/migrate.rs`
 - CI 선택: `scripts/ci_selection.py`. 게이트: `.github/workflows/{rust,web,install,documents,collab-engine}.yml`
 - 웹 정적 검사: `.github/workflows/web.yml` `web-static`, 루트 `package.json`. Turso: `docs/testing-turso.md`
-- 작업별 완료 조건: `.agents/skills/*/SKILL.md` (description 첫 문장이 트리거)
+- 완료 조건: `.agents/skills/*/SKILL.md`. `fvoci-role-*`는 명시 호출만. 나머지는 description 첫 문장이 트리거.
 
 ## 완료 조건
 
@@ -24,25 +24,25 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 ## 허용 범위
 
-- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x 검사는 리뷰어 2/2 ACCEPT와 필수 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS다. 확인 순서는 `fvoci-handoff` 완료 조건이다. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
+- main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x는 리뷰어 2/2와 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
 - 브랜치 삭제는 main에 포함됐는지 다시 확인한 뒤 그 목록을 게시한 다음에 허용된다.
 - ruleset 변경은 리뷰어 2명 ACCEPT 뒤에 허용된다. 작은 커밋은 리뷰어 1명. `workflows`, `xtask`, `AGENTS.md`, `.agents/`, 게이트, `scripts/ci_selection.py`는 리뷰어 2명. `docs/rewrite.md`는 리뷰어 1명.
 - 작성자와 리뷰어는 다른 주체다. 리뷰어는 검토하는 커밋을 고치지 않는다.
 - 태그와 릴리스는 영환님 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 배포, 시크릿, 패키지 공개 범위, 유료 사용은 영환님 말이 있을 때 허용된다.
 - 저장소 배치는 같은 커밋에서 호출자를 고치면 바꿀 수 있다. 무료 티어만 쓴다.
+- 클라우드 에이전트 추론 노력(영환님, 2026-10-10 10:28 KST): 작업마다 고른다. 기계적인 작업은 더 낮게 고른다.
 
 ## 손대지 말 것
 
 - 게이트 workflow에 `paths:`가 없다. `ci-base-image.yml`의 이미지 경로 필터는 게이트 밖이다.
-- 재실행은 전체 rerun이다. `gh run rerun --failed`는 범위 밖이다. `GITHUB_RUN_ATTEMPT` 생산자 대조는 유지한다.
-- 머지 큐 근거는 게시한 큐 head와, `merge_group` checkout SHA = 그 main 커밋 SHA다.
+- 재실행은 전체 rerun이다. `gh run rerun --failed`는 범위 밖이다. `GITHUB_RUN_ATTEMPT` 생산자 대조는 유지한다. 머지 큐 근거는 게시한 큐 head와 `merge_group` checkout SHA = 그 main 커밋 SHA다.
 - 통과는 타임아웃 증액·retry·sleep·skip 없이 나온다. regression·resolved·flaky 라벨에는 재현 근거가 있다.
 - 원인이 알려진 flaky는 재실행하지 않는다. 같은 실패가 두 번이면 고친다. REJECT는 2라운드까지고, 3라운드부터 막는 것은 보안·fail-closed뿐이다.
-- 하네스(영환님, 2026-10-09 11:31 KST): 하네스 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
-- 영환님, 2026-10-10 10:39 KST: 새 `.py` 파일과 새 Python 코드는 레포에 두지 않는다. 하네스 이전이 그 파일을 대체하기 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)을 고칠 수 있다. 그 수정의 경계는 2026-10-10 10:42 KST다. 기존 검사를 유지하거나 바꾸는 수정은 허용된다. 새 기능이나 새 테스트 준비 코드는 Python에 더하지 않고 TypeScript 또는 Rust에 둔다.
-- 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓸 수 있다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.
-- 자식 프로세스는 `process.execPath`로 띄운다. 새 테스트는 기본 25회와 CPU 부하 5회를 통과한다.
+- 하네스(영환님, 2026-10-09 11:31 KST): 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
+- 영환님, 2026-10-10 10:39 KST. 경계는 2026-10-10 10:42 KST: 새 `.py`와 새 Python 코드는 없다. 이전 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)의 기존 검사 수정은 허용된다. 새 기능이나 새 테스트 준비는 TypeScript 또는 Rust에 둔다.
+- 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓴다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.
+- 자식 프로세스는 `process.execPath`로 띄운다. Playwright 자식 프로세스 env에서는 `JEST_WORKER_ID`를 뺀다. 새 테스트는 기본 25회와 CPU 부하 5회를 통과한다.
 - force push, `reset --hard`, 진행 중 CI 직접 취소, 운영 DB 변경은 허용 조건이 없다. 예외는 `draft/*` push의 자동 취소뿐이고 main·#347 push에는 없다. 그 run은 `CANCELLED(대체됨)`이라 판정 근거가 아니다.
 - 시크릿·credential·접속 URL·host는 로그·커밋·보고·artifact 밖에 둔다. main 직접 push는 병합 허용 조건에 없다.
 

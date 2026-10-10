@@ -9,7 +9,7 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
 
 - 제출 보고에 base SHA, 커밋 SHA(여럿이면 순서), 작업 브랜치, 커밋별 파일, 실행한 명령, cwd, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 남은 위험이 있다. 실행하지 않은 검사는 미실행이다.
 - 리뷰는 그 고정 SHA의 diff·호출자·계약·검사에 대한 ACCEPT 또는 REQUEST_CHANGES다. ACCEPT에는 검토한 SHA가 적힌다. 검토 문장은 원격 CI를 대신하지 않는다. SHA가 바뀌면 바뀐 범위를 다시 본다.
-- 통합 push는 그 커밋 객체의 fast-forward다. push된 head는 ACCEPT(2인이 필요한 경로는 2/2 ACCEPT)된 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA, tested merge SHA, push한 주체를 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
+- main 병합을 실행하는 역할은 `fvoci-role-integrator`다. #347 fast-forward는 그 역할이 아니다. 확인 순서의 나머지는 아래와 그 스킬이 같다. push된 head는 ACCEPT(2인이 필요한 경로는 2/2 ACCEPT)된 SHA와 같고, 부모는 직전 head다. 하나라도 다르면 push하지 않는다. push 후 head SHA와 tested merge SHA를 구분해서 알린다. 예전 SHA의 CI 성공을 새 head의 완료로 적지 않는다.
 - main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x(1.0.0 미만, 0.9.x 포함)에서 그 검사는 아래이고, 1.0.0 도달 또는 영환님 철회 전까지의 상시 조건이다. 1.0.0 병합은 영환님 말이 있을 때 허용된다.
   - 독립 리뷰어 두 명의 ACCEPT. 두 사람이 ACCEPT한 최종 head SHA를, 게이트 5개가 그 SHA를 검사한 뒤에 팀 방에 먼저 게시한다.
   - 그 head의 check run 전체(최신 attempt, `filter=latest`, 모든 페이지). `filter=all`은 쓰지 않는다. pull_request check run은 PR head에 붙는다.
@@ -19,8 +19,7 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
   - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
   - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
 - Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
-- 브랜치 삭제는 그 브랜치가 main에 포함됐는지 다시 확인한 뒤 목록을 게시한 다음에 허용된다.
-- ruleset 변경은 리뷰어 2명 ACCEPT 뒤에 허용된다.
+- 브랜치 삭제와 ruleset 변경의 완료 조건은 `fvoci-role-integrator`다.
 - 태그와 릴리스는 영환님 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
 
@@ -28,7 +27,7 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
 
 기본값이다. 완료 조건을 지키면 더 나은 경로로 벗어나도 된다.
 
-역할은 이렇게 나눈다. 리드는 계획·배정·지시·취합·보고를 하고 PR 브랜치를 push하지 않는다. 작성자는 허용 경로만 작업 브랜치에 커밋하고 SHA·파일·검사·exit code를 보고하며, 자기 변경을 수락하지 않는다. 리뷰어는 고정 SHA를 보고 ACCEPT 또는 REQUEST_CHANGES와 근거·최소 수정안을 돌려준다. 통합은 ACCEPT된 커밋을 그대로 fast-forward한다. CI 기록은 현재 head의 job 결과를 적고, 워크플로를 재실행·취소하지 않는다. tracer는 UI → 인가 → backend commit → ACK → 새 클라이언트 readback이 어디서 끊겼는지를 receipt·로그로 알린다.
+역할별 완료 조건은 `fvoci-role-lead`, `fvoci-role-author`, `fvoci-role-reviewer-rust`, `fvoci-role-reviewer-ci-web`, `fvoci-role-reviewer-db`, `fvoci-role-integrator`, `fvoci-role-ci-watch`, `fvoci-role-evidence`, `fvoci-role-brainstorm`이다. 증거는 장부다.
 
 작성자가 남긴 회귀 검사는, 리뷰어가 계약 근거와 실제 실패 포착(필요하면 변조)을 확인한다. 인가·저장 ACK·동시성은 거부·유실·경합과 실제 시스템 근거를 대조한다.
 

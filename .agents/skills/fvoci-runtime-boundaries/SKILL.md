@@ -27,7 +27,7 @@ crate, 배포 실행 파일, 프로세스, 독립 service, 운영자 명령을 �
 ## 손대지 말 것
 
 - 서버 측 제품 연산의 기준은 Rust다. 새 Node 의존, 숨은 JS fallback, 내장 JS 엔진, JS 런타임 번들, 외부 변환 서비스 우회를 넣지 않는다. Vue/Tiptap, 브라우저 JS, 개발용 Node/CodeGraph, TS oracle, 합의한 PostgreSQL·Meilisearch·S3·SMTP는 제품 서버와 별개다.
-- 자식 프로세스는 `process.execPath`로 띄운다. rlimit·env_clear를 파일시스템·네트워크 sandbox라고 하지 않는다. timeout과 Drop만으로 정리 완료라고 하지 않는다. `spawn_blocking`만으로 process 격리를 대체하지 않는다.
+- 자식 프로세스는 `process.execPath`로 띄운다. Playwright 자식 프로세스 env에서는 `JEST_WORKER_ID`를 뺀다. rlimit·env_clear를 파일시스템·네트워크 sandbox라고 하지 않는다. timeout과 Drop만으로 정리 완료라고 하지 않는다. `spawn_blocking`만으로 process 격리를 대체하지 않는다.
 - parser·CRDT process 격리를 유지한다. 위험한 파싱을 HTTP 프로세스 안에 넣지 않는다. 편집 중 문서를 JSON 왕복으로 다시 만들어 삭제·동시편집 이력을 버리지 않는다.
 - 하네스(영환님, 2026-10-09 11:31 KST): 하네스 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터 한다. diff·intent 표는 커밋 메시지와 PR 본문에 두고 레포 파일로 남기지 않는다.
 - 영환님, 2026-10-10 10:39 KST: 새 `.py` 파일과 새 Python 코드는 레포에 두지 않는다. 하네스 이전이 그 파일을 대체하기 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)을 고칠 수 있다. 그 수정의 경계는 2026-10-10 10:42 KST다. 기존 검사를 유지하거나 바꾸는 수정은 허용된다. 새 기능이나 새 테스트 준비 코드는 Python에 더하지 않고 TypeScript 또는 Rust에 둔다.

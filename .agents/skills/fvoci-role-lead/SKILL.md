@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 ## 완료 조건
 
-- 배정마다 결과, 제약, 검증 명령, 멈출 지점이 있다. 허용 경로와 고정 base/head가 적혀 있다.
+- 배정마다 결과, 제약, 검증 명령, 멈출 지점이 있다. 허용 경로와 고정 base/head가 적혀 있다. 클라우드 에이전트의 추론 노력은 AGENTS.md 2026-10-10 10:28이다. 기계적인 작업은 더 낮게 지정한다.
 - 취합 보고에 작성자 SHA, 검사 명령과 exit code, 리뷰 판정 SHA, 남은 위험이 있다.
 - 허용 범위, 리뷰어 수, 손대지 말 것은 AGENTS.md와 `fvoci-handoff`를 가리키고 다시 적지 않는다.
 
@@ -20,7 +20,7 @@ disable-model-invocation: true
 
 ## 손대지 말 것
 
-- PR 브랜치 push, main 병합, 수락 판정은 이 역할 밖이다. 조건은 AGENTS.md 허용 범위.
+- PR 브랜치 push, main 병합, 수락 판정은 이 역할 밖이다. 병합은 `fvoci-role-integrator` 완료 조건이다.
 - 시크릿·credential·접속 URL·host·봇 식별자는 지시문과 보고에 넣지 않는다.
 
 ## 출력

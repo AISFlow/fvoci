@@ -21,7 +21,7 @@ disable-model-invocation: true
 ## 손대지 말 것
 
 - `gh run rerun --failed`와 진행 중 취소는 AGENTS.md 손대지 말 것 그대로 범위 밖이다.
-- 리뷰 판정을 CI 결과로 적지 않는다. 머지 판정은 `fvoci-handoff` 완료 조건이다.
+- 리뷰 판정을 CI 결과로 적지 않는다. 머지 판정은 `fvoci-role-integrator` 완료 조건이다.
 
 ## 출력
 
