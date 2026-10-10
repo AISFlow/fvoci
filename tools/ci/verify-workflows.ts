@@ -1,7 +1,17 @@
 import { resolve } from "node:path";
 import { loadContext, type VerifyContext, type WorkflowCheck } from "./verify/load.ts";
 import { verifyGateHardening, verifyWorkflowRegistry } from "./verify/registry.ts";
+import { verifyRustBinaryHandoff } from "./verify/rust-handoff.ts";
+import { verifySelectedLibraryExecution } from "./verify/rust-library.ts";
+import { verifyPostgresBudgetMatrix } from "./verify/rust-postgres.ts";
+import { verifyRustSuiteRegistry } from "./verify/rust-registry.ts";
+import { RUST_WORKFLOW_FILE } from "./verify/rust-shared.ts";
 import { verifyPermissionPins } from "./verify/scopes.ts";
+import {
+  gatedWorkflowJobs,
+  verifyWebBrowserBudget,
+  verifyWebBuildHandoff,
+} from "./verify/web-browser.ts";
 
 // Checks owned by this module, in report order.
 export const CHECKS: readonly WorkflowCheck[] = [
@@ -10,43 +20,34 @@ export const CHECKS: readonly WorkflowCheck[] = [
   verifyPermissionPins,
 ];
 
-export const SLOT_NAMES = [
-  "rust-library",
-  "rust-postgres",
-  "rust-sqlite",
-  "rust-exec",
-  "rust-collab",
-  "rust-native",
-  "rust-install",
-  "rust-schema",
-  "web-browser",
-] as const;
+export const SLOT_NAMES = ["rust-binary-handoff", "rust-suite-registry", "web-browser"] as const;
 export type SlotName = (typeof SLOT_NAMES)[number];
+type Slots = Readonly<Record<SlotName, WorkflowCheck | null>>;
 
-// Rust suite and web browser checks, wired in by the modules that own them. An empty
-// slot makes the CLI fail closed unless --partial is passed explicitly.
-export const SLOTS: Readonly<Record<SlotName, WorkflowCheck | null>> = {
-  "rust-library": null,
-  "rust-postgres": null,
-  "rust-sqlite": null,
-  "rust-exec": null,
-  "rust-collab": null,
-  "rust-native": null,
-  "rust-install": null,
-  "rust-schema": null,
-  "web-browser": null,
+// The Rust suite and web browser checks, one slot per call site of the
+// original: the binary handoff (with the SQLite prefix cache) runs only for a
+// well-formed rust.yml, the suite registry walks Cargo.toml and rust.yml with
+// the library and PostgreSQL budget checks at their fixed points (the
+// execution, native, collaboration, install and schema checks are inside that
+// walk), and the web checks run only for a well-formed web.yml. An empty slot
+// makes the CLI fail closed unless --partial is passed explicitly.
+export const SLOTS: Slots = {
+  "rust-binary-handoff": (ctx) => {
+    const jobs = gatedWorkflowJobs(ctx, RUST_WORKFLOW_FILE);
+    return jobs === null ? [] : verifyRustBinaryHandoff(jobs);
+  },
+  "rust-suite-registry": (ctx) =>
+    verifyRustSuiteRegistry(ctx, { verifySelectedLibraryExecution, verifyPostgresBudgetMatrix }),
+  "web-browser": (ctx) => [...verifyWebBrowserBudget(ctx), ...verifyWebBuildHandoff(ctx)],
 };
 
-export function unfilledSlots(
-  slots: Readonly<Record<SlotName, WorkflowCheck | null>> = SLOTS,
-): SlotName[] {
+export function unfilledSlots(slots: Slots = SLOTS): SlotName[] {
   return SLOT_NAMES.filter((name) => slots[name] === null);
 }
 
-export function verifyWorkflows(
-  ctx: VerifyContext,
-  slots: Readonly<Record<SlotName, WorkflowCheck | null>> = SLOTS,
-): string[] {
+export function verifyWorkflows(ctx: VerifyContext, slots: Slots = SLOTS): string[] {
+  // Without the workflow directory nothing else is meaningful.
+  if (ctx.files === null) return verifyWorkflowRegistry(ctx);
   const checks = [...CHECKS, ...SLOT_NAMES.flatMap((name) => slots[name] ?? [])];
   return checks.flatMap((check) => check(ctx));
 }
@@ -74,16 +75,16 @@ export function parseArgs(argv: readonly string[]): Args | string {
 }
 
 /** One error per line on stderr; exit 1 if any, 2 on usage errors, else 0. */
-export function main(argv: readonly string[]): number {
+export function main(argv: readonly string[], slots: Slots = SLOTS): number {
   const args = parseArgs(argv);
   if (typeof args === "string") {
     process.stderr.write(`${USAGE}\nverify-workflows.ts: error: ${args}\n`);
     return 2;
   }
-  const errors = verifyWorkflows(loadContext(args.root));
+  const errors = verifyWorkflows(loadContext(args.root), slots);
   if (!args.partial) {
     errors.push(
-      ...unfilledSlots().map((name) => `verify-workflows: check slot ${name} is not wired`),
+      ...unfilledSlots(slots).map((name) => `verify-workflows: check slot ${name} is not wired`),
     );
   }
   for (const error of errors) process.stderr.write(error + "\n");

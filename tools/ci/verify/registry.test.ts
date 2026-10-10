@@ -1,5 +1,6 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { SLOT_NAMES, unfilledSlots, verifyWorkflows } from "../verify-workflows.ts";
+import { SLOT_NAMES, SLOTS, main, unfilledSlots, verifyWorkflows } from "../verify-workflows.ts";
 import {
   contextFromTexts,
   get,
@@ -39,6 +40,22 @@ function tree(files: Record<string, string>): string {
   mkdirSync(join(dir, ".github/workflows"), { recursive: true });
   for (const [name, text] of Object.entries(files))
     writeFileSync(join(dir, ".github/workflows", name), text);
+  return dir;
+}
+
+// The non-workflow inputs the rust suite registry reads.
+function withRepoInputs(dir: string): string {
+  mkdirSync(join(dir, "tests"));
+  mkdirSync(join(dir, "scripts"));
+  const rel = [
+    "Cargo.toml",
+    "scripts/run-rust-collaboration-ci-tests.sh",
+    "scripts/collab-capacity-probe.sh",
+    ...readdirSync(join(root, "tests"))
+      .filter((name) => name.endsWith(".rs"))
+      .map((name) => `tests/${name}`),
+  ];
+  for (const file of rel) copyFileSync(join(root, file), join(dir, file));
   return dir;
 }
 
@@ -271,14 +288,27 @@ describe("verify-workflows CLI", () => {
     expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
   });
 
-  test("fails closed while a check slot is not wired", () => {
-    const result = runCli([]);
-    const missing = unfilledSlots();
-    expect(result.code).toBe(missing.length > 0 ? 1 : 0);
-    expect(result.stderr.split("\n").filter(Boolean)).toEqual(
-      missing.map((name) => `verify-workflows: check slot ${name} is not wired`),
-    );
-    expect(SLOT_NAMES).toHaveLength(9);
+  test("every check slot is wired and the full CLI passes on the repository", () => {
+    expect(SLOT_NAMES.filter((name) => SLOTS[name] === null)).toEqual([]);
+    expect(unfilledSlots()).toEqual([]);
+    expect(runCli([])).toEqual({ code: 0, stdout: "", stderr: "" });
+  });
+
+  test("an empty slot fails closed unless --partial is passed", () => {
+    const slots = { ...SLOTS, "web-browser": null };
+    expect(unfilledSlots(slots)).toEqual(["web-browser"]);
+    const written: string[] = [];
+    const spy = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(main(["--repo-root", root], slots)).toBe(1);
+      expect(main(["--repo-root", root, "--partial"], slots)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(written).toEqual(["verify-workflows: check slot web-browser is not wired\n"]);
   });
 
   test("reports one error per line on stderr and exits 1", () => {
@@ -305,9 +335,9 @@ describe("verify-workflows CLI", () => {
         readFileSync(join(directory, name), "utf8").replaceAll("\n", "\r\n"),
       ]),
     );
-    const dir = tree(files);
+    const dir = withRepoInputs(tree(files));
     symlinkSync(join(dir, "missing-target.yml"), join(dir, ".github/workflows/old.yml"));
-    expect(runCli(["--repo-root", dir, "--partial"])).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(runCli(["--repo-root", dir])).toEqual({ code: 0, stdout: "", stderr: "" });
   });
 
   test("a leading BOM stays in the workflow text and YAML skips it", () => {
