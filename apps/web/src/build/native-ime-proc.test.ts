@@ -88,6 +88,22 @@ describe.skipIf(process.platform !== "linux")("/proc process identification", ()
     expect(rows.find((r) => r.pid === browser)?.exe).toBe(bash);
   });
 
+  // A leading U+FEFF is data. The BOM must start /proc/<pid>/environ or
+  // /proc/<pid>/cmdline, so each child gets one environment entry or one argv element.
+  const cat = realpathSync(Bun.which("cat") ?? "/bin/cat");
+  test("a U+FEFF-prefixed environment key is not the session marker", () => {
+    const session = join(root, "session-bom");
+    const env = { "﻿FVOCI_NATIVE_IME_SESSION": session };
+    children.push(Bun.spawn([cat], { env, stdin: "pipe" }));
+    expect(sessionProcesses(session)).toEqual([]);
+  });
+
+  test("a U+FEFF-prefixed argv element is not the profile flag", () => {
+    const profile = join(root, "profile-bom");
+    children.push(Bun.spawn([cat], { argv0: "﻿--user-data-dir=" + profile, stdin: "pipe" }));
+    expect(browserProcesses(profile)).toEqual([]);
+  });
+
   test("an unparseable title that carries a profile flag aborts the scan", async () => {
     const profile = join(root, "profile-unbalanced");
     const bad = Bun.spawn(["cat"], {

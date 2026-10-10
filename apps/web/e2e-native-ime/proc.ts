@@ -5,7 +5,8 @@ import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 
 class InvalidUtf8 extends Error {}
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+// ignoreBOM keeps a leading U+FEFF: in argv and environ it is data, not encoding metadata.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function decode(bytes: Uint8Array): string {
   try {
     return utf8.decode(bytes);
