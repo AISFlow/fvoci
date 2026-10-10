@@ -379,7 +379,12 @@ export async function parent(run: string, facts: ParentFacts, seam: ParentSeam):
     summary.started_utc = now();
     const result = await seam.command(
       ["bash", pgScript, ...postgresDriverCommand(), "--pg-ready", run],
-      { log: join(run, "owned-fixtures.log"), required: false, env: environment },
+      {
+        log: join(run, "owned-fixtures.log"),
+        required: false,
+        env: environment,
+        waitOnInterrupt: true,
+      },
     );
     code = result.returncode;
     summary.wrapper_exit = code;
@@ -1420,7 +1425,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     trapInterrupts();
     const result = await command(
       ["bash", meiliScript, ...postgresDriverCommand(), "--inside", run],
-      { log: join(run, "owned-meili-and-tracer.log"), required: false },
+      { log: join(run, "owned-meili-and-tracer.log"), required: false, waitOnInterrupt: true },
     );
     return result.returncode;
   }

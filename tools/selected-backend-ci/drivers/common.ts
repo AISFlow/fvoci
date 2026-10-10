@@ -49,14 +49,15 @@ export function errorFacts(error: unknown): { type: string; message: string } {
 // flight is killed and reaped, the first failure is recorded and every cleanup
 // step still runs. A later SIGINT aborts only the cleanup command in flight,
 // which records that step as a cleanup error.
-const inFlight = new Set<AbortController>();
+// What each in-flight owned command does on SIGINT.
+const inFlight = new Set<() => void>();
 let interrupted = false,
   cleanupDepth = 0;
 export const interruptError = () => named("KeyboardInterrupt", "selected driver interrupted");
 export function trapInterrupts(): void {
   process.on("SIGINT", () => {
     interrupted = true;
-    for (const controller of inFlight) controller.abort(interruptError());
+    for (const interrupt of inFlight) interrupt();
   });
 }
 export function checkInterrupt(): void {
@@ -82,13 +83,23 @@ export interface CommandOptions {
   env?: Environment;
   cwd?: string;
   input?: string;
+  // The child is a fixture wrapper whose EXIT trap removes what it owns. On
+  // SIGINT it is not killed: it gets SIGINT (as from a process-group ^C) and
+  // is waited for, so its cleanup runs and its own exit is returned.
+  waitOnInterrupt?: boolean;
 }
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
 // stdout and stderr go to one truncated log, or are captured as strict UTF-8.
 export const command: Command = async (args, options = {}) => {
   checkInterrupt();
   const controller = new AbortController();
-  inFlight.add(controller);
+  let forward = () => {
+    controller.abort(interruptError());
+  };
+  const interrupt = () => {
+    forward();
+  };
+  inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
   try {
     const child = spawn(args, {
@@ -97,9 +108,12 @@ export const command: Command = async (args, options = {}) => {
       stdin: options.input === undefined ? "inherit" : new TextEncoder().encode(options.input),
       stdout: fd ?? "pipe",
       stderr: fd ?? "pipe",
-      signal: controller.signal,
-      killSignal: "SIGKILL",
+      ...(options.waitOnInterrupt ? {} : { signal: controller.signal, killSignal: "SIGKILL" }),
     });
+    if (options.waitOnInterrupt)
+      forward = () => {
+        child.kill("SIGINT");
+      };
     const [stdout, stderr] = await Promise.all([
       child.stdout instanceof ReadableStream ? new Response(child.stdout).bytes() : null,
       child.stderr instanceof ReadableStream ? new Response(child.stderr).bytes() : null,
@@ -120,7 +134,7 @@ export const command: Command = async (args, options = {}) => {
       stderr: stderr ? decode(stderr) : "",
     };
   } finally {
-    inFlight.delete(controller);
+    inFlight.delete(interrupt);
     if (fd !== undefined) closeSync(fd);
   }
 };
