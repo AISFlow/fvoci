@@ -83,7 +83,7 @@ export function verifyWorkflow(data: any) {
     check(
       event.paths.includes("docker/ci-base/**") &&
         event.paths.includes(".github/workflows/ci-base-image.yml") &&
-        event.paths.includes("scripts/ci/**"),
+        event.paths.includes("tools/ci/**"),
       "image edits must trigger builds",
     );
   }
