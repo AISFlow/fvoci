@@ -1,13 +1,15 @@
 //! Bounded child execution with the observable behaviour of Python
-//! `subprocess.run(argv, timeout=..., capture_output=...)`: the direct child is
-//! killed and reaped when the timeout expires, and both pipes are drained
+//! `subprocess.run(argv, timeout=..., capture_output=...)`: the timeout covers
+//! the child's exit and EOF on both captured pipes, the direct child is killed
+//! and reaped when the timeout expires, and both pipes are drained
 //! concurrently so a chatty child cannot block on a full pipe.
 
 use serde_json::{json, Value};
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread::{self, JoinHandle};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 /// Elapsed/timeout/exit record kept per step, like the former `TIMINGS` dicts.
@@ -74,7 +76,8 @@ pub struct Finished {
 pub enum RunError {
     Spawn(io::Error),
     Wait(io::Error),
-    /// The child outlived its budget and was killed and reaped.
+    /// The child or its captured pipes outlived the budget; a direct child
+    /// still running at the deadline was killed and reaped.
     Timeout(Duration),
 }
 
@@ -87,56 +90,86 @@ impl std::fmt::Display for RunError {
     }
 }
 
-fn drain(source: Option<impl Read + Send + 'static>) -> Option<JoinHandle<Vec<u8>>> {
-    source.map(|mut pipe| {
-        thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
-    })
-}
-
-fn wait_with_deadline(child: &mut Child, timeout: Duration) -> Result<ExitStatus, RunError> {
-    let deadline = Instant::now() + timeout;
-    let mut pause = Duration::from_millis(1);
-    loop {
-        if let Some(status) = child.try_wait().map_err(RunError::Wait)? {
-            return Ok(status);
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            // Only the direct child is signalled, as subprocess.run did.
-            let _ = child.kill();
-            child.wait().map_err(RunError::Wait)?;
-            return Err(RunError::Timeout(timeout));
-        }
-        thread::sleep(pause.min(deadline - now));
-        pause = (pause * 2).min(Duration::from_millis(50));
-    }
+/// Read `pipe` to EOF on its own thread and send the bytes tagged `index`.
+fn drain(index: usize, mut pipe: impl Read + Send + 'static, sender: Sender<(usize, Vec<u8>)>) {
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = sender.send((index, buffer));
+    });
 }
 
 /// Run `command` to completion within `timeout`. With `capture`, stdout and
 /// stderr are collected; otherwise they are inherited. Stdin is inherited.
+///
+/// Like `Popen.communicate(timeout=...)`, the budget covers both the direct
+/// child's exit and EOF on every captured pipe: a descendant that keeps a pipe
+/// open past the deadline makes the call time out even when the direct child
+/// already exited. On timeout only the direct child is killed (when still
+/// running) and reaped, as `subprocess.run` did; the reader threads are
+/// detached and finish when the last pipe writer closes.
 pub fn run(command: &mut Command, timeout: Duration, capture: bool) -> Result<Finished, RunError> {
     if capture {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
+    let deadline = Instant::now() + timeout;
     let mut child = command.spawn().map_err(RunError::Spawn)?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let status = wait_with_deadline(&mut child, timeout)?;
-    // A grandchild holding a pipe open delays EOF; the status is already final.
-    let collect = |handle: Option<JoinHandle<Vec<u8>>>| {
-        handle
-            .map(|h| h.join().unwrap_or_default())
-            .unwrap_or_default()
-    };
-    Ok(Finished {
-        status,
-        stdout: collect(stdout),
-        stderr: collect(stderr),
-    })
+    let (sender, receiver) = mpsc::channel();
+    let mut pending = 0;
+    if let Some(pipe) = child.stdout.take() {
+        drain(0, pipe, sender.clone());
+        pending += 1;
+    }
+    if let Some(pipe) = child.stderr.take() {
+        drain(1, pipe, sender.clone());
+        pending += 1;
+    }
+    drop(sender);
+    let mut output = [Vec::new(), Vec::new()];
+    let mut status: Option<ExitStatus> = None;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if status.is_none() {
+            status = child.try_wait().map_err(RunError::Wait)?;
+        }
+        if let (Some(status), 0) = (status, pending) {
+            let [stdout, stderr] = output;
+            return Ok(Finished {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            if status.is_none() {
+                let _ = child.kill();
+                child.wait().map_err(RunError::Wait)?;
+            }
+            return Err(RunError::Timeout(timeout));
+        }
+        let wait = pause.min(deadline - now);
+        pause = (pause * 2).min(Duration::from_millis(50));
+        if pending == 0 {
+            thread::sleep(wait);
+            continue;
+        }
+        match receiver.recv_timeout(wait) {
+            Ok((index, bytes)) => {
+                output[index] = bytes;
+                pending -= 1;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            // A reader ended without sending; its output is lost, so fail now.
+            Err(RecvTimeoutError::Disconnected) => {
+                if status.is_none() {
+                    let _ = child.kill();
+                    child.wait().map_err(RunError::Wait)?;
+                }
+                return Err(RunError::Wait(io::Error::other("output reader failed")));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
