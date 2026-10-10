@@ -61,6 +61,7 @@ const contracts = {
   documents: { "native-extraction": "select_native_extraction" },
   "collab-engine": { "native-collab-engine": "select_native_collab_engine" },
   install: {
+    "install-image": "select_install_smoke",
     "install-smoke": "select_install_smoke",
     "backup-restore-smoke": "select_backup_restore_smoke",
     "upgrade-smoke-arm64": "select_upgrade_smoke_arm64",
