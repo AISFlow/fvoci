@@ -21,6 +21,7 @@ import {
   env,
   files,
   inventory,
+  isFile,
   observedExit,
   read,
   root,
@@ -66,7 +67,7 @@ export function buildEnv(): Record<string, string> {
   return Object.fromEntries(names.map((name) => [name, digest(env(name))]));
 }
 function addInput(external: Record<string, string>, path: string, excluded: string[] = []): void {
-  const entries = statSync(path).isDirectory() ? files(path) : [path];
+  const entries = statSync(path).isDirectory() ? files(path, true) : [path];
   for (const file of entries)
     if (!excluded.some((prefix) => below(file, prefix))) external[file] = sha(file);
 }
@@ -102,7 +103,7 @@ export function inputs(): Inputs {
   const untracked = Object.fromEntries(
     call(["git", "ls-files", "--others", "--exclude-standard", "-z"])
       .split("\0")
-      .filter((p) => p && statSync(join(root, p)).isFile())
+      .filter((p) => p && isFile(join(root, p)))
       .map((p) => [p, sha(join(root, p))]),
   );
   const external: Record<string, string> = {};
