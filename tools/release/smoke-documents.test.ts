@@ -171,8 +171,8 @@ const refusedExports: Array<[string, Uint8Array, string]> = [
     ]),
     "word/document.xml appears twice",
   ],
-  // OPC forbids DTDs, and saxes does not check DTD syntax: every DOCTYPE,
-  // well-formed or not, is refused.
+  // saxes does not check DTD syntax, so every DOCTYPE, well-formed or not,
+  // is refused.
   ...[
     "<!DOCTYPE>",
     "<!DOCTYPE a [garbage]>",
@@ -195,6 +195,17 @@ const refusedExports: Array<[string, Uint8Array, string]> = [
     label,
     rawZip([{ name: "word/document.xml", data: "<a>후속 편집 저장</a>", ...entry }]),
     needle,
+  ]),
+  // UTF-8 bytes under a declaration naming another encoding (XML 1.0 §4.3.3).
+  ...["UTF-16", "ISO-8859-1"].map((encoding): [string, Uint8Array, string] => [
+    `UTF-8 bytes declared ${encoding}`,
+    rawZip([
+      {
+        name: "word/document.xml",
+        data: `<?xml version="1.0" encoding="${encoding}"?><a>후속 편집 저장</a>`,
+      },
+    ]),
+    "only UTF-8 Office parts are supported",
   ]),
   [
     "a non-canonical part name",
@@ -253,6 +264,13 @@ describe("export checks", () => {
     expect(() => xmlText('<!DOCTYPE a [<!ENTITY e "boom">]><a>&e;</a>')).toThrow(
       "DOCTYPE is not allowed",
     );
+    for (const encoding of ["UTF-8", "utf-8", "Utf-8"])
+      expect(xmlText(`<?xml version="1.0" encoding="${encoding}"?><a>x</a>`)).toBe("x");
+    expect(xmlText(`<?xml version="1.0" encoding="utf-8" standalone="yes"?><a>x</a>`)).toBe("x");
+    for (const encoding of ["UTF-16", "ISO-8859-1", "UTF8"])
+      expect(() => xmlText(`<?xml version="1.0" encoding="${encoding}"?><a>x</a>`)).toThrow(
+        "only UTF-8 Office parts are supported",
+      );
     expect(() => xmlText("<a/><b/>")).toThrow("only one root");
     expect(() => xmlText("text<a/>")).toThrow("outside of root");
     expect(() => xmlText("<w:a><w:t>x</w:t></w:a>")).toThrow("unbound namespace prefix");
@@ -411,7 +429,9 @@ describe("zip structure (assembled archives)", () => {
       rawZip([doc]),
       rawZip([{ ...doc, descriptor: true }]),
       // Deflate option bits 1-2 (Word writes 0x0006), version 1.0, a timestamp extra field.
-      rawZip([{ ...doc, flags: 0x06, version: 10, extra: Buffer.from("555405000100000000", "hex") }]),
+      rawZip([
+        { ...doc, flags: 0x06, version: 10, extra: Buffer.from("555405000100000000", "hex") },
+      ]),
     ]) {
       expect(officeHasText(archive, "docx", "후속 편집 저장")).toBe(true);
     }

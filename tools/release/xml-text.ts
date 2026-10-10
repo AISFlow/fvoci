@@ -10,12 +10,17 @@ import { SaxesParser } from "saxes";
 export function xmlText(xml: string): string {
   const parser = new SaxesParser({ xmlns: true, position: true });
   // OOXML parts are XML 1.0; a 1.1 declaration would admit control
-  // characters such as &#1;.
+  // characters such as &#1;. The caller decodes the bytes as UTF-8, so any
+  // other declared encoding is a fatal error (XML 1.0 §4.3.3).
   parser.on("xmldecl", (decl) => {
     if (decl.version !== "1.0") throw parser.makeError(`XML version ${String(decl.version)}`);
+    if (decl.encoding !== undefined && decl.encoding.toUpperCase() !== "UTF-8")
+      throw parser.makeError("only UTF-8 Office parts are supported");
   });
-  // OPC (ISO/IEC 29500-2) forbids DTD declarations in package XML, and saxes
-  // does not check DTD syntax, so every DOCTYPE is refused, not skipped.
+  // ISO/IEC 29500-2 §6.2.5 forbids DTDs only in the OPC parts it defines
+  // (content types, relationships, core properties, signatures). The smoke
+  // refuses them in every part it parses as well: saxes does not check DTD
+  // syntax, so a DOCTYPE is refused, not skipped.
   parser.on("doctype", () => {
     throw parser.makeError("DOCTYPE is not allowed in an Office part");
   });
