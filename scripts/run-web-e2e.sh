@@ -211,11 +211,11 @@ run_ci_shard() {
   local plan_file
   plan_file="$(mktemp "${TMPDIR:-/tmp}/fvoci-web-e2e-plan.XXXXXX")"
 
-  if ! python3 "$ROOT/scripts/web-e2e-groups.py" verify --shards "$CI_SHARD_COUNT" >/dev/null; then
+  if ! bun "$ROOT/tools/web-e2e/groups.ts" verify --shards "$CI_SHARD_COUNT" >/dev/null; then
     rm -f "$plan_file"
     exit 1
   fi
-  if ! python3 "$ROOT/scripts/web-e2e-groups.py" shard-jsonl \
+  if ! bun "$ROOT/tools/web-e2e/groups.ts" shard-jsonl \
       --index "$shard_index" --shards "$CI_SHARD_COUNT" >"$plan_file"; then
     rm -f "$plan_file"
     exit 1
