@@ -195,6 +195,7 @@ function cohort() {
 function localFixture(
   actorUid: number,
   actorGid: number,
+  worktree = root,
 ): {
   output: string;
   env: Record<string, string>;
@@ -223,7 +224,7 @@ function localFixture(
     taskId: "task_ef56",
     workerTerminal: "fixture-worker",
     rootTerminal: "fixture-root",
-    worktree: root,
+    worktree,
     uid: actorUid,
     gid: actorGid,
     source,
@@ -398,7 +399,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
     for (const mode of modes.filter((value) => value !== "stage"))
       expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" ' + mode);
-    expect(caller.match(/bun "\$ROOT\/scripts\/run-selected-backend-e2e\.ts" stage/g)).toHaveLength(4);
+    expect(caller.match(/bun "\$ROOT\/scripts\/run-selected-backend-e2e\.ts" stage/g)).toHaveLength(
+      4,
+    );
     expect(caller).not.toContain("run-selected-backend-e2e.py");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
@@ -1028,9 +1031,17 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     copyFileSync(process.execPath, bunCopy);
     chmodSync(bunCopy, 0o755);
     const probe = join(shared, "probe.ts");
-    const admission = JSON.stringify(join(import.meta.dir, "admission.ts"));
-    const io = JSON.stringify(join(import.meta.dir, "io.ts"));
-    const runtime = JSON.stringify(join(import.meta.dir, "runtime.ts"));
+    // The probe imports a world-readable copy of the runner modules: the actors
+    // below must not depend on reading the host checkout (a 0750 home on
+    // developer hosts). The copy root is that probe's worktree root.
+    const copied = join(shared, "tools/selected-backend-ci");
+    mkdirSync(copied, { recursive: true, mode: 0o755 });
+    for (const name of readdirSync(import.meta.dir))
+      if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
+        copyFileSync(join(import.meta.dir, name), join(copied, name));
+    const admission = JSON.stringify(join(copied, "admission.ts"));
+    const io = JSON.stringify(join(copied, "io.ts"));
+    const runtime = JSON.stringify(join(copied, "runtime.ts"));
     writeFileSync(
       probe,
       `import process from "node:process";
@@ -1114,8 +1125,8 @@ try {
     const rootOwned = directory();
     const mismatch = directory();
     const cohortOutput = cohort().output;
-    const rootGrant = localFixture(0, 0);
-    const ciGrant = localFixture(1001, 1001);
+    const rootGrant = localFixture(0, 0, shared);
+    const ciGrant = localFixture(1001, 1001, shared);
     give(ciOwned, "1001:1001");
     give(rootOwned, "0:0");
     give(mismatch, `${String(uid() + 1)}:${String(gid() + 1)}`);
