@@ -396,6 +396,18 @@ fn database_collision_retires_only_the_created_role() {
 }
 
 #[test]
+fn failed_database_drop_still_retires_the_role_and_fails() {
+    let mut fixture = Fixture::new("drop-database");
+    let output = fixture.run();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("cleanup: drop-database exit=6"));
+    let sql = fixture.statements();
+    assert_eq!(sql.len(), 4);
+    assert!(sql[3].starts_with("DROP ROLE"));
+}
+
+#[test]
 fn sigint_kills_the_running_child_and_retires_owned_identities() {
     // `interrupt`: the migrator itself would sleep 30 s and is killed.
     // `orphan`: the migrator exits but a grandchild holds its output pipes

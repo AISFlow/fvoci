@@ -442,14 +442,15 @@ fn controls(
     Ok(())
 }
 
-/// Retire exactly the identities this invocation created, database first.
+/// Retire exactly the identities this invocation created; both drops are
+/// attempted even when the first fails.
 fn retire(run: &Run, identity: &Identity, created: &Created) -> Result<(), String> {
     let database = if created.database {
         run.sql("drop-database", &identity.drop_database(), false)
     } else {
         Ok(())
     };
-    let role = if created.role && database.is_ok() {
+    let role = if created.role {
         run.sql("drop-role", &identity.drop_role(), false)
     } else {
         Ok(())
