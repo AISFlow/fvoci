@@ -65,7 +65,11 @@ fvoci_test_meili_start
 
 # Each invocation: stdout teed to .stdout.log through the pipeline (pipefail
 # keeps cargo's status), the group's stderr teed to .stderr.log by a process
-# substitution this shell waits for before reading the log.
+# substitution this shell waits for before reading the log. That stderr tee
+# ignores TERM (INT is already ignored for async commands) so a TERM to the
+# process group cannot close this shell's stderr before bash reports the
+# killed job (that write to a closed pipe killed the shell by SIGPIPE instead
+# of exit 143); it exits at EOF once this shell exits.
 status=0
 first=0
 {
@@ -80,7 +84,7 @@ first=0
     --test document_import_export_integration \
     --test document_import_formats_integration \
     | tee "$PARALLEL_LOG.stdout.log"
-} 2> >(tee "$PARALLEL_LOG.stderr.log" >&2) || first=$?
+} 2> >(trap '' TERM; exec tee "$PARALLEL_LOG.stderr.log" >&2) || first=$?
 wait "$!" || true
 if [[ "$first" -ne 0 ]]; then
   report_failure "parallel suites" "$first" "$PARALLEL_LOG"
@@ -92,7 +96,7 @@ second=0
     --test task_collab_integration \
     -- --test-threads=1 \
     | tee "$SERIAL_LOG.stdout.log"
-} 2> >(tee "$SERIAL_LOG.stderr.log" >&2) || second=$?
+} 2> >(trap '' TERM; exec tee "$SERIAL_LOG.stderr.log" >&2) || second=$?
 wait "$!" || true
 if [[ "$second" -ne 0 ]]; then
   report_failure "task_collab_integration (--test-threads=1)" "$second" "$SERIAL_LOG"

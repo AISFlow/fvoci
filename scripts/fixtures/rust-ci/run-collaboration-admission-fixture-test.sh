@@ -12,6 +12,7 @@ DOCKER_CALLS="$FIXTURE_RUN/docker-calls.log"
 RUNNER_STDERR="$FIXTURE_RUN/runner-stderr.log"
 READY_FIFO="$FIXTURE_RUN/cargo-ready.fifo"
 HOLD_FIFO="$FIXTURE_RUN/cargo-hold.fifo"
+STDERR_FIFO="$FIXTURE_RUN/runner-stderr.fifo"
 signal_pgid=""
 
 cleanup() {
@@ -23,7 +24,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$FAKE_BIN"
-mkfifo "$READY_FIFO" "$HOLD_FIFO"
+mkfifo "$READY_FIFO" "$HOLD_FIFO" "$STDERR_FIFO"
 
 # Fixed suite list from main collaboration job (ebca941e); order-independent guard.
 EXPECTED_SUITE_NAMES=(
@@ -372,41 +373,55 @@ if [[ "$status" -eq 0 ]] || [[ -s "$INVOCATIONS" ]] || grep -q '^rm ' "$DOCKER_C
   exit 1
 fi
 
-# SIGINT to the runner's process group while cargo runs (Ctrl-C or runner
-# cancel shape): the runner exits 130 after the foreground cargo ends, never
-# starts the second invocation, and its EXIT trap removes the Meilisearch.
-# set -m gives the background runner its own group with INT not ignored.
-fresh_run
-exec 3<>"$READY_FIFO"
-set -m
-FVOCI_TEST_CARGO_MODE=hang bash "$RUN" >/dev/null 2>"$RUNNER_STDERR" 3<&- &
-signal_pgid=$!
-set +m
-cargo_pid=""
-if ! read -r -t 60 cargo_pid <&3; then
-  echo "hang-mode cargo stub never started" >&2
-  cat "$RUNNER_STDERR" >&2
-  exit 1
-fi
-exec 3<&-
-kill -INT -- "-$signal_pgid"
-status=0
-wait "$signal_pgid" || status=$?
-if [[ "$status" -ne 130 ]]; then
-  echo "expected runner exit 130 after SIGINT, got ${status}" >&2
-  cat "$RUNNER_STDERR" >&2
-  exit 1
-fi
-if kill -0 "$cargo_pid" 2>/dev/null; then
-  echo "cargo stub ${cargo_pid} still running after the runner exited" >&2
-  exit 1
-fi
-signal_pgid=""
-if [[ "$(wc -l <"$INVOCATIONS" | tr -d ' ')" -ne 1 ]]; then
-  echo "expected SIGINT to stop the runner before the second cargo invocation" >&2
-  cat "$INVOCATIONS" >&2
-  exit 1
-fi
-assert_meili_started_and_removed_once "SIGINT"
+# INT or TERM to the runner's process group while cargo runs (Ctrl-C or a
+# runner cancel): the runner exits 130/143 itself (never killed by SIGPIPE
+# or the signal), never starts the second invocation, and its EXIT trap removes
+# the Meilisearch once. set -m gives the background runner its own group with
+# INT not ignored. Runner stderr goes through a fifo whose reader ends only
+# when every writer, including the runner's stderr tee, has exited.
+signal_case() {
+  local signal="$1" expected="$2" cat_pid cargo_pid status reader=0
+  fresh_run
+  timeout 60 cat <"$STDERR_FIFO" >"$RUNNER_STDERR" &
+  cat_pid=$!
+  exec 3<>"$READY_FIFO"
+  set -m
+  FVOCI_TEST_CARGO_MODE=hang bash "$RUN" >/dev/null 2>"$STDERR_FIFO" 3<&- &
+  signal_pgid=$!
+  set +m
+  cargo_pid=""
+  if ! read -r -t 60 cargo_pid <&3; then
+    echo "hang-mode cargo stub never started (${signal})" >&2
+    exit 1
+  fi
+  exec 3<&-
+  kill "-${signal}" -- "-$signal_pgid"
+  status=0
+  wait "$signal_pgid" || status=$?
+  wait "$cat_pid" || reader=$?
+  if [[ "$status" -ne "$expected" ]]; then
+    echo "expected runner exit ${expected} after SIG${signal}, got ${status}" >&2
+    cat "$RUNNER_STDERR" >&2
+    exit 1
+  fi
+  if [[ "$reader" -ne 0 ]]; then
+    echo "runner stderr stayed open after SIG${signal} (a tee outlived the runner): ${reader}" >&2
+    exit 1
+  fi
+  if kill -0 "$cargo_pid" 2>/dev/null; then
+    echo "cargo stub ${cargo_pid} still running after the runner exited (${signal})" >&2
+    exit 1
+  fi
+  signal_pgid=""
+  if [[ "$(wc -l <"$INVOCATIONS" | tr -d ' ')" -ne 1 ]]; then
+    echo "expected SIG${signal} to stop the runner before the second cargo invocation" >&2
+    cat "$INVOCATIONS" >&2
+    exit 1
+  fi
+  assert_meili_started_and_removed_once "SIG${signal}"
+}
+
+signal_case INT 130
+signal_case TERM 143
 
 echo "run-collaboration-admission-fixture-test: ok"
