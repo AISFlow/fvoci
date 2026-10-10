@@ -11,13 +11,21 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import process from "node:process";
-import { admittedBrowser, browserInventory, identity, runtimeAccess } from "./admission.ts";
+import {
+  admittedBrowser,
+  assertRuntimeJob,
+  browserInventory,
+  identity,
+  runtimeAccess,
+} from "./admission.ts";
 import { reference } from "./build.ts";
 import {
   accessible,
@@ -65,9 +73,9 @@ export const selectedRuns = [
   ["postgres", "off"],
   ["sqlite", "off"],
 ] as const;
-export function requestedRuns(
-  value = process.env.FVOCI_COLLAB_LANE,
-): readonly (readonly [Lane, Flow])[] {
+// The caller's `--lane` argument is the only lane source; the runtime actor's
+// sudo environment does not carry the shell's FVOCI_COLLAB_LANE.
+export function requestedRuns(value?: string): readonly (readonly [Lane, Flow])[] {
   if (value === undefined) return selectedRuns;
   const match = /^(install|postgres|sqlite)\/(on|off)$/.exec(value);
   assert.ok(match, "unknown collaboration lane");
@@ -309,10 +317,28 @@ export function prepareBrowser(output: string, chromium: string): string {
   });
   return copied;
 }
-export function runtimePermissions(output: string, sqliteParent: string, dockerGid: number): void {
+export interface PermissionBoundary {
+  identity: typeof identity;
+  // Private runtime copy of the admitted browser; returns the copied executable.
+  browser: (output: string, bun: string) => string;
+}
+const permissionBoundary: PermissionBoundary = {
+  identity,
+  browser: (output, bun) =>
+    prepareBrowser(
+      output,
+      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
+    ),
+};
+export function runtimePermissions(
+  output: string,
+  sqliteParent: string,
+  dockerGid: number,
+  boundary: PermissionBoundary = permissionBoundary,
+): void {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
-  const owner = identity("run", output);
-  assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
+  const owner = boundary.identity("run", output);
+  assertRuntimeJob();
   const runnerUid = uid(),
     runnerGid = gid(),
     temp = realpathSync(env("RUNNER_TEMP"));
@@ -340,10 +366,7 @@ export function runtimePermissions(output: string, sqliteParent: string, dockerG
   assert.equal(before.head, env("GITHUB_SHA"));
   assert.ok(deepEquals(read(join(output, "after.json")), before));
   const bun = realpathSync(tool("bun")),
-    chromium = prepareBrowser(
-      output,
-      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
-    );
+    chromium = boundary.browser(output, bun);
   const paths: Record<string, number> = Object.fromEntries(
     Object.keys(before.tracked).map((p) => [join(root, p), constants.R_OK]),
   );
@@ -485,8 +508,10 @@ export async function run(
   output: string,
   boundary: RunBoundary = runBoundary,
   expected: readonly [number, number] = [1000, 1000],
+  lane?: string,
 ): Promise<number> {
   assert.notEqual(process.env.GITHUB_JOB, "collaboration-build");
+  const runs = requestedRuns(lane);
   assertHandoffActor(output, expected);
   const owner = boundary.identity("run", output),
     before = read(join(output, "before.json")) as Inputs;
@@ -529,11 +554,13 @@ export async function run(
         runId: env("GITHUB_RUN_ID"),
         runAttempt: env("GITHUB_RUN_ATTEMPT"),
       };
-  const runs = requestedRuns();
-  const only = runs.length === 1 ? runs[0] : undefined;
+  // A later single lane reads the install receipt its caller placed in output.
+  const closedInstall = join(output, "closed-install-receipt.json");
   let closed: Reference | null = null;
-  if (only && only[0] !== "install") closed = reference(env("FVOCI_CLOSED_INSTALL_RECEIPT"));
-  else assert.equal(process.env.FVOCI_CLOSED_INSTALL_RECEIPT, undefined);
+  if (runs.length === 1 && runs[0]?.[0] !== "install") {
+    assert.ok(lstatSync(closedInstall).isFile(), "closed install receipt required");
+    closed = reference(closedInstall);
+  }
   let code = 0;
   const results: RunResult[] = [];
   let launcherFailure: {
@@ -659,8 +686,9 @@ export async function run(
       if (lane === "install") {
         const receipt = join(runRoot, "receipt.json");
         closed = reference(receipt);
+        // Exclusive private copy: never replace an occupied destination.
         if (runs.length === 1)
-          cpSync(receipt, join(output, "closed-install-receipt.json"), { errorOnExist: true });
+          writeFileSync(closedInstall, readFileSync(receipt), { flag: "wx", mode: 0o600 });
       }
     }
   } catch (error) {
@@ -724,6 +752,8 @@ export async function run(
 export function ownershipReturn(
   output: string,
   expected: readonly [number, number] = [1000, 1000],
+  lane?: string,
+  admit: typeof identity = identity,
 ): void {
   const diagnostic: Record<string, unknown> = {
     schema: 1,
@@ -738,9 +768,10 @@ export function ownershipReturn(
   try {
     assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
     assertHandoffActor(output, expected);
-    const owner = identity("run", output);
+    const owner = admit("run", output);
     diagnostic.phase = "current-source";
-    assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
+    assertRuntimeJob();
+    const requested = requestedRuns(lane);
     const before = read(join(output, "before.json")) as Inputs;
     assert.equal(before.head, env("GITHUB_SHA"));
     diagnostic.source = before.head;
@@ -851,16 +882,15 @@ export function ownershipReturn(
           }
         }
       }
-      const expected = requestedRuns();
       assert.ok(
         deepEquals(
           result.runs.map((r) => [r.lane, r.flow]),
-          expected,
+          requested,
         ),
       );
       proof = {
-        closed_current_runs: expected.map(([lane, flow]) => ({ lane, flow })),
-        ...(expected.some(([lane]) => lane === "install")
+        closed_current_runs: requested.map(([lane, flow]) => ({ lane, flow })),
+        ...(requested.some(([lane]) => lane === "install")
           ? { installation_process_receipts: 15 }
           : {}),
       };

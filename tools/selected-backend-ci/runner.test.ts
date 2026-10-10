@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -26,6 +27,7 @@ import {
   expectedFiles,
   identity,
   localAllocation,
+  runtimeJobs,
 } from "./admission.ts";
 import { buildEnv, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
 import { qualifyListing } from "./config-list.ts";
@@ -372,13 +374,6 @@ function expectFixedActorRefusal(
 
 describe.serial("selected runner contract and fail-closed controls", () => {
   test("original five lane tuple and all seven CLI modes remain exact", () => {
-    const original = readFileSync(join(root, "scripts/run-selected-backend-e2e.py"), "utf8");
-    expect(original).toContain(
-      "return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))",
-    );
-    expect(original).toContain(
-      "subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)",
-    );
     expect(selectedRuns).toEqual([
       ["install", "on"],
       ["postgres", "on"],
@@ -456,17 +451,12 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     ["run", "--output"],
     ["permissions", "--output", "/fixture", "--docker-gid", "nan"],
   ])
-    test("actual Bun CLI versus original Python exit: " + JSON.stringify(args), () => {
-      const ts = spawnSync(
+    test("actual CLI keeps a fixed exit for " + JSON.stringify(args), () => {
+      const result = spawnSync(
         [process.execPath, join(root, "scripts/run-selected-backend-e2e.ts"), ...args],
         { stdout: "pipe", stderr: "pipe" },
       );
-      const py = spawnSync(
-        [tool("python3"), join(root, "scripts/run-selected-backend-e2e.py"), ...args],
-        { stdout: "pipe", stderr: "pipe", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
-      );
-      expect(ts.exitCode).toBe(py.exitCode);
-      expect(ts.exitCode).toBe(args.includes("--help") ? 0 : 2);
+      expect(result.exitCode).toBe(args.includes("--help") ? 0 : 2);
     });
   for (const mode of modes)
     test("actual CLI refuses unallocated " + mode + " without starting resources", () => {
@@ -815,6 +805,98 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         expect(existsSync(join(output, "runtime-close-stage.json"))).toBe(false);
       });
     });
+
+  test("single install lane writes an exclusive private closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-install-on" }, async () => {
+      const { output, boundary } = cohort();
+      expect(await run(output, boundary, [uid(), gid()], "install/on")).toBe(0);
+      const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
+      expect(aggregate.runs.map((r) => [r.lane, r.flow])).toEqual([["install", "on"]]);
+      expect(aggregate.allRequestedRunsExecuted).toBe(true);
+      const install = aggregate.runs[0]?.runRoot as string,
+        closed = join(output, "closed-install-receipt.json");
+      expect(statSync(closed).mode & 0o777).toBe(0o600);
+      expect(readFileSync(closed)).toEqual(readFileSync(join(install, "receipt.json")));
+      mkdirSync(join(install, "retained-run"));
+      for (let index = 0; index < 15; index++)
+        write(join(install, "retained-run", String(index) + "-process.json"), { status: 0 });
+      expect(() => {
+        ownershipReturn(output, [uid(), gid()], undefined, () => owner);
+      }).toThrow();
+      ownershipReturn(output, [uid(), gid()], "install/on", () => owner);
+      expect(read(join(output, "runtime-close-stage.json"))).toMatchObject({
+        ownership_return_qualified: true,
+        closed_current_runs: [{ lane: "install", flow: "on" }],
+        installation_process_receipts: 15,
+      });
+    });
+  });
+  test("single install lane never replaces an occupied closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-install-on" }, async () => {
+      const { output, boundary } = cohort();
+      write(join(output, "closed-install-receipt.json"), { occupied: true });
+      expect(await run(output, boundary, [uid(), gid()], "install/on")).toBe(1);
+      expect(read(join(output, "closed-install-receipt.json"))).toEqual({ occupied: true });
+      expect(
+        (read(join(output, "selected-ci-receipt.json")) as Aggregate).launcherFailure,
+      ).toMatchObject({ code: "SELECTED_LAUNCHER_FAILED" });
+    });
+  });
+  test("a later single lane binds the caller's closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-postgres-off" }, async () => {
+      const missing = cohort();
+      let started = false;
+      missing.boundary.execute = () => {
+        started = true;
+        return 0;
+      };
+      await assert.rejects(run(missing.output, missing.boundary, [uid(), gid()], "postgres/off"));
+      expect(started).toBe(false);
+      const { output, boundary } = cohort();
+      const closed = join(output, "closed-install-receipt.json");
+      write(closed, receipt("install", "on"));
+      const execute = boundary.execute;
+      let bound: Reference | null | undefined;
+      boundary.execute = (driver, environment, log, signal) => {
+        bound = (
+          read(environment.FVOCI_ROOT_CURRENT_BINDING as string) as {
+            closedInstallReceipt: Reference | null;
+          }
+        ).closedInstallReceipt;
+        return execute(driver, environment, log, signal);
+      };
+      expect(await run(output, boundary, [uid(), gid()], "postgres/off")).toBe(0);
+      expect(bound).toEqual({ path: realpathSync(closed), sha256: sha(closed) });
+      ownershipReturn(output, [uid(), gid()], "postgres/off", () => owner);
+      const close = read(join(output, "runtime-close-stage.json")) as Record<string, unknown>;
+      expect(close.closed_current_runs).toEqual([{ lane: "postgres", flow: "off" }]);
+      expect(close).not.toHaveProperty("installation_process_receipts");
+    });
+  });
+  test("runtime admits only the whole-flow and five lane jobs", async () => {
+    for (const job of runtimeJobs)
+      await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
+        expect(identity("run")).toBe("github:fixture/repo:123:1:" + job);
+      });
+    for (const job of ["collaboration-build", "collaboration-sqlite-on-2", "web-browser-shard-1"])
+      await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
+        expect(() => identity("run")).toThrow();
+      });
+  });
+  test("lane argument is parsed and allowed only for run and owner-return", async () => {
+    expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({
+      mode: "run",
+      lane: "sqlite/off",
+      command: [],
+    });
+    expect(parseCLI(["owner-return", "--output", "/fixture", "--lane=install/on"])?.lane).toBe(
+      "install/on",
+    );
+    for (const mode of ["record-before", "record-after", "permissions", "config-list", "stage"])
+      await assert.rejects(main([mode, "--output", "/fixture", "--lane", "sqlite/off"]), {
+        message: "lane argument is only for the selected runtime",
+      });
+  });
 
   for (const change of [
     "CI",
@@ -1467,52 +1549,47 @@ try {
       },
     );
   for (const exit of [0, 7])
-    test("real stage CLI comparison against unchanged Python: " + String(exit), () => {
+    test("actual stage CLI preserves child exit " + String(exit) + " and the receipt", () => {
       const command = [
         process.execPath,
         "--eval",
         `console.log('compiler-fixture'); process.exit(${String(exit)});`,
       ];
-      const receipts: unknown[] = [];
-      for (const [executable, runner] of [
-        [process.execPath, "run-selected-backend-e2e.ts"],
-        [tool("python3"), "run-selected-backend-e2e.py"],
-      ]) {
-        const output = directory();
-        write(join(output, "before.json"), { head: source, tree });
-        const result = spawnSync(
-          [
-            executable as string,
-            join(root, "scripts", runner as string),
-            "stage",
-            "--output",
-            output,
-            "--stage-name",
-            "main",
-            "--",
-            ...command,
-          ],
-          {
-            cwd: root,
-            env: { ...process.env, ...ci, PYTHONDONTWRITEBYTECODE: "1" },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(result.exitCode).toBe(exit);
-        const receipt = read(join(output, "main-stage.json")) as {
-          seconds: number;
-          [key: string]: unknown;
-        };
-        expect(receipt.seconds).toBeGreaterThanOrEqual(0);
-        const { seconds: elapsed, ...contract } = receipt;
-        expect(Number.isFinite(elapsed)).toBe(true);
-        receipts.push(contract);
-        expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe(
-          "compiler-fixture\n",
-        );
-      }
-      expect(receipts[0]).toEqual(receipts[1]);
+      const output = directory();
+      write(join(output, "before.json"), { head: source, tree });
+      const result = spawnSync(
+        [
+          process.execPath,
+          join(root, "scripts/run-selected-backend-e2e.ts"),
+          "stage",
+          "--output",
+          output,
+          "--stage-name",
+          "main",
+          "--",
+          ...command,
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, ...ci },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).toBe(exit);
+      const receipt = read(join(output, "main-stage.json")) as {
+        source: string;
+        tree: string;
+        command: string[];
+        exit_code: number;
+        seconds: number;
+      };
+      const { seconds, ...contract } = receipt;
+      expect(contract).toEqual({ source, tree, command, exit_code: exit });
+      expect(Object.keys(receipt)).toEqual(["source", "tree", "command", "exit_code", "seconds"]);
+      expect(seconds).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(seconds)).toBe(true);
+      expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe("compiler-fixture\n");
     });
   test("main rejects broad permission arguments and nonphysical config output", async () => {
     const output = directory();

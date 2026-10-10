@@ -106,6 +106,23 @@ export function localAllocation(
   return grant;
 }
 
+// The whole-flow job and the five per-lane jobs that start the selected runtime.
+export const runtimeJobs = [
+  "collaboration-flow",
+  "collaboration-install-on",
+  "collaboration-postgres-on",
+  "collaboration-sqlite-on",
+  "collaboration-postgres-off",
+  "collaboration-sqlite-off",
+] as const;
+export function assertRuntimeJob(): void {
+  const job = process.env.GITHUB_JOB;
+  assert.ok(
+    job !== undefined && (runtimeJobs as readonly string[]).includes(job),
+    "selected runtime job only",
+  );
+}
+
 export function identity(mode = "handoff", output?: string): string {
   const execution = process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci";
   assert.ok(execution === "github-ci" || execution === "orca-local");
@@ -131,18 +148,7 @@ export function identity(mode = "handoff", output?: string): string {
     assert.ok(["handoff", "record-before", "stage", "record-after"].includes(mode));
     assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "prepare");
   } else {
-    const job = process.env.GITHUB_JOB;
-    assert.ok(job);
-    assert.ok(
-      [
-        "collaboration-flow",
-        "collaboration-install-on",
-        "collaboration-postgres-on",
-        "collaboration-sqlite-on",
-        "collaboration-postgres-off",
-        "collaboration-sqlite-off",
-      ].includes(job),
-    );
+    assertRuntimeJob();
     assert.ok(
       process.env.FVOCI_WEB_BUILD_PHASE === undefined ||
         process.env.FVOCI_WEB_BUILD_PHASE === "consume",
