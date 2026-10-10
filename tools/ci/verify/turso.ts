@@ -16,24 +16,27 @@ const REVIEWED_REF = "refs/heads/fvoci/v060-turso-verified-connection";
 const UI_REVIEWED_REF = "refs/heads/fvoci/v060-product-integration-20261005";
 
 // Every command the manual Turso workflow runs through the repository's guard
-// and fixture tools. Moving a tool to another runtime changes only this table.
+// and fixture tools. Bun loads no .env file, as the tools' own CLI tests run them.
 export const TURSO_COMMANDS = {
-  fixtures: "python3 scripts/selected-backend-ci/turso-test-fixtures.py",
-  admit: "python3 scripts/selected-backend-ci/turso-test-guard.py --admit",
-  freeze: "python3 scripts/selected-backend-ci/turso-test-guard.py --freeze",
-  diagnosticUnit: "python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit",
-  consume: "python3 scripts/selected-backend-ci/turso-test-guard.py --consume",
-  uiRecordBefore: "python3 scripts/selected-backend-ci/turso-ui.py --record-before",
-  uiFreeze: "python3 scripts/selected-backend-ci/turso-ui.py --freeze",
-  /** Packages the compiler preparation installs; python3 is there for the guard. */
-  aptPackages: "python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8",
-  /** Extra turso-ui job environment for the guard runtime. */
-  uiRuntimeEnv: { PYTHONDONTWRITEBYTECODE: "1" } as Mapping,
+  fixtures: "bun --no-env-file tools/turso/fixtures.ts",
+  admit: "bun --no-env-file tools/turso/guard.ts --admit",
+  freeze: "bun --no-env-file tools/turso/guard.ts --freeze",
+  diagnosticUnit: "bun --no-env-file tools/turso/guard.ts --diagnostic-unit",
+  consume: "bun --no-env-file tools/turso/guard.ts --consume",
+  uiRecordBefore: "bun --no-env-file tools/turso/ui.ts --record-before",
+  uiFreeze: "bun --no-env-file tools/turso/ui.ts --freeze",
+  /** Packages the compiler preparation installs. */
+  aptPackages: "gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8",
 } as const;
 
 const CHECKOUT = {
   uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
   with: { ref: "${{ github.sha }}", "persist-credentials": false },
+};
+// Every job runs a Bun tool, so each one sets up the same pinned Bun.
+const SETUP_BUN = {
+  uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+  with: { "bun-version": "1.4.2" },
 };
 
 const TARGET_INIT = `printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
@@ -128,7 +131,6 @@ const UI_JOB = {
     CARGO_INCREMENTAL: 0,
     CARGO_PROFILE_DEV_DEBUG: 0,
     CARGO_PROFILE_TEST_DEBUG: 0,
-    ...TURSO_COMMANDS.uiRuntimeEnv,
   },
   steps: [
     CHECKOUT,
@@ -143,10 +145,7 @@ const UI_JOB = {
         SQLITE_PREPARATION +
         "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
     },
-    {
-      uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-      with: { "bun-version": "1.4.2" },
-    },
+    SETUP_BUN,
     {
       name: "Credential-free fixed dependencies and fresh browser assets",
       run:
@@ -234,6 +233,7 @@ export function verifyTursoWorkflow(data: Mapping, name = TURSO_MANUAL_WORKFLOW_
     }), "trusted admission and existence output");
   require(deepEqual(get(admission, "steps"), [
     CHECKOUT,
+    SETUP_BUN,
     { name: "Pure admission fixtures (no credentials or network)", run: TURSO_COMMANDS.fixtures },
     {
       name: "Verify preexisting Environment (no configuration writes)",
@@ -265,11 +265,12 @@ export function verifyTursoWorkflow(data: Mapping, name = TURSO_MANUAL_WORKFLOW_
     get(admission, "timeout-minutes") === 5 &&
     get(runtime, "timeout-minutes") === 15, "fixed runner and budgets");
   const steps = get(runtime, "steps");
-  if (!Array.isArray(steps) || steps.length !== 5 || !steps.every(isMapping)) {
+  if (!Array.isArray(steps) || steps.length !== 6 || !steps.every(isMapping)) {
     return [...errors, `${name}: fixed credential-free build then single consuming step`];
   }
-  const [checkout, preparation, compile, unit, consume] = steps;
+  const [checkout, setupBun, preparation, compile, unit, consume] = steps;
   require(deepEqual(checkout, CHECKOUT), "exact SHA checkout with stripped credentials");
+  require(deepEqual(setupBun, SETUP_BUN), "pinned Bun before the guard runs");
   require(sameKeys(preparation, ["name", "run"]) &&
     sameKeys(compile, ["name", "run"]), "no compilation credentials");
   require(get(preparation, "run") ===
@@ -334,6 +335,7 @@ export function verifyTursoWorkflowText(text: string, name = TURSO_MANUAL_WORKFL
     unit > freeze &&
     secret > unit, "freeze, then the diagnostic unit, then the secret step");
   require(count(text, TURSO_COMMANDS.diagnosticUnit) === 1, "exactly one diagnostic unit");
+  require(!/python/i.test(text), "no Python runtime, package or environment");
   require(secret >= 0 &&
     !text.slice(0, secret).includes("secrets."), "no secret before the secret step");
 

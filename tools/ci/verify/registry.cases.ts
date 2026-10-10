@@ -31,9 +31,9 @@ const PHASES =
 const TARGET_INIT = `          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
 const UNIT =
   "      - name: Credential-free frozen diagnostic unit (exactly one test)\n" +
-  "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit\n";
+  "        run: bun --no-env-file tools/turso/guard.ts --diagnostic-unit\n";
 const UNIT_NEEDLE = "credential-free exact frozen diagnostic unit before secret consumption";
-const CONSUME = "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n";
+const CONSUME = "        run: bun --no-env-file tools/turso/guard.ts --consume\n";
 const WEB_GATE =
   '          python3 scripts/ci_selection.py gate --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n';
 const POSTGRES_MATRIX_LINE =
@@ -396,12 +396,12 @@ function caseList(): MutationCase[] {
     ["      CARGO_BUILD_JOBS: 2\n", "      CARGO_BUILD_JOBS: 12\n"],
     ["      CARGO_INCREMENTAL: 0\n", "      TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}\n"],
     [
-      "      PYTHONDONTWRITEBYTECODE: '1'\n",
-      "      BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/turso-bun-cache\n      PYTHONDONTWRITEBYTECODE: '1'\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n      BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/turso-bun-cache\n",
     ],
     [
-      "      PYTHONDONTWRITEBYTECODE: '1'\n",
-      "      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/turso-browsers\n      PYTHONDONTWRITEBYTECODE: '1'\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/turso-browsers\n",
     ],
     [bunCache, ""],
     [browserCache, ""],
@@ -421,7 +421,7 @@ function caseList(): MutationCase[] {
     ],
     ["          bun-version: 1.4.2\n", "          bun-version: latest\n"],
     ["          bun install --frozen-lockfile\n", "          bun install\n"],
-    ["          python3 scripts/selected-backend-ci/turso-ui.py --record-before\n", ""],
+    ["          bun --no-env-file tools/turso/ui.ts --record-before\n", ""],
     [
       "          bun --bun run --cwd apps/web build\n",
       "          cp -r /stale9202/dist apps/web/dist\n",
@@ -429,14 +429,14 @@ function caseList(): MutationCase[] {
     ["          bun --bun run --cwd apps/web build\n", "          bun run --cwd apps/web build\n"],
     ["--features api-schema,db-tests --jobs 2", "--features db-tests --jobs 2"],
     ["--features worker --jobs 2", "--jobs 2"],
-    ["          python3 scripts/selected-backend-ci/turso-ui.py --freeze\n", ""],
+    ["          bun --no-env-file tools/turso/ui.ts --freeze\n", ""],
     [
       "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
       "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n",
     ],
     ["${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"],
     ["${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"],
-    [CONSUME, "        run: python3 scripts/selected-backend-ci/turso-ui.py --actor\n"],
+    [CONSUME, "        run: bun --no-env-file tools/turso/ui.ts --actor\n"],
   ];
   ui.forEach(([old, replacement], index) => {
     add(
@@ -452,6 +452,132 @@ function caseList(): MutationCase[] {
     (text) => text + "    extra-step: {uses: actions/upload-artifact@v4}\n",
     "fixed private Turso UI job and current source baseline consumer",
   );
+
+  // Turso tools run on the pinned Bun: no Python runtime comes back, no job
+  // loses its Bun, and the tools never read a .env file.
+  const ADMISSION_NEEDLE = "pre-Environment admission steps";
+  const CONNECTION_NEEDLE = "fixed credential-free build then single consuming step";
+  const UI_NEEDLE = "fixed private Turso UI job and current source baseline consumer";
+  const PYTHON_NEEDLE = "turso-test.yml: text: no Python runtime, package or environment";
+  const SETUP_BUN =
+    "      # Setup action is pinned to the same maintained Web CI revision.\n" +
+    "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n" +
+    "        with:\n          bun-version: 1.4.2\n";
+  const guardTool = "bun --no-env-file tools/turso/guard.ts";
+  const uiTool = "bun --no-env-file tools/turso/ui.ts";
+  const oldGuard = "python3 scripts/selected-backend-ci/turso-test-guard.py";
+  const oldUi = "python3 scripts/selected-backend-ci/turso-ui.py";
+  const runtime: [string, string | null, string, string, string][] = [
+    // [name, section start, old, replacement, needle]
+    [
+      "fixtures-python",
+      null,
+      "bun --no-env-file tools/turso/fixtures.ts",
+      "python3 scripts/selected-backend-ci/turso-test-fixtures.py",
+      ADMISSION_NEEDLE,
+    ],
+    ["admit-python", null, `${guardTool} --admit`, `${oldGuard} --admit`, ADMISSION_NEEDLE],
+    [
+      "admit-env-file",
+      null,
+      `${guardTool} --admit`,
+      "bun tools/turso/guard.ts --admit",
+      ADMISSION_NEEDLE,
+    ],
+    [
+      "freeze-python",
+      null,
+      `${guardTool} --freeze`,
+      `${oldGuard} --freeze`,
+      "fixed fresh compilation",
+    ],
+    [
+      "unit-python",
+      null,
+      `${guardTool} --diagnostic-unit`,
+      `${oldGuard} --diagnostic-unit`,
+      UNIT_NEEDLE,
+    ],
+    [
+      "consume-python",
+      "  turso-connection:\n",
+      `${guardTool} --consume`,
+      `${oldGuard} --consume`,
+      "only one sanitized runtime step",
+    ],
+    ["ui-record-python", null, `${uiTool} --record-before`, `${oldUi} --record-before`, UI_NEEDLE],
+    ["ui-freeze-python", null, `${uiTool} --freeze`, `${oldUi} --freeze`, UI_NEEDLE],
+    ["ui-freeze-env-file", null, `${uiTool} --freeze`, "bun tools/turso/ui.ts --freeze", UI_NEEDLE],
+    [
+      "ui-consume-python",
+      "  turso-ui:\n",
+      `${guardTool} --consume`,
+      `${oldGuard} --consume`,
+      UI_NEEDLE,
+    ],
+    [
+      "connection-apt-python",
+      "  turso-connection:\n",
+      "--no-install-recommends gcc",
+      "--no-install-recommends python3 gcc",
+      "maintained pinned compiler/native preparation",
+    ],
+    [
+      "ui-apt-python",
+      "  turso-ui:\n",
+      "--no-install-recommends gcc",
+      "--no-install-recommends python3 gcc",
+      UI_NEEDLE,
+    ],
+    [
+      "ui-env-python",
+      "  turso-ui:\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n",
+      "      CARGO_PROFILE_TEST_DEBUG: 0\n      PYTHONDONTWRITEBYTECODE: '1'\n",
+      UI_NEEDLE,
+    ],
+    [
+      "python-comment",
+      null,
+      "\njobs:\n",
+      "\n# python3 is no longer needed\njobs:\n",
+      PYTHON_NEEDLE,
+    ],
+    ["admission-no-bun", "  admission:\n", SETUP_BUN, "", ADMISSION_NEEDLE],
+    ["connection-no-bun", "  turso-connection:\n", SETUP_BUN, "", CONNECTION_NEEDLE],
+    [
+      "admission-bun-latest",
+      "  admission:\n",
+      "          bun-version: 1.4.2\n",
+      "          bun-version: latest\n",
+      ADMISSION_NEEDLE,
+    ],
+    [
+      "connection-bun-latest",
+      "  turso-connection:\n",
+      "          bun-version: 1.4.2\n",
+      "          bun-version: latest\n",
+      "pinned Bun before the guard runs",
+    ],
+    [
+      "connection-bun-tag",
+      "  turso-connection:\n",
+      "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+      "oven-sh/setup-bun@v2",
+      "pinned Bun before the guard runs",
+    ],
+    [
+      "admission-bun-tag",
+      "  admission:\n",
+      "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+      "oven-sh/setup-bun@v2",
+      ADMISSION_NEEDLE,
+    ],
+  ];
+  for (const [name, start, old, replacement, needle] of runtime) {
+    const edit = swap(old, replacement);
+    add(`turso-bun-${name}`, "turso-test.yml", start ? within(start, null, edit) : edit, needle);
+  }
   const inputs: [string, string][] = [
     ["      ui_source_sha:\n", "      arbitrary_source:\n"],
     ["      ui_baseline_sha256:\n", "      arbitrary_dataset:\n"],
