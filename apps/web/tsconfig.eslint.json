@@ -14,7 +14,12 @@
     "../../scripts/schema-baseline/*.ts",
     "../../scripts/run-selected-backend-e2e.ts",
     "../../scripts/eslint-fixtures.test.ts",
-    "../../tools/selected-backend-ci/**/*.ts"
+    "../../tools/selected-backend-ci/**/*.ts",
+    "../../tools/ci/**/*.ts",
+    "../../tools/oracle/**/*.ts",
+    "../../tools/perf/**/*.ts",
+    "../../tools/release/**/*.ts",
+    "../../tools/turso/**/*.ts"
   ],
   "exclude": ["node_modules", "src/generated/api.ts"]
 }
