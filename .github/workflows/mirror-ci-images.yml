@@ -3,6 +3,9 @@ name: Mirror CI images
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   mirror:
     runs-on: ubuntu-26.04

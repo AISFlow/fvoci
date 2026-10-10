@@ -2151,6 +2151,17 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
         else:
             errors.extend(verify_workflow_write_scopes(data, image_path.name, CI_BASE_WRITE_SCOPES))
 
+    mirror_path = workflows_dir / MIRROR_CI_IMAGES_WORKFLOW_FILE
+    if mirror_path.is_file():
+        data, parse_err = _load_yaml_mapping(mirror_path)
+        if parse_err:
+            errors.append(f"{mirror_path.name}: {parse_err}")
+        else:
+            errors.extend(verify_workflow_write_scopes(data, mirror_path.name, {"mirror": frozenset({"packages"})}))
+            triggers = data.get("on", data.get(True))
+            if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
+                errors.append(f"{mirror_path.name}: triggers must be exactly workflow_dispatch")
+
     turso_path = workflows_dir / TURSO_MANUAL_WORKFLOW_FILE
     if turso_path.is_file():
         errors.extend(verify_turso_workflow(turso_path))

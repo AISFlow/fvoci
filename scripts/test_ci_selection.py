@@ -2789,6 +2789,39 @@ class RegistryMutationCliTest(unittest.TestCase):
                 proc, output = self._plan_against(root)
                 self._assert_no_green_outputs(proc, output, f"ci-base-image.yml: {job} may not write ['{scope}']")
 
+    def test_mirror_workflow_pull_request_target_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "mirror-ci-images.yml"
+        text = path.read_text(encoding="utf-8")
+        old = "  workflow_dispatch:\n"
+        self.assertEqual(text.count(old), 1)
+        path.write_text(text.replace(old, "  workflow_dispatch:\n  pull_request_target:\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "mirror-ci-images.yml: triggers must be exactly workflow_dispatch")
+
+    def test_mirror_workflow_contents_write_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "mirror-ci-images.yml"
+        text = path.read_text(encoding="utf-8")
+        old = "      contents: read\n      packages: write\n"
+        self.assertEqual(text.count(old), 1)
+        path.write_text(
+            text.replace(old, "      contents: read\n      contents: write\n      packages: write\n", 1),
+            encoding="utf-8",
+        )
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "mirror-ci-images.yml: mirror may not write ['contents']")
+
+    def test_mirror_workflow_extra_trigger_rejected_before_outputs(self) -> None:
+        root = self._mutated_root()
+        path = root / ".github" / "workflows" / "mirror-ci-images.yml"
+        text = path.read_text(encoding="utf-8")
+        old = "  workflow_dispatch:\n"
+        self.assertEqual(text.count(old), 1)
+        path.write_text(text.replace(old, "  workflow_dispatch:\n  push:\n", 1), encoding="utf-8")
+        proc, output = self._plan_against(root)
+        self._assert_no_green_outputs(proc, output, "mirror-ci-images.yml: triggers must be exactly workflow_dispatch")
+
     def test_release_workflow_write_scope_outside_listed_job_rejected(self) -> None:
         root = self._mutated_root()
         release = root / ".github" / "workflows" / "release.yml"
