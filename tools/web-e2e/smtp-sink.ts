@@ -5,12 +5,13 @@
 // Usage: bun tools/web-e2e/smtp-sink.ts --capture <jsonl> --port-file <file>
 // Replaces scripts/smtp-sink.py; intended differences are in the commit message.
 import { appendFileSync, writeFileSync } from "node:fs";
-// node:util's TextDecoder type takes any WHATWG label; Bun's global type lists
-// only Bun.Encoding. Both are the same runtime class.
-import { parseArgs, TextDecoder } from "node:util";
+import { parseArgs } from "node:util";
+import PostalMime from "postal-mime";
 
 const IDLE_TIMEOUT_SECONDS = 30;
 const LF = 0x0a;
+const CR = 0x0d;
+const LF_BYTE = Buffer.from([LF]);
 const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 type Session = {
@@ -18,209 +19,37 @@ type Session = {
   partial: Buffer[];
   inData: boolean;
   dataLines: string[];
+  dataBytes: Buffer[];
   mailFrom: string;
   rcptTo: string;
   out: Buffer;
   closing: boolean;
+  pumping: boolean;
 };
 
-// --- Mail decoding (single-part text/plain, as the product's lettre client sends) ---
+// postal-mime's own default; set here so the rejection boundary is the sink's.
+const MAX_MIME_NESTING_DEPTH = 256;
 
-// WHATWG maps these Python codec names to windows-1252; Python decodes them
-// as the codec itself.
-const PYTHON_ASCII = new Set(["ascii", "us-ascii", "646"]);
-const PYTHON_LATIN1 = new Set(["latin-1", "latin1", "iso-8859-1", "iso8859-1", "l1", "cp819"]);
-
-// Decodes with a WHATWG label (or Python's spelling with "_"); undefined for
-// an unknown charset.
-function decodeWith(bytes: Uint8Array, charset: string): string | undefined {
-  const label = charset.trim().toLowerCase().replace(/_/g, "-");
-  if (PYTHON_ASCII.has(label)) {
-    return Buffer.from(bytes)
-      .toString("latin1")
-      .replace(/[\x80-\xff]/g, "\ufffd");
-  }
-  if (PYTHON_LATIN1.has(label)) {
-    return Buffer.from(bytes).toString("latin1");
-  }
-  try {
-    // Every WHATWG label; RangeError for an unknown one.
-    return new TextDecoder(label, { ignoreBOM: true }).decode(bytes);
-  } catch {
-    return undefined;
-  }
-}
-
-function decodeCharset(bytes: Uint8Array, charset: string): string {
-  return decodeWith(bytes, charset) ?? utf8.decode(bytes);
-}
-
-// A body charset Python cannot look up raises in its connection handler: the
-// connection closes with no reply and nothing is stored. Throwing keeps that.
-function decodeBodyCharset(bytes: Uint8Array, charset: string): string {
-  const text = decodeWith(bytes, charset);
-  if (text === undefined) {
-    throw new Error("unknown body charset");
-  }
-  return text;
-}
-
-const HEX = /^[0-9A-Fa-f]{2}$/;
-
-// Quoted-printable body decoding with the rules of CPython binascii.a2b_qp,
-// which Python's email package applies: "=" before CR/LF is a soft break,
-// "==" yields "=", an invalid escape keeps "=", trailing whitespace is kept.
-function quotedPrintableBytes(text: string): Buffer {
-  const data = Buffer.from(text, "utf8");
-  const out: number[] = [];
-  let i = 0;
-  while (i < data.length) {
-    const byte = data[i] ?? 0;
-    i += 1;
-    if (byte !== 0x3d) {
-      out.push(byte);
-      continue;
-    }
-    if (i >= data.length) {
-      break;
-    }
-    const next = data[i] ?? 0;
-    const pair = data.subarray(i, i + 2).toString("latin1");
-    if (next === 0x0a || next === 0x0d) {
-      while (i < data.length && data[i] !== 0x0a) {
-        i += 1;
-      }
-      if (i < data.length) {
-        i += 1;
-      }
-    } else if (next === 0x3d) {
-      out.push(0x3d);
-      i += 1;
-    } else if (HEX.test(pair)) {
-      out.push(parseInt(pair, 16));
-      i += 2;
-    } else {
-      out.push(0x3d);
-    }
-  }
-  return Buffer.from(out);
-}
-
-// Python ends an encoded word at the first "?=" unless two hex digits follow, so
-// text may start with "=" only as a "=XX" escape.
-const EW_TEXT = String.raw`(?:(?:=[0-9A-Fa-f]{2}|[^?\s=])[^?\s]*)?`;
-const EW = String.raw`=\?([^?\s]+)\?([bBqQ])\?(${EW_TEXT})\?=`;
-const ENCODED_WORD = new RegExp(EW, "g");
-const LEADING_ENCODED_WORD = new RegExp(`^${EW}`);
-const TRAILING_ENCODED_WORD = new RegExp(`${EW}$`);
-
-function decodeEncodedWord(charset: string, kind: string, text: string): string {
-  const bytes =
-    kind.toUpperCase() === "B"
-      ? Buffer.from(text, "base64")
-      : Buffer.from(
-          text
-            .replace(/_/g, " ")
-            .replace(/=([0-9A-Fa-f]{2})/g, (_m, hex: string) =>
-              String.fromCharCode(parseInt(hex, 16)),
-            ),
-          "latin1",
-        );
-  // Python decodes an unknown encoded-word charset as UTF-8 (with a defect).
-  return decodeCharset(bytes, charset.split("*")[0] ?? charset);
-}
-
-// One whitespace-free token; encoded words may sit anywhere inside it.
-function decodeToken(token: string): {
-  text: string;
-  startsEncoded: boolean;
-  endsEncoded: boolean;
-} {
-  return {
-    text: token.replace(ENCODED_WORD, (_whole, charset: string, kind: string, text: string) =>
-      decodeEncodedWord(charset, kind, text),
-    ),
-    startsEncoded: LEADING_ENCODED_WORD.test(token),
-    endsEncoded: TRAILING_ENCODED_WORD.test(token),
-  };
-}
-
-// RFC 2047 unstructured value as Python's email header parser decodes it:
-// whitespace between a token ending and one starting with an encoded word is dropped.
-function decodeHeaderValue(value: string): string {
-  const parts = value.split(/([ \t]+)/);
-  const tokens = parts.map((part, index) => (index % 2 === 0 ? decodeToken(part) : undefined));
-  let result = "";
-  parts.forEach((part, index) => {
-    const token = tokens[index];
-    if (token) {
-      result += token.text;
-    } else if (!(tokens[index - 1]?.endsEncoded && tokens[index + 1]?.startsEncoded)) {
-      result += part;
-    }
-  });
-  return result;
-}
-
-function parseMessage(data: string): { headers: [string, string][]; body: string } {
-  const lines = data.split("\n");
-  const headers: [string, string][] = [];
-  let index = 0;
-  for (; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    if (line === "") {
-      index += 1;
-      break;
-    }
-    const last = headers.at(-1);
-    if (/^[\t ]/.test(line) && last) {
-      last[1] += line;
-      continue;
-    }
-    const match = /^([\x21-\x39\x3b-\x7e]+):(.*)$/.exec(line);
-    if (!match) {
-      break;
-    }
-    headers.push([match[1] ?? "", (match[2] ?? "").replace(/^[ \t]+/, "")]);
-  }
-  return { headers, body: lines.slice(index).join("\n") };
-}
-
-/** Subject and text/plain content as a mail client shows them. */
-export function decodedText(data: string): string {
-  const { headers, body } = parseMessage(data);
-  const header = (name: string) =>
-    headers.find(([key]) => key.toLowerCase() === name)?.[1].replace(/\r/g, "");
-  const subject = decodeHeaderValue(header("subject") ?? "");
-  const contentType = (header("content-type") ?? "text/plain").split(";");
-  const mime = (contentType[0] ?? "").trim().toLowerCase();
-  let content = "";
-  if (!mime.includes("/") || mime === "text/plain") {
-    const charsetParam = contentType
-      .slice(1)
-      .map((param) => /^\s*charset\s*=\s*"?([^";\s]*)"?\s*$/i.exec(param)?.[1])
-      .find((value) => value !== undefined);
-    const charset = charsetParam ?? "ascii";
-    const encoding = (header("content-transfer-encoding") ?? "").trim().toLowerCase();
-    if (encoding === "base64") {
-      content = decodeBodyCharset(Buffer.from(body, "base64"), charset);
-    } else if (encoding === "quoted-printable") {
-      content = decodeBodyCharset(quotedPrintableBytes(body), charset);
-    } else {
-      // Identity transfer encodings keep the received text (see the intent table).
-      decodeBodyCharset(new Uint8Array(), charset);
-      content = body;
-    }
-  }
-  return `Subject: ${subject}\n\n${content}`;
+/** Subject and plain-text body as a mail client shows them. postal-mime does the
+ * header, MIME, transfer-encoding, charset and body selection; a parse error rejects.
+ * The sink passes the received bytes, so a declared charset applies to them. */
+export async function decodedText(message: string | Uint8Array): Promise<string> {
+  const email = await PostalMime.parse(message, { maxNestingDepth: MAX_MIME_NESTING_DEPTH });
+  return `Subject: ${email.subject ?? ""}\n\n${email.text ?? ""}`;
 }
 
 // --- SMTP session ---
 
-function captureRecord(mailFrom: string, rcptTo: string, data: string): string {
+async function captureRecord(
+  mailFrom: string,
+  rcptTo: string,
+  data: string,
+  bytes: Buffer,
+): Promise<string> {
+  const text = await decodedText(bytes);
   const ts = (performance.timeOrigin + performance.now()) / 1000;
   // Key order and separators of Python json.dumps(ensure_ascii=False).
-  return `{"from": ${JSON.stringify(mailFrom)}, "to": ${JSON.stringify(rcptTo)}, "data": ${JSON.stringify(data)}, "text": ${JSON.stringify(decodedText(data))}, "ts": ${String(ts)}}\n`;
+  return `{"from": ${JSON.stringify(mailFrom)}, "to": ${JSON.stringify(rcptTo)}, "data": ${JSON.stringify(data)}, "text": ${JSON.stringify(text)}, "ts": ${String(ts)}}\n`;
 }
 
 function envelopeAddress(line: string): string {
@@ -247,19 +76,33 @@ function reply(socket: Bun.Socket<Session>, line: string): void {
   flush(socket);
 }
 
-function handleLine(socket: Bun.Socket<Session>, capturePath: string, line: string): void {
+// Returns a promise only for the end of DATA, whose record is decoded
+// asynchronously; the caller awaits it before reading the next line.
+function handleLine(
+  socket: Bun.Socket<Session>,
+  capturePath: string,
+  line: string,
+  bytes: Buffer,
+): Promise<void> | undefined {
   const session = socket.data;
   if (session.inData) {
     if (line === ".") {
       session.inData = false;
       const data = session.dataLines.join("\n");
+      const message = Buffer.concat(
+        session.dataBytes.flatMap((part, index) => (index === 0 ? [part] : [LF_BYTE, part])),
+      );
       session.dataLines = [];
-      appendFileSync(capturePath, captureRecord(session.mailFrom, session.rcptTo, data), "utf8");
-      reply(socket, "250 ok");
-      return;
+      session.dataBytes = [];
+      return captureRecord(session.mailFrom, session.rcptTo, data, message).then((record) => {
+        appendFileSync(capturePath, record, "utf8");
+        reply(socket, "250 ok");
+      });
     }
-    session.dataLines.push(line.startsWith(".") ? line.slice(1) : line);
-    return;
+    const stuffed = line.startsWith(".");
+    session.dataLines.push(stuffed ? line.slice(1) : line);
+    session.dataBytes.push(stuffed ? bytes.subarray(1) : bytes);
+    return undefined;
   }
   const upper = line.toUpperCase();
   if (upper.startsWith("EHLO") || upper.startsWith("HELO")) {
@@ -285,6 +128,43 @@ function handleLine(socket: Bun.Socket<Session>, capturePath: string, line: stri
     // NOOP and every unknown command.
     reply(socket, "250 ok");
   }
+  return undefined;
+}
+
+// Handles buffered lines strictly in order. One pump runs per session; data
+// arriving while it awaits a DATA record is only buffered and read afterwards,
+// so pipelined commands are answered after that message's 250.
+async function pump(socket: Bun.Socket<Session>, capturePath: string): Promise<void> {
+  const session = socket.data;
+  session.pumping = true;
+  try {
+    let newline = session.buf.indexOf(LF);
+    while (newline !== -1 && !session.closing) {
+      let end = newline;
+      while (end > 0 && session.buf[end - 1] === CR) {
+        end -= 1;
+      }
+      // Trailing CRs stripped; the decoded line is what Python's sink compared.
+      const raw = session.buf.subarray(0, end);
+      session.buf = session.buf.subarray(newline + 1);
+      const pending = handleLine(socket, capturePath, utf8.decode(raw), raw);
+      if (pending) {
+        await pending;
+      }
+      newline = session.buf.indexOf(LF);
+    }
+  } finally {
+    session.pumping = false;
+  }
+}
+
+// A parse or capture write failure drops the connection without a reply. The
+// rejection handler runs as a microtask, before any further socket event.
+function drop(socket: Bun.Socket<Session>): void {
+  const session = socket.data;
+  session.closing = true;
+  session.out = Buffer.alloc(0);
+  socket.end();
 }
 
 function onData(socket: Bun.Socket<Session>, capturePath: string, chunk: Buffer): void {
@@ -295,21 +175,10 @@ function onData(socket: Bun.Socket<Session>, capturePath: string, chunk: Buffer)
     return;
   }
   session.buf = Buffer.concat([session.buf, ...session.partial.splice(0), chunk]);
-  let newline = session.buf.indexOf(LF);
-  while (newline !== -1 && !session.closing) {
-    const raw = session.buf.subarray(0, newline);
-    session.buf = session.buf.subarray(newline + 1);
-    const line = utf8.decode(raw).replace(/\r+$/, "");
-    try {
-      handleLine(socket, capturePath, line);
-    } catch {
-      // A failed capture write drops the connection without a reply.
-      session.closing = true;
-      session.out = Buffer.alloc(0);
-      socket.end();
-      return;
-    }
-    newline = session.buf.indexOf(LF);
+  if (!session.pumping) {
+    pump(socket, capturePath).catch(() => {
+      drop(socket);
+    });
   }
 }
 
@@ -347,10 +216,12 @@ function main(argv: string[]): void {
           partial: [],
           inData: false,
           dataLines: [],
+          dataBytes: [],
           mailFrom: "",
           rcptTo: "",
           out: Buffer.alloc(0),
           closing: false,
+          pumping: false,
         };
         socket.timeout(IDLE_TIMEOUT_SECONDS);
         reply(socket, "220 fvoci-smtp-sink");
