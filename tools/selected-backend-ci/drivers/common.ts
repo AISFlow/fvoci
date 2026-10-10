@@ -1,7 +1,8 @@
 // Lane-driver primitives shared by the selected backend drivers: owned
 // commands, Docker process identities, the first-failure packet and the
 // cleanup ledger. Receipts keep the field names the runner already reads.
-import { deepEquals, sleepSync, spawn, type Subprocess } from "bun";
+import { deepEquals, sleepSync, spawn, which, type Subprocess } from "bun";
+import { dlopen, ptr } from "bun:ffi";
 import { strict as assert } from "node:assert";
 import {
   closeSync,
@@ -19,7 +20,7 @@ import {
 import { createHash } from "node:crypto";
 import { get } from "node:http";
 import { connect } from "node:net";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import process from "node:process";
 import { digest, files, jsonInteger, observedExit, root, sha, sourceInputText } from "../io.ts";
 import type { Environment } from "../io.ts";
@@ -170,7 +171,10 @@ const deathBound = 1000;
 // still checked before each signal. A step that fails does not stop the
 // others; the first failure is thrown after the rest, and a process left
 // alive is a failure. A child that exits between being listed and being
-// stopped hands its own children to init, out of reach of this walk.
+// stopped hands its own children to the nearest child subreaper. The walk is
+// whole only when the root is one, as a waited wrapper is (execSubreaper):
+// the stopped root then holds those orphans for the next pass. Under any
+// other root they go to init, out of reach of this walk.
 export function killTree(pid: number): void {
   const tree = new Map([[pid, startedAt(pid)]]);
   const order = [pid];
@@ -245,6 +249,113 @@ export function killTree(pid: number): void {
   });
   if (failure) throw failure;
 }
+
+// libc calls Bun does not expose. prctl, fcntl and syscall are variadic: every
+// argument is passed as an unsigned long, as the Linux x86-64/aarch64 ABI does.
+let libc: ReturnType<typeof openLibc> | undefined;
+function openLibc() {
+  return dlopen("libc.so.6", {
+    prctl: { args: ["i32", "u64", "u64", "u64", "u64"], returns: "i32" },
+    fcntl: { args: ["i32", "i32", "u64"], returns: "i32" },
+    syscall: { args: ["i64", "i64", "i64", "i64", "i64"], returns: "i64" },
+    pipe2: { args: ["ptr", "i32"], returns: "i32" },
+    signal: { args: ["i32", "u64"], returns: "u64" },
+    sigprocmask: { args: ["i32", "ptr", "ptr"], returns: "i32" },
+    execve: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
+  }).symbols;
+}
+const native = () => (libc ??= openLibc());
+const PR_SET_CHILD_SUBREAPER = 36;
+const PR_GET_CHILD_SUBREAPER = 37;
+const O_CLOEXEC = 0o2000000;
+const F_GETFD = 1;
+const F_SETFD = 2;
+const FD_CLOEXEC = 1;
+const SYS_CLOSE_RANGE = 436n;
+const CLOSE_RANGE_CLOEXEC = 4n;
+const SIG_SETMASK = 2;
+const SIG_ERR = 0xffffffffffffffffn;
+// The launcher writes "ok" to this fd just before its exec, and the name of
+// a step that failed after it.
+const statusFd = 3;
+// A waited wrapper is launched as `bun common.ts <cwd> <args...>`: the
+// launcher makes itself a child subreaper and confirms the flag, so an orphan
+// of the wrapper tree is reparented onto the wrapper instead of init, then
+// execs the wrapper in its own place. The pid, the process group and the flag
+// survive the exec. The status fd is close-on-exec, so an exec that succeeds
+// leaves "ok" alone in the pipe; a launcher that dies before it writes "ok"
+// leaves nothing. Bun.spawn resets a child's ignored signals and its mask, so
+// the launcher does so too, last of all; the signals Bun handles return to
+// their default at the exec. The launcher starts in its own directory, away
+// from any bunfig.toml or tsconfig.json of the wrapper's cwd.
+function execSubreaper([cwd, executable, ...rest]: string[]): never {
+  const fail = (step: string): never => {
+    writeSync(statusFd, step);
+    process.exit(1);
+  };
+  if (cwd === undefined || executable === undefined) return fail("exec");
+  try {
+    process.chdir(cwd);
+  } catch {
+    fail("exec");
+  }
+  const path = which(executable);
+  if (path === null) return fail("exec");
+  const strings: Buffer[] = [];
+  const vector = (values: string[]) => {
+    const pointers = new BigUint64Array(values.length + 1);
+    values.forEach((value, index) => {
+      const bytes = Buffer.from(value + "\0");
+      strings.push(bytes);
+      pointers[index] = BigInt(ptr(bytes));
+    });
+    return pointers;
+  };
+  const file = Buffer.from(path + "\0");
+  const argv = vector([executable, ...rest]);
+  const envp = vector(Object.entries(process.env).map(([key, value]) => `${key}=${String(value)}`));
+  const ignored = BigInt(
+    "0x" + (/^SigIgn:\s*([0-9a-f]+)$/m.exec(readText("/proc/self/status"))?.[1] ?? ""),
+  );
+  const c = native();
+  const flag = new Int32Array(1);
+  if (
+    c.prctl(PR_SET_CHILD_SUBREAPER, 1n, 0n, 0n, 0n) !== 0 ||
+    c.prctl(PR_GET_CHILD_SUBREAPER, BigInt(ptr(flag)), 0n, 0n, 0n) !== 0 ||
+    flag[0] !== 1
+  )
+    fail("subreaper");
+  // Bun opens its own fds close-on-exec; close_range (Linux 5.11) makes sure
+  // of every fd above 2. The status fd must be.
+  c.syscall(SYS_CLOSE_RANGE, 3n, 0xffffffffn, CLOSE_RANGE_CLOEXEC, 0n);
+  if (
+    c.fcntl(statusFd, F_SETFD, BigInt(FD_CLOEXEC)) !== 0 ||
+    (c.fcntl(statusFd, F_GETFD, 0n) & FD_CLOEXEC) === 0
+  )
+    fail("cloexec");
+  for (let signal = 1; signal <= 64; signal += 1)
+    if ((ignored >> BigInt(signal - 1)) & 1n && c.signal(signal, 0n) === SIG_ERR) fail("signals");
+  if (c.sigprocmask(SIG_SETMASK, ptr(new Uint8Array(128)), null) !== 0) fail("signals");
+  writeSync(statusFd, "ok");
+  c.execve(ptr(file), ptr(argv), ptr(envp));
+  return fail("exec");
+}
+// The read end of a close-on-exec pipe whose write end is the launcher's
+// status fd. Read once the wrapper has exited, when no process holds the
+// write end.
+function statusPipe(): [number, number] {
+  const ends = new Int32Array(2);
+  if (native().pipe2(ptr(ends), O_CLOEXEC) !== 0)
+    throw runtimeError("owned wrapper status pipe failed");
+  return [ends[0] as number, ends[1] as number];
+}
+function readStatus(fd: number): string {
+  const chunk = Buffer.alloc(64);
+  let text = "";
+  for (let count; (count = readSync(fd, chunk)) > 0;) text += decode(chunk.subarray(0, count));
+  return text;
+}
+
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
 // stdout and stderr go to one truncated log, or are captured as strict UTF-8.
 export const command: Command = async (args, options = {}) => {
@@ -262,16 +373,32 @@ export const command: Command = async (args, options = {}) => {
   inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
   let deadline: ReturnType<typeof setTimeout> | undefined;
+  let status: [number, number] | undefined;
+  // A wrapper tree that outlived its SIGKILL is a failure of its own, never
+  // a clean interrupt.
+  let treeFailure: Error | undefined;
   try {
-    const child = spawn(args, {
-      cwd: options.cwd ?? process.cwd(),
-      env: options.env ?? process.env,
-      stdin: options.input === undefined ? "inherit" : new TextEncoder().encode(options.input),
-      stdout: fd ?? "pipe",
-      stderr: fd ?? "pipe",
-      ...(options.waitOnInterrupt ? {} : { signal: controller.signal, killSignal: "SIGKILL" }),
-    });
-    if (options.waitOnInterrupt)
+    const cwd = resolve(options.cwd ?? process.cwd());
+    const stdin = options.input === undefined ? "inherit" : new TextEncoder().encode(options.input);
+    if (options.waitOnInterrupt) status = statusPipe();
+    const child = status
+      ? spawn([process.execPath, "--no-env-file", import.meta.path, cwd, ...args], {
+          cwd: import.meta.dir,
+          env: options.env ?? process.env,
+          stdio: [stdin, fd ?? "pipe", fd ?? "pipe", status[1]],
+        })
+      : spawn(args, {
+          cwd,
+          env: options.env ?? process.env,
+          stdin,
+          stdout: fd ?? "pipe",
+          stderr: fd ?? "pipe",
+          signal: controller.signal,
+          killSignal: "SIGKILL",
+        });
+    if (status) {
+      closeSync(status[1]);
+      status[1] = -1;
       forward = () => {
         controller.abort(interruptError());
         child.kill("SIGINT");
@@ -283,15 +410,26 @@ export const command: Command = async (args, options = {}) => {
           } catch (error) {
             child.kill("SIGKILL");
             const facts = errorFacts(error);
-            writeSync(2, `owned wrapper tree kill failed: ${facts.type}: ${facts.message}\n`);
+            treeFailure = runtimeError(
+              `owned wrapper tree kill failed: ${facts.type}: ${facts.message}`,
+            );
           }
         }, options.interruptGrace ?? wrapperInterruptGrace);
       };
+    }
     const [stdout, stderr] = await Promise.all([
       child.stdout instanceof ReadableStream ? new Response(child.stdout).bytes() : null,
       child.stderr instanceof ReadableStream ? new Response(child.stderr).bytes() : null,
       child.exited,
     ]);
+    // A launcher that never reached its exec failed its setup, unless an
+    // interrupt killed it first.
+    const launched = status ? readStatus(status[0]) : "ok";
+    if (launched !== "ok" && !(launched === "" && controller.signal.aborted))
+      throw runtimeError(
+        `owned wrapper ${launched.replace(/^ok/, "") || "launcher"} setup failed; executable=${String(args[0])}`,
+      );
+    if (treeFailure) throw treeFailure;
     if (controller.signal.aborted) throw controller.signal.reason;
     const returncode = observedExit({
       exitCode: child.exitCode ?? 0,
@@ -310,6 +448,7 @@ export const command: Command = async (args, options = {}) => {
     clearTimeout(deadline);
     inFlight.delete(interrupt);
     if (fd !== undefined) closeSync(fd);
+    for (const end of status ?? []) if (end >= 0) closeSync(end);
   }
 };
 
@@ -795,3 +934,5 @@ export function probeSetup(base: string): Promise<{ status: number; body: unknow
 export function spawnServer(args: string[], log: number): Child {
   return spawn(args, { stdin: "ignore", stdout: log, stderr: log });
 }
+
+if (import.meta.main) execSubreaper(process.argv.slice(2));

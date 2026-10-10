@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import process from "node:process";
 import { parseJson, sha } from "../io.ts";
 import {
@@ -272,34 +272,86 @@ function alive(pid: number): boolean {
   }
   return !["Z", "X"].includes(stat.charAt(stat.lastIndexOf(")") + 2));
 }
+// Every live process carrying the token in its environment, which survives
+// exec and is inherited by every process of a tree.
+const marked = (token: string) =>
+  readdirSync("/proc")
+    .filter((entry) => /^[0-9]+$/.test(entry))
+    .map(Number)
+    .filter((pid) => {
+      try {
+        return readFileSync(`/proc/${String(pid)}/environ`, "latin1").includes(token) && alive(pid);
+      } catch (error) {
+        // Gone, or another user's process.
+        if (["ENOENT", "ESRCH", "EACCES"].includes(String((error as NodeJS.ErrnoException).code)))
+          return false;
+        throw error;
+      }
+    });
+const sigkill = (pids: number[]) => {
+  for (const pid of pids)
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+};
+// Runs the fixture driver in its own process group: a group interrupt reaches
+// the wrapper and its foreground command like a terminal ^C; a direct one
+// reaches the driver alone, which forwards it to the wrapper shell only.
+async function interruptFixture(
+  shape: "trap" | "ignore" | "escape" | "foreign",
+  target: "group" | "direct",
+  grace: number,
+  check: (facts: {
+    directory: string;
+    token: string;
+    result: unknown;
+    elapsed: number;
+    foreground: number;
+  }) => void,
+  cleanup: (directory: string) => void = () => undefined,
+) {
+  const directory = temporary();
+  const token = `fvoci-wrapper-${randomUUID()}`;
+  const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
+  const child = Bun.spawn([process.execPath, fixture, directory, shape, String(grace)], {
+    env: { ...process.env, FVOCI_WRAPPER_TOKEN: token },
+    stdout: "pipe",
+    stderr: "inherit",
+    detached: true,
+  });
+  try {
+    const log = join(directory, "wrapper.log");
+    while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
+    const foreground = Number(readFileSync(join(directory, "foreground.pid"), "utf8"));
+    const started = performance.now();
+    process.kill(target === "group" ? -child.pid : child.pid, "SIGINT");
+    const output = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(0);
+    const elapsed = performance.now() - started;
+    const result: unknown = JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}");
+    check({ directory, token, result, elapsed, foreground });
+  } finally {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // The fixture group has already exited.
+    }
+    sigkill(marked(token));
+    cleanup(directory);
+    rmSync(directory, { recursive: true });
+  }
+}
+const interrupted = { error: "KeyboardInterrupt", message: "selected driver interrupted" };
 for (const [shape, target, grace, cleaned] of [
   ["ignore", "group", 1000, false],
   ["trap", "direct", 1000, false],
   ["trap", "group", 3000, true],
 ] as const)
   test(`a ${target} SIGINT to a ${shape === "trap" ? "trapping" : "SIGINT-ignoring"} fixture wrapper ends within its grace`, async () => {
-    const directory = temporary();
-    // Its own process group: a group interrupt reaches the wrapper and its
-    // foreground command like a terminal ^C; a direct one reaches the driver
-    // alone, which forwards it to the wrapper shell only.
-    const fixture = join(import.meta.dir, "wrapper-interrupt.fixture.ts");
-    const child = Bun.spawn([process.execPath, fixture, directory, shape, String(grace)], {
-      stdout: "pipe",
-      stderr: "inherit",
-      detached: true,
-    });
-    try {
-      const log = join(directory, "wrapper.log");
-      while (!(existsSync(log) && readFileSync(log, "utf8").includes("ready"))) await Bun.sleep(20);
-      const foreground = Number(readFileSync(join(directory, "foreground.pid"), "utf8"));
-      const started = performance.now();
-      process.kill(target === "group" ? -child.pid : child.pid, "SIGINT");
-      const output = await new Response(child.stdout).text();
-      expect(await child.exited).toBe(0);
-      const elapsed = performance.now() - started;
-      expect(JSON.parse(output.split("\n").filter(Boolean).at(-1) ?? "{}")).toEqual({
-        error: "KeyboardInterrupt",
-      });
+    await interruptFixture(shape, target, grace, ({ directory, result, elapsed, foreground }) => {
+      expect(result).toEqual(interrupted);
       // A cooperative wrapper is waited for, not killed; any other is
       // SIGKILLed with its foreground command once the grace has passed.
       expect(existsSync(join(directory, "cleaned"))).toBe(cleaned);
@@ -307,37 +359,107 @@ for (const [shape, target, grace, cleaned] of [
       else expect(elapsed).toBeGreaterThanOrEqual(grace);
       expect(elapsed).toBeLessThan(grace + 2000);
       expect(alive(foreground)).toBe(false);
-    } finally {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // The fixture group has already exited.
-      }
-      rmSync(directory, { recursive: true });
-    }
+    });
   });
+// Each worker forks its sleeper and exits only once the wrapper has stopped,
+// so the sleeper is orphaned while the walk is under way. The wrapper is a
+// child subreaper and adopts it, where init would otherwise.
+test("a SIGKILLed fixture wrapper leaves no orphan of its tree alive", async () => {
+  await interruptFixture("escape", "direct", 300, ({ token, result, elapsed, foreground }) => {
+    expect(result).toEqual(interrupted);
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(2300);
+    expect(alive(foreground)).toBe(false);
+    expect(marked(token)).toEqual([]);
+  });
+});
+// A member the walk cannot signal survives the SIGKILL; the command reports
+// that, not a clean interrupt. Linux runners have passwordless sudo, as the
+// footer tests require.
+test("a fixture wrapper tree that outlives its SIGKILL fails the command", async () => {
+  let killed: number | null | undefined;
+  await interruptFixture(
+    "foreign",
+    "direct",
+    300,
+    ({ directory, result }) => {
+      expect(alive(Number(readFileSync(join(directory, "foreign.pid"), "utf8")))).toBe(true);
+      expect(result).toEqual({
+        error: "RuntimeError",
+        message: expect.stringMatching(/^owned wrapper tree kill failed: /) as unknown,
+      });
+    },
+    (directory) => {
+      // sudo drops the token from the environment; the pid file names it.
+      const recorded = join(directory, "foreign.pid");
+      if (existsSync(recorded))
+        killed = Bun.spawnSync([
+          "sudo",
+          "-n",
+          "kill",
+          "-KILL",
+          readFileSync(recorded, "utf8").trim(),
+        ]).exitCode;
+    },
+  );
+  expect(killed).toBe(0);
+});
+test("a waited wrapper runs as a child subreaper in the driver's process group", async () => {
+  const directory = temporary();
+  try {
+    const log = join(directory, "wrapper.log");
+    // The subshell has exited before the read, so its sleep is already an
+    // orphan, reparented to the nearest subreaper.
+    const result = await command(
+      [
+        "bash",
+        "-c",
+        '(sleep 30 & echo $! > orphan); read -r stat < "/proc/$(cat orphan)/stat"; ' +
+          'stat=${stat##*) }; set -- $stat; parent=$2; kill -KILL "$(cat orphan)"; ' +
+          "read -r own < /proc/$$/stat; own=${own##*) }; set -- $own; " +
+          'echo "orphan-parent=$parent wrapper=$$ pgid=$3 cwd=$PWD probe=$FVOCI_WRAPPER_PROBE"',
+      ],
+      {
+        cwd: relative(process.cwd(), directory),
+        env: { ...process.env, FVOCI_WRAPPER_PROBE: "probe value" },
+        log,
+        waitOnInterrupt: true,
+      },
+    );
+    expect(result.returncode).toBe(0);
+    const ownStat = readFileSync("/proc/self/stat", "latin1");
+    const pgid = ownStat.slice(ownStat.lastIndexOf(")") + 2).split(" ")[2];
+    const text = readFileSync(log, "utf8");
+    const wrapper = / wrapper=([0-9]+) /.exec(text)?.[1];
+    expect(text).toBe(
+      `orphan-parent=${String(wrapper)} wrapper=${String(wrapper)} pgid=${String(pgid)} cwd=${directory} probe=probe value\n`,
+    );
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+test("a waited wrapper that cannot be executed fails its setup, not with an exit code", async () => {
+  const directory = temporary();
+  try {
+    const failure = await command([join(directory, "missing")], {
+      log: join(directory, "wrapper.log"),
+      required: false,
+      waitOnInterrupt: true,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).name).toBe("RuntimeError");
+    expect((failure as Error).message).toBe(
+      `owned wrapper exec setup failed; executable=${join(directory, "missing")}`,
+    );
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
 // The tree keeps forking long-lived children while it reaps short-lived ones,
 // so /proc children changes under a walk that reads it before the parent has
-// stopped. Every process of the tree inherits the token in its environment,
-// which survives exec.
+// stopped.
 test("killTree leaves no process of a forking tree alive", async () => {
   const token = `fvoci-kill-tree-${randomUUID()}`;
-  const marked = () =>
-    readdirSync("/proc")
-      .filter((entry) => /^[0-9]+$/.test(entry))
-      .map(Number)
-      .filter((pid) => {
-        try {
-          return (
-            readFileSync(`/proc/${String(pid)}/environ`, "latin1").includes(token) && alive(pid)
-          );
-        } catch (error) {
-          // Gone, or another user's process.
-          if (["ENOENT", "ESRCH", "EACCES"].includes(String((error as NodeJS.ErrnoException).code)))
-            return false;
-          throw error;
-        }
-      });
   const loop = Bun.spawn(
     [
       "bash",
@@ -357,16 +479,11 @@ test("killTree leaves no process of a forking tree alive", async () => {
       "ready\n",
     );
     killTree(loop.pid);
-    expect(marked()).toEqual([]);
+    expect(marked(token)).toEqual([]);
     await loop.exited;
     expect(loop.signalCode).toBe("SIGKILL");
   } finally {
-    for (const pid of [loop.pid, ...marked()])
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
+    sigkill([loop.pid, ...marked(token)]);
   }
 });
 
