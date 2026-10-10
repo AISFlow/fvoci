@@ -14,6 +14,7 @@ printf '%s\n' "$*" >>"$FAKE_DIR/calls"
 case "$1 $2" in
   "version -f")
     [ -n "$FAKE_VERSION_SIGNAL" ] && kill -9 $$
+    [ -n "$FAKE_VERSION_HOLD" ] && { sleep 1.2 & printf amd64; exit 0; }
     [ -n "$FAKE_VERSION_FAIL" ] && { echo "cannot connect" >&2; exit 3; }
     case "$3" in *Arch*) echo "${FAKE_ARCH:-amd64}" ;; *) echo 29.9.0 ;; esac ;;
   "buildx version") echo "github.com/docker/buildx v0.38.0 abc" ;;
@@ -235,6 +236,36 @@ fn unreadable_docker_or_git_fails_closed_and_signal_differs_from_exit() {
         &f.xtask(&["verify", "fvoci-rust-install:test"], &[]),
         "git -C",
     );
+}
+
+#[test]
+fn the_read_deadline_covers_a_descendant_holding_the_output_pipe() {
+    let f = Fixture::new();
+    f.good_image();
+    // docker exits 0 at once but leaves `sleep 1.2` holding stdout.
+    let started = std::time::Instant::now();
+    let out = f.xtask(
+        &["verify", "fvoci-rust-install:test"],
+        &[
+            ("FAKE_VERSION_HOLD", "1"),
+            ("FVOCI_INSTALL_IMAGE_READ_MS", "100"),
+        ],
+    );
+    refused(&out, "timed out after 100 ms; killed");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1000),
+        "returned after {:?}",
+        started.elapsed()
+    );
+    for bad in ["0", "300001", "-1", "1e3", " 100", ""] {
+        refused(
+            &f.xtask(
+                &["verify", "fvoci-rust-install:test"],
+                &[("FVOCI_INSTALL_IMAGE_READ_MS", bad)],
+            ),
+            "FVOCI_INSTALL_IMAGE_READ_MS must be 1..=300000 milliseconds",
+        );
+    }
 }
 
 #[test]

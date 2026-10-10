@@ -26,6 +26,9 @@
 //! context but not the tree hash; CI builds from a fresh checkout, which has none.
 //!
 //! `--root DIR` (default: this repository) selects the checkout.
+//! Every captured git or docker read runs in its own process group under one
+//! deadline (default 300 s; FVOCI_INSTALL_IMAGE_READ_MS may only lower it)
+//! that also covers reading its output; on expiry the group is killed.
 
 use crate::host;
 use crate::process::{self, RunError};
@@ -59,6 +62,26 @@ const RUN_KEYS: [(&str, &str); 3] = [
 ];
 
 const READ: Duration = Duration::from_secs(300);
+/// Lowers the read budget (milliseconds, 1..=300000) so tests can reach the
+/// deadline through the real command; anything else is refused.
+const READ_MS_VAR: &str = "FVOCI_INSTALL_IMAGE_READ_MS";
+
+fn read_budget() -> Result<Duration> {
+    let Some(raw) = std::env::var_os(READ_MS_VAR) else {
+        return Ok(READ);
+    };
+    raw.to_str()
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| (1..=READ.as_millis() as u64).contains(ms))
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            format!(
+                "{READ_MS_VAR} must be 1..={} milliseconds",
+                READ.as_millis()
+            )
+        })
+}
 const BUILD: Duration = Duration::from_secs(4 * 3600);
 const TRANSFER: Duration = Duration::from_secs(1800);
 
@@ -91,6 +114,15 @@ enum Output {
     ToStderr,
 }
 
+fn describe_run_error(shown: &str, error: RunError) -> String {
+    match error {
+        RunError::Spawn(e) => format!("cannot start {shown}: {e}"),
+        RunError::Wait(e) => format!("cannot wait for {shown}: {e}"),
+        RunError::Read(e) => format!("cannot read the output of {shown}: {e}"),
+        RunError::Timeout(t) => format!("{shown}: timed out after {} ms; killed", t.as_millis()),
+    }
+}
+
 fn child(program: &str, args: &[&str], timeout: Duration, output: Output) -> Result<Vec<u8>> {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null());
@@ -103,11 +135,15 @@ fn child(program: &str, args: &[&str], timeout: Duration, output: Output) -> Res
         command.stdout(Stdio::from(stderr));
     }
     let shown = format!("{program} {}", args.join(" "));
-    let done = process::run(&mut command, timeout, capture).map_err(|error| match error {
-        RunError::Spawn(e) => format!("cannot start {shown}: {e}"),
-        RunError::Wait(e) => format!("cannot wait for {shown}: {e}"),
-        RunError::Timeout(_) => format!("{shown}: {error}; killed"),
-    })?;
+    // A captured read owns its process group and the budget covers output
+    // collection. Build, save and load write to our stderr (no pipe to
+    // collect) and stay in our group, so a terminal interrupt reaches them.
+    let done = if capture {
+        process::run_owned(&mut command, timeout)
+    } else {
+        process::run(&mut command, timeout, false)
+    }
+    .map_err(|error| describe_run_error(&shown, error))?;
     if !done.status.success() {
         let detail = String::from_utf8_lossy(&done.stderr);
         return Err(format!(
@@ -129,7 +165,7 @@ fn text(program: &str, args: &[&str], timeout: Duration) -> Result<String> {
 }
 
 fn line(program: &str, args: &[&str]) -> Result<String> {
-    let value = text(program, args, READ)?.trim().to_owned();
+    let value = text(program, args, read_budget()?)?.trim().to_owned();
     if value.is_empty() {
         return Err(format!("{program} {}: empty output", args.join(" ")));
     }
@@ -148,7 +184,7 @@ pub fn source_tree(root: &Path) -> Result<String> {
     let status = text(
         "git",
         &["-C", r, "status", "--porcelain", "--untracked-files=normal"],
-        READ,
+        read_budget()?,
     )?;
     let tree = if status.is_empty() {
         line("git", &["-C", r, "rev-parse", "HEAD^{tree}"])?
@@ -177,8 +213,8 @@ pub fn source_tree(root: &Path) -> Result<String> {
                     .args(["-C", r])
                     .args(args)
                     .stdin(Stdio::null());
-                let done = process::run(&mut command, READ, true)
-                    .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+                let done = process::run_owned(&mut command, read_budget()?)
+                    .map_err(|e| describe_run_error(&format!("git {}", args.join(" ")), e))?;
                 if !done.status.success() {
                     return Err(format!(
                         "git {} {}: {}",
@@ -257,7 +293,7 @@ pub fn verify(root: &Path, reference: &str, want_id: Option<&str>) -> Result<Str
     let fields = text(
         "docker",
         &["image", "inspect", "-f", &template, reference],
-        READ,
+        read_budget()?,
     )
     .map_err(|e| format!("{e} (build it: cargo xtask install-image build)"))?;
     let got: Vec<&str> = fields
@@ -492,7 +528,7 @@ pub fn running(project: &str, service: &str, image: &str) -> Result<()> {
             "--filter",
             &service_filter,
         ],
-        READ,
+        read_budget()?,
     )?;
     let ids: Vec<&str> = ids.split_whitespace().collect();
     let [id] = ids.as_slice() else {
@@ -516,7 +552,7 @@ pub fn leftovers(project: &str) -> Result<Vec<String>> {
         ("volume", vec!["volume", "ls", "-q", "--filter", &filter]),
         ("network", vec!["network", "ls", "-q", "--filter", &filter]),
     ] {
-        for id in text("docker", &args, READ)?.split_whitespace() {
+        for id in text("docker", &args, read_budget()?)?.split_whitespace() {
             found.push(format!("{kind} {id}"));
         }
     }
