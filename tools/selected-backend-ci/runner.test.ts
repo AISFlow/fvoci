@@ -58,6 +58,7 @@ import {
   publicFailureFields,
   requestedRuns,
   run,
+  runtimePermissions,
   selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
@@ -885,6 +886,11 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
         expect(() => identity("run")).toThrow();
       });
+  });
+  test("permissions never grant group 0 as the docker group", () => {
+    expect(() => {
+      runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
+    }).toThrow("root group is never granted as the docker group");
   });
   test("lane argument is parsed and allowed only for run and owner-return", async () => {
     expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({

@@ -337,6 +337,8 @@ export function runtimePermissions(
   dockerGid: number,
   boundary: PermissionBoundary = permissionBoundary,
 ): void {
+  // The docker socket group joins the actor's groups; group 0 is never granted.
+  assert.ok(dockerGid > 0, "root group is never granted as the docker group");
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
   const owner = boundary.identity("run", output);
   assertRuntimeJob();
