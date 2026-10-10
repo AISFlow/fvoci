@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import {
   CLOSE_TRY_AGAIN_LATER,
@@ -43,6 +43,8 @@ await test("RefusalWatch: 거절 뒤 열리지도 못한 시도(서버 다운·�
   );
 });
 
+/** When a socket opened: wall-clock ms, or simulated ms in a test that drives mock timers. */
+let clock = () => performance.now();
 let opened: number[] = [];
 /** Every socket constructed, in order: a reconnect is a new one. */
 let made: RefusingSocket[] = [];
@@ -62,7 +64,7 @@ class RefusingSocket extends EventTarget {
       /* Like a browser socket: one closed while connecting never opens. */
       if (this.readyState !== 0) return;
       this.readyState = 1;
-      opened.push(performance.now());
+      opened.push(clock());
       this.dispatchEvent(new Event("open"));
       setTimeout(() => {
         this.serverClose();
@@ -156,8 +158,48 @@ await test("backoff 설정: 첫 재시도부터 jitter, 상한 있음, attempt �
   }
 });
 
+/** Opens during `ms` of simulated time. Every timer on the path (the fake socket, the provider's
+ * onClose reconnect, the attempt loop's sleep) is a global setTimeout, so mock timers advance it
+ * 1 ms a step; each step then drains the promise continuations it released (an attempt's
+ * rejection, the loop's next sleep) before the next one. Math.random is a seeded generator: the
+ * jitter stays (a constant would wake every loop in the same step, where each new attempt orphans
+ * the one in flight) and the run is the same every time. No scheduler timing enters the counts. */
+async function simulatedOpens(
+  ms: number,
+  make: () => { destroy(): void },
+  seed = 1,
+): Promise<number[]> {
+  let now = 0;
+  opened = [];
+  made = [];
+  let state = seed;
+  /* mulberry32 */
+  mock.method(Math, "random", () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  });
+  mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  clock = () => now;
+  const socket = make();
+  try {
+    while (now < ms) {
+      now += 1;
+      mock.timers.tick(1);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return opened;
+  } finally {
+    socket.destroy();
+    clock = () => performance.now();
+    mock.timers.reset();
+    mock.restoreAll();
+  }
+}
+
 await test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
-  const { live } = await measure(
+  const live = await simulatedOpens(
     1_500,
     () => new HocuspocusProviderWebsocket({ ...FAST, WebSocketPolyfill: RefusingSocket }),
   );
