@@ -597,7 +597,7 @@ describe("event x change kind", () => {
         payload: unknown;
         work: string;
         tested: string;
-        mode: string;
+        mode: Plan["mode"];
         reason: string;
         ok: boolean;
         selection: "none" | "full";
@@ -961,7 +961,12 @@ describe("gate", () => {
       const tested = plan.tested_sha as string;
       const withPlan = (extra: Record<string, string>) =>
         needsJson(plan, { plan_json: r.outputs.plan_json ?? "", ...extra }, results);
-      for (const extra of [{}, { postgres_matrix: "[]" }, { postgres_matrix: PR_MATRIX }]) {
+      const extras: Record<string, string>[] = [
+        {},
+        { postgres_matrix: "[]" },
+        { postgres_matrix: PR_MATRIX },
+      ];
+      for (const extra of extras) {
         const gate = await runGate("rust", withPlan(extra), tested, "pull_request");
         expect(gate.code, `${JSON.stringify(extra)} ${gate.stderr}`).toBe(0);
       }
@@ -1405,6 +1410,26 @@ describe("markdown-only lane", () => {
     },
     TIMEOUT,
   );
+
+  // Exact-set part of MarkdownOnlyLaneTest.test_fixture_and_content_read_markdown_stay_full:
+  // the planner's content-read Markdown set is exactly CONTENT_READ_MD, defined once.
+  test("content-read markdown set is exactly the probed paths", () => {
+    const source = readFileSync(planner(root), "utf8");
+    expect(source.match(/^\s*_CONTENT_READ_MARKDOWN\b\s*(?::[^=\n]*)?[|&^-]?=/gm)).toHaveLength(1);
+    const head = "\n_CONTENT_READ_MARKDOWN: frozenset[str] = frozenset(\n    {\n";
+    const start = source.indexOf(head);
+    expect(start).toBeGreaterThan(0);
+    const end = source.indexOf("\n    }\n)\n", start + head.length);
+    expect(end).toBeGreaterThan(start);
+    const lines = source.slice(start + head.length, end).split("\n");
+    const members = lines.map((line) => {
+      const m = /^ {8}"([^"\\]+)",$/.exec(line);
+      expect(m, line).not.toBeNull();
+      return (m as RegExpExecArray)[1] as string;
+    });
+    expect([...members].sort()).toEqual([...CONTENT_READ_MD].sort());
+    expect(new Set(members).size).toBe(members.length);
+  });
 
   // MarkdownOnlyLaneTest.test_ordinary_markdown_is_docs_narrow_on_every_gate
   test(

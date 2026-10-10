@@ -5,8 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vue-tsc -b tsconfig.vue.json && vite build",
-    "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json && bun run typecheck:selected-backend-ci",
+    "typecheck": "tsc -b && vue-tsc -b tsconfig.vue.json && bun run typecheck:selected-backend-ci && bun run typecheck:ci-tests",
     "typecheck:selected-backend-ci": "tsc -p ../../tools/selected-backend-ci/tsconfig.json",
+    "typecheck:ci-tests": "tsc -p ../../tools/ci/tsconfig.json",
     "test": "bun test --parallel --timeout=60000 ./src ../../tools/ci/workflows.test.ts && bun test --parallel --timeout=60000 ../../tools/selected-backend-ci",
     "test:e2e": "playwright test"
   },

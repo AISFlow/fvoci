@@ -127,8 +127,8 @@ function selectionPolicy(workflow: Workflow, name: SelectedWorkflow): void {
     ["ci-plan", gateId, ...Object.keys(products)].sort(),
     "every product job must belong to the stable gate",
   );
-  assert.ok(Object.hasOwn(workflow.on, "pull_request"));
   assert.ok(typeof workflow.on === "object" && !Array.isArray(workflow.on));
+  assert.ok(Object.hasOwn(workflow.on, "pull_request"));
   assert.equal(workflow.on.pull_request, null, "required gate cannot have path/branch filters");
   assert.ok(Object.hasOwn(workflow.on, "merge_group"), "merge_group trigger is required");
   assert.deepEqual(
