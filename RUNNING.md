@@ -1187,7 +1187,19 @@ secure cookies. Proxy body-size and timeout limits for uploads are under
 
 ### Verification
 
-`scripts/install-smoke.sh` builds the image, starts an isolated Compose project
+`scripts/install-smoke.sh` runs on an image built from the checkout by
+`scripts/install-image.sh`:
+
+```sh
+bash scripts/install-image.sh build              # labels: source tree, arch, Dockerfile hash, toolchain
+FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/install-smoke.sh
+FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/backup-restore-smoke.sh
+```
+
+An image whose labels do not match the checkout is refused, not rebuilt.
+Without `FVOCI_INSTALL_IMAGE` a local run builds it first; CI builds it once
+per architecture, hands it to both smokes with `install-image.sh save`/`load`,
+and refuses a smoke without it. The smoke starts an isolated Compose project
 (unique name, ephemeral published port, run-owned volumes), exercises setup/login,
 wiki collab body projection, HWPX upload + extraction, `/collab` availability,
 a graceful `docker compose stop server` (stopped container must report exit code 0),
@@ -1329,8 +1341,9 @@ On success the trap runs `down -v` for each project with the compose file of
 the source tree that started it, then checks that no container, volume or
 network with that project label remains. Only then does it delete the work dir
 and its 0600 env files. A failed `down` or a leftover fails the run and keeps
-the work dir. On any other failure after a project started, it keeps the
-projects and the work dir for diagnosis and prints the cleanup commands. The
+the work dir and prints the cleanup commands. On any other failure it first
+writes each project's `ps -a` and last log lines (redacted) to the evidence
+dir, then tears the projects down the same way. The
 evidence dir holds logs with the generated secrets redacted. It is kept on
 success and on failure, including build failures. It defaults to a new 0700
 directory under `TMPDIR`, and `--evidence-dir` overrides it. Generated secrets
@@ -1597,7 +1610,7 @@ KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
   docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
 ```
 
-`scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
+`scripts/backup-restore-smoke.sh` takes the same image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),
 backs it up, checks a restore with a different pepper and one with a different
@@ -1605,7 +1618,8 @@ key under the backed-up `ENCRYPTION_KEYS` id are refused before any volume
 exists, restores into a second project with a rotated superset keyring (the
 secret opens), and checks those artifacts
 plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
-Trap cleanup removes only those two projects. CI runs it as a separate job on
+Trap cleanup removes only those projects, on failure and interrupt too, and a
+leftover container, volume or network fails the run. CI runs it as a separate job on
 `ubuntu-26.04` and `ubuntu-26.04-arm` in `.github/workflows/install.yml` (no
 secrets, no image publish).
 

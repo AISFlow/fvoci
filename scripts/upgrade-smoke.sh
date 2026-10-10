@@ -29,16 +29,20 @@
 # same bucket, requires --verify-storage to refuse before the server starts,
 # restores both objects from bucket versions, and only then starts the server.
 #
-# On success the trap tears both projects down with the compose file of the tree
-# each was started from and checks that no container, volume or network of
-# either project remains; only then does it remove the work dir. A failed
-# teardown or a leftover fails the run and keeps the work dir. On any other
-# failure it keeps the projects and work dir for diagnosis and prints the
-# cleanup commands. The evidence dir (default: a new 0700 dir under TMPDIR)
-# holds redacted logs only and is kept on success and failure.
+# On success, failure and INT/TERM the trap first (on failure) writes each
+# project's `ps -a` and last 200 log lines, redacted, to the evidence dir, then
+# tears both projects down with the compose file of the tree each was started
+# from and checks that no container, volume or network of either project
+# remains; only then does it remove the work dir. A failed teardown or a
+# leftover fails the run, keeps the work dir and prints the cleanup commands.
+# The evidence dir (default: a new 0700 dir under TMPDIR) holds redacted logs
+# only and is kept on success and failure. Phases are `::group::` blocks in
+# GitHub Actions (scripts/lib/smoke-phases.sh).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/smoke-phases.sh
+source "$ROOT/scripts/lib/smoke-phases.sh"
 OLD_REF=""
 NEW_REF=""
 MAIN_REF="origin/main"
@@ -72,10 +76,7 @@ done
 
 require_cmd() {
   for cmd in "$@"; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      echo "missing required command: $cmd" >&2
-      exit 1
-    }
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
 require_cmd git docker openssl curl bun python3 sha256sum tar awk diff
@@ -113,11 +114,7 @@ log_assert() {
   printf '%s\n' "$1" | tee -a "$ASSERT_LOG"
 }
 
-fail() {
-  echo "FAIL: $*" >&2
-  printf 'FAIL: %s\n' "$*" >>"$ASSERT_LOG"
-  exit 1
-}
+SMOKE_ASSERT_LOG="$ASSERT_LOG"
 
 # Replace every generated secret with a marker before a log reaches the evidence dir.
 # The secrets go through the environment, not argv, so ps does not list them.
@@ -143,15 +140,6 @@ project_compose() {
   docker compose "${files[@]}" --project-name "$project" --env-file "$env_file" "$@"
 }
 
-# Containers, volumes and networks that still carry the project's compose label.
-owned_resources() {
-  local filter="label=com.docker.compose.project=$1" containers volumes networks
-  containers="$(docker ps -a -q --filter "$filter")" || return 1
-  volumes="$(docker volume ls -q --filter "$filter")" || return 1
-  networks="$(docker network ls -q --filter "$filter")" || return 1
-  printf '%s\n' "$containers" "$volumes" "$networks" | awk 'NF' | paste -sd' ' -
-}
-
 # `down -v` with the tree the project was started from, then prove nothing is left.
 teardown_project() {
   local project="$1" env_file="$2" tree="$3" left rc=0
@@ -175,45 +163,47 @@ teardown_project() {
 }
 
 cleanup() {
-  local status=$?
+  local status=$? torn=0
   set +e
-  if (( status == 0 )); then
-    local torn=0
-    if (( STACK_STARTED )); then
-      # Rollback first: with S3 its server joins the upgrade project's network.
-      teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
-      teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
-    fi
-    if (( torn )); then
-      printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
-      echo "upgrade-smoke passed its checks but cleanup failed; kept for diagnosis:" >&2
-      echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
-      echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
-      status=1
-    else
-      (( STACK_STARTED )) && log_assert "cleanup: both projects down, no container, volume or network left: ok"
-      rm -rf "$WORK"
-    fi
-  elif (( STACK_STARTED == 0 )); then
-    # Nothing was started and no env file was written; the work dir holds only
-    # the two source archives and recipes.
-    rm -rf "$WORK"
-  else
-    [[ -f "$UPGRADE_ENV" ]] && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200 \
+  smoke_report "$status"
+  if (( status != 0 && STACK_STARTED )); then
+    smoke_group "collect: redacted ps and logs into $EVIDENCE_DIR"
+    [[ -f "$UPGRADE_ENV" ]] && { project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" ps -a \
+      && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${UPGRADE_PROJECT}.log"
-    [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200 \
+    [[ -f "$ROLLBACK_ENV" ]] && { project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" ps -a \
+      && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
-    echo "upgrade-smoke failed after $((SECONDS - START_TS))s; kept for diagnosis:" >&2
+    smoke_group_end
+  fi
+  if (( STACK_STARTED )); then
+    smoke_group "cleanup: ${ROLLBACK_PROJECT} ${UPGRADE_PROJECT}"
+    # Rollback first: with S3 its server joins the upgrade project's network.
+    teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
+    teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
+    smoke_group_end
+  fi
+  if (( torn )); then
+    printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
+    echo "upgrade-smoke cleanup failed; kept for diagnosis:" >&2
     echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
     echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
+    (( status != 0 )) || status=1
+  else
+    (( STACK_STARTED )) && log_assert "cleanup: both projects down, no container, volume or network left: ok"
+    rm -rf "$WORK"
   fi
+  (( status == 0 )) || echo "upgrade-smoke failed after $((SECONDS - START_TS))s" >&2
   echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
+  smoke_done "$status"
   exit "$status"
 }
+smoke_init upgrade-smoke
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+phase plan
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 # --- Source identity -------------------------------------------------------
@@ -267,6 +257,7 @@ if [[ "$STORAGE" == s3 ]]; then
   log_assert "storage s3: compose.s3.yml in both trees, old backup.sh refuses S3"
 fi
 
+phase images
 # --- Images ----------------------------------------------------------------
 docker_free_gib() {
   df -P -BG "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null \
@@ -350,22 +341,6 @@ sql() {
 
 applied_versions() {
   sql "$1" "$2" "$3" "SELECT string_agg(version::text, ',' ORDER BY version) FROM fvoci.schema_migrations"
-}
-
-service_ids() {
-  docker ps -a -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2"
-}
-
-running_ids() {
-  docker ps -q --filter "label=com.docker.compose.project=$1" --filter "label=com.docker.compose.service=$2"
-}
-
-# One container of the service, running, from the expected image.
-expect_service_image() {
-  local project="$1" service="$2" image="$3" ids
-  ids="$(running_ids "$project" "$service")"
-  [[ -n "$ids" && "$(wc -l <<<"$ids")" == 1 ]] || fail "$project/$service: expected one running container, got '${ids}'"
-  [[ "$(docker inspect -f '{{.Image}}' "$ids")" == "$image" ]] || fail "$project/$service does not run image $image"
 }
 
 login() {
@@ -503,6 +478,7 @@ assert got == want and not r["previewMissing"] and not r["previewSizeMismatch"],
 ' "$@" <<<"$VS_OUT"
 }
 
+phase old-install
 # --- 1. Old install with data ---------------------------------------------
 PORT="$(pick_port)"
 BASE="http://127.0.0.1:${PORT}"
@@ -584,6 +560,7 @@ SEALED_SQL="SELECT count(*) FROM fvoci.user_mfa WHERE totp_secret LIKE 'enc:v2:k
 check_seeded_data "$BASE" "old image seeded"
 log_assert "old image seed: collab body, HWPX extract ok, sealed MFA secret (k1): ok"
 
+phase backup
 # --- 2. Pre-upgrade backup with the old checkout ---------------------------
 if [[ "$STORAGE" == local ]]; then
   log_assert "== old checkout backup.sh --leave-stopped"
@@ -640,6 +617,7 @@ cp -p "$UPGRADE_ENV" "$BACKUP_ENV"
 [[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "server still running after the pre-upgrade backup"
 log_assert "pre-upgrade backup taken, old server stopped, env copy kept (0600): ok"
 
+phase upgrade
 # --- 3. Upgrade whose init fails -------------------------------------------
 sed -i "s#^FVOCI_IMAGE=.*#FVOCI_IMAGE=${NEW_TAG}#" "$UPGRADE_ENV"
 UPGRADE_TREE="$NEW_TREE"
@@ -687,6 +665,7 @@ done
 wait_http "$BASE"
 log_assert "retry: init exit 0, server on new image, schema through ${LAST_VERSION}, no old-image container in project: ok"
 
+phase verify-upgrade
 # --- 5. Upgraded data -------------------------------------------------------
 DOCTOR="$(project_compose "${UP[@]}" "$NEW_TREE" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)" \
   || { redact <<<"$DOCTOR" >&2; fail "doctor failed on upgraded install"; }
@@ -733,6 +712,7 @@ if [[ "$STORAGE" == s3 ]]; then
 fi
 log_assert "upgraded: doctor ok, extraction kept, sealed secret opens with k1 and is invalid under another k1 (exit ${WRONG_STATUS}), new write ok: ok"
 
+phase rollback
 log_assert "== stop upgraded server before rollback"
 UPGRADED_CID="$(running_ids "$UPGRADE_PROJECT" server)"
 project_compose "${UP[@]}" "$NEW_TREE" stop -t 45 server
@@ -903,4 +883,5 @@ POST_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
 [[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "upgraded server running during rollback"
 log_assert "rollback: old image, schema through ${OLD_VERSIONS##*,}, secrets verified, seeded data present, post-backup write absent (expected loss): ok"
 
+phase collect
 log_assert "== upgrade-smoke complete ($((SECONDS - START_TS))s) old=${OLD_SHA} new=${NEW_SHA}"

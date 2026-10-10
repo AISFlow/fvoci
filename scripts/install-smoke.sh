@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
+# Container install smoke for the infra/rust developer Compose stack.
+#
+#   FVOCI_INSTALL_IMAGE=<ref> [FVOCI_INSTALL_IMAGE_ID=<id>] scripts/install-smoke.sh
+#
+# The image must come from scripts/install-image.sh (build or load) for this
+# checkout; a mismatched image is refused, never rebuilt. Without
+# FVOCI_INSTALL_IMAGE a local run first builds it with that script; CI refuses.
+# The run owns one Compose project with a unique name; its containers, volumes
+# and network are removed on success, failure and INT/TERM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/smoke-phases.sh
+source "$ROOT/scripts/lib/smoke-phases.sh"
+smoke_init install-smoke
 COMPOSE_FILE="$ROOT/infra/rust/compose.yml"
-IMAGE_TAG="${FVOCI_INSTALL_IMAGE:-fvoci-rust-install:local}"
 RUN_ID="$(openssl rand -hex 8)"
 PROJECT="fvoci-install-smoke-${RUN_ID}"
 ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-env.${RUN_ID}.XXXXXX")"
@@ -17,6 +28,10 @@ PEPPER="{\"install\":\"$(openssl rand -hex 32)\"}"
 FIXTURE_HWPX="$ROOT/compat/fixtures/sample.hwpx"
 DOCUMENT_STATE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-documents.${RUN_ID}.XXXXXX")"
 ASSERT_LOG="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-assert.${RUN_ID}.XXXXXX")"
+COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-cookie.${RUN_ID}.XXXXXX")"
+DOWNLOAD_PATH="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-download.${RUN_ID}.XXXXXX")"
+COLLAB_PROBE="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-collab-probe.${RUN_ID}.XXXXXX")"
+STACK_STARTED=0
 
 START_TS=$SECONDS
 
@@ -26,39 +41,56 @@ log_assert() {
 
 require_cmd() {
   for cmd in "$@"; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      echo "missing required command: $cmd" >&2
-      exit 1
-    }
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
 
 cleanup() {
   local status=$?
-  if (( status != 0 )); then
-    echo "== server/init logs (last 200 lines)" >&2
-    "${COMPOSE[@]}" logs --no-color --tail 200 init server >&2 || true
+  set +e
+  smoke_report "$status"
+  if (( status != 0 && STACK_STARTED )); then
+    smoke_group "collect: server/init logs (last 200 lines)"
+    smoke_quote_begin
+    "${COMPOSE[@]}" logs --no-color --tail 200 init server >&2
+    smoke_quote_end
+    smoke_group_end
   fi
-  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$ENV_FILE" "$DOCUMENT_STATE"
+  smoke_group "cleanup: ${PROJECT}"
+  docker rm -f "fvoci-install-smoke-probe-${RUN_ID}" >/dev/null 2>&1
+  if (( STACK_STARTED )); then
+    smoke_teardown "$PROJECT" "${COMPOSE[@]}" || { (( status != 0 )) || status=1; }
+  fi
+  rm -f "$ENV_FILE" "$DOCUMENT_STATE" "$COOKIE_JAR" "$DOWNLOAD_PATH" "$COLLAB_PROBE"
+  smoke_group_end
   if (( status != 0 )); then
     echo "install-smoke failed after $((SECONDS - START_TS))s; assertions:" >&2
-    cat "$ASSERT_LOG" >&2 || true
+    cat "$ASSERT_LOG" >&2
   fi
   rm -f "$ASSERT_LOG"
+  smoke_done "$status"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+phase image
 require_cmd docker openssl curl bun python3 sha256sum
+[[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
-if [[ ! -f "$FIXTURE_HWPX" ]]; then
-  echo "missing HWPX fixture: $FIXTURE_HWPX" >&2
-  exit 1
+if [[ -n "${FVOCI_INSTALL_IMAGE:-}" ]]; then
+  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" verify "$FVOCI_INSTALL_IMAGE" ${FVOCI_INSTALL_IMAGE_ID:+"$FVOCI_INSTALL_IMAGE_ID"})"
+elif smoke_actions; then
+  fail "FVOCI_INSTALL_IMAGE is required in CI: the image is built once per arch by scripts/install-image.sh; this smoke does not build it"
+else
+  log_assert "FVOCI_INSTALL_IMAGE unset: building the image for this checkout (scripts/install-image.sh build)"
+  IMAGE_ENV="$(bash "$ROOT/scripts/install-image.sh" build)"
 fi
-
+IMAGE_TAG="$(sed -n 's/^FVOCI_INSTALL_IMAGE=//p' <<<"$IMAGE_ENV")"
+IMAGE_ID="$(sed -n 's/^FVOCI_INSTALL_IMAGE_ID=//p' <<<"$IMAGE_ENV")"
+[[ -n "$IMAGE_TAG" && -n "$IMAGE_ID" ]] || fail "install-image.sh printed no image reference"
+log_assert "image ${IMAGE_TAG} (${IMAGE_ID}) built from this checkout: ok"
 HOST_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 BASE_URL="http://127.0.0.1:${HOST_PORT}"
 ORIGIN="$BASE_URL"
@@ -87,13 +119,9 @@ poll_extract_field() {
     "SELECT ${column} FROM fvoci.attachments WHERE id='${ATTACHMENT_ID}'" | tr -d '[:space:]'
 }
 
-log_assert "== build image ${IMAGE_TAG}"
-BUILD_START=$SECONDS
-docker build -f "$ROOT/infra/rust/Dockerfile" -t "$IMAGE_TAG" "$ROOT"
-log_assert "build image: ok ($((SECONDS - BUILD_START))s)"
 # Test the actual final image, not a host PATH with node hidden. Web assets are
 # browser code. Verify required product executables, not an incidental count.
-docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
+docker run --rm --name "fvoci-install-smoke-probe-${RUN_ID}" --entrypoint sh "$IMAGE_ID" -ec '
   for runtime in node nodejs bun deno qjs quickjs js d8 jsc; do
     if command -v "$runtime" >/dev/null 2>&1; then
       echo "unexpected script runtime: $runtime" >&2
@@ -114,20 +142,18 @@ docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
 log_assert "required product executables present; obsolete Node converter runtime absent: ok"
 
 
-log_assert "== start compose stack"
+phase start
 UP_START=$SECONDS
+STACK_STARTED=1
 "${COMPOSE[@]}" up -d --wait server
 SERVER_CID="$("${COMPOSE[@]}" ps -q server)"
-if [[ -z "$SERVER_CID" ]]; then
-  echo "server container id missing" >&2
-  exit 1
-fi
+[[ -n "$SERVER_CID" ]] || fail "server container id missing"
+expect_service_image "$PROJECT" server "$IMAGE_ID"
 MAPPED_PORT="$(docker port "$SERVER_CID" 8080 | head -1 | awk -F: '{print $NF}')"
 if [[ "$MAPPED_PORT" != "$HOST_PORT" ]]; then
-  echo "published port mismatch: expected ${HOST_PORT}, docker published ${MAPPED_PORT}" >&2
-  exit 1
+  fail "published port mismatch: expected ${HOST_PORT}, docker published ${MAPPED_PORT}"
 fi
-log_assert "compose up: ok ($((SECONDS - UP_START))s) base=${BASE_URL}"
+log_assert "compose up on the verified image: ok ($((SECONDS - UP_START))s) base=${BASE_URL}"
 
 wait_http() {
   local path="$1"
@@ -138,31 +164,29 @@ wait_http() {
     fi
     sleep 0.5
   done
-  echo "timed out waiting for $BASE_URL$path" >&2
-  return 1
+  fail "timed out waiting for $BASE_URL$path"
 }
 
 wait_http "/api/v1/setup"
 log_assert "setup endpoint ready: ok"
 
+phase test
+
 # Run the installed diagnostic as migrate, so its converter probe must select
 # the deployed server sibling and its shipped fonts rather than current_exe.
 if ! DOCTOR_REPORT="$("${COMPOSE[@]}" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)"; then
-  printf '%s\n' "$DOCTOR_REPORT" >&2
-  exit 1
+  fail "installed doctor failed: $DOCTOR_REPORT"
 fi
 python3 -c 'import json,sys; report=json.load(sys.stdin); assert report["ok"] is True; assert any(c["name"]=="document_convert" and c["ok"] is True for c in report["checks"]), report' <<<"$DOCTOR_REPORT"
 log_assert "installed doctor executes Rust document conversion with shipped assets: ok"
 
-COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-cookie.${RUN_ID}.XXXXXX")"
 SETUP_BODY='{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}'
 curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
   -H "content-type: application/json" -H "origin: $ORIGIN" \
   -X POST "$BASE_URL/api/v1/setup" -d "$SETUP_BODY" >/dev/null
 SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 if [[ -z "$SESSION" ]]; then
-  echo "setup did not return fvoci_session cookie" >&2
-  exit 1
+  fail "setup did not return fvoci_session cookie"
 fi
 log_assert "owner setup + session cookie: ok"
 
@@ -191,8 +215,7 @@ BODY_BEFORE="$(bun "$ROOT/scripts/install-smoke-collab.mjs" \
   --workspace-id "$WORKSPACE_ID" \
   --document-id "$DOCUMENT_ID")"
 if ! grep -q '"contentJson"' <<<"$BODY_BEFORE"; then
-  echo "collab body projection failed: $BODY_BEFORE" >&2
-  exit 1
+  fail "collab body projection failed: $BODY_BEFORE"
 fi
 log_assert "collab wiki body save + projection: ok"
 
@@ -201,11 +224,9 @@ python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
 log_assert "document import/edit/exports/public PDF on the runtime image: ok"
 
 
-COLLAB_STATUS="$(curl -sS -o /tmp/fvoci-collab-probe.$$ -w '%{http_code}' -H "origin: $ORIGIN" "$BASE_URL/collab")"
-rm -f "/tmp/fvoci-collab-probe.$$"
+COLLAB_STATUS="$(curl -sS -o "$COLLAB_PROBE" -w '%{http_code}' -H "origin: $ORIGIN" "$BASE_URL/collab")"
 if [[ "$COLLAB_STATUS" != "426" ]]; then
-  echo "expected /collab 426 when collab enabled, got $COLLAB_STATUS" >&2
-  exit 1
+  fail "expected /collab 426 when collab enabled, got $COLLAB_STATUS"
 fi
 log_assert "collab endpoint enabled (HTTP ${COLLAB_STATUS}, not 503): ok"
 
@@ -235,57 +256,47 @@ while (( SECONDS < EXTRACT_DEADLINE )); do
   sleep 1
 done
 if [[ "$EXTRACT_STATUS" == "pending" ]]; then
-  echo "extraction did not finish: status=$EXTRACT_STATUS" >&2
-  exit 1
+  fail "extraction did not finish: status=$EXTRACT_STATUS"
 fi
 if [[ "$EXTRACT_STATUS" != "ok" ]]; then
-  echo "unexpected extract status: $EXTRACT_STATUS text=$EXTRACT_TEXT" >&2
-  exit 1
+  fail "unexpected extract status: $EXTRACT_STATUS text=$EXTRACT_TEXT"
 fi
 if ! grep -q '안녕' <<<"$EXTRACT_TEXT"; then
-  echo "extract text missing 안녕: $EXTRACT_TEXT" >&2
-  exit 1
+  fail "extract text missing 안녕: $EXTRACT_TEXT"
 fi
 log_assert "extraction status done with expected text: ok (${EXTRACT_STATUS})"
 
 BODY_JSON="$BODY_BEFORE"
-DOWNLOAD_PATH="$(mktemp "${TMPDIR:-/tmp}/fvoci-install-download.${RUN_ID}.XXXXXX")"
 curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" \
   "$BASE_URL/api/v1/workspaces/${WORKSPACE_ID}/attachments/${ATTACHMENT_ID}/download" \
   -o "$DOWNLOAD_PATH"
 DOWNLOAD_SHA="$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')"
 if [[ "$DOWNLOAD_SHA" != "$FIXTURE_SHA" ]]; then
-  echo "download sha256 mismatch: $DOWNLOAD_SHA != $FIXTURE_SHA" >&2
-  exit 1
+  fail "download sha256 mismatch: $DOWNLOAD_SHA != $FIXTURE_SHA"
 fi
 log_assert "attachment download bytes match upload sha256: ok"
 
 RUNNING_UID="$(docker exec "$SERVER_CID" id -u)"
 SERVER_PID1_UID="$(docker exec "$SERVER_CID" stat -c '%u' /proc/1)"
 if [[ "$RUNNING_UID" != "1000" || "$SERVER_PID1_UID" != "1000" ]]; then
-  echo "server must run as uid 1000, got exec=${RUNNING_UID} pid1=${SERVER_PID1_UID}" >&2
-  exit 1
+  fail "server must run as uid 1000, got exec=${RUNNING_UID} pid1=${SERVER_PID1_UID}"
 fi
 log_assert "server runs as non-root uid 1000: ok"
 # Capture first: a failing inspect must fail the smoke, and grep -q must not
 # SIGPIPE the producer under pipefail.
 SERVER_ENV="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CID")"
 if grep -Eq '^(DATABASE_URL|FVOCI_MIGRATION_URL)=' <<<"$SERVER_ENV"; then
-  echo "server container must not receive the migration owner URL" >&2
-  exit 1
+  fail "server container must not receive the migration owner URL"
 fi
 log_assert "server holds only the app database URL: ok"
 if grep -Eq '^(MEILI_MASTER_KEY|FVOCI_MEILI_MASTER_KEY)=' <<<"$SERVER_ENV"; then
-  echo "server container must not receive the Meilisearch master key" >&2
-  exit 1
+  fail "server container must not receive the Meilisearch master key"
 fi
 if ! grep -Eq '^FVOCI_MEILI_URL=' <<<"$SERVER_ENV"; then
-  echo "server container missing FVOCI_MEILI_URL" >&2
-  exit 1
+  fail "server container missing FVOCI_MEILI_URL"
 fi
 if ! grep -Eq '^FVOCI_MEILI_KEY_FILE=' <<<"$SERVER_ENV"; then
-  echo "server container missing FVOCI_MEILI_KEY_FILE" >&2
-  exit 1
+  fail "server container missing FVOCI_MEILI_KEY_FILE"
 fi
 log_assert "server holds Meili URL and key file, not the master key: ok"
 SETTINGS_JSON="$(docker exec "$SERVER_CID" sh -c 'curl -fsS -H "Authorization: Bearer $(cat /run/fvoci/meili/api_key)" http://meilisearch:7700/indexes/fvoci/settings')"
@@ -296,32 +307,30 @@ log_assert "meili index settings ensured: ok"
 
 STORAGE_SAMPLE="$(docker exec "$SERVER_CID" sh -c 'find /data/storage -type f | head -1')"
 if [[ -z "$STORAGE_SAMPLE" ]]; then
-  echo "storage volume has no files after upload" >&2
-  exit 1
+  fail "storage volume has no files after upload"
 fi
 STORAGE_OWNER="$(docker exec "$SERVER_CID" stat -c '%u' "$STORAGE_SAMPLE")"
 if [[ "$STORAGE_OWNER" != "1000" ]]; then
-  echo "storage file owner expected 1000, got ${STORAGE_OWNER}" >&2
-  exit 1
+  fail "storage file owner expected 1000, got ${STORAGE_OWNER}"
 fi
 log_assert "storage files owned by service uid: ok"
 
-log_assert "== stop server (SIGTERM), then recreate the container"
+phase restart
+log_assert "stop server (SIGTERM), then recreate the container"
 STOP_CID="$SERVER_CID"
 "${COMPOSE[@]}" stop -t 45 server
 # Read the exit status of the stopped container before anything restarts it;
 # `docker restart` would reset State.ExitCode.
 STOP_STATE="$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$STOP_CID")"
 if [[ "$STOP_STATE" != "exited 0 false" ]]; then
-  echo "server stop expected 'exited 0 false', got '${STOP_STATE}'" >&2
-  exit 1
+  fail "server stop expected 'exited 0 false', got '${STOP_STATE}'"
 fi
 "${COMPOSE[@]}" up -d --force-recreate --wait server
 SERVER_CID="$("${COMPOSE[@]}" ps -q server)"
 if [[ -z "$SERVER_CID" || "$SERVER_CID" == "$STOP_CID" ]]; then
-  echo "server container was not recreated (old=${STOP_CID} new=${SERVER_CID})" >&2
-  exit 1
+  fail "server container was not recreated (old=${STOP_CID} new=${SERVER_CID})"
 fi
+expect_service_image "$PROJECT" server "$IMAGE_ID"
 wait_http "/api/v1/setup"
 log_assert "server SIGTERM clean exit 0 + new container on the same volumes: ok"
 
@@ -334,15 +343,13 @@ curl -fsS -b "$COOKIE_JAR" -H "origin: $ORIGIN" \
   -o "$DOWNLOAD_PATH"
 DOWNLOAD_SHA="$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')"
 if [[ "$DOWNLOAD_SHA" != "$FIXTURE_SHA" ]]; then
-  echo "post-restart download sha256 mismatch" >&2
-  exit 1
+  fail "post-restart download sha256 mismatch"
 fi
 
 EXTRACT_STATUS="$(poll_extract_field extract_status)"
 EXTRACT_TEXT="$(poll_extract_field extract_text)"
 if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; then
-  echo "post-restart extraction lost: $EXTRACT_STATUS $EXTRACT_TEXT" >&2
-  exit 1
+  fail "post-restart extraction lost: $EXTRACT_STATUS $EXTRACT_TEXT"
 fi
 log_assert "post-restart doc body, attachment bytes, extraction: ok"
 python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
@@ -350,6 +357,7 @@ python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
 log_assert "post-restart imported document and import job: ok"
 
 
+phase collect
 TOTAL=$((SECONDS - START_TS))
-log_assert "== install-smoke complete (${TOTAL}s)"
+log_assert "install-smoke complete (${TOTAL}s)"
 cat "$ASSERT_LOG"

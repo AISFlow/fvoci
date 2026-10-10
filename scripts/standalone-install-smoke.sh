@@ -15,9 +15,15 @@
 # the `${FVOCI_IMAGE:-...}` default is replaced, nothing else changes. The file
 # publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq,
 # python3. Secret values are compared in memory and never printed.
+# Each `step` is a phase (scripts/lib/smoke-phases.sh). The trap removes every
+# project the run created on success, failure and INT/TERM and fails a passing
+# run if a container, volume or network of one remains. Two runs on one host
+# collide on 127.0.0.1:8080: that port is part of the user compose file under test.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/smoke-phases.sh
+source "$ROOT/scripts/lib/smoke-phases.sh"
 IMAGE="${FVOCI_INSTALL_IMAGE:?FVOCI_INSTALL_IMAGE must name a built product image}"
 RUN_ID="$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 export COMPOSE_PROJECT_NAME="fvoci-install-smoke-${RUN_ID}"
@@ -28,20 +34,32 @@ BASE=http://localhost:8080
 ORIGIN=http://localhost:8080
 PROJECTS=("$MAIN")
 
-step() { printf '== %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+step() { phase "$*"; }
 
 cleanup() {
-  local status=$? p
-  if (( status != 0 )); then
-    (cd "$WORK" && docker compose ps -a >&2; docker compose logs --no-color --tail 80 >&2) || true
+  local status=$? p torn=0
+  set +e
+  smoke_report "$status"
+  if [[ -f "$WORK/compose.yml" ]]; then
+    if (( status != 0 )); then
+      smoke_group "collect: compose ps and logs (last 80 lines)"
+      smoke_quote_begin
+      (cd "$WORK" && docker compose ps -a >&2; docker compose logs --no-color --tail 80 >&2)
+      smoke_quote_end
+      smoke_group_end
+    fi
+    smoke_group "cleanup: ${PROJECTS[*]}"
+    for p in "${PROJECTS[@]}"; do
+      smoke_teardown "$p" docker compose --project-directory "$WORK" -f "$WORK/compose.yml" -p "$p" || torn=1
+    done
+    smoke_group_end
   fi
-  for p in "${PROJECTS[@]}"; do
-    (cd "$WORK" && COMPOSE_PROJECT_NAME="$p" docker compose down -v --remove-orphans >/dev/null 2>&1) || true
-  done
+  (( torn == 0 || status != 0 )) || status=1
   rm -rf "$WORK"
+  smoke_done "$status"
   exit "$status"
 }
+smoke_init standalone-install-smoke
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
