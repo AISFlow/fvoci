@@ -17,8 +17,12 @@ const LOG_PUMP_EOF_WITHIN: Duration = Duration::from_secs(5);
 
 /// A spawned server that leads its own process group, so the collab-engine
 /// helpers it spawns (same group: the product does not setsid them) die with
-/// it on cleanup. Trade-off: a terminal Ctrl-C reaches only the test process,
-/// not this group; the server is reaped only through this handle.
+/// it on cleanup. A terminal Ctrl-C reaches only the test process, not this
+/// group, and a signal-killed test runs no Drop; so the server also carries
+/// `PR_SET_PDEATHSIG(SIGKILL)` and dies with the test thread that spawned it
+/// (its helpers then die by their own parent-death signal). Spawn only from a
+/// thread that outlives the handle (a test thread or the runtime's block_on
+/// thread, never a blocking-pool thread).
 pub struct OwnedChild {
     pub child: Option<Child>,
     /// Helpers a test observed, kept for its own `wait_pids_exit` assertion.
@@ -55,7 +59,23 @@ fn cleanup_failure(message: String) {
 }
 
 impl OwnedChild {
-    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+    pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        // SAFETY: getpid has no preconditions.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: the hook only calls async-signal-safe prctl/getppid and
+        // builds errors from raw errno values (no allocation).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The test died before the death signal was armed.
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
         let child = command.process_group(0).spawn()?;
         let pgid = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
         Ok(Self {
