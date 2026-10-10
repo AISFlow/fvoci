@@ -63,6 +63,7 @@ import {
   selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
+import { copyRunnerModules } from "./test-process.ts";
 import type {
   Aggregate,
   Artifact,
@@ -1058,13 +1059,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     // below must not depend on reading the host checkout (a 0750 home on
     // developer hosts). The copy root is that probe's worktree root.
     const copied = join(shared, "tools/selected-backend-ci");
-    // runtime.ts imports the lane driver modules.
-    for (const part of ["", "drivers"]) {
-      mkdirSync(join(copied, part), { recursive: true, mode: 0o755 });
-      for (const name of readdirSync(join(import.meta.dir, part)))
-        if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
-          copyFileSync(join(import.meta.dir, part, name), join(copied, part, name));
-    }
+    copyRunnerModules(copied);
     const admission = JSON.stringify(join(copied, "admission.ts"));
     const io = JSON.stringify(join(copied, "io.ts"));
     const runtime = JSON.stringify(join(copied, "runtime.ts"));
