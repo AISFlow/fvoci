@@ -51,6 +51,8 @@ export type PlanInputs = {
   fatalError?: string | null;
   forceFullReason?: string | null;
   optInInputs?: ReadonlySet<string>;
+  /** A draft pull request: nothing is selected and the gate must fail. */
+  draft?: boolean;
   markdown?: MarkdownInputs;
 };
 
@@ -73,6 +75,9 @@ export function buildPlan(inputs: PlanInputs): Plan {
     // Unknown events still select the full job set; plan_ok stays false so
     // the required gate does not accept the run.
     decision = full("EVENT_UNKNOWN");
+    planOk = false;
+  } else if (inputs.draft) {
+    decision = { mode: "narrow", reasonCode: "PR_DRAFT", families: new Set() };
     planOk = false;
   } else if (forceFullReason) {
     decision = full(sanitizeReasonCode(forceFullReason));

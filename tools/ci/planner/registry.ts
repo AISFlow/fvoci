@@ -50,6 +50,16 @@ export const RELEASE_WORKFLOW_FILE = "release.yml";
 export const CI_BASE_WORKFLOW_FILE = "ci-base-image.yml";
 export const TURSO_MANUAL_WORKFLOW_FILE = "turso-test.yml";
 
+// The only pull_request filter allowed: the default activity types plus the
+// draft transitions, so a draft PR plans PR_DRAFT and its ready_for_review
+// runs the real selection. Branch or path filters would leave gates pending.
+export const PULL_REQUEST_TYPES = [
+  "opened",
+  "synchronize",
+  "reopened",
+  "ready_for_review",
+  "converted_to_draft",
+] as const;
 export const PLAN_JOB_ID = "ci-plan";
 export const PLAN_OUTPUT_KEYS = ["mode", "reason_code", "plan_ok", "plan_json"] as const;
 export const POSTGRES_MATRIX_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}";
@@ -205,7 +215,10 @@ export function verifyPlanRegistry(
     const triggers = data.on;
     if (!isMapping(triggers) || !Object.hasOwn(triggers, "pull_request")) {
       errors.push(`${workflow}: pull_request trigger is required for the stable gate`);
-    } else if (triggers.pull_request !== null) {
+    } else if (
+      triggers.pull_request !== null &&
+      !deepEqual(triggers.pull_request, { types: [...PULL_REQUEST_TYPES] })
+    ) {
       errors.push(`${workflow}: pull_request must be unfiltered so required gates always run`);
     }
     if (!isMapping(triggers) || !Object.hasOwn(triggers, "merge_group")) {

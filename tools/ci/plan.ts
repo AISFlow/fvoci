@@ -178,6 +178,7 @@ export function runPlan(
     paths: resolved.paths,
     fatalError: resolved.fatalError || optIns.error,
     forceFullReason: resolved.forceFullReason,
+    draft: resolved.draft,
     optInInputs: optIns.chosen,
   });
   let postgresMatrix: string | null = null;

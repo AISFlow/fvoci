@@ -4,6 +4,7 @@ import {
   eventShas,
   EventShapeError,
   mergeGroupShas,
+  pullRequestDraft,
   resolveSelectionInputs,
 } from "./events.ts";
 import type { Git } from "./git.ts";
@@ -157,6 +158,41 @@ describe("event x change kind", () => {
         path_count: 0,
       });
     }
+  });
+
+  test("a draft pull request selects nothing and is not ok, whatever changed", () => {
+    for (const paths of Object.values(CHANGE_KINDS)) {
+      for (const [workflow, plan] of Object.entries(
+        planAll(paths, "pull_request", {
+          draft: true,
+          optInInputs: new Set(["run_upgrade_smoke_arm"]),
+        }),
+      ) as [Workflow, ReturnType<typeof buildPlan>][]) {
+        expect(plan, workflow).toMatchObject({
+          mode: "narrow",
+          reason_code: "PR_DRAFT",
+          plan_ok: false,
+        });
+        expect(selectedJobs(plan), workflow).toEqual([]);
+      }
+    }
+    // A fatal input still wins (full selection, not ok).
+    for (const plan of Object.values(
+      planAll(null, "pull_request", { draft: true, fatalError: "SHA_INVALID" }),
+    )) {
+      expect(plan).toMatchObject({ mode: "full", reason_code: "SHA_INVALID", plan_ok: false });
+    }
+  });
+
+  test("pull_request.draft is read strictly", () => {
+    const pr = (draft: string) =>
+      ev(`{"action":"ready_for_review","pull_request":{"draft":${draft}}}`);
+    expect(pullRequestDraft(pr("true"))).toBe("draft");
+    expect(pullRequestDraft(pr("false"))).toBe("ready");
+    expect(pullRequestDraft(pr("null"))).toBe("ready");
+    expect(pullRequestDraft(ev('{"pull_request":{}}'))).toBe("ready");
+    for (const bad of ['"true"', "1", "[]", "{}"])
+      expect(pullRequestDraft(pr(bad)), bad).toBe("invalid");
   });
 
   test("a checkout that cannot bind is full but ok", () => {

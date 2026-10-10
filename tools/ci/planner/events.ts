@@ -102,7 +102,21 @@ export type ResolvedInputs = {
   headSha: string | null;
   mergeBaseSha: string | null;
   testedSha: string | null;
+  /** A draft pull request: the plan selects nothing and is not ok. */
+  draft: boolean;
 };
+
+/**
+ * pull_request.draft: true is a draft, false or absent is ready (including
+ * the ready_for_review action). Any other value is refused.
+ */
+export function pullRequestDraft(event: PyValue): "draft" | "ready" | "invalid" {
+  const pr = field(event, "pull_request", "event");
+  if (pr === null) return "ready";
+  const draft = field(pr, "draft", "pull_request");
+  if (draft === true) return "draft";
+  return draft === false || draft === null ? "ready" : "invalid";
+}
 
 /**
  * Bind the tested merge to the exact PR head and a trusted base lineage.
@@ -141,6 +155,7 @@ export function resolveSelectionInputs(
     headSha: null,
     mergeBaseSha: null,
     testedSha: tested,
+    draft: false,
     ...over,
   });
   if (!validateSha(tested)) return make({ fatalError: "TESTED_SHA_INVALID", testedSha: null });
@@ -173,6 +188,9 @@ export function resolveSelectionInputs(
   if (baseSha === null || headSha === null || !validateSha(baseSha) || !validateSha(headSha)) {
     return make({ fatalError: "SHA_INVALID", ...recorded });
   }
+  const draft = pullRequestDraft(event);
+  if (draft === "invalid") return make({ fatalError: "PR_DRAFT_INVALID", ...recorded });
+  if (draft === "draft") return make({ draft: true, ...recorded });
   const shas = { baseSha, headSha };
 
   const fetchError = ensureCommitShas(git, baseSha, headSha);

@@ -222,6 +222,47 @@ describe("plan CLI", () => {
   );
 
   test(
+    "a draft pull request fails its gate; ready_for_review plans normally",
+    async () => {
+      const fx = new PrCheckout();
+      const code = fx.branch({ "src/lib.rs": "fn x() {}\n" });
+      const m = fx.merge(fx.base, code);
+      const event = (action: string, draft: unknown) => ({
+        action,
+        pull_request: { draft, base: { sha: fx.base }, head: { sha: code } },
+      });
+      for (const workflow of WORKFLOWS) {
+        const draft = await cli(
+          m.work,
+          workflow,
+          "pull_request",
+          event("synchronize", true),
+          m.tested,
+        );
+        expect(draft.stdout, workflow).toBe('{"mode": "narrow", "reason_code": "PR_DRAFT"}\n');
+        const out = outputs(draft.output ?? "");
+        expect(out.get("plan_ok"), workflow).toBe("false");
+        for (const [key, value] of out)
+          if (key.startsWith("select_")) expect(value, key).toBe("false");
+        const ready = await cli(
+          m.work,
+          workflow,
+          "pull_request",
+          event("ready_for_review", false),
+          m.tested,
+        );
+        expect(ready.stdout, workflow).toBe(
+          '{"mode": "full", "reason_code": "FULL_PATH_BROADEN"}\n',
+        );
+        expect(outputs(ready.output ?? "").get("plan_ok")).toBe("true");
+      }
+      const odd = await cli(m.work, "web", "pull_request", event("opened", "yes"), m.tested);
+      expect(odd.stdout).toBe('{"mode": "full", "reason_code": "PR_DRAFT_INVALID"}\n');
+    },
+    TIMEOUT,
+  );
+
+  test(
     "unknown events and unbound checkouts are recorded, not narrowed",
     async () => {
       const fx = new PrCheckout();

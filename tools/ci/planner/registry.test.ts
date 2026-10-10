@@ -76,6 +76,11 @@ describe("plan registry", () => {
         "web: pull_request must be unfiltered so required gates always run",
       ],
       [
+        "web.yml",
+        (t) => t.replace("\n  pull_request:\n", "\n  pull_request:\n    types: [opened]\n"),
+        "web: pull_request must be unfiltered so required gates always run",
+      ],
+      [
         "install.yml",
         (t) => t.replace("types: [checks_requested]", "types: [destroyed]"),
         "install: merge_group must request checks_requested",
@@ -127,5 +132,19 @@ describe("plan registry", () => {
     writeFileSync(path, Buffer.concat([Buffer.from("# \xff\n", "latin1"), readFileSync(path)]));
     const errors = verify(loadRegistryContext(root));
     expect(errors.some((e) => e.startsWith("rust: rust.yml: YAML parse failed"))).toBe(true);
+  });
+
+  test("the draft activity types are the only pull_request filter accepted", () => {
+    const types =
+      "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n";
+    let ctx = real();
+    for (const workflow of WORKFLOWS) {
+      const name = WORKFLOW_YAML[workflow];
+      const text = read(name).replace("\n  pull_request:\n", `\n  pull_request:\n${types}`);
+      const workflows = new Map<string, ParsedWorkflow>(ctx.workflows ?? []);
+      workflows.set(name, parseWorkflow(name, text));
+      ctx = { root: ctx.root, workflows };
+    }
+    expect(verify(ctx)).toEqual([]);
   });
 });
