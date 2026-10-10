@@ -81,8 +81,8 @@
     "vue-eslint-parser": "10.4.1"
   },
   "scripts": {
-    "lint": "bash scripts/lint-web.sh",
-    "lint:fixtures": "python3 scripts/test_eslint.py",
-    "format:check": "bash scripts/format-web.sh"
+    "lint": "bun scripts/lint-web.ts",
+    "lint:fixtures": "bun scripts/test-eslint.ts",
+    "format:check": "bun scripts/format-web.ts"
   }
 }
