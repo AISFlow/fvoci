@@ -461,7 +461,7 @@ function caseList(): MutationCase[] {
   const CONNECTION_NEEDLE = "fixed credential-free build then single consuming step";
   const UI_NEEDLE = "fixed private Turso UI job and current source baseline consumer";
   const PYTHON_NEEDLE = "turso-test.yml: text: no Python runtime, package or environment";
-  const SETUP_BUN =
+  const TURSO_SETUP_BUN =
     "      # Setup action is pinned to the same maintained Web CI revision.\n" +
     "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n" +
     "        with:\n          bun-version: 1.4.2\n";
@@ -585,14 +585,14 @@ function caseList(): MutationCase[] {
     {
       name: "admission-no-bun",
       job: "admission",
-      old: SETUP_BUN,
+      old: TURSO_SETUP_BUN,
       replacement: "",
       needle: ADMISSION_NEEDLE,
     },
     {
       name: "connection-no-bun",
       job: "turso-connection",
-      old: SETUP_BUN,
+      old: TURSO_SETUP_BUN,
       replacement: "",
       needle: CONNECTION_NEEDLE,
     },
