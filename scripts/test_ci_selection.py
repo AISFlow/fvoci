@@ -1266,13 +1266,16 @@ class WorkflowRegistryTest(unittest.TestCase):
             (job_id, step)
             for job_id, job in jobs.items()
             for step in SEL._run_steps(job)
-            if "bun run lint" in step["run"]
+            if "tools/web-lint/lint-web.ts" in step["run"]
         ]
         self.assertEqual(len(lint_steps), 1)
         job_id, step = lint_steps[0]
         self.assertEqual(job_id, "web-static")
         self.assertEqual(step["run"].splitlines(), [
-            "set -euo pipefail", "bun run lint:fixtures", "bun run lint", "bun run format:check",
+            "set -euo pipefail",
+            "bun tools/web-lint/test-eslint.ts",
+            "bun tools/web-lint/lint-web.ts",
+            "bun tools/web-lint/format-web.ts",
         ])
         self.assertNotIn("continue-on-error", step)
         self.assertNotIn("if", step)
@@ -1282,7 +1285,7 @@ class WorkflowRegistryTest(unittest.TestCase):
         self.assertIn("web-static", jobs["web-ci-gate"]["needs"])
         self.assertEqual(jobs[job_id]["needs"], "ci-plan")
         self.assertFalse(any("cargo" in entry.get("run", "") or "rustup" in entry.get("run", "") for entry in steps))
-        self.assertFalse(any("format:check" in entry.get("run", "") for jid, job in jobs.items() if jid != job_id for entry in SEL._run_steps(job)))
+        self.assertFalse(any("tools/web-lint/format-web.ts" in entry.get("run", "") for jid, job in jobs.items() if jid != job_id for entry in SEL._run_steps(job)))
 
     def test_native_arm64_split_preserves_default_commands_and_build_inputs(self) -> None:
         data, error = SEL._load_yaml_mapping(ROOT / ".github/workflows/rust.yml")

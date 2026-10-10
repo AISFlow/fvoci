@@ -12,7 +12,7 @@ export type SpawnResult = {
 export type SpawnFn = (command: readonly string[], cwd: string) => SpawnResult;
 
 export function repositoryRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
 export function withDefaults(argv: readonly string[], defaults: readonly string[]): string[] {

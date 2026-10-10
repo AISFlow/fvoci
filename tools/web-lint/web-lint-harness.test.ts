@@ -171,8 +171,8 @@ test("format-web exit code follows prettier from another working directory", () 
     const bad = join(directory, "bad.ts");
     writeFileSync(good, "export const value = 1;\n");
     writeFileSync(bad, "export const value=1\n");
-    const ok = spawnSync("bun", [join(root, "scripts/format-web.ts"), good], { cwd: "/tmp", encoding: "utf8" });
-    const broken = spawnSync("bun", [join(root, "scripts/format-web.ts"), bad], { cwd: "/tmp", encoding: "utf8" });
+    const ok = spawnSync("bun", [join(root, "tools/web-lint/format-web.ts"), good], { cwd: "/tmp", encoding: "utf8" });
+    const broken = spawnSync("bun", [join(root, "tools/web-lint/format-web.ts"), bad], { cwd: "/tmp", encoding: "utf8" });
     expect(ok.status).toBe(0);
     expect(broken.status).not.toBe(0);
   } finally {

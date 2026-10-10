@@ -71,9 +71,9 @@ jobs:
       - name: Strict pinned ESLint and Vue support proofs
         run: |
           set -euo pipefail
-          bun run lint:fixtures
-          bun run lint
-          bun run format:check
+          bun tools/web-lint/test-eslint.ts
+          bun tools/web-lint/lint-web.ts
+          bun tools/web-lint/format-web.ts
       - name: Strict web and editor TypeScript and Vue template types
         run: |
           set -euo pipefail
