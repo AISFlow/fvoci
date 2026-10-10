@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+":" // 2>/dev/null; root=$(CDPATH= cd "$(dirname "$0")/.." && pwd); (cd "$root/apps/web" && bun --bun x --no-install playwright --version >/dev/null 2>&1) || exit 1; t=$(mktemp -d); bash "$root/scripts/prepare-sqlite-ci.sh" --env-file "$t/env" || { rm -rf "$t"; exit 1; }; rm -rf "$t"; exec bun --bun "$0" "$@"
 // Web Playwright entrypoint. Same flags and stage lines as the previous shell wrapper.
 
 import { spawn } from "node:child_process";
@@ -742,8 +743,52 @@ if (import.meta.main) {
   }
 }
 
-// Config-list preflight executes this shell slice from the entrypoint source.
+// Selected companion shell. Readers execute the text from selected_status=0.
 /*
+SELECTED_PHASE="whole"
+selected_status=0
+if [[ "$SELECTED_BACKENDS" == true ]]; then
+  # Mandatory companion is attempted even after pending failure; keep its first status.
+  # Preparation/build and original pending suite keep the existing CI runner UID.
+  # Only this job-owned output/native prefix transfers to the1000 runtime actor.
+  : "${FVOCI_SELECTED_CI_SQLITE_PARENT:?required exact job-owned SQLite parent}"
+  python3 - "$SQLITE3_LIB_DIR" "$FVOCI_SELECTED_CI_SQLITE_PARENT" <<'PY_PARENT'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
+PY_PARENT
+  # Exclusive runner-owned safe output stays outside the transferred prefixes.
+  safe_diagnostics="$RUNNER_TEMP/fvoci-selected-diagnostics"
+  python3 - "$safe_diagnostics" <<'PY_DIAGNOSTICS'
+from pathlib import Path
+import os,sys
+prefix=Path(sys.argv[1])
+assert prefix == Path(os.environ['RUNNER_TEMP']).resolve()/'fvoci-selected-diagnostics'
+prefix.mkdir(mode=0o700)  # occupied/symlink/foreign destinations are refused
+assert prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
+if os.environ.get('GITHUB_OUTPUT'):
+    with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+        output.write('selected-safe-diagnostics='+str(prefix)+'\n')
+PY_DIAGNOSTICS
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  docker_gid="$(stat -c %g /var/run/docker.sock)"
+  # Qualify only the existing primary read group actually required by current
+  # code/input ancestry. Inaccessible files fail before private ownership moves.
+  runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
+    --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
+  export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
+  if [[ -n "${FVOCI_COLLAB_LANE:-}" && "$FVOCI_COLLAB_LANE" != install/on ]]; then
+    : "${FVOCI_CLOSED_INSTALL_RECEIPT:?closed install receipt required}"
+    [[ -f "$FVOCI_CLOSED_INSTALL_RECEIPT" && ! -L "$FVOCI_CLOSED_INSTALL_RECEIPT" ]] || {
+      echo "closed install receipt missing" >&2
+      exit 1
+    }
+    install -m 0400 "$FVOCI_CLOSED_INSTALL_RECEIPT" "$FVOCI_SELECTED_CI_OUTPUT/closed-install-receipt.json"
+    export FVOCI_CLOSED_INSTALL_RECEIPT="$FVOCI_SELECTED_CI_OUTPUT/closed-install-receipt.json"
+  fi
+  sudo chown -h -R 1000:1000 "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
+  sudo install -d -o 1000 -g 1000 -m 0700 "$FVOCI_SELECTED_CI_OUTPUT/tmp"
   config_list_exit=not-run
   launcher_status=not-run
   if [[ "$SELECTED_PHASE" == consume ]]; then
@@ -821,4 +866,5 @@ PY_STATUS
   if [[ "$diagnostic_status" -ne 0 && "$selected_status" -eq 0 ]]; then selected_status=1; fi
 fi
 if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi
-*/
+exit "$selected_status"
+# */

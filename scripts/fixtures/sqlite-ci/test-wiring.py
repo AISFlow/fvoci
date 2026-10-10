@@ -607,10 +607,8 @@ exit "${PREREQ_EXIT:-0}"
                         self.test_workflow_root_cache_preparation_order_and_independent_crates()
 
     def test_web_build_stops_on_preflight_failure(self):
-        shutil.copytree(ROOT / 'tools/web-e2e', self.root / 'tools/web-e2e')
-        web = self.root / 'apps/web'
-        web.mkdir(parents=True)
-        (web / 'node_modules').symlink_to(ROOT / 'node_modules', target_is_directory=True)
+        shutil.copy(ROOT / 'tools/web-e2e/run.ts', self.scripts)
+        (self.root / 'apps/web').mkdir(parents=True)
         self.tool('bun', '''import os, sys
 with open(os.environ['TRACE'],'a') as t: t.write('bun '+repr(sys.argv[1:])+'\\n')
 assert sys.argv[1:] == ['--bun','x','--no-install','playwright','--version']
@@ -619,7 +617,7 @@ assert sys.argv[1:] == ['--bun','x','--no-install','playwright','--version']
 printf '%s\\n' "preflight $*" >>"$TRACE"
 exit 19
 ''')
-        result = subprocess.run([shutil.which('bun'), str(self.root / 'tools/web-e2e/run.ts')], env=self.env,
+        result = subprocess.run(['bash', str(self.scripts / 'run.ts')], env=self.env,
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1, result.stderr)
         trace = self.trace.read_text()
