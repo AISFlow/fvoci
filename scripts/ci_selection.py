@@ -65,6 +65,8 @@ RELEASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
 
 # Image publication is separate from tag-driven product releases.
 CI_BASE_WORKFLOW_FILE = "ci-base-image.yml"
+# Manual digest copy into this repository's GHCR packages. Not a PR gate.
+MIRROR_CI_IMAGES_WORKFLOW_FILE = "mirror-ci-images.yml"
 CI_BASE_WRITE_SCOPES: dict[str, frozenset[str]] = {
     "build": frozenset(),
     "push": frozenset({"packages"}),
@@ -1929,7 +1931,7 @@ def _verify_web_build_handoff(jobs: dict) -> list[str]:
 def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     workflows_dir = repo_root / ".github" / "workflows"
-    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE}
+    allowed_files = {*WORKFLOW_YAML.values(), RELEASE_WORKFLOW_FILE, CI_BASE_WORKFLOW_FILE, TURSO_MANUAL_WORKFLOW_FILE, MIRROR_CI_IMAGES_WORKFLOW_FILE}
     discovered_files = list_workflow_files(repo_root)
     if not workflows_dir.is_dir():
         errors.append("missing .github/workflows directory")
@@ -2148,6 +2150,17 @@ def verify_workflow_registry(repo_root: Path = ROOT) -> list[str]:
             errors.append(f"{image_path.name}: {parse_err}")
         else:
             errors.extend(verify_workflow_write_scopes(data, image_path.name, CI_BASE_WRITE_SCOPES))
+
+    mirror_path = workflows_dir / MIRROR_CI_IMAGES_WORKFLOW_FILE
+    if mirror_path.is_file():
+        data, parse_err = _load_yaml_mapping(mirror_path)
+        if parse_err:
+            errors.append(f"{mirror_path.name}: {parse_err}")
+        else:
+            errors.extend(verify_workflow_write_scopes(data, mirror_path.name, {"mirror": frozenset({"packages"})}))
+            triggers = data.get("on", data.get(True))
+            if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
+                errors.append(f"{mirror_path.name}: triggers must be exactly workflow_dispatch")
 
     turso_path = workflows_dir / TURSO_MANUAL_WORKFLOW_FILE
     if turso_path.is_file():
