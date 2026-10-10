@@ -2557,13 +2557,16 @@ async fn collab_lifecycle_server_process_is_non_dumpable() {
                 );
             }
 
-            let killed = std::process::Command::new("kill")
-                .args(["-s", "KILL", &server_pid.to_string()])
-                .status()
-                .expect("kill");
-            assert!(killed.success());
+            // The server only, not its group: the helpers must die through
+            // their own parent-death signal.
+            child.kill_leader();
             let status = wait_for_exit(&mut child, Duration::from_secs(10));
             assert!(!status.success(), "SIGKILLed server: {status}");
+            assert_eq!(
+                std::os::unix::process::ExitStatusExt::signal(&status),
+                Some(libc::SIGKILL),
+                "server must end by the harness SIGKILL, got {status}"
+            );
             wait_pids_exit(&helpers, Duration::from_secs(1));
             drop(ws);
             drop(logs);
