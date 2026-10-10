@@ -429,6 +429,14 @@ class PlanSelectionTest(unittest.TestCase):
         decision = SEL.decide_from_paths(["crates/document-extract/src/lib.rs"])
         self.assertEqual(decision.mode, "full")
 
+    def test_tools_prefix_is_full_path_broaden(self) -> None:
+        decision = SEL.decide_from_paths(["tools/selected-backend-ci/runtime.ts"])
+        self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN")
+
+    def test_xtask_src_prefix_is_full_path_broaden(self) -> None:
+        decision = SEL.decide_from_paths(["xtask/src/main.rs"])
+        self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN")
+
     def test_main_push_is_full(self) -> None:
         plan = SEL.build_plan(
             workflow="web",

@@ -118,6 +118,8 @@ _BROADEN_PREFIXES: tuple[str, ...] = (
     "crates/",
     # Bun `patchedDependencies` (package.json), applied by every install.
     "patches/",
+    "tools/",
+    "xtask/",
 )
 
 _BROADEN_EXACT: frozenset[str] = frozenset(
