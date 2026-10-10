@@ -309,7 +309,7 @@ class LocalAllocation(unittest.TestCase):
         self.assertEqual(self.check(), self.grant)
         grant = copy.deepcopy(self.grant)
         grant['allowedModes'] = ['fixture', 'freeze', 'record-before', 'current-build', 'actor', 'server']
-        name = 'selected-backend-ci/turso-ui.py'
+        name = 'selected-backend-ci/turso-ui.ts'
         grant['registrationHashes'] = {name: hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest()}
         with self.assertRaises(AssertionError):
             self.check(grant=grant, mode='fixture')

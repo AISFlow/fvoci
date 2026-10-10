@@ -2895,18 +2895,18 @@ class RegistryMutationCliTest(unittest.TestCase):
              "          cargo fetch --locked --manifest-path Cargo.toml\n"),
             ("          bun-version: 1.4.2\n", "          bun-version: latest\n"),
             ("          bun install --frozen-lockfile\n", "          bun install\n"),
-            ("          python3 scripts/selected-backend-ci/turso-ui.py --record-before\n", ""),
+            ("          bun scripts/selected-backend-ci/turso-ui.ts --record-before\n", ""),
             ("          bun --bun run --cwd apps/web build\n", "          cp -r /stale9202/dist apps/web/dist\n"),
             ("          bun --bun run --cwd apps/web build\n", "          bun run --cwd apps/web build\n"),
             ("--features api-schema,db-tests --jobs 2", "--features db-tests --jobs 2"),
             ("--features worker --jobs 2", "--jobs 2"),
-            ("          python3 scripts/selected-backend-ci/turso-ui.py --freeze\n", ""),
+            ("          bun scripts/selected-backend-ci/turso-ui.ts --freeze\n", ""),
             ("      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
              "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n"),
             ("${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"),
             ("${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"),
-            ("        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n",
-             "        run: python3 scripts/selected-backend-ci/turso-ui.py --actor\n"),
+            ("        run: bun scripts/selected-backend-ci/turso-test-guard.ts --consume\n",
+             "        run: bun scripts/selected-backend-ci/turso-ui.ts --actor\n"),
         ]
         for old, new in cases:
             with self.subTest(mutation=new):
@@ -2974,7 +2974,7 @@ class RegistryMutationCliTest(unittest.TestCase):
 
     def test_turso_diagnostic_unit_registration_is_exact_and_before_secrets(self) -> None:
         unit = ("      - name: Credential-free frozen diagnostic unit (exactly one test)\n"
-                "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit\n")
+                "        run: bun scripts/selected-backend-ci/turso-test-guard.ts --diagnostic-unit\n")
         needle = "credential-free exact frozen diagnostic unit before secret consumption"
         cases = [
             (unit, "", "fixed credential-free build then single consuming step"),
@@ -3008,7 +3008,7 @@ class RegistryMutationCliTest(unittest.TestCase):
                     self.assertIn(marker, text)
                     text = text.replace(marker, unit + marker, 1)
                 else:
-                    marker = "        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume\n"
+                    marker = "        run: bun scripts/selected-backend-ci/turso-test-guard.ts --consume\n"
                     self.assertIn(marker, text)
                     text = text.replace(marker, marker + unit, 1)
                 path.write_text(text, encoding="utf-8")

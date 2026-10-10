@@ -49,10 +49,10 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Pure admission fixtures (no credentials or network)
-        run: python3 scripts/selected-backend-ci/turso-test-fixtures.py
+        run: bun test scripts/selected-backend-ci/turso-test-fixtures.test.ts
       - name: Verify preexisting Environment (no configuration writes)
         id: admit
-        run: python3 scripts/selected-backend-ci/turso-test-guard.py --admit
+        run: bun scripts/selected-backend-ci/turso-test-guard.ts --admit
 
   turso-connection:
     needs: admission
@@ -87,16 +87,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --offline --lib --features db-tests --jobs 4 --no-run --message-format=json > "$RUNNER_TEMP/turso-compile.json"
-          python3 scripts/selected-backend-ci/turso-test-guard.py --freeze
+          bun scripts/selected-backend-ci/turso-test-guard.ts --freeze
       - name: Credential-free frozen diagnostic unit (exactly one test)
-        run: python3 scripts/selected-backend-ci/turso-test-guard.py --diagnostic-unit
+        run: bun scripts/selected-backend-ci/turso-test-guard.ts --diagnostic-unit
       - name: Real primary selected phase (exactly one test)
         env:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_TEST_TURSO_DATABASE_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
           FVOCI_TEST_TURSO_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
           FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: ${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}
-        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume
+        run: bun scripts/selected-backend-ci/turso-test-guard.ts --consume
 
   turso-ui:
     needs: admission
@@ -141,20 +141,20 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun --bun x playwright install --with-deps chromium
-          python3 scripts/selected-backend-ci/turso-ui.py --record-before
+          bun scripts/selected-backend-ci/turso-ui.ts --record-before
           bun --bun run --cwd apps/web build
       - name: Credential-free current native UI cohort and freeze
         run: |
           set -euo pipefail
           cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json > "$RUNNER_TEMP/ui-compile.json"
           cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --jobs 2 --bin collab-engine --message-format=json > "$RUNNER_TEMP/ui-engine-compile.json"
-          python3 scripts/selected-backend-ci/turso-ui.py --freeze
+          bun scripts/selected-backend-ci/turso-ui.ts --freeze
       - name: Actual current primary UI baseline or guarded ON restart OFF consumer
         env:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
           FVOCI_LIBSQL_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
           FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: ${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}
-        run: python3 scripts/selected-backend-ci/turso-test-guard.py --consume
+        run: bun scripts/selected-backend-ci/turso-test-guard.ts --consume
 
 # No upload of raw runtime output, credential files, SDK errors or traces.

@@ -16,7 +16,7 @@ E = Path(os.environ['FVOCI_CI_SELECTED_RUNS'])
 W = Path(__file__).resolve().parents[2]
 SELECTED_BACKEND_MODES = frozenset({'record-before', 'stage', 'record-after', 'run'})
 TURSO_UI_MODES = frozenset({'record-before', 'freeze', 'current-build', 'actor', 'fixture', 'server'})
-TURSO_UI_REGISTRATION = 'selected-backend-ci/turso-ui.py'
+TURSO_UI_REGISTRATION = 'selected-backend-ci/turso-ui.ts'
 
 # The feature list cargo actually emits for the engine stage: crates/collab-engine
 # declares `default = []`, and a compiler-artifact lists every activated feature

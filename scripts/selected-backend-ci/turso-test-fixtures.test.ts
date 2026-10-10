@@ -586,7 +586,7 @@ test("workflow keeps manual dispatch, exact sha checkout and pre-secret order", 
   expect(workflow.split("ref: ${{ github.sha }}").length - 1).toBe(3);
   expect(workflow.split("github.repository == 'AISFlow/fvoci'").length - 1).toBe(3);
   expect(workflow.split("environment: fvoci-turso-test").length - 1).toBe(2);
-  const guard = "turso-test-guard.py";
+  const guard = "turso-test-guard.ts";
   const freeze = workflow.indexOf(guard + " --freeze");
   const unit = workflow.indexOf(guard + " --diagnostic-unit");
   const secret = workflow.indexOf("      - name: Real primary selected phase");
