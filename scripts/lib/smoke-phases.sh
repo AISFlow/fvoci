@@ -103,7 +103,9 @@ fail() {
 }
 
 smoke_first_error() {
-  if [[ -s "$SMOKE_FAIL_FILE" ]]; then
+  if (( ${1:-0} == 130 || ${1:-0} == 143 )); then
+    echo "interrupted (SIG$( (( $1 == 130 )) && echo INT || echo TERM))"
+  elif [[ -s "$SMOKE_FAIL_FILE" ]]; then
     cat "$SMOKE_FAIL_FILE"
   elif [[ -n "$SMOKE_LAST_ERR" ]]; then
     printf '%s\n' "$SMOKE_LAST_ERR"
@@ -120,7 +122,7 @@ smoke_report() {
     echo "::endgroup::"
   fi
   (( status != 0 )) || return 0
-  message="phase ${SMOKE_PHASE:-setup} failed (exit ${status}): $(smoke_first_error)"
+  message="phase ${SMOKE_PHASE:-setup} failed (exit ${status}): $(smoke_first_error "$status")"
   SMOKE_REPORT="$message"
   echo "$message" >&2
   if smoke_actions; then
