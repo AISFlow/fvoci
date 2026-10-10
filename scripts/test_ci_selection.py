@@ -1649,6 +1649,22 @@ class RustSuiteRegistryFixture:
         rust.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
+def _postgres_matrix_structure_error(jobs: dict) -> str | None:
+    """rust.yml postgres must run fromJSON(plan output), not a static include list."""
+    plan_outputs = jobs.get("ci-plan", {}).get("outputs")
+    if not isinstance(plan_outputs, dict) or plan_outputs.get("postgres_matrix") != SEL.POSTGRES_MATRIX_OUTPUT_EXPR:
+        return "ci-plan must publish postgres_matrix from the plan step"
+    strategy = jobs.get("postgres", {}).get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if matrix != SEL.POSTGRES_MATRIX_EXPR:
+        return "postgres strategy.matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix), not a static include"
+    if jobs.get("postgres-build", {}).get("strategy", {}).get("matrix") == SEL.POSTGRES_MATRIX_EXPR:
+        return "postgres-build matrix must stay on its own include list"
+    if jobs.get("collaboration", {}).get("strategy", {}).get("matrix") == SEL.POSTGRES_MATRIX_EXPR:
+        return "collaboration matrix must stay on its own include list"
+    return None
+
+
 class RustSuiteRegistryTest(unittest.TestCase):
     def test_postgres_budget_exact_measured_split_and_isolation(self) -> None:
         original_a = {
@@ -1687,6 +1703,27 @@ class RustSuiteRegistryTest(unittest.TestCase):
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
         self.assertEqual(step["run"], SEL.RUST_POSTGRES_INTEGRATION_RUN_CANONICAL)
         self.assertEqual(step["env"]["FVOCI_COLLAB_ENGINE"], "${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}")
+
+    def test_postgres_workflow_matrix_is_plan_fromjson_not_static_include(self) -> None:
+        """The rust.yml postgres job must execute the plan matrix, not a static include."""
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        self.assertIsNone(_postgres_matrix_structure_error(jobs))
+        bad = copy.deepcopy(jobs)
+        catalog = json.loads(bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+        bad["postgres"]["strategy"]["matrix"] = {"include": catalog}
+        structure_error = _postgres_matrix_structure_error(bad)
+        self.assertIsNotNone(structure_error)
+        self.assertIn("static include", structure_error or "")
+        self.assertTrue(SEL.verify_postgres_budget_matrix(bad))
+        self.assertNotEqual(
+            jobs["postgres-build"]["strategy"]["matrix"],
+            SEL.POSTGRES_MATRIX_EXPR,
+        )
+        self.assertNotEqual(
+            jobs["collaboration"]["strategy"]["matrix"],
+            SEL.POSTGRES_MATRIX_EXPR,
+        )
 
     def test_postgres_arm64_b_budget_rejects_scope_and_limit_drift(self) -> None:
         jobs, error = SEL._rust_workflow_jobs(ROOT)
