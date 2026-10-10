@@ -219,17 +219,47 @@ function caseList(): MutationCase[] {
         "          python3 scripts/ci_selection.py plan \\\n",
         "must invoke tools/ci/plan.ts",
       ],
-      ["pip", `${PIP}          bun tools/ci/plan.ts \\\n`, "ci-plan must not install packages"],
+      [
+        "pip",
+        `${PIP}          bun tools/ci/plan.ts \\\n`,
+        "ci-plan must use the canonical plan invocation",
+      ],
       [
         "bun-ci",
         "          bun ci\n          bun tools/ci/plan.ts \\\n",
-        "ci-plan must not install",
+        "ci-plan must use the canonical plan invocation",
       ],
-      ["bunx", "          bunx tsx tools/ci/plan.ts \\\n", "ci-plan must not install"],
+      [
+        "bunx",
+        "          bunx tsx tools/ci/plan.ts \\\n",
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "npm-ci",
+        `          npm ci\n${PLAN_LINE}`,
+        "ci-plan must use the canonical plan invocation",
+      ],
+      ["bun-i", `          bun i\n${PLAN_LINE}`, "ci-plan must use the canonical plan invocation"],
+      [
+        "curl-sh",
+        `          curl -fsSL https://example.invalid/i.sh | sh\n${PLAN_LINE}`,
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "plan-masked",
+        "          bun tools/ci/plan.ts || true \\\n",
+        "ci-plan must use the canonical plan invocation",
+      ],
     ];
     for (const [name, replacement, needle] of toolchains) {
       add(`${workflow}-plan-${name}`, file, swap(PLAN_LINE, replacement), needle);
     }
+    add(
+      `${workflow}-plan-extra-run-step`,
+      file,
+      swap("      - id: plan\n", "      - run: python3 -m pip install pyyaml\n      - id: plan\n"),
+      "ci-plan must use the canonical plan invocation in its only run step",
+    );
     const setups: [string, Edit, Edit][] = [
       ["missing", swap(SETUP_BUN, ""), swap(SETUP_BUN, "")],
       ["sha", swap(SETUP_BUN_PIN, OTHER_PIN), swap(SETUP_BUN_PIN, OTHER_PIN)],
@@ -279,7 +309,7 @@ function caseList(): MutationCase[] {
       `${workflow}-gate-pip`,
       file,
       inGate(swap("          bun tools/ci/gate.ts", PIP + "          bun tools/ci/gate.ts")),
-      `${gate} must not install packages or run Python`,
+      `${gate} must use the canonical gate invocation`,
     );
   }
   for (const workflow of GATED) {

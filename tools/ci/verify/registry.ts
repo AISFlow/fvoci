@@ -92,12 +92,24 @@ export const PLANNER_COMMANDS = {
 } as const;
 
 // plan.ts and gate.ts use Bun builtins only: the pinned Bun is their whole
-// toolchain, with no package install and no Python.
+// toolchain. Each job has exactly one run step with the canonical text, so no
+// package install or Python can run beside the selector.
 export const SETUP_BUN_STEP: Mapping = {
   uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
   with: { "bun-version-file": ".bun-version" },
 };
-const FOREIGN_TOOLCHAIN = /python|\bpip\d*\b|ci_selection|\bbun (?:ci|install|add|x)\b|\bbunx\b/;
+
+export function canonicalPlanRun(workflow: GatedWorkflow): string {
+  return (
+    "set -euo pipefail\n" +
+    (workflow === "rust" ? `bash ${PLANNER_COMMANDS.selectorRegression}\n` : "") +
+    `${PLANNER_COMMANDS.plan} \\\n` +
+    `  --workflow ${workflow} \\\n` +
+    '  --event-json "$GITHUB_EVENT_PATH" \\\n' +
+    '  --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \\\n' +
+    '  --github-output "$GITHUB_OUTPUT"\n'
+  );
+}
 
 export function canonicalGateRun(workflow: GatedWorkflow): string {
   return (
@@ -109,7 +121,7 @@ export function canonicalGateRun(workflow: GatedWorkflow): string {
 
 /**
  * The job checks out, then installs the pinned Bun exactly once with no
- * condition, before the step at `runAt`; no run step installs anything else.
+ * condition, before the step at `runAt`.
  */
 function verifyBunToolchain(
   workflow: GatedWorkflow,
@@ -135,9 +147,6 @@ function verifyBunToolchain(
     errors.push(
       `${workflow}: ${jobId} must install pinned Bun from .bun-version once, after checkout and before the selector`,
     );
-  }
-  if (runSteps(job).some((step) => FOREIGN_TOOLCHAIN.test(get(step, "run") as string))) {
-    errors.push(`${workflow}: ${jobId} must not install packages or run Python`);
   }
   return errors;
 }
@@ -432,6 +441,15 @@ function verifyPlanJob(workflow: GatedWorkflow, data: Mapping, planJob: Mapping)
     return typeof run === "string" && run.includes(PLANNER_COMMANDS.plan);
   });
   errors.push(...verifyBunToolchain(workflow, PLAN_JOB_ID, planJob, planAt));
+  const planRunSteps = runSteps(planJob);
+  if (
+    planRunSteps.length !== 1 ||
+    normalizeRunScript(get(planRunSteps[0], "run") as string) !== canonicalPlanRun(workflow)
+  ) {
+    errors.push(
+      `${workflow}: ${PLAN_JOB_ID} must use the canonical plan invocation in its only run step`,
+    );
+  }
   if (!planRuns.includes(PLANNER_COMMANDS.plan)) {
     errors.push(`${workflow}: ${PLAN_JOB_ID} ${PLANNER_COMMANDS.planMessage}`);
   }
