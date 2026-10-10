@@ -207,12 +207,13 @@ describe("freeze", () => {
   });
 });
 
+const listing = DIAGNOSTIC_UNIT_NAME + ": test\n\n1 test, 0 benchmarks\n";
+const success =
+  "running 1 test\ntest " +
+  DIAGNOSTIC_UNIT_NAME +
+  " ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n";
+
 describe("diagnostic unit", () => {
-  const listing = DIAGNOSTIC_UNIT_NAME + ": test\n\n1 test, 0 benchmarks\n";
-  const success =
-    "running 1 test\ntest " +
-    DIAGNOSTIC_UNIT_NAME +
-    " ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n";
   // Ambient DB/provider/GitHub values must never reach the unit.
   const unitEnv = (root: string): Env => ({
     PATH: "/usr/bin:/bin",
@@ -663,6 +664,37 @@ describe("primary consumers", () => {
         expect(run.calls.length).toBe(1);
       }
     });
+
+    test(phase + ": a failed child over a changed binding discloses nothing", async () => {
+      // Output of a child whose binary no longer matches the receipt is never parsed.
+      const failed = phase === "inventory" ? inventoryFailure() : output;
+      for (const mutation of ["binary", "native", "cargo", "manifest", "source"]) {
+        const { root } = frozen();
+        const digest = { value: "fixture" };
+        const paths: Record<string, string> = {
+          binary: "turso-connection-libtest",
+          native: "fvoci-sqlite/consumer-inputs.json",
+          cargo: "turso-compile.json",
+        };
+        const run = seams(
+          [
+            () => {
+              if (mutation === "source") digest.value = "changed";
+              else if (mutation === "manifest")
+                appendFileSync(join(root, "turso-connection-build.json"), " ");
+              else writeFileSync(join(root, paths[mutation] as string), "FAKE_PRIVATE_TOKEN");
+              return ok(failed + "FAKE_PRIVATE_TOKEN\n", 1);
+            },
+          ],
+          digest,
+        );
+        const env = primaryEnv(root, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: allow });
+        expect(await refusal(runPrimary(phase, A, inputs, env, run.seams))).toBe(
+          "COMPILED_TEST_BINDING_FAILED",
+        );
+        expect(run.calls.length).toBe(1);
+      }
+    });
   }
 
   test("a failed inventory still refuses and discloses only closed facts", async () => {
@@ -928,6 +960,131 @@ describe("CLI", () => {
       "2:ENVIRONMENT_METADATA_UNAVAILABLE\n",
       "2:CHECKOUT_MISMATCH\n",
     ]);
+  });
+});
+
+describe("main routing", () => {
+  const eventFile = (root: string, inputs: Record<string, string>) => {
+    const path = join(root, "event.json");
+    writeFileSync(path, JSON.stringify({ inputs }));
+    return path;
+  };
+  const github = (root: string, inputs: Record<string, string>, row: string[]): Env => {
+    const [event, repository, ref, sha] = row as [string, string, string, string];
+    return {
+      GITHUB_EVENT_PATH: eventFile(root, inputs),
+      GITHUB_EVENT_NAME: event,
+      GITHUB_REPOSITORY: repository,
+      GITHUB_REF: ref,
+      GITHUB_SHA: sha,
+    };
+  };
+
+  /** Runs main with every other effect refusing; returns exit, writes and stray calls. */
+  async function route(argv: string[], env: Env, run: ReturnType<typeof seams>) {
+    const stray: string[] = [];
+    const writes: string[] = [];
+    const out = process.stdout.write.bind(process.stdout);
+    const err = process.stderr.write.bind(process.stderr);
+    process.stdout.write = (chunk: string) => writes.push("1:" + chunk) > 0;
+    process.stderr.write = (chunk: string) => writes.push("2:" + chunk) > 0;
+    try {
+      const code = await main(argv, env, {
+        checkoutSha: () => A,
+        fetchEnvironment: () => {
+          stray.push("metadata");
+          return Promise.reject(new Error("unexpected metadata read"));
+        },
+        uiConsume: () => {
+          stray.push("ui");
+          return Promise.reject(new Error("unexpected UI consumer"));
+        },
+        seams: run.seams,
+      });
+      return { code, writes, stray };
+    } finally {
+      process.stdout.write = out;
+      process.stderr.write = err;
+    }
+  }
+
+  test("--diagnostic-unit runs only the unit, and only for a trusted manual dispatch", async () => {
+    for (const [event, sha, expected] of [
+      ["workflow_dispatch", A, "1:TURSO_DIAGNOSTIC_UNIT_PASS tests=1 ignored=0 consumer=NOTRUN\n"],
+      ["push", A, "2:SECRET_MODE_REQUIRES_MANUAL\n"],
+      ["workflow_dispatch", "b".repeat(40), "2:CHECKOUT_MISMATCH\n"],
+    ] as const) {
+      const { root } = frozen();
+      const env = {
+        PATH: "/usr/bin:/bin",
+        RUNNER_TEMP: root,
+        FVOCI_LIBSQL_AUTH_TOKEN: "FAKE_PRIVATE_TOKEN",
+        ...github(root, { phase: "connection", destructive: "false" }, [
+          event,
+          "AISFlow/fvoci",
+          REVIEWED_REF,
+          sha,
+        ]),
+      };
+      const run = seams([ok(listing), ok(success)]);
+      const result = await route(["--diagnostic-unit"], env, run);
+      expect(result.code).toBe(expected.startsWith("1:") ? 0 : 78);
+      expect(result.writes).toEqual([expected]);
+      expect(result.stray).toEqual([]);
+      expect(run.calls.map((call) => call.argv[1])).toEqual(
+        expected.startsWith("1:") ? [DIAGNOSTIC_UNIT_NAME, DIAGNOSTIC_UNIT_NAME] : [],
+      );
+    }
+  });
+
+  test("--consume routes inventory only from a trusted, read-only manual dispatch", async () => {
+    const PASS = "1:TURSO_INVENTORY_PASS tests=1 ignored=0\n";
+    for (const [row, destructive, expected] of [
+      [["workflow_dispatch", "AISFlow/fvoci", "refs/heads/main", A], "false", PASS],
+      [["workflow_dispatch", "AISFlow/fvoci", REVIEWED_REF, A], "false", PASS],
+      [["push", "AISFlow/fvoci", REVIEWED_REF, A], "false", "SECRET_MODE_REQUIRES_MANUAL"],
+      [["pull_request", "AISFlow/fvoci", "refs/heads/main", A], "false", "UNTRUSTED_DISPATCH"],
+      [
+        ["workflow_dispatch", "attacker/fvoci", "refs/heads/main", A],
+        "false",
+        "UNTRUSTED_DISPATCH",
+      ],
+      [
+        ["workflow_dispatch", "AISFlow/fvoci", "refs/heads/topic", A],
+        "false",
+        "UNTRUSTED_DISPATCH",
+      ],
+      [
+        ["workflow_dispatch", "AISFlow/fvoci", "refs/heads/main", "b".repeat(40)],
+        "false",
+        "CHECKOUT_MISMATCH",
+      ],
+      [
+        ["workflow_dispatch", "AISFlow/fvoci", "refs/heads/main", A],
+        "true",
+        "INVENTORY_MUST_BE_READ_ONLY",
+      ],
+    ] as const) {
+      const { root } = frozen();
+      const env = {
+        ...primaryEnv(root),
+        ...github(root, { phase: "inventory", destructive }, [...row]),
+      };
+      const run = seams([ok(inventorySuccess())]);
+      const result = await route(["--consume"], env, run);
+      expect(result.stray).toEqual([]);
+      expect(result.writes.join("")).not.toContain("FAKE_PRIVATE_TOKEN");
+      if (expected === PASS) {
+        expect(result.code).toBe(0);
+        expect(result.writes).toContain(PASS);
+        expect(result.writes.filter((write) => write.startsWith("2:"))).toEqual([]);
+        expect(run.calls.map((call) => call.argv[1])).toEqual([INVENTORY_TEST_NAME]);
+      } else {
+        expect(result.code).toBe(78);
+        expect(result.writes).toEqual(["2:" + expected + "\n"]);
+        expect(run.calls).toEqual([]);
+      }
+    }
   });
 });
 

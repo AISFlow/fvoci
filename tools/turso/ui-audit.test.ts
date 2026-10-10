@@ -13,7 +13,7 @@ import {
   startupBlockers,
   type Audit,
 } from "./ui-audit.ts";
-import type { Record_ } from "./ui-common.ts";
+import { UiError, type Record_ } from "./ui-common.ts";
 import { parseJson } from "../selected-backend-ci/io.ts";
 import { clone, must, parsed } from "./ui-fakes.ts";
 
@@ -149,7 +149,7 @@ describe("preservation audit", () => {
     ])
       expect(() => {
         assertPreserved(original, mutated);
-      }).toThrow();
+      }).toThrow(UiError);
   });
 
   test("only correlated counter deltas preserve existing business rows", () => {
@@ -176,14 +176,14 @@ describe("preservation audit", () => {
       mutate(wrong);
       expect(() => {
         assertPreserved(original, wrong, audit);
-      }).toThrow();
+      }).toThrow(UiError);
     }
     expect(() => {
       assertPreserved(original, after);
-    }).toThrow();
+    }).toThrow(UiError);
     expect(() => {
       assertPreserved(original, after, { ...audit, observedFences: [] });
-    }).toThrow();
+    }).toThrow(UiError);
   });
 
   test("background preflight keeps populated users but refuses old work", () => {
@@ -231,7 +231,7 @@ describe("preservation audit", () => {
       defect(a, proof);
       expect(() => {
         assertPreserved(before, a, proof);
-      }, name).toThrow();
+      }, name).toThrow(UiError);
     }
   });
 
@@ -328,7 +328,7 @@ describe("browser report", () => {
     for (const [name, mutate] of Object.entries(mutations)) {
       const wrong = clone(report);
       mutate(wrong);
-      expect(() => reportCases(wrong, OFF, titles), name).toThrow();
+      expect(() => reportCases(wrong, OFF, titles), name).toThrow(UiError);
     }
   });
 });

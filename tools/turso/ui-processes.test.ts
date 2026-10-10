@@ -257,7 +257,7 @@ describe("subreaper scope", () => {
   });
 
   test("final observation and cleanup faults keep the original and an unknown closure", async () => {
-    for (const fault of ["snapshot", "descriptor", "receipt"]) {
+    for (const fault of ["snapshot", "stop", "descriptor", "receipt"]) {
       const output = new Captured();
       const attempted: unknown[] = [];
       const closed: number[] = [];
@@ -292,6 +292,10 @@ describe("subreaper scope", () => {
         reaped: false,
       });
       if (fault !== "snapshot") scope.closure = () => false;
+      if (fault === "stop")
+        scope.stopWatch = () => {
+          throw new Error("PRIVATE_STOP");
+        };
       await scope.close(new UiError("UI_ACTUAL_BROWSER_FAILED"));
       expect(closed).toEqual([123]);
       expect(restored).toEqual([]);
@@ -302,6 +306,7 @@ describe("subreaper scope", () => {
       const expected = must(
         {
           snapshot: "UI_PROCESS_FINAL_OBSERVATION_FAILED",
+          stop: "UI_PROCESS_OBSERVER_STOP_FAILED",
           descriptor: "UI_PIDFD_CLOSE_FAILED",
           receipt: "UI_PROCESS_RECEIPT_WRITE_FAILED",
         }[fault],
