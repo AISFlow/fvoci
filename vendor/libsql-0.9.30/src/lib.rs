@@ -150,6 +150,12 @@ cfg_wasm! {
 
 mod util;
 
+#[cfg(all(
+    feature = "tls",
+    any(feature = "remote", feature = "replication", feature = "sync")
+))]
+mod tls;
+
 pub mod errors;
 pub use errors::Error;
 

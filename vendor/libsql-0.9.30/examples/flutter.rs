@@ -8,17 +8,8 @@ async fn main() {
             "".to_string()
         });
 
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-
-        Builder::new_remote(url, token)
-            .connector(https)
-            .build()
-            .await
-            .unwrap()
+        // The crate connector is platform roots on rustls 0.23 (see src/tls.rs).
+        Builder::new_remote(url, token).build().await.unwrap()
     } else {
         Builder::new_local(":memory:").build().await.unwrap()
     };
