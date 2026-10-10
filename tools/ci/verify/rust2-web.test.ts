@@ -3,11 +3,12 @@ import type { Mapping } from "./py.ts";
 import {
   WEB_COLLAB_LANES,
   verifyWebBrowserBudget,
+  rawJobScalar,
   verifyWebBrowserBudgetJobs,
   verifyWebBuildHandoff,
   verifyWebBuildHandoffJobs,
 } from "./web-browser.ts";
-import { ROOT, loadContext, realJobs } from "./rust2-fixture.ts";
+import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 const steps = (jobs: Mapping, job: string) => (jobs[job] as Mapping)["steps"] as Mapping[];
@@ -34,7 +35,7 @@ test("real web.yml passes through the context entry points", () => {
 
 test("normal browser job budget is measured and fail closed", () => {
   const jobs = realJobs("web.yml");
-  expect(verifyWebBrowserBudgetJobs(jobs)).toEqual([]);
+  expect(verifyWebBrowserBudgetJobs(jobs, "20")).toEqual([]);
   expect((jobs["workspace-browser-shard"] as Mapping)["strategy"]).toEqual({
     "fail-fast": false,
     matrix: { shard: [0, 1, 2, 3, 4, 5, 6, 7] },
@@ -47,24 +48,24 @@ test("normal browser job budget is measured and fail closed", () => {
   ]) {
     expect((jobs[job] as Mapping)["timeout-minutes"], job).toBe(15);
   }
-  // 20.0 is indistinguishable from 20 after YAML parsing (contract table).
+  // Parsed values; the raw-scalar form (20.0, 020) is covered below.
   for (const value of [null, 0, 15, 16, 19, 21, 30, "20", 20.5, true]) {
     const bad = clone(jobs);
     (bad["workspace-browser-shard"] as Mapping)["timeout-minutes"] = value;
-    expect(verifyWebBrowserBudgetJobs(bad), String(value)).toEqual([
+    expect(verifyWebBrowserBudgetJobs(bad, "20"), String(value)).toEqual([
       "web: normal browser shard requires the measured 20 minute job budget",
     ]);
   }
   for (const value of [null, [], "20"]) {
     const bad = clone(jobs);
     bad["workspace-browser-shard"] = value;
-    expect(verifyWebBrowserBudgetJobs(bad)).toEqual([
+    expect(verifyWebBrowserBudgetJobs(bad, "20")).toEqual([
       "web: normal browser shard must be a mapping",
     ]);
   }
   const missing = clone(jobs);
   delete missing["workspace-browser-shard"];
-  expect(verifyWebBrowserBudgetJobs(missing)).toEqual([
+  expect(verifyWebBrowserBudgetJobs(missing, "20")).toEqual([
     "web: normal browser shard must be a mapping",
   ]);
 });
@@ -228,4 +229,54 @@ test("selected registration commands cannot be missing or masked", () => {
     unitStep(bad)[key] = value;
     expect(verifyWebBuildHandoffJobs(bad).length, key).toBe(1);
   }
+});
+
+const BUDGET_ERROR = "web: normal browser shard requires the measured 20 minute job budget";
+
+function budgetWithRaw(raw: string): string[] {
+  using tree = new RegistryTree([]);
+  const rel = ".github/workflows/web.yml";
+  const text = tree.read(rel);
+  const start = text.indexOf("  workspace-browser-shard:\n");
+  const tail = text.slice(start);
+  expect(tail).toContain("\n    timeout-minutes: 20\n");
+  tree.write(
+    rel,
+    text.slice(0, start) +
+      tail.replace("\n    timeout-minutes: 20\n", `\n    timeout-minutes: ${raw}\n`),
+  );
+  return verifyWebBrowserBudget(loadContext(tree.root));
+}
+
+test("browser budget raw scalar must be a plain decimal integer", () => {
+  expect(budgetWithRaw("20")).toEqual([]);
+  expect(budgetWithRaw("20 # measured")).toEqual([]);
+  // Bun.YAML reads each of these as the number 20; PyYAML does not.
+  for (const raw of ["20.0", "020", "0x14", "+20", "2_0", "20.", "2e1"]) {
+    expect(budgetWithRaw(raw), raw).toEqual([BUDGET_ERROR]);
+  }
+});
+
+test("raw job scalar lookup is exact and fails closed", () => {
+  const source = [
+    "on: push",
+    "jobs:",
+    "  a:",
+    "    timeout-minutes: 7 # c",
+    "    steps:",
+    "      - timeout-minutes: 9",
+    "  b:",
+    "    run: |",
+    "      timeout-minutes: 3",
+    "  c:",
+    "    timeout-minutes: 1",
+    "    timeout-minutes: 2",
+    "",
+  ].join("\n");
+  expect(rawJobScalar(source, "a", "timeout-minutes")).toBe("7");
+  expect(rawJobScalar(source, "b", "timeout-minutes")).toBeNull();
+  expect(rawJobScalar(source, "c", "timeout-minutes")).toBeNull();
+  expect(rawJobScalar(source, "missing", "timeout-minutes")).toBeNull();
+  expect(rawJobScalar("jobs: {a: {timeout-minutes: 7}}\n", "a", "timeout-minutes")).toBeNull();
+  expect(verifyWebBrowserBudgetJobs(realJobs("web.yml"), null)).toEqual([BUDGET_ERROR]);
 });

@@ -526,6 +526,17 @@ test("invalid UTF-8 in read inputs is a refusal", () => {
   );
 });
 
+test("a leading BOM in Cargo.toml is a parse refusal", () => {
+  using tree = new RegistryTree([]);
+  const cargo = tree.read("Cargo.toml");
+  tree.write("Cargo.toml", "\ufeff" + cargo);
+  expect(verifyRustSuiteRegistry(tree.context())).toEqual([
+    "rust: Cargo.toml parse failed: leading BOM",
+  ]);
+  tree.write("Cargo.toml", cargo + "# \ufeff\n");
+  expect(verifyRustSuiteRegistry(tree.context())).toEqual([]);
+});
+
 const PYTHON_ONLY_WS = ["\u0085", "\u001c", "\u001d", "\u001e", "\u001f"];
 
 test("target extraction and validation share Python whitespace", () => {

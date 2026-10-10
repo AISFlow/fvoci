@@ -1,7 +1,8 @@
 // web.yml browser budget and the current-run native build handoff: the only
 // admitted cross-job native consumer, bound to this run's producer artifact.
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
-import type { VerifyContext } from "./rust-shared.ts";
+import { join } from "node:path";
+import { readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
 const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*\n?$/;
@@ -17,11 +18,55 @@ export function webWorkflowJobs(ctx: VerifyContext): Mapping | null {
   return Object.keys(jobs).every((id) => JOB_ID_RE.test(id)) ? jobs : null;
 }
 
-export function verifyWebBrowserBudgetJobs(jobs: Mapping): string[] {
+const indentOf = (line: string) => line.length - line.trimStart().length;
+const isContent = (line: string) => line.trim() !== "" && !line.trimStart().startsWith("#");
+
+// Raw source text of a block-style job-level scalar `jobs.<jobId>.<key>`, or
+// null when it is not written exactly once in that plain form.
+export function rawJobScalar(source: string, jobId: string, key: string): string | null {
+  const lines = source.split("\n").map((line) => line.replace(/\r$/, ""));
+  const jobsAt = lines.findIndex((line) => /^jobs:[ \t]*(#.*)?$/.test(line));
+  if (jobsAt === -1) return null;
+  const body: string[] = [];
+  for (const line of lines.slice(jobsAt + 1)) {
+    if (isContent(line) && indentOf(line) === 0) break;
+    body.push(line);
+  }
+  const jobIndent = indentOf(body.find(isContent) ?? "");
+  const header = new RegExp(`^ {${String(jobIndent)}}${jobId}:[ \\t]*(#.*)?$`);
+  const jobAt = body.findIndex((line) => header.test(line));
+  if (jobIndent === 0 || jobAt === -1) return null;
+  const block: string[] = [];
+  for (const line of body.slice(jobAt + 1)) {
+    if (isContent(line) && indentOf(line) <= jobIndent) break;
+    block.push(line);
+  }
+  const keyIndent = indentOf(block.find(isContent) ?? "");
+  const prefix = " ".repeat(keyIndent) + key + ":";
+  const matches = block.filter((line) => line.startsWith(prefix) && indentOf(line) === keyIndent);
+  if (keyIndent <= jobIndent || matches.length !== 1) return null;
+  let value = (matches[0] as string).slice(prefix.length);
+  const comment = value.search(/[ \t]#/);
+  if (comment !== -1) value = value.slice(0, comment);
+  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+// PyYAML (YAML 1.1) reads `20.0` as a float and `020` as octal, which the
+// original refuses; Bun.YAML turns both into the number 20. The raw scalar
+// therefore has to be a plain decimal integer as well.
+const PLAIN_DECIMAL = /^(0|[1-9][0-9]*)$/;
+
+export function verifyWebBrowserBudgetJobs(jobs: Mapping, rawBudget: string | null): string[] {
   const job = get(jobs, "workspace-browser-shard");
   if (!isMapping(job)) return ["web: normal browser shard must be a mapping"];
   const budget = get(job, "timeout-minutes");
-  if (typeof budget !== "number" || !Number.isInteger(budget) || budget !== 20) {
+  if (
+    typeof budget !== "number" ||
+    !Number.isInteger(budget) ||
+    budget !== 20 ||
+    rawBudget === null ||
+    !PLAIN_DECIMAL.test(rawBudget)
+  ) {
     return ["web: normal browser shard requires the measured 20 minute job budget"];
   }
   return [];
@@ -29,7 +74,11 @@ export function verifyWebBrowserBudgetJobs(jobs: Mapping): string[] {
 
 export function verifyWebBrowserBudget(ctx: VerifyContext): string[] {
   const jobs = webWorkflowJobs(ctx);
-  return jobs === null ? [] : verifyWebBrowserBudgetJobs(jobs);
+  if (jobs === null) return [];
+  const source = readUtf8(join(ctx.root, ".github", "workflows", WEB_WORKFLOW_FILE));
+  const raw =
+    source === null ? null : rawJobScalar(source, "workspace-browser-shard", "timeout-minutes");
+  return verifyWebBrowserBudgetJobs(jobs, raw);
 }
 
 const CLOSED_INSTALL_RECEIPT =

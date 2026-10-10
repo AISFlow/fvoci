@@ -141,6 +141,8 @@ export function rootDbIntegrationRegistryTargets(root: string): Result<Set<strin
   try {
     const text = readUtf8(cargoPath);
     if (text === null) return [null, notUtf8("Cargo.toml")];
+    // tomllib refuses a leading BOM (Invalid statement at 1:1); Bun.TOML skips it.
+    if (text.startsWith("\ufeff")) return [null, "rust: Cargo.toml parse failed: leading BOM"];
     cargo = Bun.TOML.parse(text);
   } catch (error) {
     return [
