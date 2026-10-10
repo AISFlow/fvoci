@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchOptIns, eventShas, EventShapeError, mergeGroupShas } from "./events.ts";
+import {
+  dispatchOptIns,
+  eventShas,
+  EventShapeError,
+  mergeGroupShas,
+  resolveSelectionInputs,
+} from "./events.ts";
+import type { Git } from "./git.ts";
 import { decideFromPaths } from "./paths.ts";
 import { buildPlan, sanitizeReasonCode } from "./plan.ts";
 import { pyLoads, type PyValue } from "./pyjson.ts";
@@ -237,23 +244,69 @@ describe("event payloads", () => {
     expect(mergeGroupShas(ev(`{"merge_group":{"base_sha":"${SHA_A}\\n"}}`))).toEqual([null, null]);
   });
 
-  test("pull_request and push values are carried as given; impossible shapes refuse", () => {
+  test("pull_request values are returned as given; impossible shapes refuse", () => {
     expect(
       eventShas(ev(`{"pull_request":{"base":{"sha":"x"},"head":{}}}`), "pull_request"),
     ).toEqual(["x", null]);
     expect(eventShas(ev("{}"), "pull_request")).toEqual([null, null]);
-    expect(eventShas(ev('{"pull_request":0}'), "pull_request")).toEqual([null, null]);
+    expect(eventShas(ev('{"pull_request":{"base":null}}'), "pull_request")).toEqual([null, null]);
     for (const bad of [
       "[]",
+      '{"pull_request":0}',
       '{"pull_request":"x"}',
-      '{"pull_request":{"base":null}}',
       '{"pull_request":{"head":[]}}',
+      '{"pull_request":{"base":"x"}}',
     ]) {
       expect(() => eventShas(ev(bad), "pull_request"), bad).toThrow(EventShapeError);
     }
-    expect(eventShas(ev('{"before":"a","after":1}'), "push")).toEqual(["a", pyLoads("1")]);
     expect(() => eventShas(ev("[]"), "push")).toThrow(EventShapeError);
     expect(eventShas(ev("[]"), "schedule")).toEqual([null, null]);
+  });
+
+  test("push records only well-formed SHAs", () => {
+    expect(eventShas(ev(`{"before":"${SHA_A}","after":"${SHA_B}"}`), "push")).toEqual([
+      SHA_A,
+      SHA_B,
+    ]);
+    for (const json of [
+      '{"before":"a","after":1}',
+      '{"before":{"x":1},"after":[1]}',
+      `{"before":"${SHA_A}\\n","after":"${SHA_B.toUpperCase()}"}`,
+      "{}",
+    ]) {
+      expect(eventShas(ev(json), "push"), json).toEqual([null, null]);
+    }
+  });
+
+  test("pull_request SHAs: absent is missing, anything but a 40-hex string is invalid", () => {
+    const git = {
+      revParse: () => ({ value: SHA_C, error: null }),
+      objectExists: () => {
+        throw new Error("validation must stop before any git read of the event SHAs");
+      },
+    } as unknown as Git;
+    const resolve = (json: string) => resolveSelectionInputs(git, ev(json), "pull_request", SHA_C);
+    const pr = (base: string, head: string) =>
+      `{"pull_request":{"base":{"sha":${base}},"head":{"sha":${head}}}}`;
+    const cases: [string, string, string | null, string | null][] = [
+      [pr("null", `"${SHA_B}"`), "MISSING_BASE_OR_HEAD", null, SHA_B],
+      [pr('""', `"${SHA_B}"`), "MISSING_BASE_OR_HEAD", "", SHA_B],
+      ["{}", "MISSING_BASE_OR_HEAD", null, null],
+      [pr("0", `"${SHA_B}"`), "SHA_INVALID", null, SHA_B],
+      [pr("{}", `"${SHA_B}"`), "SHA_INVALID", null, SHA_B],
+      [pr("false", `"${SHA_B}"`), "SHA_INVALID", null, SHA_B],
+      [pr(`"${SHA_A}"`, "5"), "SHA_INVALID", SHA_A, null],
+      [pr('"xyz"', `"${SHA_B}"`), "SHA_INVALID", "xyz", SHA_B],
+      [pr(`"${SHA_A}\\n"`, `"${SHA_B}"`), "SHA_INVALID", `${SHA_A}\n`, SHA_B],
+    ];
+    for (const [json, fatal, base, head] of cases) {
+      expect(resolve(json), json).toMatchObject({
+        fatalError: fatal,
+        baseSha: base,
+        headSha: head,
+        paths: null,
+      });
+    }
   });
 
   test("dispatch opt-ins fail closed", () => {

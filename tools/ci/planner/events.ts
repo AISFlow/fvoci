@@ -1,5 +1,5 @@
 import { diffPathsForPr, ensureCommitShas, validateSha, type Git } from "./git.ts";
-import { pySorted, pyTruthy, isMapping, type PyValue } from "./pyjson.ts";
+import { pySorted, isMapping, type PyValue } from "./pyjson.ts";
 import { OPT_IN_JOBS, type Workflow } from "./registry.ts";
 
 // Event payload reading and the git-verified path set a pull request may
@@ -40,24 +40,26 @@ function field(container: PyValue | undefined, key: string, what: string): PyVal
   return container.get(key) ?? null;
 }
 
-/** The event's (base, head) values as carried, for the plan record. */
+/**
+ * The event's base and head values. A pull request's are returned as given
+ * for the caller to validate; push keeps only well-formed SHAs, as
+ * merge_group does. An event, pull_request, base or head that is present but
+ * not an object is refused.
+ */
 export function eventShas(event: PyValue, eventName: string): [PyValue, PyValue] {
   if (eventName === "pull_request") {
-    const raw = field(event, "pull_request", "event");
-    const pr = pyTruthy(raw) ? raw : new Map<string, PyValue>();
-    const base =
-      isMapping(pr) && !pr.has("base")
-        ? new Map<string, PyValue>()
-        : field(pr, "base", "pull_request");
-    const head =
-      isMapping(pr) && !pr.has("head")
-        ? new Map<string, PyValue>()
-        : field(pr, "head", "pull_request");
-    return [field(base, "sha", "pull_request.base"), field(head, "sha", "pull_request.head")];
+    const pr = field(event, "pull_request", "event");
+    if (pr === null) return [null, null];
+    const sha = (side: string): PyValue => {
+      const ref = field(pr, side, "pull_request");
+      return ref === null ? null : field(ref, "sha", `pull_request.${side}`);
+    };
+    return [sha("base"), sha("head")];
   }
   if (eventName === "merge_group") return mergeGroupShas(event);
-  if (eventName === "push")
-    return [field(event, "before", "event"), field(event, "after", "event")];
+  if (eventName === "push") {
+    return [shaOrNull(field(event, "before", "event")), shaOrNull(field(event, "after", "event"))];
+  }
   return [null, null];
 }
 
@@ -96,8 +98,8 @@ export type ResolvedInputs = {
   paths: string[] | null;
   fatalError: string | null;
   forceFullReason: string | null;
-  baseSha: PyValue;
-  headSha: PyValue;
+  baseSha: string | null;
+  headSha: string | null;
   mergeBaseSha: string | null;
   testedSha: string | null;
 };
@@ -147,20 +149,30 @@ export function resolveSelectionInputs(
   if (headNow.value !== tested) return make({ fatalError: "TESTED_SHA_MISMATCH" });
 
   if (eventName === "workflow_dispatch" || !KNOWN_EVENTS.has(eventName)) return make({});
-  if (eventName === "merge_group" || eventName === "push") {
-    const [baseSha, headSha] = eventShas(event, eventName);
+  if (eventName === "merge_group") {
+    const [baseSha, headSha] = mergeGroupShas(event);
     return make({ baseSha, headSha });
   }
+  if (eventName === "push") {
+    const before = field(event, "before", "event");
+    const after = field(event, "after", "event");
+    return make({ baseSha: shaOrNull(before), headSha: shaOrNull(after) });
+  }
 
-  const [baseSha, headSha] = eventShas(event, eventName);
-  if (!pyTruthy(baseSha) || !pyTruthy(headSha))
-    return make({ fatalError: "MISSING_BASE_OR_HEAD", baseSha, headSha });
-  const isValid = (sha: PyValue): sha is string => {
-    if (typeof sha !== "string") throw new EventShapeError("pull_request sha is not a string");
-    return validateSha(sha);
+  const [rawBase, rawHead] = eventShas(event, eventName);
+  // The plan records strings as the event carried them and nothing else.
+  const recorded = {
+    baseSha: typeof rawBase === "string" ? rawBase : null,
+    headSha: typeof rawHead === "string" ? rawHead : null,
   };
-  if (!isValid(baseSha) || !isValid(headSha))
-    return make({ fatalError: "SHA_INVALID", baseSha, headSha });
+  const absent = (sha: PyValue) => sha === null || sha === "";
+  if (absent(rawBase) || absent(rawHead)) {
+    return make({ fatalError: "MISSING_BASE_OR_HEAD", ...recorded });
+  }
+  const { baseSha, headSha } = recorded;
+  if (baseSha === null || headSha === null || !validateSha(baseSha) || !validateSha(headSha)) {
+    return make({ fatalError: "SHA_INVALID", ...recorded });
+  }
   const shas = { baseSha, headSha };
 
   const fetchError = ensureCommitShas(git, baseSha, headSha);

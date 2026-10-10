@@ -259,8 +259,14 @@ describe("plan CLI", () => {
         [
           "web",
           "pull_request",
-          prEvent(5, fx.base),
-          "plan: event payload invalid: pull_request sha is not a string\n",
+          { pull_request: { base: "x" } },
+          "plan: event payload invalid: pull_request.base is not an object\n",
+        ],
+        [
+          "web",
+          "push",
+          '{"before": NaN}',
+          "plan: event JSON unreadable: Expecting value at char 11\n",
         ],
         [
           "web",
@@ -342,19 +348,38 @@ describe("plan CLI", () => {
     expect(main(["--he"], io)).toBe(0);
   });
 
-  test("option values follow argparse", () => {
+  test("option parsing is strict", () => {
     const base = ["--workflow", "web", "--output-plan", "p"];
-    for (const value of ["-", "-.5", "-1", "-x y"]) {
-      expect(parseArgs([...base, "--event-json", value]), value).toMatchObject({
-        eventJson: value,
-      });
+    // A separate value never starts with "-" (argparse would take "-1" or "-x y").
+    for (const value of ["-", "-.5", "-1", "-1x", "-١", "-x y", "-x"]) {
+      expect(() => parseArgs([...base, "--event-json", value]), value).toThrow(
+        "argument --event-json: expected one argument",
+      );
     }
-    expect(parseArgs(["--work=rust", "--event", "e", "--output-plan", "p"])).toMatchObject({
-      workflow: "rust",
-      eventJson: "e",
-      githubOutput: null,
-    });
-    expect(() => parseArgs([...base, "--event-json", "-x"])).toThrow("expected one argument");
+    expect(parseArgs([...base, "--event-json=-x"])).toMatchObject({ eventJson: "-x" });
+    // Every --workflow occurrence is checked, not only the last.
+    for (const argv of [
+      ["--workflow", "bad", ...base, "--event-json", "e"],
+      [...base, "--workflow", "bad", "--event-json", "e"],
+      ["extra", "--workflow=bad"],
+    ]) {
+      expect(() => parseArgs(argv), argv.join(" ")).toThrow(
+        "argument --workflow: invalid choice: 'bad' (choose from collab-engine, documents, install, rust, web)",
+      );
+    }
+    // Help takes no attached text.
+    for (const arg of ["--help=x", "--he=x", "-h=x", "-hx"]) {
+      expect(() => parseArgs([arg]), arg).toThrow("argument -h/--help: ignored explicit argument");
+    }
+    expect(parseArgs(["-h"])).toBe("help");
+    expect(parseArgs(["--he"])).toBe("help");
+    // Unique long prefixes and last-wins stay.
+    expect(
+      parseArgs(["--work=rust", "--event", "e", "--output-plan", "p", "--output-plan", "q"]),
+    ).toMatchObject({ workflow: "rust", eventJson: "e", outputPlan: "q", githubOutput: null });
+    expect(() => parseArgs([...base, "--event-json", "e", "--", "x"])).toThrow(
+      "unrecognized arguments: -- x",
+    );
   });
 
   test(

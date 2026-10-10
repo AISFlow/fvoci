@@ -50,18 +50,31 @@ const OPTIONS = [
 ] as const;
 type Option = (typeof OPTIONS)[number];
 
-// argparse reads "-", negative numbers and words with a space as values, not options.
-const optionLike = (arg: string) =>
-  arg.startsWith("-") && arg !== "-" && !/^-\d+$|^-\d*\.\d+$/.test(arg) && !arg.includes(" ");
+const invalidChoice = (value: string) =>
+  new UsageError(
+    `argument --workflow: invalid choice: '${value}' (choose from ${CHOICES.join(", ")})`,
+  );
+const ignoredArgument = (value: string) =>
+  new UsageError(`argument -h/--help: ignored explicit argument '${value}'`);
 
-/** argparse semantics: `--opt value`, `--opt=value`, unique prefixes, last wins. */
+/**
+ * `--opt value`, `--opt=value`, unique long-option prefixes, last wins.
+ * Stricter than argparse: a separate value never starts with "-", every
+ * --workflow occurrence must be a known workflow, and -h/--help take no
+ * attached text. Unknown tokens are reported after the required check.
+ */
 export function parseArgs(argv: readonly string[]): PlanArgs | "help" {
   const values = new Map<Option, string>();
+  const extras: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    if (arg === "-h") return "help";
-    if (!arg.startsWith("--") || arg === "--")
-      throw new UsageError(`unrecognized arguments: ${argv.slice(i).join(" ")}`);
+    if (!arg.startsWith("--") || arg === "--") {
+      if (arg === "-h") return "help";
+      if (arg.startsWith("-h=")) throw ignoredArgument(arg.slice(3));
+      if (arg.startsWith("-h") && arg.length > 2) throw ignoredArgument(arg.slice(2));
+      extras.push(arg);
+      continue;
+    }
     const eq = arg.indexOf("=");
     const name = eq < 0 ? arg : arg.slice(0, eq);
     const matches = OPTIONS.filter((option) => option.startsWith(name));
@@ -71,18 +84,23 @@ export function parseArgs(argv: readonly string[]): PlanArgs | "help" {
       if (matches.length > 1) {
         throw new UsageError(`ambiguous option: ${name} could match ${matches.join(", ")}`);
       }
-      throw new UsageError(`unrecognized arguments: ${arg}`);
+      extras.push(arg);
+      continue;
     }
-    if (option === "--help") return "help";
+    if (option === "--help") {
+      if (eq >= 0) throw ignoredArgument(arg.slice(eq + 1));
+      return "help";
+    }
     let value: string | undefined;
     if (eq >= 0) value = arg.slice(eq + 1);
     else {
       value = argv[i + 1];
-      if (value === undefined || optionLike(value)) {
+      if (value === undefined || value.startsWith("-")) {
         throw new UsageError(`argument ${option}: expected one argument`);
       }
       i++;
     }
+    if (option === "--workflow" && !isWorkflow(value)) throw invalidChoice(value);
     values.set(option, value);
   }
   const missing = ["--workflow", "--event-json", "--output-plan"].filter(
@@ -90,12 +108,9 @@ export function parseArgs(argv: readonly string[]): PlanArgs | "help" {
   );
   if (missing.length > 0)
     throw new UsageError(`the following arguments are required: ${missing.join(", ")}`);
+  if (extras.length > 0) throw new UsageError(`unrecognized arguments: ${extras.join(" ")}`);
   const workflow = values.get("--workflow") as string;
-  if (!isWorkflow(workflow)) {
-    throw new UsageError(
-      `argument --workflow: invalid choice: '${workflow}' (choose from ${CHOICES.map((c) => `'${c}'`).join(", ")})`,
-    );
-  }
+  if (!isWorkflow(workflow)) throw invalidChoice(workflow);
   return {
     workflow,
     repoRoot: resolve(values.get("--repo-root") ?? PLANNER_ROOT),

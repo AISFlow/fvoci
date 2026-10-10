@@ -1,6 +1,5 @@
 import { ALWAYS_FULL_EVENTS, KNOWN_EVENTS } from "./events.ts";
 import { decideFromPaths, type MarkdownInputs, type SelectionDecision } from "./paths.ts";
-import type { PyValue } from "./pyjson.ts";
 import { OPT_IN_JOBS, WORKFLOW_JOBS, type Workflow } from "./registry.ts";
 
 // Plan v3: which jobs of one workflow this run selects, and why.
@@ -19,8 +18,8 @@ export type Plan = {
   mode: "full" | "narrow";
   reason_code: string;
   plan_ok: boolean;
-  base_sha: PyValue;
-  head_sha: PyValue;
+  base_sha: string | null;
+  head_sha: string | null;
   merge_base_sha: string | null;
   tested_sha: string | null;
   path_count: number;
@@ -44,8 +43,8 @@ export function workflowJobSelected(
 export type PlanInputs = {
   workflow: Workflow;
   eventName: string;
-  baseSha: PyValue;
-  headSha: PyValue;
+  baseSha: string | null;
+  headSha: string | null;
   mergeBaseSha: string | null;
   testedSha: string | null;
   paths: readonly string[] | null;

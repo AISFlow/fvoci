@@ -1,8 +1,10 @@
 // JSON with the value model and output bytes of Python's `json` module, so the
 // plan file, `plan_json` and `postgres_matrix` stay byte-identical with the
 // outputs the gate and older runs were built against. Objects keep source key
-// order (a Map, also for integer-like keys), integers keep their digits,
-// NaN/Infinity parse, and output escapes every non-ASCII code unit.
+// order (a Map, also for integer-like keys), integers keep their digits, and
+// output escapes every non-ASCII code unit. Input is strict JSON: NaN,
+// Infinity and numbers that overflow to infinity are refused (Python's json
+// accepts them and then writes invalid JSON).
 
 export class PyInt {
   constructor(readonly digits: bigint) {}
@@ -134,12 +136,6 @@ export function pyLoads(text: string): PyValue {
     if (ch === "n") return literal("null", null);
     if (ch === "t") return literal("true", true);
     if (ch === "f") return literal("false", false);
-    if (ch === "N") return literal("NaN", new PyFloat(NaN));
-    if (ch === "I") return literal("Infinity", new PyFloat(Infinity));
-    if (ch === "-" && text.startsWith("-Infinity", pos)) {
-      pos += 9;
-      return new PyFloat(-Infinity);
-    }
     NUMBER_RE.lastIndex = pos;
     const m = NUMBER_RE.exec(text);
     if (!m) return fail("Expecting value");
@@ -149,25 +145,14 @@ export function pyLoads(text: string): PyValue {
       if (digits.length > MAX_INT_DIGITS) fail("Exceeds the limit for integer string conversion");
       return new PyInt(BigInt(m[0]));
     }
-    return new PyFloat(Number(m[0]));
+    const float = Number(m[0]);
+    if (!Number.isFinite(float)) fail("Number out of range");
+    return new PyFloat(float);
   };
   const result = value();
   skip();
   if (pos !== text.length) fail("Extra data");
   return result;
-}
-
-/** Python truthiness of a loaded JSON value. */
-export function pyTruthy(value: PyValue | undefined): boolean {
-  if (value === null || value === undefined || value === false) return false;
-  if (value === true) return true;
-  if (typeof value === "string") return value.length > 0;
-  if (typeof value === "number") return value !== 0;
-  if (value instanceof PyInt) return value.digits !== 0n;
-  if (value instanceof PyFloat) return value.value !== 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (value instanceof Map) return value.size > 0;
-  return Object.keys(value).length > 0;
 }
 
 export function isMapping(value: PyValue | undefined): value is Map<string, PyValue> {
@@ -176,9 +161,7 @@ export function isMapping(value: PyValue | undefined): value is Map<string, PyVa
 
 /** float.__repr__: shortest round-trip digits, exponent outside 1e-4 <= |x| < 1e16. */
 export function pyFloatRepr(x: number): string {
-  if (Number.isNaN(x)) return "NaN";
-  if (x === Infinity) return "Infinity";
-  if (x === -Infinity) return "-Infinity";
+  if (!Number.isFinite(x)) throw new RangeError("JSON has no non-finite numbers");
   if (x === 0) return Object.is(x, -0) ? "-0.0" : "0.0";
   const sign = x < 0 ? "-" : "";
   const [mantissa = "", exp = "0"] = Math.abs(x).toExponential().split("e");

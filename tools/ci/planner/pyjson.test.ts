@@ -1,14 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  PyFloat,
-  PyInt,
-  pyDumps,
-  pyFloatRepr,
-  pyLoads,
-  pyQuote,
-  pySorted,
-  pyTruthy,
-} from "./pyjson.ts";
+import { PyFloat, PyInt, pyDumps, pyFloatRepr, pyLoads, pyQuote, pySorted } from "./pyjson.ts";
 
 // Expected strings are what CPython's json.dumps / repr(float) print.
 describe("python-compatible json", () => {
@@ -27,11 +18,9 @@ describe("python-compatible json", () => {
       [1.7976931348623157e308, "1.7976931348623157e+308"],
       [5e-324, "5e-324"],
       [0.1, "0.1"],
-      [Infinity, "Infinity"],
-      [-Infinity, "-Infinity"],
-      [NaN, "NaN"],
     ];
     for (const [value, repr] of cases) expect(pyFloatRepr(value), repr).toBe(repr);
+    for (const value of [Infinity, -Infinity, NaN]) expect(() => pyFloatRepr(value)).toThrow();
   });
 
   test("strings escape every non-ASCII code unit", () => {
@@ -42,19 +31,17 @@ describe("python-compatible json", () => {
   });
 
   test("loads keeps source order, integer digits and the last duplicate", () => {
-    const value = pyLoads(
-      '{"2": 1, "1": [1.0, -0, 12345678901234567890], "2": NaN, "x": -Infinity}',
-    );
-    expect(pyDumps(value)).toBe('{"2": NaN, "1": [1.0, 0, 12345678901234567890], "x": -Infinity}');
+    const value = pyLoads('{"2": 1, "1": [1.0, -0, 12345678901234567890], "2": 2.5}');
+    expect(pyDumps(value)).toBe('{"2": 2.5, "1": [1.0, 0, 12345678901234567890]}');
     expect(pyDumps(value, { compact: true, sortKeys: true })).toBe(
-      '{"1":[1.0,0,12345678901234567890],"2":NaN,"x":-Infinity}',
+      '{"1":[1.0,0,12345678901234567890],"2":2.5}',
     );
-    expect(pyLoads("1e400")).toEqual(new PyFloat(Infinity));
     expect(pyLoads(" 7 ")).toEqual(new PyInt(7n));
+    expect(pyLoads("1e2")).toEqual(new PyFloat(100));
     expect(pyLoads('"\\ud800"')).toBe("\ud800");
   });
 
-  test("loads refuses what CPython refuses", () => {
+  test("loads is strict JSON", () => {
     for (const bad of [
       "",
       "{",
@@ -70,6 +57,12 @@ describe("python-compatible json", () => {
       '{"a" 1}',
       '"\\x"',
       "1".repeat(4301),
+      // Python's json accepts these and would write invalid JSON back.
+      "NaN",
+      "Infinity",
+      "-Infinity",
+      "1e400",
+      "\u{feff}{}",
     ]) {
       expect(() => pyLoads(bad), bad).toThrow();
     }
@@ -86,11 +79,7 @@ describe("python-compatible json", () => {
     );
   });
 
-  test("sorted() order and truthiness", () => {
+  test("sorted() order is by code point", () => {
     expect(pySorted(["\u{1F600}", "\uffff", "b", "B"])).toEqual(["B", "b", "\uffff", "\u{1F600}"]);
-    for (const falsy of ["0", "0.0", "-0.0", '""', "[]", "{}", "null", "false"])
-      expect(pyTruthy(pyLoads(falsy)), falsy).toBe(false);
-    for (const truthy of ["1", "NaN", '"0"', "[0]", '{"a":0}', "true"])
-      expect(pyTruthy(pyLoads(truthy)), truthy).toBe(true);
   });
 });

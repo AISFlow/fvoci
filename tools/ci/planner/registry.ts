@@ -202,8 +202,7 @@ export function verifyPlanRegistry(
       continue;
     }
     const data = parsed.data;
-    // YAML 1.1 loaders read the bare `on` key as boolean true.
-    const triggers = Object.hasOwn(data, "on") ? data.on : data.true;
+    const triggers = data.on;
     if (!isMapping(triggers) || !Object.hasOwn(triggers, "pull_request")) {
       errors.push(`${workflow}: pull_request trigger is required for the stable gate`);
     } else if (triggers.pull_request !== null) {
