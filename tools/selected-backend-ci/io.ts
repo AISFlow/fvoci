@@ -12,11 +12,12 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  lstatSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 
 export type Environment = Record<string, string | undefined>;
@@ -145,20 +146,30 @@ export function below(path: string, parent: string): boolean {
   const part = relative(parent, path);
   return part === "" || (part !== ".." && !part.startsWith(".." + sep) && !isAbsolute(part));
 }
-// Python Path.resolve(): symlinks of the existing prefix resolve, a missing
-// tail (CARGO_TARGET_DIR before the first build) is appended unchanged.
+// Python Path.resolve() (posixpath.realpath, non-strict): components in
+// order, each existing one through its symlink, ".." from the resolved
+// location, and a missing component appended as is (CARGO_TARGET_DIR
+// before the first build).
 export function resolved(path: string): string {
-  const absolute = resolve(path);
-  for (let prefix = absolute, rest = ""; ;) {
-    try {
-      return join(realpathSync(prefix), rest);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || prefix === dirname(prefix))
-        throw error;
-      rest = join(basename(prefix), rest);
-      prefix = dirname(prefix);
+  const absolute = isAbsolute(path) ? path : process.cwd() + sep + path;
+  let current: string = sep;
+  for (const part of absolute.split(sep)) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      current = dirname(current);
+      continue;
     }
+    const next = join(current, part);
+    let exists = true;
+    try {
+      lstatSync(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      exists = false;
+    }
+    current = exists ? realpathSync(next) : next;
   }
+  return current;
 }
 export function physical(path: string): string {
   assert.ok(isAbsolute(path) && realpathSync(path) === path, "nonphysical path");

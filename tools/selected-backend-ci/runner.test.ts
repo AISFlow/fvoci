@@ -1913,6 +1913,19 @@ test("resolved() keeps Python Path.resolve semantics for a missing tail", () => 
     expect(resolved(join(base, "link/target/debug"))).toBe(join(base, "real/target/debug"));
     expect(resolved(join(base, "link"))).toBe(join(base, "real"));
     expect(resolved(join(base, "missing"))).toBe(join(base, "missing"));
+    // ".." applies after the symlink, as in Python: link -> real/inner, so
+    // link/../cargo is real/cargo, not the lexical base/cargo.
+    mkdirSync(join(base, "real/inner"));
+    mkdirSync(join(base, "real/cargo"));
+    mkdirSync(join(base, "cargo"));
+    rmSync(join(base, "link"));
+    symlinkSync(join(base, "real/inner"), join(base, "link"));
+    writeFileSync(join(base, "real/cargo/config.toml"), "[alias]\nactual-config = 'build'\n");
+    writeFileSync(join(base, "cargo/config.toml"), "lexical decoy");
+    const home = resolved(`${base}/link/../cargo`);
+    expect(home).toBe(join(base, "real/cargo"));
+    expect(Object.keys(cargoInputs(home))).toEqual([join(base, "real/cargo/config.toml")]);
+    expect(resolved(`${base}/missing/../real`)).toBe(join(base, "real"));
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
