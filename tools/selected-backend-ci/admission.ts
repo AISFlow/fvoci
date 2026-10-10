@@ -298,7 +298,10 @@ export interface Consumed {
   fresh_dist_equal: boolean;
   received: Record<string, { sha256: string; inode: number; mode: number }>;
 }
-export function configListInputs(output: string): {
+export function configListInputs(
+  output: string,
+  checkout = root,
+): {
   before: Inputs;
   browser: Browser;
   modules: Record<string, string>;
@@ -306,7 +309,7 @@ export function configListInputs(output: string): {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
   assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "consume");
   assert.ok(uid() === 1000 && gid() === 1000);
-  const owner = identity("config-list", output);
+  const owner = identity("config-list", output, checkout);
   assert.ok(
     !existsSync(join(output, "runtime")) &&
       !readdirSync(output).some((p) => /-(allocation|binding)\.json$/.test(p)),
@@ -315,7 +318,8 @@ export function configListInputs(output: string): {
     before = read(join(output, "before.json")) as Inputs;
   assert.ok(consumed.source === before.head && before.head === env("GITHUB_SHA"));
   assert.ok(
-    consumed.tree === before.tree && before.tree === call(["git", "rev-parse", "HEAD^{tree}"]),
+    consumed.tree === before.tree &&
+      before.tree === call(["git", "rev-parse", "HEAD^{tree}"], checkout),
   );
   assert.ok(
     consumed.repository === env("GITHUB_REPOSITORY") &&
@@ -325,23 +329,26 @@ export function configListInputs(output: string): {
   assert.equal(consumed.full_current_physical_inputs_equal, true);
   assert.equal(consumed.fresh_dist_equal, true);
   assert.ok(deepEquals(read(join(output, "after.json")), before));
-  assert.equal(call(["git", "status", "--short"]), before.status.trim());
+  assert.equal(call(["git", "status", "--short"], checkout), before.status.trim());
   assert.ok(
     deepEquals(
-      new Set(call(["git", "ls-files", "-z"]).split("\0").filter(Boolean)),
+      new Set(call(["git", "ls-files", "-z"], checkout).split("\0").filter(Boolean)),
       new Set(Object.keys(before.tracked)),
     ),
   );
   for (const [values, base] of [
-    [before.tracked, root],
+    [before.tracked, checkout],
     [before.external, "/"],
-    [before.untracked, root],
+    [before.untracked, checkout],
   ] as const)
     for (const [name, digest] of Object.entries(values))
       assert.equal(sha(resolve(base, name)), digest);
   const bundle = read(join(output, "bundle.json")) as Bundle;
   assert.ok(
-    deepEquals(new Set(Object.keys(consumed.received)), new Set(expectedFiles(bundle, output))),
+    deepEquals(
+      new Set(Object.keys(consumed.received)),
+      new Set(expectedFiles(bundle, output, undefined, checkout)),
+    ),
   );
   for (const [path, recorded] of Object.entries(consumed.received)) {
     physical(path);
@@ -359,7 +366,7 @@ export function configListInputs(output: string): {
   assert.ok(
     web.source === before.head &&
       web.tree === before.tree &&
-      deepEquals(web.dist_files, inventory(join(root, "apps/web/dist"))),
+      deepEquals(web.dist_files, inventory(join(checkout, "apps/web/dist"))),
   );
   const abi = read(join(output, "abi-receipt.json")) as {
     currentSource: string;
@@ -388,7 +395,7 @@ export function configListInputs(output: string): {
   };
   runtimeAccess(
     [
-      ...Object.keys(before.tracked).map((p) => join(root, p)),
+      ...Object.keys(before.tracked).map((p) => join(checkout, p)),
       ...Object.keys(before.external),
       ...Object.keys(bundle.binaries),
     ],
@@ -398,13 +405,13 @@ export function configListInputs(output: string): {
     assert.ok(accessible(path, constants.R_OK | constants.X_OK));
   const modules: Record<string, string> = {};
   for (const name of ["@playwright/test", "playwright", "playwright-core"]) {
-    const path = join(root, "node_modules", name, "package.json"),
+    const path = join(checkout, "node_modules", name, "package.json"),
       data = read(path) as { version: string; bin?: { playwright: string } };
     assert.equal(data.version, "1.63.0");
     if (name === "playwright") assert.equal(data.bin?.playwright, "cli.js");
     modules[name] = sha(path);
   }
-  const cli = join(root, "node_modules/playwright/cli.js");
+  const cli = join(checkout, "node_modules/playwright/cli.js");
   assert.ok(!lstatSync(cli).isSymbolicLink() && statSync(cli).isFile() && accessible(cli));
   assert.equal(sha(cli), before.external[cli]);
   modules["playwright/cli.js"] = sha(cli);
