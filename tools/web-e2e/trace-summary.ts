@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import process from "node:process";
 import { crc32 } from "node:zlib";
-import yauzl, { type Entry, type ExtraField, type ZipFile } from "yauzl";
+import yauzl, { type Entry, type ZipFile } from "yauzl";
 import {
   JsonFloat,
   PY_SPACE,
@@ -93,13 +93,13 @@ const KEY_STAGE =
   /^(?:keydown|keyup):(?:Home|End|Shift|Enter|Escape|ArrowLeft|ArrowRight|ArrowUp|ArrowDown|PageUp|PageDown):shift=(?:true|false):composing=(?:true|false):keyCode=\p{Nd}{1,3}(?::microtask)?$/u;
 const ATTACHMENT_PATH = /^attachments\/[a-f0-9]{40,64}$/;
 
-// Resource budgets. A real failure trace from this suite is about 0.7 MB
+// Resource budgets. The one local failure trace from this suite is 0.7 MB
 // unpacked in 38 records (largest .network 0.2 MB, .trace 0.1 MB); these
 // leave two to three orders of magnitude of headroom and still stay finite.
 const ARCHIVE_BYTES = 256 * 1024 * 1024;
+/** The central directory, all of it: headers, names, extra fields and comments. */
 const CENTRAL_BYTES = 8 * 1024 * 1024;
 const CENTRAL_RECORDS = 20_000;
-const NAME_EXTRA_BYTES = 4 * 1024 * 1024;
 /** Each .network/.trace member, and all of them together. */
 const MEMBER_BYTES = 64 * 1024 * 1024;
 const SUMMARY_BYTES = 256 * 1024 * 1024;
@@ -116,7 +116,7 @@ export interface Member {
   entry: Entry;
   /** The name as stored (`orig_filename`); the local header must repeat it. */
   storedName: string;
-  /** `filename`: the Unicode Path name when it matches, cut at NUL. */
+  /** `filename`: the last matching Unicode Path name, else the stored one, cut at NUL. */
   name: string;
   /** Python's data-end guard: the next local header, or the central directory. */
   endOffset: number;
@@ -135,34 +135,63 @@ class BudgetExceeded extends Error {
   override name = "BudgetExceeded";
 }
 
-const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-
-/** yauzl's name decoding (cp437, or UTF-8 under flag bit 11), with Python's strict UTF-8. */
-function decodeName(raw: Buffer, flags: number, extraFields: ExtraField[]): string {
-  if (flags & 0x800) strictUtf8.decode(raw);
-  return yauzl.getFileNameLowLevel(flags, raw, extraFields, true);
+/** Any other failure of the ZIP layer (yauzl, zlib, a decoder) becomes BadZipFile. */
+async function zipStep<T>(step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (error instanceof BadZipFile || error instanceof BudgetExceeded) throw error;
+    throw new BadZipFile("unreadable archive");
+  }
 }
 
-/** Python refused a Unicode Path field it could not read; yauzl skips it. */
-function checkUnicodePath(entry: Entry): void {
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** yauzl's stored-name decoding (cp437, or UTF-8 under flag bit 11), with Python's strict UTF-8. */
+function storedNameOf(raw: Buffer, flags: number): string {
+  if (flags & 0x800) strictUtf8.decode(raw);
+  return yauzl.getFileNameLowLevel(flags, raw, [], true);
+}
+
+/**
+ * Python's `_decodeExtra` Unicode Path rule: every 0x7075 field must hold a
+ * version and CRC; of those with version 1 and the stored name's CRC, the
+ * last non-empty one names the member, decoded as strict UTF-8.
+ */
+function unicodePathOf(entry: Entry): string | null {
+  let name: string | null = null;
   for (const field of entry.extraFields) {
     if (field.id !== 0x7075) continue;
     if (field.data.length < 5) throw new BadZipFile("Corrupt unicode path extra field");
     if (field.data[0] !== 1 || field.data.readUInt32LE(1) !== crc32(entry.fileNameRaw) >>> 0) {
       continue;
     }
-    strictUtf8.decode(field.data.subarray(5));
+    const decoded = strictUtf8.decode(field.data.subarray(5));
+    if (decoded !== "") name = decoded;
   }
+  return name;
+}
+
+/** A 64-bit field as an exact number; above 2^53 it is refused. */
+function exact(value: bigint | number): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) throw new BadZipFile("ZIP64 value out of range");
+  return number;
 }
 
 /**
- * Where the central directory must start and how long it is, from the end
- * records yauzl also reads. Python walked exactly these bytes, so yauzl's
- * records must fill them; prepended data is refused instead of re-based.
+ * Where the central directory must start and how long it is, from the same
+ * end records yauzl uses (same backward scan). Python walked exactly these
+ * bytes, so yauzl's records must fill them; prepended data is refused
+ * instead of re-based.
  */
 function centralLayout(archive: Buffer): { offset: number; size: number; end: number } {
-  for (let at = archive.length - 22; at >= Math.max(archive.length - 22 - 0xffff, 0); at -= 1) {
+  const lowest = Math.max(archive.length - 22 - 0xffff - 20, 0);
+  for (let at = archive.length - 22; at >= lowest; at -= 1) {
     if (archive.readUInt32LE(at) !== 0x06054b50) continue;
+    if (archive.readUInt16LE(at + 20) !== archive.length - at - 22) {
+      throw new BadZipFile("Bad end of central directory comment");
+    }
     const locator = at - 20;
     if (locator < 0 || archive.readUInt32LE(locator) !== 0x07064b50) {
       return {
@@ -174,13 +203,17 @@ function centralLayout(archive: Buffer): { offset: number; size: number; end: nu
     if (archive.readUInt32LE(locator + 4) !== 0 || archive.readUInt32LE(locator + 16) > 1) {
       throw new BadZipFile("multi-disk archive");
     }
-    const record = Number(archive.readBigUInt64LE(locator + 8));
-    if (record !== locator - 56 || Number(archive.readBigUInt64LE(record + 4)) !== 44) {
+    const record = exact(archive.readBigUInt64LE(locator + 8));
+    if (
+      record !== locator - 56 ||
+      archive.readUInt32LE(record) !== 0x06064b50 ||
+      exact(archive.readBigUInt64LE(record + 4)) !== 44
+    ) {
       throw new BadZipFile("Corrupt zip64 end of central directory record");
     }
     return {
-      offset: Number(archive.readBigUInt64LE(record + 48)),
-      size: Number(archive.readBigUInt64LE(record + 40)),
+      offset: exact(archive.readBigUInt64LE(record + 48)),
+      size: exact(archive.readBigUInt64LE(record + 40)),
       end: record,
     };
   }
@@ -195,16 +228,18 @@ function centralLayout(archive: Buffer): { offset: number; size: number; end: nu
 export async function openArchive(bytes: Uint8Array): Promise<Archive> {
   if (bytes.length > ARCHIVE_BYTES) throw new BudgetExceeded("archive size");
   const archive = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const layout = centralLayout(archive);
+  const layout = await zipStep(() => Promise.resolve(centralLayout(archive)));
   if (layout.size > CENTRAL_BYTES) throw new BudgetExceeded("central directory size");
   if (layout.offset + layout.size !== layout.end) throw new BadZipFile("Bad central directory");
-  const zip = await yauzl.fromBufferPromise(archive, {
-    lazyEntries: true,
-    decodeStrings: false,
-    validateEntrySizes: true,
-  });
+  const zip = await zipStep(() =>
+    yauzl.fromBufferPromise(archive, {
+      lazyEntries: true,
+      decodeStrings: false,
+      validateEntrySizes: true,
+    }),
+  );
   try {
-    return await listMembers(zip, layout);
+    return await zipStep(() => listMembers(zip, layout));
   } catch (error) {
     zip.close();
     throw error;
@@ -218,15 +253,20 @@ async function listMembers(
   if (zip.entryCount > CENTRAL_RECORDS) throw new BudgetExceeded("central directory records");
   const members: Member[] = [];
   let walked = 0;
-  let nameExtra = 0;
   for await (const entry of zip.eachEntry()) {
+    // yauzl walks by the end record's count, Python by its size: they must agree.
     walked += 46 + entry.fileNameLength + entry.extraFieldLength + entry.fileCommentLength;
-    nameExtra += entry.fileNameLength + entry.extraFieldLength;
-    if (nameExtra > NAME_EXTRA_BYTES) throw new BudgetExceeded("central names and extra fields");
+    if (walked > layout.size) throw new BadZipFile("Bad central directory");
+    for (const value of [
+      entry.compressedSize,
+      entry.uncompressedSize,
+      entry.relativeOffsetOfLocalHeader,
+    ]) {
+      exact(value);
+    }
     if ((entry.versionNeededToExtract & 0xff) > 63) throw new BadZipFile("version not supported");
-    checkUnicodePath(entry);
-    const storedName = decodeName(entry.fileNameRaw, entry.generalPurposeBitFlag, []);
-    const name = decodeName(entry.fileNameRaw, entry.generalPurposeBitFlag, entry.extraFields);
+    const storedName = storedNameOf(entry.fileNameRaw, entry.generalPurposeBitFlag);
+    const name = unicodePathOf(entry) ?? storedName;
     members.push({ entry, storedName, name: name.split("\0", 1)[0] ?? "", endOffset: 0 });
   }
   if (walked !== layout.size) throw new BadZipFile("Bad central directory");
@@ -249,42 +289,44 @@ async function listMembers(
  * validateEntrySizes) and a matching CRC-32. Decoding stops as soon as the
  * budget would be passed.
  */
-async function readMember(zip: ZipFile, member: Member, budget: number): Promise<Buffer> {
-  const { entry } = member;
-  const flags = entry.generalPurposeBitFlag;
-  if (flags & 0x60) throw new BadZipFile("compressed patched data or strong encryption");
-  const local = await zip.readLocalFileHeaderPromise(entry);
-  if (decodeName(local.fileName, local.generalPurposeBitFlag, []) !== member.storedName) {
-    throw new BadZipFile("File name in directory and header differ");
-  }
-  const offset = entry.relativeOffsetOfLocalHeader;
-  if (
-    local.fileDataStart + entry.compressedSize > member.endOffset &&
-    member.endOffset !== offset
-  ) {
-    throw new BadZipFile("Overlapped entries");
-  }
-  if (flags & 1) throw new BadZipFile("File is encrypted");
-  // Python also decoded bzip2, LZMA and zstd; Playwright writes deflate, so those fail closed.
-  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
-    throw new BadZipFile("compression method not supported");
-  }
-  if (entry.uncompressedSize > budget) throw new BudgetExceeded("member size");
-  const stream = await zip.openReadStreamPromise(entry);
-  const chunks: Buffer[] = [];
-  let length = 0;
-  let crc = 0;
-  for await (const chunk of stream as AsyncIterable<Buffer>) {
-    length += chunk.length;
-    if (length > budget) {
-      stream.destroy();
-      throw new BudgetExceeded("member size");
+function readMember(zip: ZipFile, member: Member, budget: number): Promise<Buffer> {
+  return zipStep(async () => {
+    const { entry } = member;
+    const flags = entry.generalPurposeBitFlag;
+    if (flags & 0x60) throw new BadZipFile("compressed patched data or strong encryption");
+    const local = await zip.readLocalFileHeaderPromise(entry);
+    if (storedNameOf(local.fileName, local.generalPurposeBitFlag) !== member.storedName) {
+      throw new BadZipFile("File name in directory and header differ");
     }
-    crc = crc32(chunk, crc);
-    chunks.push(chunk);
-  }
-  if (crc >>> 0 !== entry.crc32 >>> 0) throw new BadZipFile("Bad CRC-32");
-  return Buffer.concat(chunks, length);
+    const offset = entry.relativeOffsetOfLocalHeader;
+    if (
+      local.fileDataStart + entry.compressedSize > member.endOffset &&
+      member.endOffset !== offset
+    ) {
+      throw new BadZipFile("Overlapped entries");
+    }
+    if (flags & 1) throw new BadZipFile("File is encrypted");
+    // Python also decoded bzip2, LZMA and zstd; Playwright writes deflate, so those fail closed.
+    if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
+      throw new BadZipFile("compression method not supported");
+    }
+    if (entry.uncompressedSize > budget) throw new BudgetExceeded("member size");
+    const stream = await zip.openReadStreamPromise(entry);
+    const chunks: Buffer[] = [];
+    let length = 0;
+    let crc = 0;
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      length += chunk.length;
+      if (length > budget) {
+        stream.destroy();
+        throw new BudgetExceeded("member size");
+      }
+      crc = crc32(chunk, crc);
+      chunks.push(chunk);
+    }
+    if (crc >>> 0 !== entry.crc32 >>> 0) throw new BadZipFile("Bad CRC-32");
+    return Buffer.concat(chunks, length);
+  });
 }
 
 /** `ZipFile.NameToInfo`: the last record of each name. */
@@ -951,7 +993,10 @@ if (import.meta.main) {
   }
   let output: string;
   try {
-    if (statSync(path).size > ARCHIVE_BYTES) throw new BudgetExceeded("archive size");
+    // A FIFO or device reports size 0; only a regular file's size bounds the read.
+    const stat = statSync(path);
+    if (!stat.isFile()) throw new BadZipFile("not a regular file");
+    if (stat.size > ARCHIVE_BYTES) throw new BudgetExceeded("archive size");
     output = await summarize(readFileSync(path));
   } catch (error) {
     // Only the error class: a message could quote unredacted trace content.
