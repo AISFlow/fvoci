@@ -12,7 +12,9 @@ import {
   readFileSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
+import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative } from "node:path";
 import process from "node:process";
@@ -551,4 +553,35 @@ export function frameLine(error: unknown, file: string): number | null {
 export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
 export function assertNoEnvFile(): void {
   assert.ok(process.execArgv.includes("--no-env-file"), "lane driver requires bun --no-env-file");
+}
+
+// The restart/normal-server I/O both selected normal lanes share.
+export const emit = (line: string) => {
+  writeSync(1, line + "\n");
+};
+export const actor = () => [process.getuid?.(), process.getgid?.()] as const;
+export function probeSetup(base: string): Promise<{ status: number; body: unknown }> {
+  // node:http never consults proxy variables; the owned server is loopback.
+  return new Promise((resolvePromise, reject) => {
+    const request = get(base + "/api/v1/setup", { timeout: 10_000 }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("error", reject);
+      response.on("end", () => {
+        try {
+          resolvePromise({
+            status: response.statusCode ?? 0,
+            body: JSON.parse(decode(Buffer.concat(chunks))),
+          });
+        } catch (error) {
+          reject(error instanceof Error ? error : runtimeError("owned setup probe failed"));
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy(runtimeError("owned setup probe timed out")));
+    request.on("error", reject);
+  });
+}
+export function spawnServer(args: string[], log: number): Child {
+  return spawn(args, { stdin: "ignore", stdout: log, stderr: log });
 }

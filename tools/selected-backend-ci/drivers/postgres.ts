@@ -7,7 +7,7 @@
 // owned Meilisearch wrapper as `--inside <run>`. Every mode first rebinds the
 // whole current artifact/preparation proof. Each process prints at most its
 // final JSON summary on stdout and exits with the lane's first failure code.
-import { deepEquals, spawn } from "bun";
+import { deepEquals } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -21,9 +21,7 @@ import {
   readdirSync,
   statSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
-import { get } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { env, jsonInteger, parseJson, read, resolved, root, sha } from "../io.ts";
@@ -38,8 +36,9 @@ import {
   cleanupAttempt,
   cleanupScope,
   command,
+  actor,
   copiedHashes,
-  decode,
+  emit,
   errorFacts,
   failureCheckpoint,
   failureDigest,
@@ -47,6 +46,7 @@ import {
   isRecord,
   privateText,
   privateWrite,
+  probeSetup,
   identityGone,
   inputCheck,
   knownBrowserCheckpoint,
@@ -60,6 +60,7 @@ import {
   runtimeError,
   secondary,
   shellQuote,
+  spawnServer,
   trapInterrupts,
   treeHashes,
   waitFor,
@@ -286,35 +287,6 @@ export async function verifyFixturesClosed(
 // The I/O this driver owns, replaceable as one boundary in tests.
 export interface Seam extends RestartSeam {
   postInputs: () => Promise<Inputs>;
-}
-export const emit = (line: string) => {
-  writeSync(1, line + "\n");
-};
-export const actor = () => [process.getuid?.(), process.getgid?.()] as const;
-export function probeSetup(base: string): Promise<{ status: number; body: unknown }> {
-  // node:http never consults proxy variables; the owned server is loopback.
-  return new Promise((resolvePromise, reject) => {
-    const request = get(base + "/api/v1/setup", { timeout: 10_000 }, (response) => {
-      const chunks: Buffer[] = [];
-      response.on("data", (chunk: Buffer) => chunks.push(chunk));
-      response.on("error", reject);
-      response.on("end", () => {
-        try {
-          resolvePromise({
-            status: response.statusCode ?? 0,
-            body: JSON.parse(decode(Buffer.concat(chunks))),
-          });
-        } catch (error) {
-          reject(error instanceof Error ? error : runtimeError("owned setup probe failed"));
-        }
-      });
-    });
-    request.on("timeout", () => request.destroy(runtimeError("owned setup probe timed out")));
-    request.on("error", reject);
-  });
-}
-export function spawnServer(args: string[], log: number): Child {
-  return spawn(args, { stdin: "ignore", stdout: log, stderr: log });
 }
 
 const environmentNames = [
