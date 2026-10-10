@@ -23,6 +23,15 @@ interface Run {
 
 const green = (run: Run) => run.status === "completed" && run.conclusion === "success";
 
+// -1, 0 or 1 as run a is older than, as old as, or newer than run b. A run with
+// no time has not started yet, so it is newer than any run that has one.
+function age(a: Run, b: Run): number {
+  if (a.at === b.at) return 0;
+  if (a.at === "") return 1;
+  if (b.at === "") return -1;
+  return a.at > b.at ? 1 : -1;
+}
+
 /** Per-gate report lines and the gates that are not green, in gate order. */
 export function verdict(
   gates: readonly string[],
@@ -42,7 +51,7 @@ export function verdict(
     const run = { at, status, conclusion };
     const prior = latest.get(name);
     // Equal times are ambiguous; a run that is not green wins the tie.
-    if (!prior || at > prior.at || (at === prior.at && green(prior) && !green(run))) {
+    if (!prior || age(run, prior) > 0 || (age(run, prior) === 0 && green(prior) && !green(run))) {
       latest.set(name, run);
     }
   }

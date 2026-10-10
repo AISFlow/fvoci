@@ -58,6 +58,12 @@ describe("release gate verdict", () => {
     expect(verdict(GATES, [broken, ...allGreen].join("\n")).bad).toEqual(["web-ci-gate"]);
   });
 
+  test("a run that has not started is newer than any finished run", () => {
+    const queued = row("web-ci-gate", "queued", "none", "");
+    expect(verdict(GATES, [...allGreen, queued].join("\n")).bad).toEqual(["web-ci-gate"]);
+    expect(verdict(GATES, [queued, ...allGreen].join("\n")).bad).toEqual(["web-ci-gate"]);
+  });
+
   test("a tie between green and not green is not green", () => {
     const tie = row("web-ci-gate", "completed", "failure", T1);
     expect(verdict(GATES, [...allGreen, tie].join("\n")).bad).toEqual(["web-ci-gate"]);
@@ -66,7 +72,7 @@ describe("release gate verdict", () => {
 
   test("a line that is not four fields is refused", () => {
     for (const bad of ["web-ci-gate\tcompleted\tsuccess", `${allGreen[0] ?? ""}\textra`, ""]) {
-      expect(() => verdict(GATES, [...allGreen, bad, "x"].join("\n"))).toThrow(
+      expect(() => verdict(GATES, [...allGreen, bad, ...allGreen].join("\n"))).toThrow(
         "is not 4 tab-separated fields",
       );
     }
