@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -231,6 +233,146 @@ def _is_fixture_markdown(path: str) -> bool:
     return path.startswith(_MD_FIXTURE_PREFIXES) or _is_crate_fixture_path(path)
 
 
+def format_web_default_targets(script: str) -> tuple[str, ...]:
+    """Positional paths format-web.sh passes to prettier when no paths are given."""
+    marker = "set -- "
+    start = script.find(marker)
+    if start < 0:
+        raise ValueError("format-web.sh has no default prettier target list")
+    end = script.find('"$@"', start)
+    if end < 0:
+        raise ValueError("format-web.sh default target list is not closed")
+    chunk = script[start + len(marker) : end].replace("\\\n", " ")
+    return tuple(shlex.split(chunk, posix=True))
+
+
+def prettier_ignore_patterns(text: str) -> tuple[str, ...]:
+    patterns: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        patterns.append(stripped)
+    return tuple(patterns)
+
+
+def _gitignore_regex(pattern: str) -> re.Pattern[str]:
+    directory_only = pattern.endswith("/")
+    if directory_only:
+        pattern = pattern[:-1]
+    anchored = pattern.startswith("/")
+    if anchored:
+        pattern = pattern[1:]
+    elif "/" in pattern:
+        anchored = True
+    body: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            body.append("(?:.*/)?")
+            index += 3
+            continue
+        if pattern.startswith("**", index):
+            body.append(".*")
+            index += 2
+            continue
+        char = pattern[index]
+        if char == "*":
+            body.append("[^/]*")
+        elif char == "?":
+            body.append("[^/]")
+        else:
+            body.append(re.escape(char))
+        index += 1
+    expression = "".join(body)
+    if directory_only:
+        suffix = "(?:/.*)$"
+    else:
+        suffix = "(?:/.*)?$"
+    if anchored:
+        return re.compile("^" + expression + suffix)
+    return re.compile("(?:^|/)" + expression + suffix)
+
+
+def path_matches_prettier_ignore(path: str, patterns: tuple[str, ...]) -> bool:
+    ignored = False
+    for pattern in patterns:
+        negated = pattern.startswith("!")
+        body = pattern[1:] if negated else pattern
+        if _gitignore_regex(body).search(path):
+            ignored = not negated
+    return ignored
+
+
+def _prettier_glob_regex(pattern: str) -> re.Pattern[str]:
+    body: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            body.append("(?:.*/)?")
+            index += 3
+            continue
+        if pattern.startswith("**", index):
+            body.append(".*")
+            index += 2
+            continue
+        char = pattern[index]
+        if char == "*":
+            body.append("[^/]*")
+        elif char == "?":
+            body.append("[^/]")
+        else:
+            body.append(re.escape(char))
+        index += 1
+    return re.compile("^" + "".join(body) + "$")
+
+
+def prettier_target_matches(target: str, path: str) -> bool:
+    if any(char in target for char in "*?["):
+        return bool(_prettier_glob_regex(target).fullmatch(path))
+    name = target.rsplit("/", 1)[-1]
+    if "." in name:
+        return path == target
+    return path == target or path.startswith(target + "/")
+
+
+def prettier_checks_markdown(
+    path: str, *, targets: tuple[str, ...], patterns: tuple[str, ...]
+) -> bool:
+    if not path.endswith(".md") or path_matches_prettier_ignore(path, patterns):
+        return False
+    return any(prettier_target_matches(target, path) for target in targets)
+
+
+@functools.lru_cache(maxsize=1)
+def _prettier_check_inputs() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    script = (ROOT / "scripts" / "format-web.sh").read_text(encoding="utf-8")
+    ignore = (ROOT / ".prettierignore").read_text(encoding="utf-8")
+    return format_web_default_targets(script), prettier_ignore_patterns(ignore)
+
+
+def _is_prettier_checked_markdown(path: str) -> bool:
+    targets, patterns = _prettier_check_inputs()
+    return prettier_checks_markdown(path, targets=targets, patterns=patterns)
+
+
+_PLANNER_CONTRACT_MARKDOWN = ".agents/skills/fvoci-fast-verify/SKILL.md"
+_PARENT_BROADEN_MARKDOWN = ".agents/skills/fvoci-standard-implementations/references/candidates.md"
+
+
+def _markdown_lane(path: str) -> NarrowFamily | Literal["broaden"]:
+    """Lane for a `*.md` path. Prettier inputs use the web format lane."""
+    if _is_fixture_markdown(path) or path in _CONTENT_READ_MARKDOWN:
+        return "broaden"
+    if path.startswith(".github/"):
+        return "broaden"
+    if path in {_PLANNER_CONTRACT_MARKDOWN, _PARENT_BROADEN_MARKDOWN}:
+        return "broaden"
+    if _is_prettier_checked_markdown(path):
+        return "frontend_web_install"
+    return "docs"
+
+
 def validate_sha(ref: str) -> bool:
     return bool(SHA_RE.match(ref))
 
@@ -283,12 +425,11 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
     # traversal before any allowlist/prefix match, including synthetic inputs.
     if not path or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
         return "unknown"
-    # Only `*.md` is documentation. Fixture oracles and files whose bytes are
-    # loaded stay on the full lane; every other markdown path does not.
+    # Only `*.md` is documentation. Fixture oracles, loaded bytes, .github
+    # markdown, and the planner contract stay full. Prettier-checked markdown
+    # uses the web format lane. Every other markdown path is docs.
     if path.endswith(".md"):
-        if _is_fixture_markdown(path) or path in _CONTENT_READ_MARKDOWN:
-            return "broaden"
-        return "docs"
+        return _markdown_lane(path)
     if path in _EXPLICIT_DOCS:
         return "docs"
     if _BROWSER_SPEC_RE.fullmatch(path) or path in _BROWSER_UI_HELPERS:
