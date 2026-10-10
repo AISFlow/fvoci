@@ -2,7 +2,7 @@
 import { lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import process from "node:process";
-import { digest, env, parseJson, uid } from "../selected-backend-ci/io.ts";
+import { digest, env, parseJson, root as checkout, uid } from "../selected-backend-ci/io.ts";
 import { pyJsonDumps } from "../web-e2e/compat.ts";
 
 /** Fixed codes only; no SDK, URL, token, actor password or raw trace. */
@@ -94,7 +94,14 @@ export const stdio: Output = {
   },
 };
 
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+// ignoreBOM: a leading U+FEFF is data (refused by JSON.parse), never silently dropped.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** Bun flags for every Bun child: only the given environment, only the repository bunfig. */
+export const bunIsolation = (workspace: string = checkout): string[] => [
+  "--no-env-file",
+  "--config=" + join(workspace, "bunfig.toml"),
+];
 export const decodeUtf8 = (bytes: Uint8Array): string => utf8.decode(bytes);
 export const parseBytes = (bytes: Uint8Array): unknown => parseJson(decodeUtf8(bytes));
 export const parsePlain = (bytes: Uint8Array): unknown => JSON.parse(decodeUtf8(bytes)) as unknown;

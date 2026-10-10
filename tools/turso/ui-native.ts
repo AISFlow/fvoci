@@ -29,6 +29,7 @@ import {
   token,
   UiError,
   type Record_,
+  bunIsolation,
 } from "./ui-common.ts";
 import {
   localFixture,
@@ -277,6 +278,8 @@ export async function browser(
     FVOCI_E2E_RESULT_DIR: directory,
     PLAYWRIGHT_JSON_OUTPUT_FILE: report,
   };
+  // A Bun test worker's id must not reach the Playwright child.
+  Reflect.deleteProperty(env, "JEST_WORKER_ID");
   require(!SECRET_BROWSER_KEYS.some((key) =>
     Object.hasOwn(env, key),
   ), "UI_BROWSER_SECRET_ENV_REFUSED");
@@ -296,8 +299,10 @@ export async function browser(
     pkg.version === "1.63.0" &&
     isRecord(pkg.bin) &&
     pkg.bin.playwright === "cli.js", "UI_PLAYWRIGHT_CLI_REFUSED");
+  // The checked env is the whole env: no .env or bunfig of apps/web is loaded.
   const args = [
     manifest.bun.path,
+    ...bunIsolation(workspace),
     "--no-install",
     cli,
     "test",

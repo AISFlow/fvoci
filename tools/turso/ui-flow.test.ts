@@ -262,6 +262,10 @@ describe("consumer flow", () => {
     expect(() => privateRead(path)).toThrow("UI_PRIVATE_INPUT_REFUSED");
     chmodSync(path, 0o600);
     expect(() => privateRead(path, 1)).toThrow("UI_PRIVATE_INPUT_REFUSED");
+    // A leading U+FEFF is data: the decoder keeps it and JSON refuses it.
+    const bom = join(directory, "bom");
+    writeFileSync(bom, '\ufeff{"synthetic":true}', { mode: 0o600 });
+    expect(() => privateRead(bom)).toThrow(SyntaxError);
   });
 
   test("the member wrapper re-enters this CLI with the running Bun and its RUNNER_TEMP", () => {

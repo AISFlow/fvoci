@@ -20,6 +20,7 @@ import { OFF, ON } from "./ui-audit.ts";
 import { failureCode, UiError, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { browser, fixture, stop } from "./ui-native.ts";
+import { linuxKernel, UiProcesses, withProcesses } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
 
 let directory: string;
@@ -317,6 +318,8 @@ describe("browser", () => {
       const [args, label, options] = must(calls.spawn[0]);
       const expected = [
         "/never-executed/admitted-bun",
+        "--no-env-file",
+        "--config=" + join(inputs.workspace, "bunfig.toml"),
         "--no-install",
         inputs.cli,
         "test",
@@ -480,5 +483,56 @@ describe("server stop", () => {
         ),
       ),
     ).toContain("UI_SERVER_CLOSURE_FAILED");
+  });
+});
+
+// A real Bun child under a real process scope: the env checked before the
+// spawn is the env the Playwright CLI sees. Only key presence is recorded.
+describe.skipIf(process.platform !== "linux")("browser child environment", () => {
+  test("no .env, bunfig or Bun test worker id reaches the Playwright child", async () => {
+    const inputs = browserInputs();
+    process.env.PATH = saved.PATH ?? "";
+    writeFileSync(
+      inputs.cli,
+      "const keys = ['FVOCI_LIBSQL_AUTH_TOKEN', 'FVOCI_LIBSQL_URL', 'JEST_WORKER_ID', 'FROM_BUNFIG_PRELOAD'];\n" +
+        "require('node:fs').writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify(Object.fromEntries(keys.map((k) => [k, k in process.env]))));\n",
+    );
+    rewrite(inputs, (external) => (external[inputs.cli] = sha(inputs.cli)));
+    mkdirSync(join(inputs.workspace, "apps/web"), { recursive: true });
+    writeFileSync(
+      join(inputs.workspace, "apps/web/.env"),
+      "FVOCI_LIBSQL_AUTH_TOKEN=synthetic\nFVOCI_LIBSQL_URL=libsql://synthetic.invalid\nJEST_WORKER_ID=7\n",
+    );
+    // The isolated config is the workspace bunfig; a bunfig in apps/web is not read.
+    writeFileSync(join(inputs.workspace, "bunfig.toml"), "");
+    writeFileSync(
+      join(inputs.workspace, "apps/web/preload.ts"),
+      "process.env.FROM_BUNFIG_PRELOAD = '1';\n",
+    );
+    writeFileSync(join(inputs.workspace, "apps/web/bunfig.toml"), 'preload = ["./preload.ts"]\n');
+    const manifest = {
+      ...inputs.manifest,
+      bun: { path: process.execPath, sha256: "", version: "" },
+    };
+    const output = new Captured();
+    const seen = await withProcesses(
+      (scope) =>
+        browser(
+          scope,
+          manifest,
+          inputs.run,
+          { JEST_WORKER_ID: "3" },
+          ON,
+          undefined,
+          inputs.workspace,
+        ),
+      new UiProcesses(linuxKernel, { output, write, root: () => inputs.run }),
+    );
+    expect(seen).toEqual({
+      FVOCI_LIBSQL_AUTH_TOKEN: false,
+      FVOCI_LIBSQL_URL: false,
+      JEST_WORKER_ID: false,
+      FROM_BUNFIG_PRELOAD: false,
+    });
   });
 });

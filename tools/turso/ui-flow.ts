@@ -41,6 +41,7 @@ import {
   valueDigest,
   type Output,
   type Record_,
+  bunIsolation,
 } from "./ui-common.ts";
 import { lease, shellQuote, type ServerHandle } from "./ui-container.ts";
 import { browser, fixture, registeredTitles, start, stop } from "./ui-native.ts";
@@ -96,7 +97,9 @@ export function memberWrapper(
     shellQuote(runnerTemp) +
     "\nexport RUNNER_TEMP\nexec " +
     shellQuote(process.execPath) +
-    " --no-env-file " +
+    " " +
+    bunIsolation().map(shellQuote).join(" ") +
+    " " +
     shellQuote(ENTRY) +
     " --actor\n"
   );

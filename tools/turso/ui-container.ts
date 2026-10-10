@@ -999,7 +999,7 @@ export async function publishContainer(
     );
     admitPublishedConfig(argv, [], secretValues);
     require(scope !== null, "UI_OWNED_PROCESS_SCOPE_REQUIRED");
-    containerId = new TextDecoder().decode(await docker.client(scope, argv, 10)).trim();
+    containerId = decodeUtf8(await docker.client(scope, argv, 10)).trim();
     require(/^[0-9a-f]{64}$/.test(containerId), "UI_DOCKER_CLIENT_FAILED");
     const inspected = parseBytes(
       await docker.client(scope, ["docker", "inspect", containerId], 10),

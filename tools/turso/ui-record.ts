@@ -17,7 +17,16 @@ import {
   write,
 } from "../selected-backend-ci/io.ts";
 import type { LocalGrant } from "../selected-backend-ci/types.ts";
-import { executionMode, get, list, privateRead, require, root, UiError } from "./ui-common.ts";
+import {
+  bunIsolation,
+  executionMode,
+  get,
+  list,
+  privateRead,
+  require,
+  root,
+  UiError,
+} from "./ui-common.ts";
 
 export const PINNED_BUN = "1.4.2";
 export const BINARIES = ["fvoci-server", "fvoci-migrate", "fvoci-e2e-fixture", "collab-engine"];
@@ -207,6 +216,7 @@ export function freeze(lease?: LocalLease): void {
   const bun = call(["which", "bun"]);
   const chromium = call([
     bun,
+    ...bunIsolation(),
     "--eval",
     'import {chromium} from "@playwright/test";console.log(chromium.executablePath())',
   ]);
