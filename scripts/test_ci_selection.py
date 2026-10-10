@@ -353,7 +353,7 @@ def dummy_event_path(directory: Path) -> Path:
 class ClassifyPathsTest(unittest.TestCase):
     def test_explicit_docs_only(self) -> None:
         self.assertEqual(SEL.classify_path("docs/rewrite.md"), "docs")
-        self.assertEqual(SEL.classify_path("docs/other.md"), "broaden")
+        self.assertEqual(SEL.classify_path("docs/other.md"), "docs")
 
     def test_frontend_src_narrow(self) -> None:
         self.assertEqual(SEL.classify_path("apps/web/src/foo.ts"), "frontend_web_install")
@@ -3262,8 +3262,9 @@ class ImpactUnionTest(unittest.TestCase):
 
     def test_new_explanatory_docs_are_exact(self) -> None:
         self.assert_selected_workflows(["docs/RELEASING.md", "docs/collab-engine-comparison.md"], set())
-        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md", "docs/collab-engine-comparison.md.bak"):
-            self.assertEqual(SEL.decide_from_paths([path]).mode, "full", path)
+        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md"):
+            self.assertEqual(SEL.decide_from_paths([path]).reason_code, "NARROW_DOCS", path)
+        self.assertEqual(SEL.decide_from_paths(["docs/collab-engine-comparison.md.bak"]).mode, "full")
 
     def test_backend_contracts_harness_and_unknown_stay_full(self) -> None:
         for path in (
@@ -3446,19 +3447,24 @@ class AgentDocsSelectionTest(unittest.TestCase):
 
     def test_other_agents_paths_stay_broaden_or_unknown(self) -> None:
         for path in (
-            ".agents/skills/fvoci-fast-verify/SKILL.md",
-            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
             ".agents/environment.md.bak",
             ".agents/environment.mdx",
-            ".agents/other.md",
-            ".agents/sub/environment.md",
         ):
             self.assertEqual(SEL.classify_path(path), "broaden", path)
-        for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
+        for path in ("AGENTS.MD", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
-        self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
         self.assertEqual(SEL.classify_path(".agents/"), "unknown")
-        self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
+        for path in (
+            ".agents/skills/fvoci-fast-verify/SKILL.md",
+            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
+            ".agents/other.md",
+            ".agents/sub/environment.md",
+            "agents/environment.md",
+            "apps/AGENTS.md",
+            "docs/AGENTS.md",
+            "scripts/AGENTS.md",
+        ):
+            self.assertEqual(SEL.classify_path(path), "docs", path)
 
     def test_explicit_docs_never_overlap_build_inputs(self) -> None:
         for path in SEL._EXPLICIT_DOCS:
@@ -3485,9 +3491,9 @@ class AgentDocsSelectionTest(unittest.TestCase):
             "scripts/test_ci_selection.py",
             "scripts/test-ci-selection.sh",
             "scripts/ci_selection_requirements.txt",
-            ".agents/skills/fvoci-fast-verify/SKILL.md",
         ):
             self.assert_full([*AGENT_DOCS, extra], "FULL_PATH_BROADEN")
+        self.assert_docs_only([*AGENT_DOCS, ".agents/skills/fvoci-fast-verify/SKILL.md"])
 
     def test_agent_docs_with_executable_config_is_full(self) -> None:
         for extra in (
@@ -3516,8 +3522,10 @@ class AgentDocsSelectionTest(unittest.TestCase):
     def test_agent_docs_with_fixture_or_unknown_is_full(self) -> None:
         self.assert_full([*AGENT_DOCS, "compat/fixtures/x.json"], "FULL_PATH_BROADEN")
         self.assert_full([*AGENT_DOCS, "scripts/fixtures/web-e2e/x.sh"], "FULL_PATH_BROADEN")
-        self.assert_full([*AGENT_DOCS, "docs/other.md"], "FULL_PATH_BROADEN")
-        for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
+        self.assert_docs_only([*AGENT_DOCS, "docs/other.md"])
+        for extra in ("third-party/x.md", "apps/AGENTS.md", "notes.md"):
+            self.assert_docs_only([*AGENT_DOCS, extra])
+        for extra in (".gitignore", "LICENSE"):
             self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
 
     def test_agent_docs_with_frontend_unions_impacts(self) -> None:
@@ -3599,15 +3607,15 @@ class AgentDocsSelectionTest(unittest.TestCase):
             fx.delete_file(".agents/skills/x/SKILL.md")
             paths = self._diff(fx, base)
             self.assertIn(".agents/skills/x/SKILL.md", paths)
-            self.assertEqual(SEL.decide_from_paths(paths).mode, "full")
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
 
     def test_real_diff_rename_checks_old_and_new_names(self) -> None:
         body = "role record line\n" * 20
         cases = (
-            ("AGENTS.md", "notes/AGENTS.md", "FULL_UNKNOWN_PATH"),
-            (".agents/environment.md", ".agents/skills/environment.md", "FULL_PATH_BROADEN"),
-            (".agents/skills/x/SKILL.md", ".agents/environment.md", "FULL_PATH_BROADEN"),
-            ("src/env.md", "AGENTS.md", "FULL_PATH_BROADEN"),
+            ("AGENTS.md", "notes/AGENTS.md", "NARROW_DOCS"),
+            (".agents/environment.md", ".agents/skills/environment.md", "NARROW_DOCS"),
+            (".agents/skills/x/SKILL.md", ".agents/environment.md", "NARROW_DOCS"),
+            ("src/env.md", "AGENTS.md", "NARROW_DOCS"),
             ("AGENTS.md", "Cargo.toml", "FULL_PATH_BROADEN"),
         )
         for old, new, reason in cases:
@@ -3618,8 +3626,8 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 paths = self._diff(fx, base)
                 self.assertEqual(paths, [old, new], (old, new))
                 decision = SEL.decide_from_paths(paths)
-                self.assertEqual(decision.mode, "full", (old, new))
                 self.assertEqual(decision.reason_code, reason, (old, new))
+                self.assertEqual(decision.mode, "narrow" if reason == "NARROW_DOCS" else "full", (old, new))
 
     def test_real_diff_rename_between_agent_docs_stays_docs(self) -> None:
         body = "role record line\n" * 20
@@ -3651,6 +3659,84 @@ class AgentDocsSelectionTest(unittest.TestCase):
             self.assertEqual(plan["path_count"], 2)
             self.assertTrue(plan["plan_ok"])
             self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()))
+
+
+class MarkdownOnlyLaneTest(unittest.TestCase):
+    """Only-markdown changes use the docs lane except fixture oracles and loaded bytes."""
+
+    _CONTENT_READ = frozenset({
+        "apps/web/NOTICE.md",
+        "packages/editor/src/fonts/README.md",
+        "scripts/release-notes-template.md",
+        "infra/rust/compose.user.INSTALL.md",
+        "scripts/testdata/release/compose.user.INSTALL.md",
+    })
+    _FIXTURE_MD = (
+        "vendor/markdown/x.md",
+        "vendor/markdown/nested/oracle.md",
+        "compat/fixtures/markdown-oracle/x.md",
+        "compat/fixtures/x.md",
+        "tests/fixtures/x.md",
+        "crates/collab-engine/fixtures/x.md",
+        "crates/collab-engine/fixtures/nested/x.md",
+        "scripts/fixtures/x.md",
+        "scripts/fixtures/web-e2e/note.md",
+    )
+    _ORDINARY_MD = (
+        "README.md",
+        "NOTES.md",
+        "docs/rewrite.md",
+        "docs/other.md",
+        "scripts/x.md",
+        "scripts/sub/x.md",
+        "tools/x.md",
+        "tools/ci/x.md",
+    )
+
+    def test_fixture_and_content_read_markdown_stay_full(self) -> None:
+        self.assertEqual(SEL._CONTENT_READ_MARKDOWN, self._CONTENT_READ)
+        for path in (*self._FIXTURE_MD, *self._CONTENT_READ):
+            self.assertEqual(SEL.classify_path(path), "broaden", path)
+            decision = SEL.decide_from_paths([path])
+            self.assertEqual(decision.mode, "full", path)
+            self.assertEqual(decision.reason_code, "FULL_PATH_BROADEN", path)
+
+    def test_ordinary_markdown_is_docs_narrow_on_every_gate(self) -> None:
+        gate = GateSchemaTest()
+        for path in self._ORDINARY_MD:
+            self.assertEqual(SEL.classify_path(path), "docs", path)
+            for workflow, plan in plan_all_workflows([path]).items():
+                self.assertEqual(plan["mode"], "narrow", (path, workflow))
+                self.assertEqual(plan["reason_code"], "NARROW_DOCS", (path, workflow))
+                self.assertTrue(plan["plan_ok"], (path, workflow))
+                self.assertFalse(any(meta["selected"] for meta in plan["jobs"].values()), (path, workflow))
+                checked = SEL.build_plan(
+                    workflow=workflow,
+                    event_name="pull_request",
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    merge_base_sha="c" * 40,
+                    tested_sha="a" * 40,
+                    paths=[path],
+                )
+                self.assertEqual(gate._gate(checked, workflow), 0, (path, workflow))
+
+    def test_markdown_with_code_or_loaded_markdown_is_full(self) -> None:
+        self.assertEqual(
+            SEL.decide_from_paths(["docs/other.md", "src/lib.rs"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(
+            SEL.decide_from_paths(["NOTES.md", "apps/web/NOTICE.md"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(
+            SEL.decide_from_paths(["tools/ci/x.md", "compat/fixtures/markdown-oracle/x.md"]).reason_code,
+            "FULL_PATH_BROADEN",
+        )
+        self.assertEqual(SEL.classify_path("scripts/run-web-e2e.sh"), "broaden")
+        self.assertEqual(SEL.classify_path("vendor/markdown/src/parser.rs"), "broaden")
+        self.assertEqual(SEL.classify_path("crates/collab-engine/src/lib.rs"), "broaden")
 
 
 class AgentDocsGateTest(unittest.TestCase):

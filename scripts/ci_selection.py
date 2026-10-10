@@ -153,6 +153,23 @@ _MANIFEST_MARKERS: tuple[str, ...] = (
 # Explicit explanatory docs only (not build inputs). Exact paths are checked
 # before the broaden prefixes so the agent role/environment records stay docs
 # while every other `.agents/` path (skills, references) remains full.
+# A change set of only `*.md` files is docs wherever it lives, except fixture
+# oracles and markdown whose bytes product code or tests actually load.
+_MD_FIXTURE_PREFIXES: tuple[str, ...] = (
+    "vendor/markdown/",
+    "compat/fixtures/",
+    "tests/fixtures/",
+    "scripts/fixtures/",
+)
+_CONTENT_READ_MARKDOWN: frozenset[str] = frozenset(
+    {
+        "apps/web/NOTICE.md",
+        "packages/editor/src/fonts/README.md",
+        "scripts/release-notes-template.md",
+        "infra/rust/compose.user.INSTALL.md",
+        "scripts/testdata/release/compose.user.INSTALL.md",
+    }
+)
 _EXPLICIT_DOCS: frozenset[str] = frozenset(
     {
         "README.md",
@@ -203,6 +220,15 @@ _BROWSER_UI_HELPERS = frozenset({
 
 def _starts_with(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix)
+
+
+def _is_crate_fixture_path(path: str) -> bool:
+    parts = path.split("/")
+    return len(parts) >= 4 and parts[0] == "crates" and parts[2] == "fixtures"
+
+
+def _is_fixture_markdown(path: str) -> bool:
+    return path.startswith(_MD_FIXTURE_PREFIXES) or _is_crate_fixture_path(path)
 
 
 def validate_sha(ref: str) -> bool:
@@ -257,6 +283,12 @@ def classify_path(path: str) -> NarrowFamily | Literal["broaden"] | Literal["unk
     # traversal before any allowlist/prefix match, including synthetic inputs.
     if not path or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
         return "unknown"
+    # Only `*.md` is documentation. Fixture oracles and files whose bytes are
+    # loaded stay on the full lane; every other markdown path does not.
+    if path.endswith(".md"):
+        if _is_fixture_markdown(path) or path in _CONTENT_READ_MARKDOWN:
+            return "broaden"
+        return "docs"
     if path in _EXPLICIT_DOCS:
         return "docs"
     if _BROWSER_SPEC_RE.fullmatch(path) or path in _BROWSER_UI_HELPERS:
