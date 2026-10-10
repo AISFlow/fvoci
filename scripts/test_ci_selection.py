@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import importlib.util
 import inspect
+import io
 import json
 import os
 import shutil
@@ -722,6 +724,69 @@ class GateSchemaTest(unittest.TestCase):
                 self.assertEqual(self._gate(plan, "rust", {**results, "postgres": result}), 1)
         self.assertEqual(self._gate(plan, "rust", results, omit_jobs=frozenset({"postgres"})), 1)
 
+    def test_plan_failure_or_skip_rejects_empty_postgres_matrix(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "skipped" for job in SEL.WORKFLOW_JOBS["rust"]}
+        plan_json = json.dumps(plan, separators=(",", ":"))
+        matrices: tuple[str | None, ...] = (None, "", "[]", "{}", '{"include":[]}')
+        for plan_result in ("failure", "skipped", "cancelled"):
+            for matrix in matrices:
+                outputs = {"plan_json": plan_json}
+                if matrix is not None:
+                    outputs["postgres_matrix"] = matrix
+                stderr = io.StringIO()
+                with self.subTest(plan_result=plan_result, matrix=matrix):
+                    with contextlib.redirect_stderr(stderr):
+                        rc = self._gate(
+                            plan,
+                            "rust",
+                            results,
+                            plan_result=plan_result,
+                            plan_outputs=outputs,
+                        )
+                    self.assertEqual(rc, 1)
+                    self.assertIn("PLAN_RESULT", stderr.getvalue())
+
+    def test_selected_postgres_rejects_empty_or_missing_matrix_output(self) -> None:
+        plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
+        results = {job: "success" for job in SEL.WORKFLOW_JOBS["rust"]}
+        plan_json = json.dumps(plan, separators=(",", ":"))
+        cases = {
+            "missing": None,
+            "blank": "",
+            "array": "[]",
+            "object": "{}",
+            "empty-include": '{"include":[]}',
+            "empty-row": '{"include":[{}]}',
+            "null": "null",
+            "malformed": "{",
+        }
+        for label, matrix in cases.items():
+            outputs = {"plan_json": plan_json}
+            if matrix is not None:
+                outputs["postgres_matrix"] = matrix
+            stderr = io.StringIO()
+            with self.subTest(label=label):
+                with contextlib.redirect_stderr(stderr):
+                    rc = self._gate(plan, "rust", results, plan_outputs=outputs)
+                self.assertEqual(rc, 1)
+                self.assertIn("postgres matrix error POSTGRES_MATRIX_", stderr.getvalue())
+        kept = {
+            "plan_json": plan_json,
+            "postgres_matrix": '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}',
+        }
+        self.assertEqual(self._gate(plan, "rust", results, plan_outputs=kept), 0)
+
+    def test_unselected_postgres_does_not_require_matrix_output(self) -> None:
+        plan = self._plan("rust", {})
+        results = {job: "skipped" for job in SEL.WORKFLOW_JOBS["rust"]}
+        self.assertEqual(self._gate(plan, "rust", results), 0)
+        outputs = {
+            "plan_json": json.dumps(plan, separators=(",", ":")),
+            "postgres_matrix": "[]",
+        }
+        self.assertEqual(self._gate(plan, "rust", results, plan_outputs=outputs), 0)
+
     def test_web_budget_lanes_require_both_selected_success(self) -> None:
         selected = {"web-checks": True, "web-native-checks": True}
         plan = self._plan("web", selected)
@@ -762,10 +827,14 @@ class GateSchemaTest(unittest.TestCase):
     ) -> str:
         needs: dict[str, object] = {}
         if plan_outputs is None:
-            needs["ci-plan"] = {
-                "result": plan_result,
-                "outputs": {"plan_json": json.dumps(plan, separators=(",", ":"))},
-            }
+            outputs = {"plan_json": json.dumps(plan, separators=(",", ":"))}
+            jobs = plan.get("jobs") if isinstance(plan, dict) else None
+            postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
+            if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
+                outputs["postgres_matrix"] = (
+                    '{"include":[{"runner":"ubuntu-26.04","pg_major":"18","check":"postgres"}]}'
+                )
+            needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
         omit = omit_jobs or frozenset()
@@ -1767,6 +1836,52 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
+
+        jobs, err = SEL._rust_workflow_jobs(ROOT)
+        self.assertIsNone(err)
+        for fallback in (
+            "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix || '[]') }}",
+            '${{ fromJSON(needs.ci-plan.outputs.postgres_matrix || \'{"include":[]}\') }}',
+        ):
+            with self.subTest(fallback=fallback):
+                bad = copy.deepcopy(jobs)
+                bad["postgres"]["strategy"]["matrix"] = fallback
+                errors = SEL.verify_postgres_budget_matrix(bad)
+                self.assertTrue(errors)
+                self.assertIn("without an empty-array fallback", "\n".join(errors))
+
+        for fn_name, params in (
+            ("postgres_matrix_row_runs", ["event_name", "row"]),
+            ("postgres_matrix_include", ["event_name", "rows"]),
+            ("postgres_matrix_json", ["event_name", "rows"]),
+        ):
+            fn = getattr(SEL, fn_name)
+            self.assertEqual(list(inspect.signature(fn).parameters), params, fn_name)
+            tree = ast.parse(inspect.getsource(fn))
+            names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+            attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+            strings = {
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+            self.assertFalse(names & {"event", "labels", "body", "payload", "github"}, fn_name)
+            self.assertFalse(attrs & {"labels", "body", "ref", "pull_request"}, fn_name)
+            self.assertFalse(
+                strings & {"labels", "body", "head", "ref", "github.event", "pull_request.head"},
+                fn_name,
+            )
+        plan_tree = ast.parse(inspect.getsource(SEL.cmd_plan))
+        matrix_calls = [
+            node
+            for node in ast.walk(plan_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "postgres_matrix_json"
+        ]
+        self.assertEqual(len(matrix_calls), 1)
+        self.assertEqual([arg.id for arg in matrix_calls[0].args if isinstance(arg, ast.Name)], ["event_name", "rows"])
+        self.assertEqual(matrix_calls[0].keywords, [])
 
     def test_postgres_budget_limits_and_strict_cache_mutations_fail(self) -> None:
         for mutation in ("timeout", "fail-fast", "mask", "runner", "cache-fallback", "cache-key", "cache-path", "missing-cache"):
@@ -3998,6 +4113,85 @@ class MergeGroupPlanTest(unittest.TestCase):
             self.assertEqual(plan["reason_code"], "FULL_EVENT_UNKNOWN")
             assert_full_selection(self, "rust", plan, "schedule")
             self.assertIn(f"postgres_matrix<<POSTGRES_MATRIX_EOF\n{full}\nPOSTGRES_MATRIX_EOF\n", text)
+
+    def test_matrix_ignores_pr_controlled_inputs_and_keeps_full_legs(self) -> None:
+        with PrCheckoutFixture() as fx:
+            fx.clone_work()
+            tested = git_sha(fx.work)
+            jobs, err = SEL._rust_workflow_jobs(ROOT)
+            self.assertIsNone(err)
+            rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+            self.assertIsNone(row_err)
+            assert rows is not None
+            reduced = json.loads(SEL.postgres_matrix_json("pull_request", rows))
+            full = json.loads(SEL.postgres_matrix_json("push", rows))
+            self.assertEqual(len(reduced["include"]), 3)
+            self.assertEqual(len(full["include"]), 12)
+            self.assertEqual(
+                [row["check"] for row in reduced["include"]],
+                ["postgres", "postgres-c", "postgres-b"],
+            )
+
+            def emitted(event_name: str, payload: dict) -> dict:
+                proc, _plan, text = self._plan(
+                    fx, workflow="rust", event_name=event_name, payload=payload, tested=tested
+                )
+                self.assertEqual(proc.returncode, 0, (event_name, proc.stderr))
+                marker = "postgres_matrix<<POSTGRES_MATRIX_EOF\n"
+                start = text.index(marker) + len(marker)
+                end = text.index("\nPOSTGRES_MATRIX_EOF", start)
+                return json.loads(text[start:end])
+
+            pr_base = {"base": {"ref": "main", "sha": fx.base_sha}, "head": {"sha": tested}}
+            pr_payloads = [
+                {
+                    "ref": "refs/heads/feature",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "feature", "sha": tested},
+                        "labels": [],
+                        "body": "",
+                    },
+                },
+                {
+                    "ref": "refs/heads/full-matrix",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "run-all-legs", "sha": tested},
+                        "labels": [{"name": "full-ci"}, {"name": "postgres-all"}],
+                        "body": "run all 12 postgres legs including arm64",
+                    },
+                },
+                {
+                    "ref": "refs/heads/pg18-only",
+                    "pull_request": {
+                        **pr_base,
+                        "head": {"ref": "reduce-matrix", "sha": tested},
+                        "labels": [{"name": "pg18-only"}, {"name": "skip-arm"}],
+                        "body": "only ubuntu-26.04 pg 18",
+                    },
+                },
+            ]
+            for payload in pr_payloads:
+                with self.subTest(event_name="pull_request", ref=payload["ref"]):
+                    self.assertEqual(emitted("pull_request", payload), reduced)
+
+            stuffed = {
+                "ref": "refs/heads/feature",
+                "before": "e" * 40,
+                "after": tested,
+                "pull_request": {
+                    "base": {"ref": "main", "sha": fx.base_sha},
+                    "head": {"ref": "pull_request", "sha": tested},
+                    "labels": [{"name": "pg18-only"}, {"name": "reduce-matrix"}],
+                    "body": "only ubuntu-26.04 pg 18",
+                },
+                "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40},
+            }
+            for event_name in ("merge_group", "push", "schedule", "pull_request_target"):
+                with self.subTest(event_name=event_name):
+                    self.assertEqual(emitted(event_name, stuffed), full)
+                    self.assertEqual(SEL.postgres_matrix_json(event_name, rows), json.dumps(full, separators=(",", ":")))
 
     def test_required_gate_names_match_under_every_event(self) -> None:
         rust = (ROOT / ".github/workflows/rust.yml").read_text(encoding="utf-8")
