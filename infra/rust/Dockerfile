@@ -28,6 +28,7 @@ COPY infra/rust/.env.example ./infra/rust/.env.example
 # `/api/docs/json` embeds the committed OpenAPI export (include_str!).
 COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
+COPY xtask ./xtask
 COPY crates/collab-engine ./crates/collab-engine
 # FVOCI-owned same-version read-only Yrs accessor patch (direct path dependency).
 COPY crates/vendor/yrs-0.28.0 ./crates/vendor/yrs-0.28.0
@@ -40,6 +41,7 @@ COPY vendor/libsql-0.9.30 ./vendor/libsql-0.9.30
 
 FROM rust-sources AS rust-deps
 RUN cargo fetch --locked \
+ && cargo fetch --locked --manifest-path xtask/Cargo.toml \
  && cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml \
  && cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked
 

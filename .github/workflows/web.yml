@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
@@ -158,7 +159,9 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           bash scripts/test-web-e2e-groups.sh
-          python3 scripts/fixtures/web-e2e/test-build-handoff.py
+      # The planner CLI parses workflow YAML with the pinned parser installed above.
+      - name: Planner and gate CLI contract
+        run: bun test --timeout=60000 tools/ci/planner.test.ts
 
   web-native-checks:
     needs: ci-plan

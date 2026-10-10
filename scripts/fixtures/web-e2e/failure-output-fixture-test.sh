@@ -5,8 +5,9 @@
 # playwright-output directory that CI uploads, for ordinary and pending runs,
 # with the group's redacted netlink event log, and that the pre-browser network
 # settle wait returns, waits for tentative addresses, and stays bounded.
-# PostgreSQL, Meilisearch, SMTP, migrations, the server and `ip` are stubbed; no
-# browser is launched because the fixture specs never request `page`.
+# PostgreSQL, Meilisearch, migrations, the server and `ip` are stubbed; the real
+# Bun SMTP sink runs on loopback. No browser is launched because the fixture
+# specs never request `page`.
 # Both inner wrappers must reject listening-only/early-exit servers and launch
 # Playwright exactly once when setup becomes healthy on the final startup poll.
 set -euo pipefail
@@ -33,12 +34,13 @@ FAKE_BIN="$WORK/bin"
 FIXTURE_PATH="$FAKE_BIN:$PATH"
 RUN_TMP="$WORK/tmp"
 NET_STATE="$WORK/net"
-mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/apps/web/e2e" \
+mkdir -p "$FIXTURE_ROOT/scripts/perf" "$FIXTURE_ROOT/tools/web-e2e" "$FIXTURE_ROOT/apps/web/e2e" \
   "$FIXTURE_ROOT/apps/web/e2e-pending" "$FIXTURE_ROOT/apps/web/dist" \
-  "$FIXTURE_ROOT/target/debug" "$FAKE_BIN" "$RUN_TMP"
-cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" \
-  "$ROOT/scripts/web-e2e-trace-summary.py" "$FIXTURE_ROOT/scripts/"
+  "$FIXTURE_ROOT/target/debug" "$FIXTURE_ROOT/tools/web-e2e" "$FAKE_BIN" "$RUN_TMP"
+cp "$ROOT/scripts/web-e2e-run-group.sh" "$ROOT/scripts/web-e2e-inner.sh" "$FIXTURE_ROOT/scripts/"
+cp "$ROOT/tools/web-e2e/trace-summary.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
+cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
@@ -69,15 +71,6 @@ cat >"$FIXTURE_ROOT/scripts/start-test-meili.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 "$@"
-STUB
-cat >"$FIXTURE_ROOT/scripts/smtp-sink.py" <<'STUB'
-import argparse, pathlib, time
-parser = argparse.ArgumentParser()
-parser.add_argument("--capture")
-parser.add_argument("--port-file")
-args = parser.parse_args()
-pathlib.Path(args.port_file).write_text("2525")
-time.sleep(600)
 STUB
 cat >"$FIXTURE_ROOT/target/debug/fvoci-migrate" <<'STUB'
 #!/usr/bin/env bash

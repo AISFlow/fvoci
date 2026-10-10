@@ -231,7 +231,7 @@ unset DATABASE_URL FVOCI_MIGRATION_URL
 SMTP_CAPTURE="$RUN_DIR/smtp.jsonl"
 SMTP_PORT_FILE="$RUN_DIR/smtp.port"
 : >"$SMTP_CAPTURE"
-python3 "$ROOT/scripts/smtp-sink.py" --capture "$SMTP_CAPTURE" --port-file "$SMTP_PORT_FILE" &
+bun "$ROOT/tools/web-e2e/smtp-sink.ts" --capture "$SMTP_CAPTURE" --port-file "$SMTP_PORT_FILE" &
 SMTP_PID=$!
 deadline=$((SECONDS + 10))
 until [[ -s "$SMTP_PORT_FILE" ]]; do

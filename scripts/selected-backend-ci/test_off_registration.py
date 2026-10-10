@@ -162,7 +162,7 @@ class CompanionExecutionPlan(unittest.TestCase):
             environment={'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1'}
             with patch.dict(os.environ,environment,clear=True), patch.object(os,'getuid',return_value=1000),patch.object(os,'getgid',return_value=1000),patch.object(os,'access',return_value=True),patch.object(runner,'identity',return_value='pure-fixture-owner'),patch.object(runner,'runtime_access'),patch.object(runner,'call',return_value=str(output/'chromium')),patch.object(runner,'admitted_browser',return_value=str(output/'chromium') if admitted is None else admitted) as admission,patch.object(runner,'sha',return_value='0'*64),patch.object(runner.shutil,'which',return_value='/pure-fixture/bun'),patch.object(runner.subprocess,'run',side_effect=child):
                 # Only the admitted-browser boundary is modeled here: the real staging,
-                # admission and rejection controls live in scripts/fixtures/web-e2e/test-build-handoff.py.
+                # admission and rejection controls live in tools/selected-backend-ci/browser.test.ts.
                 # The product guard itself still runs and is exercised by the mismatch control below.
                 if admitted is not None:
                     with self.assertRaises(AssertionError):runner.run(output)

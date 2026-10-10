@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -205,7 +207,6 @@ fi
         self.assertEqual(mirror, 'https://archive.ubuntu.com/ubuntu/\n')
 
 
-
 class SchemaCatalogLifecycleTest(unittest.TestCase):
     """Actual inline control flow, private data-only subprocess boundaries.
     These controls do not qualify PostgreSQL/SQLite/catalog execution.
@@ -353,7 +354,7 @@ def dummy_event_path(directory: Path) -> Path:
 class ClassifyPathsTest(unittest.TestCase):
     def test_explicit_docs_only(self) -> None:
         self.assertEqual(SEL.classify_path("docs/rewrite.md"), "docs")
-        self.assertEqual(SEL.classify_path("docs/other.md"), "broaden")
+        self.assertEqual(SEL.classify_path("docs/other.md"), "docs")
 
     def test_frontend_src_narrow(self) -> None:
         self.assertEqual(SEL.classify_path("apps/web/src/foo.ts"), "frontend_web_install")
@@ -687,6 +688,15 @@ class PrCheckoutBindingTest(unittest.TestCase):
         self.assertEqual(plan["reason_code"], "FULL_PR_CHECKOUT_NOT_MERGE")
 
 
+def expected_postgres_matrix(event_name: str) -> str:
+    """The plan's postgres_matrix output for this event from the real rust.yml catalog."""
+    jobs, err = SEL._rust_workflow_jobs(ROOT)
+    assert err is None and jobs is not None, err
+    rows, row_err = SEL._postgres_matrix_rows(jobs["postgres"])
+    assert row_err is None and rows is not None, row_err
+    return SEL.postgres_matrix_json(event_name, rows)
+
+
 class GateSchemaTest(unittest.TestCase):
     def test_postgres_budget_matrix_aggregate_is_required_by_gate(self) -> None:
         plan = self._plan("rust", {job: True for job in SEL.WORKFLOW_JOBS["rust"]})
@@ -734,13 +744,16 @@ class GateSchemaTest(unittest.TestCase):
         extra: dict | None = None,
         omit_jobs: frozenset[str] | None = None,
         job_entries: dict[str, object] | None = None,
+        matrix_event: str = "pull_request",
     ) -> str:
         needs: dict[str, object] = {}
         if plan_outputs is None:
-            needs["ci-plan"] = {
-                "result": plan_result,
-                "outputs": {"plan_json": json.dumps(plan, separators=(",", ":"))},
-            }
+            outputs = {"plan_json": json.dumps(plan, separators=(",", ":"))}
+            jobs = plan.get("jobs") if isinstance(plan, dict) else None
+            postgres = jobs.get("postgres") if isinstance(jobs, dict) else None
+            if workflow == "rust" and isinstance(postgres, dict) and postgres.get("selected") is True:
+                outputs["postgres_matrix"] = expected_postgres_matrix(matrix_event)
+            needs["ci-plan"] = {"result": plan_result, "outputs": outputs}
         else:
             needs["ci-plan"] = {"result": plan_result, "outputs": plan_outputs}
         omit = omit_jobs or frozenset()
@@ -766,9 +779,6 @@ class GateSchemaTest(unittest.TestCase):
         event: object = None,
         **needs_kwargs: object,
     ) -> int:
-        payload = needs_json if needs_json is not None else self._needs(
-            plan, workflow, results, **needs_kwargs
-        )
         if event_name is None:
             # Default: the event that legitimately produced this plan's opt-ins.
             chosen = {
@@ -779,6 +789,10 @@ class GateSchemaTest(unittest.TestCase):
                 and (plan["jobs"].get(job) or {}).get("selected") is True
             }
             event_name, event = ("workflow_dispatch", {"inputs": chosen}) if chosen else ("pull_request", {})
+        # The default matrix output is the one the plan emits for this event.
+        payload = needs_json if needs_json is not None else self._needs(
+            plan, workflow, results, matrix_event=event_name, **needs_kwargs
+        )
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / "event.json"
             event_path.write_text(
@@ -1218,7 +1232,6 @@ class WorkflowRegistryTest(unittest.TestCase):
                 "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
                 "python3 scripts/selected-backend-ci/test_off_registration.py",
                 "bash scripts/test-web-e2e-groups.sh",
-                "python3 scripts/fixtures/web-e2e/test-build-handoff.py",
             ],
             "web-native-checks": [
                 "cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings",
@@ -1493,6 +1506,17 @@ class RustBinaryArtifactTest(unittest.TestCase):
         self.assertEqual(gate._gate(web, "web", {j: "skipped" if j == "workspace-browser-build" else "success" for j in SEL.WORKFLOW_JOBS["web"]}), 1)
 
 
+def postgres_catalog_rows(job: dict) -> list[dict]:
+    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+    if not isinstance(rows, list):
+        raise AssertionError("postgres matrix catalog must be a list")
+    return rows
+
+
+def store_postgres_catalog(job: dict, rows: list[dict]) -> None:
+    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
+
+
 class RustSuiteRegistryFixture:
     """Minimal tree with real rust.yml wiring and a trimmed Cargo [[test]] registry."""
 
@@ -1558,7 +1582,9 @@ class RustSuiteRegistryTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(SEL.verify_postgres_budget_matrix(jobs), [])
         job = jobs["postgres"]
-        rows = job["strategy"]["matrix"]["include"]
+        rows, row_err = SEL._postgres_matrix_rows(job)
+        self.assertIsNone(row_err)
+        assert rows is not None
         self.assertEqual(len(rows), 12)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04", "17"),
                               ("ubuntu-26.04", "18"), ("ubuntu-26.04-arm", "18")):
@@ -1574,6 +1600,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(len(a | b | c), 44)
                 self.assertFalse(a & b or a & c or b & c)
                 self.assertEqual(selected["a"]["postgres_image"], selected["c"]["postgres_image"])
+        self.assertEqual(job["strategy"]["matrix"], SEL.POSTGRES_MATRIX_EXPR)
         self.assertEqual(job["services"]["postgres"]["image"], "${{ matrix.postgres_image }}")
         self.assertEqual(job["services"]["postgres"]["ports"], ["5432/tcp"])
         step = next(step for step in job["steps"] if step.get("name") == SEL.RUST_POSTGRES_INTEGRATION_STEP)
@@ -1616,8 +1643,8 @@ class RustSuiteRegistryTest(unittest.TestCase):
             with self.subTest(mutation=mutation), RustSuiteRegistryFixture() as fx:
                 fx.write_cargo()
                 def change(data: dict) -> None:
-                    matrix = data["jobs"]["postgres"]["strategy"]["matrix"]
-                    rows = matrix["include"]
+                    job = data["jobs"]["postgres"]
+                    rows = json.loads(job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
                     c = next(row for row in rows if row["shard"] == "c" and row["pg_major"] == "16")
                     a = next(row for row in rows if row["shard"] == "a" and row["pg_major"] == "16")
                     if mutation == "missing-c": rows.remove(c)
@@ -1626,12 +1653,15 @@ class RustSuiteRegistryTest(unittest.TestCase):
                     elif mutation == "wrong-major": c["pg_major"] = "17"
                     elif mutation == "wrong-pin": c["postgres_image"] = "postgres:16"
                     elif mutation == "duplicate-check": c["check"] = a["check"]
-                    elif mutation == "extra-dimension": matrix["exclude"] = [dict(c)]
+                    elif mutation == "extra-dimension":
+                        job["strategy"]["matrix"] = {"include": rows, "exclude": []}
+                        return
                     elif mutation == "duplicate-target": c["tests"] += " --test task_integration"
                     elif mutation == "duplicate-across-shards": a["tests"] += " --test task_integration"
                     elif mutation == "missing-pg16-target": a["tests"] = a["tests"].replace("--test db_integration ", "")
                     elif mutation == "c-filter": c["tests"] += " -- --skip failing"
                     else: c["continue-on-error"] = True
+                    job["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps(rows)
                 fx.mutate_rust_workflow(change)
                 self.assertTrue(SEL.verify_postgres_budget_matrix(SEL._rust_workflow_jobs(fx.root)[0]))
 
@@ -1687,8 +1717,11 @@ class RustSuiteRegistryTest(unittest.TestCase):
                 self.assertEqual(names, set()); self.assertIsNotNone(err)
         for runner, major in (("ubuntu-26.04", "16"), ("ubuntu-26.04-arm", "18")):
             bad = copy.deepcopy(jobs)
-            bad["postgres"]["strategy"]["matrix"]["include"] = [row for row in bad["postgres"]["strategy"]["matrix"]["include"]
-                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")]
+            catalog = json.loads(bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV])
+            bad["postgres"]["env"][SEL.POSTGRES_MATRIX_CATALOG_ENV] = json.dumps([
+                row for row in catalog
+                if not (row.get("runner") == runner and row.get("pg_major") == major and row.get("shard") == "a")
+            ])
             self.assertIsNotNone(SEL.schema_baseline_inventory(bad)[1])
 
     def test_schema_target_omission_is_a_registry_failure(self) -> None:
@@ -1802,7 +1835,7 @@ class RustSuiteRegistryTest(unittest.TestCase):
             step = next(item for item in jobs["postgres"]["steps"] if item.get("name") == SEL.RUST_SELECTED_INSTALL_STEP)
             self.assertIn('prefix="fvoci-selected-install-", dir="/run"', step["run"])
             self.assertEqual(jobs["native-arm64"]["steps"][-1]["run"].strip(), SEL.RUST_NATIVE_ARM64_RUN)
-            rows = jobs["postgres"]["strategy"]["matrix"]["include"]
+            rows = postgres_catalog_rows(jobs["postgres"])
             self.assertEqual(
                 sorted(row["runner"] for row in rows if row["shard"] == "b" and row["pg_major"] == "18"),
                 ["ubuntu-26.04", "ubuntu-26.04-arm"],
@@ -1834,8 +1867,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
                         helper = next(item for item in steps if item.get("name") == "Validate and restore finished postgres executables (no rebuild fallback)")
                         helper["run"] = helper["run"].replace('--cohort postgres ', '--cohort helper ')
                     else:
-                        row = next(row for row in job["strategy"]["matrix"]["include"] if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
+                        rows = postgres_catalog_rows(job)
+                        row = next(row for row in rows if row["runner"] == "ubuntu-26.04-arm" and row["shard"] == "b")
                         row["pg_major"] = "17"
+                        store_postgres_catalog(job, rows)
                 fx.mutate_rust_workflow(weaken)
                 errors = SEL.verify_rust_suite_registry(fx.root)
                 self.assertTrue(errors, "selected install actual execution must be mandatory")
@@ -1845,9 +1880,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo(["selected_install_lifetime"])
             def duplicate(data: dict) -> None:
-                for row in data["jobs"]["postgres"]["strategy"]["matrix"]["include"]:
+                job = data["jobs"]["postgres"]
+                rows = postgres_catalog_rows(job)
+                for row in rows:
                     if row["shard"] == "b":
                         row["tests"] += " --test selected_install_lifetime"
+                store_postgres_catalog(job, rows)
             fx.mutate_rust_workflow(duplicate)
             errors = SEL.verify_rust_suite_registry(fx.root)
         self.assertIn("assigned to multiple CI buckets: selected_install_lifetime", "\n".join(errors))
@@ -1863,10 +1901,12 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_arm64_row_omission_fails(self) -> None:
         def drop_search_meili_on_arm(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             for row in rows:
                 if row.get("runner") == "ubuntu-26.04-arm":
                     row["tests"] = row["tests"].replace(" --test search_meili", "")
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2124,8 +2164,10 @@ class RustSuiteRegistryTest(unittest.TestCase):
 
     def test_postgres_matrix_tests_no_run_fragment_fails(self) -> None:
         def poison_matrix_tests(data: dict) -> None:
-            rows = data["jobs"]["postgres"]["strategy"]["matrix"]["include"]
+            job = data["jobs"]["postgres"]
+            rows = postgres_catalog_rows(job)
             rows[0]["tests"] = "--no-run --test db_integration"
+            store_postgres_catalog(job, rows)
 
         with RustSuiteRegistryFixture() as fx:
             fx.write_cargo()
@@ -2555,8 +2597,9 @@ class RegistryMutationCliTest(unittest.TestCase):
                 self.assertIsNone(err)
                 job = data["jobs"]["postgres"]
                 if mutation == "missing-c":
-                    rows = job["strategy"]["matrix"]["include"]
+                    rows = postgres_catalog_rows(job)
                     rows.remove(next(row for row in rows if row["shard"] == "c"))
+                    store_postgres_catalog(job, rows)
                     needle = "all twelve"
                 elif mutation == "missing-gate":
                     data["jobs"]["rust-ci-gate"]["needs"].remove("postgres")
@@ -3255,8 +3298,9 @@ class ImpactUnionTest(unittest.TestCase):
 
     def test_new_explanatory_docs_are_exact(self) -> None:
         self.assert_selected_workflows(["docs/RELEASING.md", "docs/collab-engine-comparison.md"], set())
-        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md", "docs/collab-engine-comparison.md.bak"):
-            self.assertEqual(SEL.decide_from_paths([path]).mode, "full", path)
+        for path in ("docs/fixtures/example.md", "docs/generated/api.md", "docs/other.md"):
+            self.assertEqual(SEL.decide_from_paths([path]).reason_code, "NARROW_DOCS", path)
+        self.assertEqual(SEL.decide_from_paths(["docs/collab-engine-comparison.md.bak"]).mode, "full")
 
     def test_backend_contracts_harness_and_unknown_stay_full(self) -> None:
         for path in (
@@ -3439,19 +3483,27 @@ class AgentDocsSelectionTest(unittest.TestCase):
 
     def test_other_agents_paths_stay_broaden_or_unknown(self) -> None:
         for path in (
-            ".agents/skills/fvoci-fast-verify/SKILL.md",
-            ".agents/skills/fvoci-standard-implementations/references/candidates.md",
             ".agents/environment.md.bak",
             ".agents/environment.mdx",
-            ".agents/other.md",
-            ".agents/sub/environment.md",
         ):
             self.assertEqual(SEL.classify_path(path), "broaden", path)
-        for path in ("agents/environment.md", "AGENTS.MD", "apps/AGENTS.md", "AGENTS.md.orig"):
+        for path in ("AGENTS.MD", "AGENTS.md.orig"):
             self.assertEqual(SEL.classify_path(path), "unknown", path)
-        self.assertEqual(SEL.classify_path("docs/AGENTS.md"), "broaden")
         self.assertEqual(SEL.classify_path(".agents/"), "unknown")
-        self.assertEqual(SEL.classify_path("scripts/AGENTS.md"), "broaden")
+        self.assertEqual(SEL.classify_path(".agents/skills/fvoci-fast-verify/SKILL.md"), "broaden")
+        self.assertEqual(
+            SEL.classify_path(".agents/skills/fvoci-standard-implementations/references/candidates.md"),
+            "broaden",
+        )
+        for path in (
+            ".agents/other.md",
+            ".agents/sub/environment.md",
+            "agents/environment.md",
+            "apps/AGENTS.md",
+            "docs/AGENTS.md",
+            "scripts/AGENTS.md",
+        ):
+            self.assertEqual(SEL.classify_path(path), "docs", path)
 
     def test_explicit_docs_never_overlap_build_inputs(self) -> None:
         for path in SEL._EXPLICIT_DOCS:
@@ -3509,8 +3561,10 @@ class AgentDocsSelectionTest(unittest.TestCase):
     def test_agent_docs_with_fixture_or_unknown_is_full(self) -> None:
         self.assert_full([*AGENT_DOCS, "compat/fixtures/x.json"], "FULL_PATH_BROADEN")
         self.assert_full([*AGENT_DOCS, "scripts/fixtures/web-e2e/x.sh"], "FULL_PATH_BROADEN")
-        self.assert_full([*AGENT_DOCS, "docs/other.md"], "FULL_PATH_BROADEN")
-        for extra in (".gitignore", "LICENSE", "third-party/x.md", "apps/AGENTS.md", "notes.md"):
+        self.assert_docs_only([*AGENT_DOCS, "docs/other.md"])
+        for extra in ("third-party/x.md", "apps/AGENTS.md", "notes.md"):
+            self.assert_docs_only([*AGENT_DOCS, extra])
+        for extra in (".gitignore", "LICENSE"):
             self.assert_full([*AGENT_DOCS, extra], "FULL_UNKNOWN_PATH")
 
     def test_agent_docs_with_frontend_unions_impacts(self) -> None:
@@ -3592,15 +3646,15 @@ class AgentDocsSelectionTest(unittest.TestCase):
             fx.delete_file(".agents/skills/x/SKILL.md")
             paths = self._diff(fx, base)
             self.assertIn(".agents/skills/x/SKILL.md", paths)
-            self.assertEqual(SEL.decide_from_paths(paths).mode, "full")
+            self.assertEqual(SEL.decide_from_paths(paths).reason_code, "NARROW_DOCS")
 
     def test_real_diff_rename_checks_old_and_new_names(self) -> None:
         body = "role record line\n" * 20
         cases = (
-            ("AGENTS.md", "notes/AGENTS.md", "FULL_UNKNOWN_PATH"),
-            (".agents/environment.md", ".agents/skills/environment.md", "FULL_PATH_BROADEN"),
-            (".agents/skills/x/SKILL.md", ".agents/environment.md", "FULL_PATH_BROADEN"),
-            ("src/env.md", "AGENTS.md", "FULL_PATH_BROADEN"),
+            ("AGENTS.md", "notes/AGENTS.md", "NARROW_DOCS"),
+            (".agents/environment.md", ".agents/skills/environment.md", "NARROW_DOCS"),
+            (".agents/skills/x/SKILL.md", ".agents/environment.md", "NARROW_DOCS"),
+            ("src/env.md", "AGENTS.md", "NARROW_DOCS"),
             ("AGENTS.md", "Cargo.toml", "FULL_PATH_BROADEN"),
         )
         for old, new, reason in cases:
@@ -3611,8 +3665,8 @@ class AgentDocsSelectionTest(unittest.TestCase):
                 paths = self._diff(fx, base)
                 self.assertEqual(paths, [old, new], (old, new))
                 decision = SEL.decide_from_paths(paths)
-                self.assertEqual(decision.mode, "full", (old, new))
                 self.assertEqual(decision.reason_code, reason, (old, new))
+                self.assertEqual(decision.mode, "narrow" if reason == "NARROW_DOCS" else "full", (old, new))
 
     def test_real_diff_rename_between_agent_docs_stays_docs(self) -> None:
         body = "role record line\n" * 20

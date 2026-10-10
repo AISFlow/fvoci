@@ -76,13 +76,14 @@
     "eslint-plugin-vue": "10.11.1",
     "globals": "17.12.0",
     "prettier": "3.9.9",
+    "tar": "7.4.3",
     "typescript": "5.9.3",
     "typescript-eslint": "8.71.0",
     "vue-eslint-parser": "10.4.1"
   },
   "scripts": {
     "lint": "bash scripts/lint-web.sh",
-    "lint:fixtures": "python3 scripts/test_eslint.py",
+    "lint:fixtures": "bun test --timeout=600000 ./scripts/eslint-fixtures.test.ts",
     "format:check": "bash scripts/format-web.sh"
   }
 }

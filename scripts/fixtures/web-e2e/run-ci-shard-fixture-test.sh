@@ -11,8 +11,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web"
-cp "$ROOT/scripts/run-web-e2e.sh" "$ROOT/scripts/web-e2e-groups.py" "$FIXTURE_ROOT/scripts/"
+REAL_BUN="$(command -v bun)"
+mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web" "$FIXTURE_ROOT/tools/web-e2e"
+cp "$ROOT/scripts/run-web-e2e.sh" "$FIXTURE_ROOT/scripts/"
+cp "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 chmod +x "$FIXTURE_ROOT/scripts/run-web-e2e.sh"
 
 cat >"$FIXTURE_ROOT/scripts/web-e2e-run-group.sh" <<'STUB'
@@ -55,9 +57,24 @@ if [[ "$*" == "--bun run build" ]]; then
   fi
   exit "${FVOCI_TEST_BUN_BUILD_EXIT:-0}"
 fi
+# The fixture checkout's own group planner runs for real, in its two plan modes only.
+if [[ $# -ge 2 && "$1" == @GROUPS@ && ("$2" == verify || "$2" == shard-jsonl) ]]; then
+  exec @REAL_BUN@ "$@"
+fi
+# Test-only handoff leaf: checks invocation/propagates refusal, without build.
+if [[ $# == 2 && "$1" == @HANDOFF@ && "$2" == consume ]]; then
+  [[ "${FVOCI_WEB_BUILD_PHASE:-}" == consume ]] || exit 99
+  echo "fvoci-web-e2e-fake-handoff-consume"
+  exit "${FVOCI_TEST_HANDOFF_EXIT:-0}"
+fi
 echo "unexpected bun invocation: $*" >&2
 exit 1
 STUB
+# The fixture checkout's own handoff path; quoted so it matches only itself.
+handoff="$FIXTURE_ROOT/tools/selected-backend-ci/handoff.ts"
+sed -i "s|@HANDOFF@|\"${handoff//|/\\|}\"|" "$FAKE_BIN/bun"
+groups="$FIXTURE_ROOT/tools/web-e2e/groups.ts"
+sed -i "s|@GROUPS@|\"${groups//|/\\|}\"|; s|@REAL_BUN@|\"${REAL_BUN//|/\\|}\"|" "$FAKE_BIN/bun"
 chmod +x "$FAKE_BIN/bun"
 
 cat >"$FAKE_BIN/cargo" <<'STUB'
@@ -110,16 +127,11 @@ populate_e2e_tree \
   extra-25-flow.spec.ts extra-26-flow.spec.ts
 
 planned_groups_file="$(mktemp)"
-python3 -c '
-import pathlib, sys, importlib.util
-root = pathlib.Path(sys.argv[1])
-spec = importlib.util.spec_from_file_location("web_e2e_groups", root / "scripts" / "web-e2e-groups.py")
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-e2e = root / "apps" / "web" / "e2e"
-for line in mod.shard_plan_lines(e2e, 0, 8):
-    print(" ".join(line["specs"]))
-' "$FIXTURE_ROOT" >"$planned_groups_file"
+bun -e '
+const [groups, e2e] = process.argv.slice(1);
+const { shardPlanLines } = await import(groups);
+for (const line of shardPlanLines(e2e, 0, 8)) console.log(line.specs.join(" "));
+' "$FIXTURE_ROOT/tools/web-e2e/groups.ts" "$FIXTURE_ROOT/apps/web/e2e" >"$planned_groups_file"
 
 log="$(run_shard 0)"
 build_once="$(grep -c 'fvoci-web-e2e-fake-generate-api' <<<"$log" || true)"
@@ -190,15 +202,6 @@ if (
   exit 1
 fi
 
-# Test-only handoff leaf: checks invocation/propagates refusal, without build.
-mkdir -p "$FIXTURE_ROOT/scripts/selected-backend-ci"
-cat >"$FIXTURE_ROOT/scripts/selected-backend-ci/web-build-handoff.py" <<'STUB'
-import os, sys
-assert sys.argv[1:] == ['consume']
-assert os.environ['FVOCI_WEB_BUILD_PHASE'] == 'consume'
-print('fvoci-web-e2e-fake-handoff-consume')
-sys.exit(int(os.environ.get('FVOCI_TEST_HANDOFF_EXIT', '0')))
-STUB
 
 # Explicit CI consumption must use physical tracked outputs from its tested
 # checkout, with no generator fallback. All runtime/builds remain stubbed here.

@@ -4,7 +4,7 @@ on:
   pull_request:
     paths: &image-paths
       - docker/ci-base/**
-      - scripts/ci/**
+      - tools/ci/**
       - .github/workflows/ci-base-image.yml
       - scripts/ci_selection.py
       - rust-toolchain.toml
@@ -73,8 +73,8 @@ jobs:
           DOCKER_CONFIG: ${{ runner.temp }}/ci-base-docker
         run: |
           set -euo pipefail
-          bun scripts/ci/ci-base-image.ts inputs
-          bun test scripts/ci/ci-base-image.test.ts
+          bun tools/ci/ci-base-image.ts inputs
+          bun test tools/ci/ci-base-image.test.ts
           [[ "$(uname -m)" == "$([[ "$ARCH" == amd64 ]] && echo x86_64 || echo aarch64)" ]]
           IMAGE="ghcr.io/aisflow/fvoci-$TARGET"
           work=$(mktemp -d "$RUNNER_TEMP/ci-base.XXXXXX")
@@ -84,7 +84,7 @@ jobs:
           cleanup() {
             code=$?
             if [[ -f "$work/build.log" ]]; then
-              if ! bun scripts/ci/ci-base-image.ts summary "$work/build.log" "$work/image.json" | tee -a "$GITHUB_STEP_SUMMARY"; then
+              if ! bun tools/ci/ci-base-image.ts summary "$work/build.log" "$work/image.json" | tee -a "$GITHUB_STEP_SUMMARY"; then
                 if [[ "$code" == 0 ]]; then code=1; fi
               fi
             fi
@@ -108,7 +108,7 @@ jobs:
           docker image inspect "$ref" --format '{{json .}}' > "$work/image.json"
           docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.source"}}'
           docker image save "$ref" --output "$work/image.tar"
-          bun scripts/ci/ci-base-image.ts scan "$work/image.tar" "$work/image.json" "$ARCH"
+          bun tools/ci/ci-base-image.ts scan "$work/image.tar" "$work/image.json" "$ARCH"
           docker run --rm --network none "$ref" bash -ec '
             set -o pipefail
             test "$(id -u):$(id -g)" = 1000:1000
@@ -199,14 +199,14 @@ jobs:
             ref="$IMAGE:$prefix-$arch"
             docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$work/config.json"
             docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/manifest.json"
-            digest=$(bun scripts/ci/ci-base-image.ts arch-digest "$work/config.json" "$work/manifest.json" "$arch")
+            digest=$(bun tools/ci/ci-base-image.ts arch-digest "$work/config.json" "$work/manifest.json" "$arch")
             sources+=("$IMAGE@$digest")
             docker buildx imagetools inspect "$ref" --raw > "$work/raw.json"
-            bun scripts/ci/ci-base-image.ts layer-size "$work/raw.json" "$arch" | tee -a "$GITHUB_STEP_SUMMARY"
+            bun tools/ci/ci-base-image.ts layer-size "$work/raw.json" "$arch" | tee -a "$GITHUB_STEP_SUMMARY"
           done
           started=$SECONDS
           ref="$IMAGE:sha-$GITHUB_SHA"
           docker buildx imagetools create --tag "$ref" "${sources[@]}"
           docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/index.json"
-          bun scripts/ci/ci-base-image.ts manifest "$work/index.json" "$IMAGE" "${sources[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          bun tools/ci/ci-base-image.ts manifest "$work/index.json" "$IMAGE" "${sources[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           printf 'Manifest publish: %ss\n' "$((SECONDS-started))" | tee -a "$GITHUB_STEP_SUMMARY"
