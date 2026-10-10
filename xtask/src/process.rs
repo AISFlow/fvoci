@@ -411,17 +411,24 @@ mod tests {
             .parse()
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        // A killed descendant is a zombie or gone; kill(pid, 0) accepts both.
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        let running = state
-            .rsplit_once(") ")
-            .is_some_and(|(_, rest)| !rest.starts_with('Z'));
-        if running {
+        // A killed descendant is a zombie or gone (kill(pid, 0) accepts
+        // both). SIGKILL lands asynchronously, so watch for half a second.
+        let killed = (0..50).any(|_| {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let dead = !state
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z'));
+            if !dead {
+                thread::sleep(Duration::from_millis(10));
+            }
+            dead
+        });
+        if !killed {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
-        assert!(running, "run signalled the descendant {pid}");
+        assert!(!killed, "run signalled the descendant {pid}");
     }
 
     /// CPU time of the calling thread, where run_owned's wait loop runs.
