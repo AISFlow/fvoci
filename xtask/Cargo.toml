@@ -3,7 +3,7 @@ name = "xtask"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "Development-task dispatcher. Harness commands are not implemented yet."
+description = "Development-task dispatcher, including isolated test-service startup."
 license = "MIT"
 
 [workspace]
