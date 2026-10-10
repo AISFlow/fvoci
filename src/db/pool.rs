@@ -30,10 +30,29 @@ impl SqlitePreparationPool {
     /// connection explicitly and retain its worker-shutdown result instead.
     /// A silently retired/replaced connection has no such receipt: fail closed.
     pub(crate) async fn close_confirmed(self) -> Result<(), sqlx::Error> {
-        let result = match self.pool.acquire().await {
-            Ok(connection) => connection.close().await,
-            Err(error) => Err(error),
+        // `acquire` runs `before_acquire`. A rejection closes this size-1
+        // worker and opens a replacement inside the 30s acquire budget. The
+        // replacement is not a shutdown receipt (`opened != 1`). If that
+        // connect cannot take the database lock, the same acquire returns
+        // `PoolTimedOut` and migration cleanup is unconfirmed. Close the idle
+        // worker directly. `try_acquire` does not run the hook and does not
+        // open a connection. A checkout that is still live uses `acquire`,
+        // which waits for that holder and then closes whatever it returns;
+        // the `opened == 1` check below still rejects a replacement.
+        let connection = if let Some(connection) = self.pool.try_acquire() {
+            connection
+        } else {
+            match self.pool.acquire().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    // Same drain as before: an acquire failure still closes the
+                    // pool instead of leaving the worker to a later drop.
+                    self.pool.close().await;
+                    return Err(error);
+                }
+            }
         };
+        let result = connection.close().await;
         self.pool.close().await;
         result?;
         if self.opened.load(std::sync::atomic::Ordering::SeqCst) != 1 {
@@ -311,5 +330,32 @@ fn error_kind(error: &sqlx::Error) -> &'static str {
         sqlx::Error::Protocol(_) => "protocol",
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
         _ => "other",
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod preparation_close_tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_confirmed_shuts_the_original_worker_left_in_a_transaction() {
+        let root = std::env::temp_dir().join(format!("fvoci-prep-close-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("app.sqlite");
+        let prep = super::connect_sqlite_prepare(&path).await.unwrap();
+        let mut conn = prep.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        // Not a sqlx Transaction: nothing queues ROLLBACK. The worker is idle
+        // and still inside the transaction. `acquire` would reject it, open a
+        // replacement, and fail the shutdown receipt.
+        conn.return_to_pool().await;
+        let started = std::time::Instant::now();
+        prep.close_confirmed().await.unwrap();
+        assert!(
+            started.elapsed().as_secs() < 2,
+            "closing the original worker waited on the pool acquire timeout"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

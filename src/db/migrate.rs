@@ -1106,7 +1106,6 @@ async fn run_sqlite_migration_owned(
     let preparation = super::pool::connect_sqlite_prepare(path)
         .await
         .map_err(unconfirmed_migration_cleanup)?;
-    let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
     #[cfg(feature = "db-tests")]
     let mut cleanup_started = None;
     #[cfg(feature = "db-tests")]
@@ -1118,7 +1117,13 @@ async fn run_sqlite_migration_owned(
             _ = cancel.cancelled() => {},
         }
     }
-    let result = apply_sqlite_migrations(&backend, Some(cancel)).await;
+    // Drop this pool clone before shutdown. Cleanup then closes the size-1
+    // preparation worker; a checkout that is still live is waited out inside
+    // `close_confirmed`, which still requires the original `opened == 1` receipt.
+    let result = {
+        let backend = super::backend::Backend::Sqlite(preparation.pool.clone());
+        apply_sqlite_migrations(&backend, Some(cancel)).await
+    };
     // Request cancellation does not cancel any operation above or this drain.
     #[cfg(feature = "db-tests")]
     if let Some(started) = cleanup_started {
