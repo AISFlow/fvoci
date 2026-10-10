@@ -26,7 +26,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 - main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x는 리뷰어 2/2와 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS. 1.0.0 병합은 메인테이너 말이 있을 때 허용된다. 절차는 `fvoci-handoff`다.
 - 브랜치 삭제는 main에 포함됐는지 다시 확인한 뒤 그 목록을 게시한 다음에 허용된다. 절차는 `fvoci-handoff`다.
-- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. workflow, xtask, AGENTS.md, `.agents/` 스킬, 게이트, ruleset, `scripts/ci_selection.py`는 2명 ACCEPT. `docs/rewrite.md`는 1명. ruleset 변경은 그 2명 ACCEPT 뒤에 허용된다. AGENTS.md·`.agents/` 스킬의 0.x 수락은 메인테이너 SHA 승인이 아니라 이 2명 ACCEPT다(2026-10-09 13:46). 주 리뷰어: 그 문서는 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
+- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. `docs/rewrite.md`는 1명. workflow, xtask, 게이트, ruleset, `scripts/ci_selection.py`는 2명 ACCEPT. workflow·xtask·게이트의 0.x 병합은 그 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 허용된다. AGENTS.md와 `.agents/` 스킬은 리뷰어 ACCEPT와 CI에 더해, 그 커밋 40자 SHA에 대한 메인테이너의 명시 승인이 있어야 한다(메인테이너, 2026-10-10 11:08 KST). ruleset 변경은 2명 ACCEPT 뒤에 허용된다. 주 리뷰어: AGENTS.md·`.agents/` 스킬은 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
 - 작성자와 리뷰어는 다른 주체다. 리뷰어는 검토하는 커밋을 고치지 않는다.
 - 태그와 릴리스는 메인테이너 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 배포, 시크릿, 패키지 공개 범위, 유료 사용은 메인테이너 말이 있을 때 허용된다.
