@@ -53,6 +53,9 @@ export function dbIntegrationTargets(
   cargoText: string,
   autotests: readonly AutotestFile[] | null,
 ): TargetsResult {
+  // tomllib refuses a leading BOM (Invalid statement at 1:1); Bun.TOML would skip it.
+  if (cargoText.startsWith("\ufeff"))
+    return { targets: null, error: "rust: Cargo.toml parse failed: leading BOM" };
   let data: unknown;
   try {
     data = Bun.TOML.parse(cargoText);
@@ -108,9 +111,10 @@ export function dbIntegrationTargets(
 }
 
 class UnreadableFile extends Error {}
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-// Python read_text(encoding="utf-8") raises on invalid bytes; keep that fail-closed.
+// Python read_text(encoding="utf-8") raises on invalid bytes and keeps a leading
+// U+FEFF as text; keep both.
 function readUtf8(path: string, label: string): string {
   try {
     return utf8.decode(readFileSync(path));

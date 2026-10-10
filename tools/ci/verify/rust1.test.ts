@@ -374,4 +374,29 @@ describe("cargo db-tests targets", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("a leading BOM is data: Cargo.toml refuses, tests/*.rs keeps it as text", () => {
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const withBom = (text: string) => Buffer.concat([bom, new TextEncoder().encode(text)]);
+    const dir = mkdtempSync(join(tmpdir(), "rust1-bom-"));
+    try {
+      writeFileSync(join(dir, "Cargo.toml"), withBom(stub()));
+      expect(rootDbIntegrationRegistryTargets(dir).error).toBe(
+        "rust: Cargo.toml parse failed: leading BOM",
+      );
+      writeFileSync(join(dir, "Cargo.toml"), stub());
+      mkdirSync(join(dir, "tests"));
+      // str.strip() keeps U+FEFF, so the first line is not a crate attribute.
+      writeFileSync(join(dir, "tests", "probe.rs"), withBom('#![cfg(feature = "db-tests")]\n'));
+      expect(rootDbIntegrationRegistryTargets(dir).error).toBe(
+        'rust: tests/probe.rs is not registered and has no crate #![cfg(feature = "db-tests")]; add CI inventory or an explicit fast/native exclusion',
+      );
+      writeFileSync(join(dir, "tests", "probe.rs"), bom);
+      expect(rootDbIntegrationRegistryTargets(dir).error).toStartWith(
+        "rust: tests/probe.rs is not registered",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
