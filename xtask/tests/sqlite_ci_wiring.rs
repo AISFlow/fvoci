@@ -408,6 +408,25 @@ fn partial_environment_refused() {
     assert_eq!(f.trace(), "");
 }
 
+/// An explicit parent skips the partial-environment check; a missing
+/// `SQLITE3_LIB_DIR` is still a handled failure (exit 1), never a panic.
+#[test]
+fn explicit_parent_with_partial_environment_fails_without_panic() {
+    let mut f = Fixture::new();
+    f.set("SQLITE3_STATIC", "1");
+    let outcome = f.invoke(&["--", "consumer"]);
+    assert_eq!(outcome.code, 1, "{}", outcome.stderr);
+    assert!(
+        outcome
+            .stderr
+            .contains("prepare-sqlite-ci: 'SQLITE3_LIB_DIR'"),
+        "{}",
+        outcome.stderr
+    );
+    f.rejected(&outcome);
+    assert_eq!(f.trace(), "");
+}
+
 #[test]
 fn cross_cargo_target_fails_before_download() {
     let mut f = Fixture::new();
@@ -667,6 +686,8 @@ fn usage_errors_exit_two_before_any_work() {
         &["--parnet", "x"][..],
         &["--env-file"],
         &["--identity-only=yes"],
+        &["--env-file", "--", "consumer"],
+        &["--expected-cache-identity", "-h"],
     ] {
         let outcome = f.invoke(extra);
         assert_eq!(outcome.code, 2, "{extra:?}");

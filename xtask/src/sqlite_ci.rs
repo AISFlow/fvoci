@@ -339,8 +339,15 @@ fn prepare(
         return Err("build parent must exist and be owned by the current user".into());
     }
     let prefix = parent.join(target);
-    if !inherited.is_empty() && Path::new(&inherited["SQLITE3_LIB_DIR"]) != prefix.join("lib") {
-        return Err("SQLite environment does not match the owned build prefix".into());
+    if !inherited.is_empty() {
+        // An explicit parent skips the partial-environment check above; a
+        // missing key is the former handled KeyError (exit 1), never a panic.
+        let lib = inherited
+            .get("SQLITE3_LIB_DIR")
+            .ok_or("'SQLITE3_LIB_DIR'")?;
+        if Path::new(lib) != prefix.join("lib") {
+            return Err("SQLite environment does not match the owned build prefix".into());
+        }
     }
     let mut steps = Steps {
         parent: parent.clone(),
