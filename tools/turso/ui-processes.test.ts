@@ -218,23 +218,32 @@ describe("subreaper scope", () => {
     expect(UiProcesses.active).toBeNull();
   });
 
-  test("without a usable pidfd the scope is refused before the subreaper is set", () => {
-    const calls: string[] = [];
-    const { kernel } = fakeKernel(new Map(), {
-      pidfdOpen: () => {
-        throw new Error("pidfd_open failed");
-      },
-      getSubreaper: () => (calls.push("get"), 0),
-      setSubreaper: () => calls.push("set"),
-    });
-    expect(() => new UiProcesses(kernel, io()).open()).toThrow("UI_PROCESS_CAPABILITY_REQUIRED");
-    expect(calls).toEqual([]);
-    expect(UiProcesses.active).toBeNull();
+  test("without a usable pidfd the scope is refused before the subreaper is set", async () => {
+    const fault = () => {
+      throw new Error("pidfd syscall failed");
+    };
+    for (const overrides of [
+      { pidfdOpen: fault },
+      { pidfdSendSignal: fault },
+      { close: fault },
+    ] as Partial<Kernel>[]) {
+      const calls: string[] = [];
+      const { kernel } = fakeKernel(new Map(), {
+        ...overrides,
+        getSubreaper: () => (calls.push("get"), 0),
+        setSubreaper: () => calls.push("set"),
+      });
+      expect(() => new UiProcesses(kernel, io()).open()).toThrow("UI_PROCESS_CAPABILITY_REQUIRED");
+      expect(calls).toEqual([]);
+      expect(UiProcesses.active).toBeNull();
+    }
     const closed: number[] = [];
     const probe = fakeKernel(new Map(), { close: (fd) => closed.push(fd) });
-    const scope = new UiProcesses(probe.kernel, io());
-    scope.open();
+    const scope = new UiProcesses(probe.kernel, io()).open();
+    expect(probe.signals).toEqual([[scope.pid + 1000, 0]]);
     expect(closed).toEqual([scope.pid + 1000]);
+    await scope.close();
+    expect(UiProcesses.active).toBeNull();
   });
 
   test("an unknown closure keeps the original failure and does not restore the flag", async () => {

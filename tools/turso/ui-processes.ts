@@ -316,8 +316,8 @@ export class UiProcesses {
     return this;
   }
 
-  // Every signal goes through a pidfd, so the scope opens only where one can
-  // be taken. pidfd_send_signal (Linux 5.1) predates pidfd_open (5.3).
+  // Every signal goes through a pidfd, so the scope opens only where both
+  // syscalls work; signal 0 on our own pidfd checks delivery without sending.
   private pidfdUsable(): boolean {
     let fd: number;
     try {
@@ -325,12 +325,18 @@ export class UiProcesses {
     } catch {
       return false;
     }
+    let usable = true;
+    try {
+      this.kernel.pidfdSendSignal(fd, 0);
+    } catch {
+      usable = false;
+    }
     try {
       this.kernel.close(fd);
     } catch {
-      return false;
+      usable = false;
     }
-    return true;
+    return usable;
   }
 
   startWatch(): void {

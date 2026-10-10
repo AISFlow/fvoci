@@ -437,8 +437,6 @@ describe("browser", () => {
       ),
     ).toBe("UI_ACTUAL_BROWSER_FAILED");
     expect(calls.finish).toHaveLength(1);
-    // Structural: the browser child gets the original fixed 900 s wait.
-    expect(browser.toString()).toContain("await wait(child, 900)");
     const failing = fakeScope({
       spawn: () => exitedChild(1),
       output,

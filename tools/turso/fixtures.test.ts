@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -37,7 +38,7 @@ function fakeBun(root: string, tail: string): string {
   writeFileSync(
     path,
     "#!/bin/sh\n" +
-      `{ pwd; printf '%s\\n' "$@"; printf 'secret=%s\\n' "\${FAKE_SECRET-absent}"; } > '${seen}'\n` +
+      `{ pwd -P; printf '%s\\n' "$@"; printf 'secret=%s\\n' "\${FAKE_SECRET-absent}"; } > '${seen}'\n` +
       tail +
       "\n",
   );
@@ -118,7 +119,7 @@ describe("admission fixtures", () => {
       expect(code).toBe(expected);
       expect(readFileSync(join(root, "seen"), "utf8")).toBe(
         [
-          root,
+          realpathSync(root),
           "--no-env-file",
           "--config=" + join(root, "bunfig.toml"),
           "test",
