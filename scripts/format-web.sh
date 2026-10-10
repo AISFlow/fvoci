@@ -7,7 +7,8 @@ if [[ $# == 0 || $1 == -* ]]; then
     scripts/document-convert scripts/generate-emoji-shortcodes.mjs \
     scripts/install-smoke-collab.mjs scripts/verify-web-tools.mjs scripts/WEB_LINT.md \
     scripts/run-selected-backend-e2e.ts scripts/eslint-fixtures.test.ts \
-    'tools/selected-backend-ci/**/*.ts' tools/ci/workflows.test.ts tools/ci/planner.test.ts 'tools/web-e2e/**/*.ts' \
+    'tools/selected-backend-ci/**/*.ts' 'tools/ci/**/*.ts' 'tools/web-e2e/**/*.ts' \
+    'tools/oracle/**/*.ts' 'tools/perf/**/*.ts' 'tools/release/**/*.ts' 'tools/turso/**/*.ts' \
     'scripts/schema-baseline/*.ts' 'scripts/schema-baseline/*.md' \
     eslint.config.mjs package.json .prettierrc.json "$@"
 fi

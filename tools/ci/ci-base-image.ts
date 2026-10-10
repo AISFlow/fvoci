@@ -7,6 +7,21 @@ class PolicyError extends Error {}
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new PolicyError(message);
 }
+// Parsed JSON/YAML/TOML is untrusted: read it only through these narrowing helpers.
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function at(value: unknown, ...path: string[]): unknown {
+  let current = value;
+  for (const key of path) {
+    if (!isObject(current) || !Object.hasOwn(current, key)) return undefined;
+    current = current[key];
+  }
+  return current;
+}
+function list(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? (value as unknown[]) : undefined;
+}
 const token = /gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/;
 const dbUrl = /(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss):\/\//i;
 export function checkText(text: string, databaseUrls = true) {
@@ -29,7 +44,7 @@ async function text(path: string) {
   check(!decoded.startsWith("\ufeff"), "input must be UTF-8 without a BOM");
   return decoded;
 }
-async function json(path: string) {
+async function json(path: string): Promise<unknown> {
   const decoded = await text(path);
   try {
     return JSON.parse(decoded);
@@ -37,7 +52,7 @@ async function json(path: string) {
     throw new PolicyError("invalid JSON input; content withheld");
   }
 }
-const layerCodecs = new Map([
+const layerCodecs = new Map<unknown, "tar" | "gzip" | "zstd">([
   ["application/vnd.oci.image.layer.v1.tar", "tar"],
   ["application/vnd.oci.image.layer.v1.tar+gzip", "gzip"],
   ["application/vnd.oci.image.layer.v1.tar+zstd", "zstd"],
@@ -47,12 +62,22 @@ const layerCodecs = new Map([
   ["application/vnd.docker.image.rootfs.diff.tar.gzip", "gzip"],
   ["application/vnd.docker.image.rootfs.foreign.diff.tar.gzip", "gzip"],
 ]);
-function descriptorName(descriptor: any) {
+const manifestMediaTypes: unknown[] = [
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json",
+];
+const configMediaTypes: unknown[] = [
+  "application/vnd.oci.image.config.v1+json",
+  "application/vnd.docker.container.image.v1+json",
+];
+const sha256Digest = /^sha256:[0-9a-f]{64}$/;
+function descriptorName(descriptor: unknown) {
+  const digest = at(descriptor, "digest");
   check(
-    typeof descriptor?.digest === "string" && /^sha256:[0-9a-f]{64}$/.test(descriptor.digest),
+    typeof digest === "string" && sha256Digest.test(digest),
     "invalid saved image descriptor digest; content withheld",
   );
-  return "blobs/sha256/" + descriptor.digest.slice(7);
+  return "blobs/sha256/" + digest.slice(7);
 }
 
 const tarMessages = new Set([
@@ -69,7 +94,9 @@ async function tarStderrPrefix(stream: ReadableStream<Uint8Array>) {
   let prefix = "";
   let truncated = false;
   // Drain the entire pipe, but retain at most 512 bytes for diagnostics.
-  for await (const chunk of stream) {
+  const reader = stream.getReader();
+  for (let next = await reader.read(); !next.done; next = await reader.read()) {
+    const chunk = next.value;
     const remaining = 512 - prefix.length;
     prefix += Buffer.from(chunk.subarray(0, remaining)).toString("latin1");
     if (chunk.length > remaining) truncated = true;
@@ -91,34 +118,74 @@ function layerIdentity(index: number, name: string, bytes: Uint8Array) {
     ? name
     : "name withheld";
   const magic = Buffer.from(bytes.subarray(0, 4)).toString("hex") || "empty";
-  return `layer ${index} (${safeName}), magic=${magic}`;
+  return `layer ${String(index)} (${safeName}), magic=${magic}`;
+}
+// Streams one archived file so memory stays near one stream chunk (Bun yields
+// up to 2 MiB) plus the first MiB, which decides text vs binary (compiled
+// binaries contain protocol literals). Chunks are checked in fixed 64 KiB
+// windows with a 1024-character carry, so a token split at a window boundary
+// is still found whatever chunk sizes the stream yields.
+const textHead = 1024 * 1024;
+const scanWindow = 64 * 1024;
+async function scanFile(stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader();
+  const head: Uint8Array[] = [];
+  let buffered = 0;
+  let next = await reader.read();
+  for (; !next.done && buffered < textHead; next = await reader.read()) {
+    head.push(next.value);
+    buffered += next.value.length;
+  }
+  const text = !Buffer.concat(head).subarray(0, textHead).includes(0);
+  let tail = "";
+  const checkWindow = (bytes: Uint8Array) => {
+    const window = tail + Buffer.from(bytes).toString("latin1");
+    checkText(window, text); // token signatures also checked in binaries
+    tail = window.slice(-1024);
+  };
+  // Windows start at file offsets 0, 64 KiB, ...; a shorter remainder waits for the next chunk.
+  let pending: Uint8Array = new Uint8Array(0);
+  const scan = (chunk: Uint8Array) => {
+    const data = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+    let offset = 0;
+    for (; data.length - offset >= scanWindow; offset += scanWindow)
+      checkWindow(data.subarray(offset, offset + scanWindow));
+    pending = data.subarray(offset);
+  };
+  for (const chunk of head) scan(chunk);
+  for (; !next.done; next = await reader.read()) scan(next.value);
+  if (pending.length) checkWindow(pending);
 }
 
-export function verifyWorkflow(data: any) {
+export function verifyWorkflow(data: unknown) {
+  const on = at(data, "on");
   check(
-    Bun.deepEquals(Object.keys(data.on).sort(), ["pull_request", "push", "workflow_dispatch"]),
+    isObject(on) &&
+      Bun.deepEquals(Object.keys(on).sort(), ["pull_request", "push", "workflow_dispatch"]),
     "unexpected image triggers",
   );
-  check(Bun.deepEquals(data.on.push.branches, ["main"]), "push must target main");
-  for (const event of [data.on.push, data.on.pull_request]) {
+  check(Bun.deepEquals(at(on, "push", "branches"), ["main"]), "push must target main");
+  for (const event of ["push", "pull_request"]) {
+    const paths = list(at(on, event, "paths"));
     check(
-      event.paths.includes("docker/ci-base/**") &&
-        event.paths.includes(".github/workflows/ci-base-image.yml") &&
-        event.paths.includes("tools/ci/**"),
+      paths?.includes("docker/ci-base/**") &&
+        paths.includes(".github/workflows/ci-base-image.yml") &&
+        paths.includes("tools/ci/**"),
       "image edits must trigger builds",
     );
   }
   check(
-    Bun.deepEquals(data.permissions, { contents: "read" }),
+    Bun.deepEquals(at(data, "permissions"), { contents: "read" }),
     "read-only default permissions required",
   );
+  const jobs = at(data, "jobs");
   check(
-    Bun.deepEquals(Object.keys(data.jobs).sort(), ["build", "push", "push-manifest"]),
+    isObject(jobs) && Bun.deepEquals(Object.keys(jobs).sort(), ["build", "push", "push-manifest"]),
     "unexpected image jobs",
   );
-  for (const [name, job] of Object.entries(data.jobs) as [string, any][]) {
+  for (const [name, job] of Object.entries(jobs)) {
     check(
-      job.if ===
+      at(job, "if") ===
         (name === "build"
           ? "github.event_name == 'pull_request'"
           : "github.ref == 'refs/heads/main'"),
@@ -126,22 +193,22 @@ export function verifyWorkflow(data: any) {
     );
     check(
       Bun.deepEquals(
-        job.permissions ?? {},
+        at(job, "permissions") ?? {},
         name === "build" ? {} : { contents: "read", packages: "write" },
       ),
       "invalid job token permissions",
     );
     check(
-      !job.container && !job["continue-on-error"],
+      !at(job, "container") && !at(job, "continue-on-error"),
       "image jobs must fail closed without container conversion",
     );
     if (name !== "push-manifest") {
       check(
-        job["runs-on"] === "${{ matrix.runner }}" && job["timeout-minutes"] === 15,
+        at(job, "runs-on") === "${{ matrix.runner }}" && at(job, "timeout-minutes") === 15,
         "native build runner/budget required",
       );
       check(
-        Bun.deepEquals(job.strategy.matrix, {
+        Bun.deepEquals(at(job, "strategy", "matrix"), {
           arch: ["amd64", "arm64"],
           image: ["ci-base", "ci-web"],
           include: [
@@ -153,11 +220,14 @@ export function verifyWorkflow(data: any) {
       );
     } else {
       check(
-        job.needs === "push" && job["timeout-minutes"] === 5,
+        at(job, "needs") === "push" && at(job, "timeout-minutes") === 5,
         "manifest must follow successful pushes",
       );
     }
-    for (const step of job.steps) {
+    const steps = list(at(job, "steps"));
+    check(steps, "image job steps must be a list");
+    for (const step of steps) {
+      check(isObject(step), "image job steps must be mappings");
       check(!step["continue-on-error"], "steps must fail closed");
       if (step.uses)
         check(
@@ -165,6 +235,7 @@ export function verifyWorkflow(data: any) {
           "no new actions allowed",
         );
       const run = step.run ?? "";
+      check(typeof run === "string", "step run must be a string");
       check(
         !JSON.stringify(step).includes("secrets.") && !run.includes("github.token"),
         "token must use github.token via env",
@@ -172,7 +243,8 @@ export function verifyWorkflow(data: any) {
       check(!/python3|type=gha|qemu/i.test(run), "no new Python, gha cache or QEMU");
       if (run.includes("docker login"))
         check(
-          step.env.GHCR_TOKEN === "${{ github.token }}" && run.includes("--password-stdin"),
+          at(step, "env", "GHCR_TOKEN") === "${{ github.token }}" &&
+            run.includes("--password-stdin"),
           "token env/password-stdin required",
         );
       if (run.includes("docker buildx build"))
@@ -181,21 +253,26 @@ export function verifyWorkflow(data: any) {
   }
 }
 
-export function verifyMetadata(info: any, architecture: string) {
+export function verifyMetadata(info: unknown, architecture: string) {
   check(
-    info.Architecture === architecture && info.Os === "linux",
+    at(info, "Architecture") === architecture && at(info, "Os") === "linux",
     "image must match native Linux architecture",
   );
-  check(info.Config.User === "1000:1000", "image default user must be 1000:1000");
+  check(at(info, "Config", "User") === "1000:1000", "image default user must be 1000:1000");
   check(
-    info.Config.Labels?.["org.opencontainers.image.source"] === "https://github.com/AISFlow/fvoci",
+    at(info, "Config", "Labels", "org.opencontainers.image.source") ===
+      "https://github.com/AISFlow/fvoci",
     "OCI source label required",
   );
-  for (const env of info.Config.Env ?? [])
+  const env = list(at(info, "Config", "Env") ?? []);
+  check(env, "image environment must be a list");
+  for (const entry of env) {
+    check(typeof entry === "string", "image environment entries must be strings");
     check(
-      !/TOKEN|SECRET|PASSWORD|DATABASE|DB_URL|CREDENTIAL/i.test(env.split("=", 1)[0]),
+      !/TOKEN|SECRET|PASSWORD|DATABASE|DB_URL|CREDENTIAL/i.test(entry.split("=", 1)[0] ?? ""),
       "sensitive environment key found",
     );
+  }
   checkText(JSON.stringify(info));
 }
 
@@ -207,85 +284,81 @@ export async function scanImage(path: string, inspection: string, arch: string) 
     check(file, missing);
     return file;
   }
-  function parseMetadata(bytes: Uint8Array) {
+  function parseMetadata(bytes: Uint8Array): unknown {
     try {
       return JSON.parse(utf8.decode(bytes));
     } catch {
       throw new PolicyError("invalid saved image metadata; content withheld");
     }
   }
-  async function descriptorBytes(descriptor: any) {
+  async function descriptorBytes(descriptor: unknown) {
     const bytes = await (await entry(descriptorName(descriptor))).bytes();
+    const size = at(descriptor, "size");
     check(
-      Number.isSafeInteger(descriptor.size) &&
-        descriptor.size >= 0 &&
-        descriptor.size === bytes.length &&
-        descriptor.digest ===
+      typeof size === "number" &&
+        Number.isSafeInteger(size) &&
+        size >= 0 &&
+        size === bytes.length &&
+        at(descriptor, "digest") ===
           "sha256:" + new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
       "saved image descriptor content mismatch; content withheld",
     );
     return bytes;
   }
-  const manifests = parseMetadata(await (await entry("manifest.json")).bytes());
-  check(
-    Array.isArray(manifests) &&
-      manifests.length === 1 &&
-      Array.isArray(manifests[0]?.Layers) &&
-      manifests[0].Layers.length > 0,
-    "expected one saved image with layers",
-  );
+  const manifests = list(parseMetadata(await (await entry("manifest.json")).bytes()));
+  const legacy = manifests?.length === 1 ? manifests[0] : undefined;
+  const legacyLayers = list(at(legacy, "Layers"));
+  check(legacyLayers && legacyLayers.length > 0, "expected one saved image with layers");
   const layout = parseMetadata(
     await (
       await entry("oci-layout", "saved image OCI descriptors missing; content withheld")
     ).bytes(),
   );
-  check(layout?.imageLayoutVersion === "1.0.0", "unsupported saved image layout; content withheld");
+  check(
+    at(layout, "imageLayoutVersion") === "1.0.0",
+    "unsupported saved image layout; content withheld",
+  );
   const index = parseMetadata(
     await (
       await entry("index.json", "saved image OCI descriptors missing; content withheld")
     ).bytes(),
   );
+  const indexManifests = list(at(index, "manifests"));
   check(
-    index?.schemaVersion === 2 &&
-      index.mediaType === "application/vnd.oci.image.index.v1+json" &&
-      Array.isArray(index.manifests) &&
-      index.manifests.length === 1,
+    at(index, "schemaVersion") === 2 &&
+      at(index, "mediaType") === "application/vnd.oci.image.index.v1+json" &&
+      indexManifests?.length === 1,
     "expected one saved image OCI manifest; content withheld",
   );
-  const manifestDescriptor = index.manifests[0];
+  const manifestDescriptor = indexManifests[0];
   check(
-    [
-      "application/vnd.oci.image.manifest.v1+json",
-      "application/vnd.docker.distribution.manifest.v2+json",
-    ].includes(manifestDescriptor?.mediaType),
+    manifestMediaTypes.includes(at(manifestDescriptor, "mediaType")),
     "unsupported saved image manifest media type; content withheld",
   );
   const manifest = parseMetadata(await descriptorBytes(manifestDescriptor));
+  const layers = list(at(manifest, "layers"));
   check(
-    manifest?.schemaVersion === 2 &&
-      manifest.mediaType === manifestDescriptor.mediaType &&
-      Array.isArray(manifest.layers) &&
-      manifest.layers.length > 0 &&
-      [
-        "application/vnd.oci.image.config.v1+json",
-        "application/vnd.docker.container.image.v1+json",
-      ].includes(manifest.config?.mediaType),
+    at(manifest, "schemaVersion") === 2 &&
+      at(manifest, "mediaType") === at(manifestDescriptor, "mediaType") &&
+      layers &&
+      layers.length > 0 &&
+      configMediaTypes.includes(at(manifest, "config", "mediaType")),
     "invalid saved image OCI manifest; content withheld",
   );
   check(
-    manifests[0].Config === descriptorName(manifest.config) &&
-      Bun.deepEquals(manifests[0].Layers, manifest.layers.map(descriptorName)),
+    at(legacy, "Config") === descriptorName(at(manifest, "config")) &&
+      Bun.deepEquals(legacyLayers, layers.map(descriptorName)),
     "saved image OCI/legacy references disagree; content withheld",
   );
-  const config = await descriptorBytes(manifest.config);
+  const config = await descriptorBytes(at(manifest, "config"));
   parseMetadata(config);
   checkText(utf8.decode(config));
   // Include lower layers: deleting a credential later does not remove it.
-  for (const [index, descriptor] of manifest.layers.entries()) {
+  for (const [index, descriptor] of layers.entries()) {
     const layer = descriptorName(descriptor);
-    let bytes = await descriptorBytes(descriptor);
+    let bytes: Uint8Array = await descriptorBytes(descriptor);
     const identity = layerIdentity(index, layer, bytes);
-    const codec = layerCodecs.get(descriptor.mediaType);
+    const codec = layerCodecs.get(at(descriptor, "mediaType"));
     check(codec, `unsupported layer media type: ${identity}; content withheld`);
     try {
       // Decode once so GNU tar and Bun inspect the same uncompressed archive.
@@ -328,60 +401,73 @@ export async function scanImage(path: string, inspection: string, arch: string) 
         basename(name) !== ".env" && !basename(name).startsWith(".env."),
         "environment file found; content withheld",
       );
-      const head = await file.slice(0, 1024 * 1024).bytes();
-      const text = !head.includes(0); // compiled binaries contain protocol literals
-      let tail = "";
-      for await (const chunk of file.stream()) {
-        const data = tail + Buffer.from(chunk).toString("latin1");
-        checkText(data, text); // token signatures also checked in binaries
-        tail = data.slice(-1024);
-      }
+      await scanFile(file.stream());
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
 }
 
-export function buildSummary(log: string, info?: any) {
+export function buildSummary(log: string, info?: unknown) {
   const rows = ["\n| Build step | Seconds |", "| --- | ---: |"];
   const descriptions = new Map<string, string>();
   for (const line of log.split("\n")) {
-    const description = line.match(/^(#\d+) (\[.*?\] .*)/);
-    if (description) descriptions.set(description[1], description[2].replaceAll("|", "\\|"));
-    const done = line.match(/^(#\d+) (?:DONE ([0-9.]+)s|(CACHED))$/);
-    if (done && descriptions.has(done[1]))
-      rows.push(`| ${descriptions.get(done[1])} | ${done[2] ?? "cached"} |`);
+    const description = /^(#\d+) (\[.*?\] .*)/.exec(line);
+    if (description?.[1] && description[2])
+      descriptions.set(description[1], description[2].replaceAll("|", "\\|"));
+    const done = /^(#\d+) (?:DONE ([0-9.]+)s|(CACHED))$/.exec(line);
+    const step = done?.[1] === undefined ? undefined : descriptions.get(done[1]);
+    if (done && step !== undefined) rows.push(`| ${step} | ${done[2] ?? "cached"} |`);
   }
-  if (info) rows.push(`\nUncompressed image size: ${info.Size} bytes (${info.Architecture}).`);
+  // Reporting only: an inspection without these fields omits the size line.
+  const size = at(info, "Size");
+  const architecture = at(info, "Architecture");
+  if (typeof size === "number" && typeof architecture === "string")
+    rows.push(`\nUncompressed image size: ${String(size)} bytes (${architecture}).`);
   return rows.join("\n");
 }
 
-export function archDigest(config: any, manifest: any, arch: string) {
+export function archDigest(config: unknown, manifest: unknown, arch: string) {
   check(
-    config.architecture === arch && config.os === "linux" && config.config.User === "1000:1000",
+    at(config, "architecture") === arch &&
+      at(config, "os") === "linux" &&
+      at(config, "config", "User") === "1000:1000",
     "published architecture/user mismatch",
   );
-  check(/^sha256:[0-9a-f]{64}$/.test(manifest.digest), "invalid architecture digest");
-  return manifest.digest;
+  const digest = at(manifest, "digest");
+  check(typeof digest === "string" && sha256Digest.test(digest), "invalid architecture digest");
+  return digest;
 }
-export function verifyManifest(index: any, sources: string[]) {
+export function verifyManifest(index: unknown, sources: string[]) {
+  const manifests = list(at(index, "manifests"));
+  const digest = at(index, "digest");
   check(
-    index.manifests.length === 2 && /^sha256:[0-9a-f]{64}$/.test(index.digest),
+    manifests?.length === 2 && typeof digest === "string" && sha256Digest.test(digest),
     "invalid multi-arch manifest",
   );
   check(
     Bun.deepEquals(
-      index.manifests.map((m: any) => `${m.platform.os}/${m.platform.architecture}`).sort(),
+      manifests
+        .map(
+          (m) => `${String(at(m, "platform", "os"))}/${String(at(m, "platform", "architecture"))}`,
+        )
+        .sort(),
       ["linux/amd64", "linux/arm64"],
     ),
     "wrong manifest platforms",
   );
+  const digests = manifests.map((m) => at(m, "digest"));
   check(
-    Bun.deepEquals(
-      index.manifests.map((m: any) => m.digest).sort(),
-      sources.map((s) => s.split("@")[1]).sort(),
-    ),
+    digests.every((value) => typeof value === "string" && sha256Digest.test(value)) &&
+      Bun.deepEquals(digests.sort(), sources.map((s) => s.split("@")[1]).sort()),
     "manifest must use verified source digests",
   );
+  return digest;
+}
+
+function operand(args: readonly string[], index: number) {
+  const value = args[index];
+  check(value !== undefined, "missing image check argument");
+  return value;
 }
 
 if (import.meta.main) {
@@ -389,43 +475,57 @@ if (import.meta.main) {
   try {
     switch (command) {
       case "inputs": {
-        const rust: any = Bun.TOML.parse(await text("rust-toolchain.toml"));
+        const rust = Bun.TOML.parse(await text("rust-toolchain.toml"));
         check(
-          rust.toolchain.channel === "1.98.1" && (await text(".bun-version")).trim() === "1.4.2",
+          at(rust, "toolchain", "channel") === "1.98.1" &&
+            (await text(".bun-version")).trim() === "1.4.2",
           "tool versions differ from recipe",
         );
         check(
-          (await json("apps/web/package.json")).devDependencies["@playwright/test"] === "1.63.0",
+          at(await json("apps/web/package.json"), "devDependencies", "@playwright/test") ===
+            "1.63.0",
           "Playwright pin differs from recipe",
         );
         verifyWorkflow(Bun.YAML.parse(await text(".github/workflows/ci-base-image.yml")));
         break;
       }
       case "scan":
-        await scanImage(args[0], args[1], args[2]);
+        await scanImage(operand(args, 0), operand(args, 1), operand(args, 2));
         break;
-      case "summary":
+      case "summary": {
+        const inspection = operand(args, 1);
         console.log(
           buildSummary(
-            await Bun.file(args[0]).text(),
-            (await Bun.file(args[1]).exists()) ? await json(args[1]) : undefined,
+            await Bun.file(operand(args, 0)).text(),
+            (await Bun.file(inspection).exists()) ? await json(inspection) : undefined,
           ),
         );
         break;
+      }
       case "arch-digest":
-        console.log(archDigest(await json(args[0]), await json(args[1]), args[2]));
+        console.log(
+          archDigest(await json(operand(args, 0)), await json(operand(args, 1)), operand(args, 2)),
+        );
         break;
       case "layer-size": {
-        const manifest = await json(args[0]);
-        console.log(
-          `Compressed layer size (${args[1]}): ${manifest.layers.reduce((size: number, layer: any) => size + layer.size, 0)} bytes`,
-        );
+        const layers = list(at(await json(operand(args, 0)), "layers"));
+        check(layers, "invalid layer manifest");
+        let size = 0;
+        for (const layer of layers) {
+          const layerSize = at(layer, "size");
+          check(
+            typeof layerSize === "number" && Number.isSafeInteger(layerSize) && layerSize >= 0,
+            "invalid layer size",
+          );
+          size += layerSize;
+        }
+        console.log(`Compressed layer size (${operand(args, 1)}): ${String(size)} bytes`);
         break;
       }
       case "manifest": {
-        const index = await json(args[0]);
-        verifyManifest(index, args.slice(2));
-        console.log(`Final multi-arch image: ${args[1]}@${index.digest}`);
+        const index = await json(operand(args, 0));
+        const image = operand(args, 1);
+        console.log(`Final multi-arch image: ${image}@${verifyManifest(index, args.slice(2))}`);
         break;
       }
       default:
