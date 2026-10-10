@@ -15,7 +15,28 @@ export function checkText(text: string, databaseUrls = true) {
     "credential/DB URL pattern found; content withheld",
   );
 }
-const json = async (path: string) => JSON.parse(await Bun.file(path).text());
+// Strict UTF-8 that keeps a leading BOM so it is refused, never skipped: RFC 8259
+// JSON has none, and Bun's TOML/YAML parsers and String#trim would drop it silently.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+async function text(path: string) {
+  const bytes = await Bun.file(path).bytes();
+  let decoded: string;
+  try {
+    decoded = utf8.decode(bytes);
+  } catch {
+    throw new PolicyError("input must be UTF-8 without a BOM");
+  }
+  check(!decoded.startsWith("\ufeff"), "input must be UTF-8 without a BOM");
+  return decoded;
+}
+async function json(path: string) {
+  const decoded = await text(path);
+  try {
+    return JSON.parse(decoded);
+  } catch {
+    throw new PolicyError("invalid JSON input; content withheld");
+  }
+}
 const layerCodecs = new Map([
   ["application/vnd.oci.image.layer.v1.tar", "tar"],
   ["application/vnd.oci.image.layer.v1.tar+gzip", "gzip"],
@@ -188,7 +209,7 @@ export async function scanImage(path: string, inspection: string, arch: string) 
   }
   function parseMetadata(bytes: Uint8Array) {
     try {
-      return JSON.parse(new TextDecoder().decode(bytes));
+      return JSON.parse(utf8.decode(bytes));
     } catch {
       throw new PolicyError("invalid saved image metadata; content withheld");
     }
@@ -256,7 +277,9 @@ export async function scanImage(path: string, inspection: string, arch: string) 
       Bun.deepEquals(manifests[0].Layers, manifest.layers.map(descriptorName)),
     "saved image OCI/legacy references disagree; content withheld",
   );
-  checkText(new TextDecoder().decode(await descriptorBytes(manifest.config)));
+  const config = await descriptorBytes(manifest.config);
+  parseMetadata(config);
+  checkText(utf8.decode(config));
   // Include lower layers: deleting a credential later does not remove it.
   for (const [index, descriptor] of manifest.layers.entries()) {
     const layer = descriptorName(descriptor);
@@ -366,19 +389,16 @@ if (import.meta.main) {
   try {
     switch (command) {
       case "inputs": {
-        const rust: any = Bun.TOML.parse(await Bun.file("rust-toolchain.toml").text());
+        const rust: any = Bun.TOML.parse(await text("rust-toolchain.toml"));
         check(
-          rust.toolchain.channel === "1.98.1" &&
-            (await Bun.file(".bun-version").text()).trim() === "1.4.2",
+          rust.toolchain.channel === "1.98.1" && (await text(".bun-version")).trim() === "1.4.2",
           "tool versions differ from recipe",
         );
         check(
           (await json("apps/web/package.json")).devDependencies["@playwright/test"] === "1.63.0",
           "Playwright pin differs from recipe",
         );
-        verifyWorkflow(
-          Bun.YAML.parse(await Bun.file(".github/workflows/ci-base-image.yml").text()),
-        );
+        verifyWorkflow(Bun.YAML.parse(await text(".github/workflows/ci-base-image.yml")));
         break;
       }
       case "scan":
