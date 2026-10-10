@@ -448,9 +448,11 @@ jobs:
     # = 22m03.916s; 25m leaves 2m56.084s for hosted variation/cleanup.
     # Each major/architecture pair runs every suite exactly once across
     # A/B/C. PG18 covers both architectures; PG16/17 cover x64.
-    # Pull requests run the PG 18 x64 rows only. merge_group, push, and
-    # every other event run this full catalog. GitHub applies exclude
-    # before include, so the job matrix is the plan JSON itself.
+    # Pull requests run the PG 18 x64 rows only, even when their paths make
+    # the plan full. merge_group, push, and workflow_dispatch run this full
+    # catalog. ci-plan emits the rows as {"include": [...]} and the job
+    # matrix is that plan output itself; rust-ci-gate recomputes the rows
+    # for the run's event and fails on any other matrix.
     # Keep image pins in sync with scripts/start-test-postgres.sh.
     env:
       FVOCI_POSTGRES_MATRIX_CATALOG: |
@@ -940,4 +942,5 @@ jobs:
           TESTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt
           python3 scripts/ci_selection.py gate --workflow rust --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"
