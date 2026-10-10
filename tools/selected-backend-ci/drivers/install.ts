@@ -83,7 +83,7 @@ export const completeTestRun = (log: string) =>
   /test result: ok\. 4 passed; 0 failed; 0 ignored;/.test(log);
 // Every owned child receipt has an observed, non-null status.
 export function assertProcessReceipts(records: readonly unknown[]): void {
-  assert.equal(records.length, expectedProcessReceipts, "actual child receipt count");
+  assert.ok(records.length === expectedProcessReceipts, "actual child receipt count");
   for (const record of records)
     assert.ok(
       record !== null &&

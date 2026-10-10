@@ -459,7 +459,7 @@ async function qualifyServer(state: State, seam: Seam): Promise<void> {
   const candidates = rows.filter(
     (row) => row.args === "/fvoci/bin/fvoci-server" && !row.already_retired_at_observation,
   );
-  assert.equal(candidates.length, 1, "one actual normal server required");
+  assert.ok(candidates.length === 1, "one actual normal server required");
   const server = candidates[0] as Row;
   state.serverRow = server;
   const [uid, gid] = state.identity;
@@ -557,7 +557,7 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     actors.map((file) => [file, read(join(dbroot, file))]),
   );
   if (state.code !== 0) return;
-  assert.equal(actors.length, 1, "exactly one fresh selected actor fixture");
+  assert.ok(actors.length === 1, "exactly one fresh selected actor fixture");
   assertActorReceipt(read(join(dbroot, actors[0] as string)));
   if (flow === "on")
     assert.ok(/\b1 passed\b/.test(readText(log)), "exact one selected browser test");
@@ -715,13 +715,13 @@ export function finalize(state: State, seam: Seam): Promise<number> {
       assert.ok(deepEquals(seam.treeHashes(state.dist), state.current.assets.dist_files));
       const binaries = state.current.build.binaries;
       for (const path of [state.server, state.migrate, state.fixture, state.engine])
-        assert.equal(sha(path), binaries[path]?.sha256);
+        assert.ok(sha(path) === binaries[path]?.sha256);
       for (const [path, expected] of Object.entries(state.current.abi.host_runtime_files))
-        assert.equal(sha(path), expected);
+        assert.ok(sha(path) === expected);
       const inputs = state.browserInputs;
       if (inputs !== null) {
-        assert.equal(sha(state.bun), inputs.bun.sha256);
-        assert.equal(sha(inputs.chromium.path), inputs.chromium.sha256);
+        assert.ok(sha(state.bun) === inputs.bun.sha256);
+        assert.ok(sha(inputs.chromium.path) === inputs.chromium.sha256);
         assert.ok(
           deepEquals(
             seam.treeHashes(dirname(inputs.chromium.path)),
@@ -776,7 +776,7 @@ export async function main(
       ? "workspace-off-selected-backend.spec.ts"
       : "workspace-wiki-selected-backend.spec.ts";
   const bun = env("FVOCI_CI_BUN", source);
-  assert.equal(source.FVOCI_ROOT_RUN_OWNER, owner);
+  assert.ok(source.FVOCI_ROOT_RUN_OWNER === owner);
   const before = current.before;
   const sourceBefore = current.sourceBefore;
   const binaries = Object.keys(current.build.binaries);
@@ -791,9 +791,8 @@ export async function main(
     engine = pick("/collab-engine");
   const dist = join(root, "apps/web/dist");
   assert.ok(isFile(bun) && isFile(join(root, "node_modules/.bin/playwright")));
-  assert.equal(
-    source.FVOCI_E2E_SELECTED_AUXILIARY,
-    undefined,
+  assert.ok(
+    source.FVOCI_E2E_SELECTED_AUXILIARY === undefined,
     "BLOCKED: SQLite auxiliary normal writers are not ready",
   );
   const run = current.run;
