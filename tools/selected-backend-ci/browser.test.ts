@@ -2,7 +2,6 @@
 // component from the preparation owner's cache, admittedBrowser re-proves the
 // copy, and the fixed 1000:1000 runtime actor reads it through setpriv.
 // No Chromium, Bun or product process starts from the fixture assets.
-import { spawnSync } from "bun";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -24,6 +23,7 @@ import process from "node:process";
 import { admittedBrowser } from "./admission.ts";
 import { gid, read, uid } from "./io.ts";
 import { prepareBrowser } from "./runtime.ts";
+import { run } from "./test-process.ts";
 
 const SHA = "a".repeat(40);
 interface Fixture {
@@ -37,7 +37,7 @@ let f: Fixture;
 const saved = { ...process.env };
 const linux = process.platform === "linux";
 const sudo = (...args: string[]) => {
-  expect(spawnSync(["sudo", "-n", ...args], { stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+  expect(run(["sudo", "-n", ...args]).exitCode).toBe(0);
 };
 
 beforeEach(() => {
@@ -64,7 +64,7 @@ beforeEach(() => {
 afterEach(() => {
   if (linux)
     for (const path of [f.base, f.output])
-      spawnSync(["sudo", "-n", "chown", "-h", "-R", `${String(uid())}:${String(gid())}`, path]);
+      run(["sudo", "-n", "chown", "-h", "-R", `${String(uid())}:${String(gid())}`, path]);
   rmSync(f.base, { recursive: true, force: true });
   rmSync(f.output, { recursive: true, force: true });
   for (const key of Object.keys(process.env))
@@ -93,28 +93,21 @@ function runAs(
     chmodSync(bun, 0o755);
     const script = join(probe, "probe.ts");
     writeFileSync(script, body.replaceAll("@TOOLS@", tools));
-    const result = spawnSync(
-      [
-        "sudo",
-        "-n",
-        "setpriv",
-        `--reuid=${String(actor)}`,
-        `--regid=${String(actor)}`,
-        "--clear-groups",
-        "env",
-        "GITHUB_SHA=" + SHA,
-        "PLAYWRIGHT_BROWSERS_PATH=" + join(f.output, "browser"),
-        bun,
-        script,
-        ...args,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    return {
-      exitCode: result.exitCode,
-      stdout: result.stdout.toString(),
-      stderr: result.stderr.toString(),
-    };
+    const result = run([
+      "sudo",
+      "-n",
+      "setpriv",
+      `--reuid=${String(actor)}`,
+      `--regid=${String(actor)}`,
+      "--clear-groups",
+      "env",
+      "GITHUB_SHA=" + SHA,
+      "PLAYWRIGHT_BROWSERS_PATH=" + join(f.output, "browser"),
+      bun,
+      script,
+      ...args,
+    ]);
+    return result;
   } finally {
     rmSync(probe, { recursive: true, force: true });
   }
@@ -179,10 +172,16 @@ describe.serial("private runtime browser copy", () => {
       // so an executable-only preflight would pass and Chromium would fail.
       chmodSync(f.base, 0o755);
       sudo("chown", "-R", "1001:1001", f.cache);
-      const preflight = spawnSync(
-        ["sudo", "-n", "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "cat", f.asset],
-        { stdout: "pipe", stderr: "pipe" },
-      );
+      const preflight = run([
+        "sudo",
+        "-n",
+        "setpriv",
+        "--reuid=1000",
+        "--regid=1000",
+        "--clear-groups",
+        "cat",
+        f.asset,
+      ]);
       expect(preflight.exitCode).not.toBe(0);
       sudo("chown", "1001:1001", f.output);
       const staged = runAs(
@@ -204,10 +203,8 @@ prepareBrowser(process.argv[2] ?? "", process.argv[3] ?? "");
         groups: [],
         supplemental: "qualified supplemental asset",
       });
-      const source = spawnSync(["sudo", "-n", "stat", "-c", "%u:%g:%a", f.asset], {
-        stdout: "pipe",
-      });
-      expect(source.stdout.toString().trim()).toBe("1001:1001:600");
+      const source = run(["sudo", "-n", "stat", "-c", "%u:%g:%a", f.asset]);
+      expect(source.stdout.trim()).toBe("1001:1001:600");
     },
   );
   test("an unreadable source asset is refused before any copy", () => {

@@ -2,7 +2,6 @@
 // setpriv, and the Bun runner CLI. A root preparation process with primary
 // GID 1001 models a distinct CI preparation owner without creating an account.
 // footer.fixture.ts replaces only identity, the browser copy and lane drivers.
-import { spawnSync } from "bun";
 import { afterAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -19,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { gid, root, sha, uid } from "./io.ts";
+import { run } from "./test-process.ts";
 
 const SHA = "a".repeat(40),
   TREE = "b".repeat(40),
@@ -35,16 +35,13 @@ afterAll(() => {
 });
 
 function sudo(...args: string[]): void {
-  const result = spawnSync(["sudo", "-n", ...args], { stdout: "pipe", stderr: "pipe" });
+  const result = run(["sudo", "-n", ...args]);
   if (result.exitCode !== 0) throw new Error("sudo fixture step failed: " + String(args[0]));
 }
 function owned(path: string): { uid: number; gid: number; mode: number } | null {
-  const result = spawnSync(["sudo", "-n", "stat", "-L", "-c", "%u %g %a", path], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const result = run(["sudo", "-n", "stat", "-L", "-c", "%u %g %a", path]);
   if (result.exitCode !== 0) return null;
-  const [owner, group, mode] = result.stdout.toString().trim().split(" ");
+  const [owner, group, mode] = result.stdout.trim().split(" ");
   return { uid: Number(owner), gid: Number(group), mode: parseInt(mode ?? "", 8) };
 }
 function optional(path: string): Record<string, unknown> | null {
@@ -73,7 +70,7 @@ function footerCase(
   pending = 0,
   preparationGroup = 1001,
 ): { status: number; stderr: string; facts: Facts } {
-  expect(spawnSync(["sudo", "-n", "true"]).exitCode).toBe(0);
+  expect(run(["sudo", "-n", "true"]).exitCode).toBe(0);
   const temp = mkdtempSync(join(tmpdir(), "fvoci-permission-fixture-"));
   try {
     const repo = join(temp, "repo"),
@@ -175,31 +172,36 @@ function footerCase(
       GITHUB_RUN_ID: "1",
       GITHUB_RUN_ATTEMPT: "1",
     };
-    const result = spawnSync(
-      [
-        "sudo",
-        "-n",
-        "setpriv",
-        "--reuid=0",
-        "--regid=" + String(preparationGroup),
-        "--clear-groups",
-        "env",
-        "-i",
-        ...Object.entries(environment).map(([key, value]) => key + "=" + value),
-        "/bin/bash",
-        script,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const result = run([
+      "sudo",
+      "-n",
+      "setpriv",
+      "--reuid=0",
+      "--regid=" + String(preparationGroup),
+      "--clear-groups",
+      "env",
+      "-i",
+      ...Object.entries(environment).map(([key, value]) => key + "=" + value),
+      "/bin/bash",
+      script,
+    ]);
     // Ownership facts as the footer left them, then return the owned fixture
     // to this test's actor and read the receipts.
     const diagnosticModes: Record<string, number> = {};
-    const listed = spawnSync(
-      ["sudo", "-n", "find", destination, "-maxdepth", "1", "-type", "f", "-printf", "%f %m\\n"],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+    const listed = run([
+      "sudo",
+      "-n",
+      "find",
+      destination,
+      "-maxdepth",
+      "1",
+      "-type",
+      "f",
+      "-printf",
+      "%f %m\\n",
+    ]);
     if (listed.exitCode === 0)
-      for (const line of listed.stdout.toString().split("\n").filter(Boolean)) {
+      for (const line of listed.stdout.split("\n").filter(Boolean)) {
         const [name, mode] = line.split(" ");
         diagnosticModes[name ?? ""] = parseInt(mode ?? "", 8);
       }
@@ -229,7 +231,7 @@ function footerCase(
       safePublished: published.includes("selected-safe-diagnostics="),
     };
     expect(JSON.stringify(facts.stage)).not.toContain(temp);
-    return { status: result.exitCode, stderr: result.stderr.toString(), facts };
+    return { status: result.exitCode, stderr: result.stderr, facts };
   } finally {
     sudo("chown", "-h", "-R", String(uid()) + ":" + String(gid()), temp);
     rmSync(temp, { recursive: true, force: true });
@@ -411,15 +413,21 @@ describe.skipIf(!linux).serial("diagnostic upload access is decided by owner, no
       sudo("chmod", "755", parent);
       sudo("chown", "-R", "1000:1000", output);
       const list = () =>
-        spawnSync(
-          ["sudo", "-n", "setpriv", "--reuid=1001", "--regid=1001", "--clear-groups", "ls", output],
-          { stdout: "pipe", stderr: "pipe" },
-        );
+        run([
+          "sudo",
+          "-n",
+          "setpriv",
+          "--reuid=1001",
+          "--regid=1001",
+          "--clear-groups",
+          "ls",
+          output,
+        ]);
       expect(list().exitCode).not.toBe(0);
       sudo("chown", "-R", "1001:1001", output);
       const fixed = list();
       expect(fixed.exitCode).toBe(0);
-      expect(fixed.stdout.toString()).toContain("safe-stage.json");
+      expect(fixed.stdout).toContain("safe-stage.json");
       expect(owned(output)?.mode).toBe(0o700);
     } finally {
       sudo("chown", "-h", "-R", String(uid()) + ":" + String(gid()), parent);
@@ -443,19 +451,24 @@ describe.skipIf(!linux).serial("diagnostic upload access is decided by owner, no
       sudo("chown", "-R", "1001:1001", safe);
       sudo("chown", "-R", "1000:1000", privateRuntime);
       const as1001 = (...command: string[]) =>
-        spawnSync(
-          ["sudo", "-n", "setpriv", "--reuid=1001", "--regid=1001", "--clear-groups", ...command],
-          { stdout: "pipe", stderr: "pipe" },
-        );
+        run([
+          "sudo",
+          "-n",
+          "setpriv",
+          "--reuid=1001",
+          "--regid=1001",
+          "--clear-groups",
+          ...command,
+        ]);
       const receipt = as1001("cat", join(safe, "ownership-stage.json"));
       expect(receipt.exitCode).toBe(0);
-      expect(JSON.parse(receipt.stdout.toString())).toEqual({
+      expect(JSON.parse(receipt.stdout)).toEqual({
         ownership_return_qualified: false,
         lanes: [],
       });
       const denied = as1001("ls", privateRuntime);
       expect(denied.exitCode).not.toBe(0);
-      expect(denied.stdout.toString()).not.toContain("PRIVATE_CANARY");
+      expect(denied.stdout).not.toContain("PRIVATE_CANARY");
       expect(owned(privateRuntime)?.uid).toBe(1000);
       expect(owned(safe)).toEqual({ uid: 1001, gid: 1001, mode: 0o700 });
     } finally {

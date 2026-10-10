@@ -1,12 +1,12 @@
 // The real configListInputs as the fixed 1000:1000 runtime actor, through
 // setpriv, from a 0755 copy of the runner modules. Linux with sudo only;
 // elsewhere it is skipped and counts as NOTRUN.
-import { spawnSync } from "bun";
 import { expect, test } from "bun:test";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { run } from "./test-process.ts";
 
 const linux = process.platform === "linux";
 
@@ -22,7 +22,7 @@ function asActor(actor: number): Record<string, string> {
     const bun = join(probe, "bun");
     copyFileSync(process.execPath, bun);
     chmodSync(bun, 0o755);
-    const result = spawnSync(
+    const result = run(
       [
         "sudo",
         "-n",
@@ -38,10 +38,10 @@ function asActor(actor: number): Record<string, string> {
         bun,
         join(tools, "config-list.fixture.ts"),
       ],
-      { cwd: "/", stdout: "pipe", stderr: "pipe" },
+      "/",
     );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    return JSON.parse(result.stdout.toString()) as Record<string, string>;
+    expect(result.exitCode, result.stderr).toBe(0);
+    return JSON.parse(result.stdout) as Record<string, string>;
   } finally {
     rmSync(probe, { recursive: true, force: true });
   }
