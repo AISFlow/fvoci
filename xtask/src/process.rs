@@ -189,6 +189,26 @@ fn forward_interrupts() {
     });
 }
 
+/// Block the forwarded signals in this thread; returns the previous mask.
+fn hold_interrupts() -> libc::sigset_t {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaddset(&mut set, signal);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+        old
+    }
+}
+
+fn release_interrupts(old: libc::sigset_t) {
+    unsafe {
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+    }
+}
+
 /// True once `pid` has exited, leaving it unreaped so its process group id
 /// cannot be reused before `killpg`.
 fn exited(pid: u32) -> io::Result<bool> {
@@ -220,9 +240,24 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    // An interrupt between spawn and recording the group would leave the group
+    // running outside the foreground group: hold the forwarded signals until
+    // the group is recorded. The child would inherit the held mask, so it
+    // restores the caller's mask before exec.
+    let held = hold_interrupts();
+    unsafe {
+        command.pre_exec(move || {
+            libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut());
+            Ok(())
+        });
+    }
+    let spawned = command.spawn();
+    if let Ok(child) = &spawned {
+        OWNED_GROUP.store(child.id() as i32, Ordering::SeqCst);
+    }
+    release_interrupts(held);
+    let mut child = spawned.map_err(RunError::Spawn)?;
     let pid = child.id();
-    OWNED_GROUP.store(pid as i32, Ordering::SeqCst);
     let (sender, results) = mpsc::channel::<(usize, io::Result<Vec<u8>>)>();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
         child
@@ -274,15 +309,18 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
                         "an output reader was lost",
                     )));
                 }
+                // Both pipes are read and the child still runs: poll its exit.
+                thread::sleep((deadline - now).min(Duration::from_millis(10)));
             }
         }
     };
-    // The child is not reaped yet, so the group id is still ours.
+    // The child is not reaped yet, so the group id is still ours; forget it
+    // before reaping so the interrupt handler never signals a reused id.
     unsafe {
         libc::killpg(pid as libc::pid_t, libc::SIGKILL);
     }
-    let reaped = child.wait();
     OWNED_GROUP.store(0, Ordering::SeqCst);
+    let reaped = child.wait();
     outcome?;
     let status = reaped.map_err(RunError::Wait)?;
     let [stdout, stderr] = output.map(Option::unwrap_or_default);
@@ -341,6 +379,51 @@ mod tests {
             !alive
         });
         assert!(gone, "background sleep {pid} survived the group kill");
+    }
+
+    /// CPU time of the calling thread, where run_owned's wait loop runs.
+    fn thread_cpu() -> Duration {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) },
+            0
+        );
+        let time = |t: libc::timeval| {
+            Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
+        };
+        time(usage.ru_utime) + time(usage.ru_stime)
+    }
+
+    #[test]
+    fn owned_wait_after_the_pipes_close_does_not_spin() {
+        // Both readers finish at once; the child runs on for a second.
+        let before = thread_cpu();
+        let done = run_owned(
+            Command::new("sh").args(["-c", "exec >&- 2>&-; sleep 1"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let used = thread_cpu() - before;
+        assert!(done.status.success());
+        assert!(
+            used < Duration::from_millis(200),
+            "waiting used {used:?} CPU"
+        );
+    }
+
+    #[test]
+    fn owned_child_starts_with_no_blocked_signals() {
+        let done = run_owned(
+            // The spawned program reads its own mask (a shell blocks signals
+            // around its own forks).
+            Command::new("sed").args(["-n", "s/^SigBlk:[[:space:]]*//p", "/proc/self/status"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&done.stdout).trim(),
+            "0000000000000000"
+        );
     }
 
     #[test]

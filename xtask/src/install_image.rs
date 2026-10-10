@@ -135,9 +135,10 @@ fn child(program: &str, args: &[&str], timeout: Duration, output: Output) -> Res
         command.stdout(Stdio::from(stderr));
     }
     let shown = format!("{program} {}", args.join(" "));
-    // A captured read owns its process group and the budget covers output
-    // collection. Build, save and load write to our stderr (no pipe to
-    // collect) and stay in our group, so a terminal interrupt reaches them.
+    // A captured call (every read, and `docker load`) owns its process group
+    // and the budget covers output collection; an interrupt kills that group.
+    // Build and save write to our stderr (no pipe to collect) and stay in our
+    // group, so a terminal interrupt reaches them directly.
     let done = if capture {
         process::run_owned(&mut command, timeout)
     } else {
