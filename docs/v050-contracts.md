@@ -8,7 +8,7 @@ The historical upstream reference SHAs in `rewrite.md` are separate from this ta
 
 The source mapping reuses W1/W2 v2 (`SHA256 6aca9ca4a2b8d692fb5abd0ba945d060dc0c1bf33f4833fad3d1f19caf702eb5`),
 its independent preparation review, W3's 12-case loss oracle and W7's boundary preparation.
-The preparation reports `w1-w2-contract-v2.md`, `preparation-independent-review-v2.md`, `w3-loss-oracle.md`, `w7-boundary.md` are kept outside the repository.
+The preparation reports `w1-w2-contract-v2.md`, `preparation-independent-review-v2.md`, `w3-loss-oracle.md`, `w7-boundary.md` are not stored in this repository.
 The first two have preparation acceptance; W3/W7 are source findings, not runtime acceptance.
 Current author owns only this document and `packages/editor/test/v050-contract-corpus{,.test}.ts`.
 Operation rules are in [AGENTS.md](../AGENTS.md); current integration/release evidence is in the PR #347 checkpoint and #331.
