@@ -59,9 +59,13 @@ function withRepoInputs(dir: string): string {
   return dir;
 }
 
-function runCli(args: string[]): { code: number; stdout: string; stderr: string } {
-  const result = Bun.spawnSync(["bun", cli, ...args], {
+function runCli(
+  args: string[],
+  env = process.env,
+): { code: number; stdout: string; stderr: string } {
+  const result = Bun.spawnSync([process.execPath, cli, ...args], {
     cwd: root,
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -283,6 +287,13 @@ describe("registry boundaries beyond the mutation table", () => {
 });
 
 describe("verify-workflows CLI", () => {
+  test("invalid arguments still fail when PATH has no Bun executable", () => {
+    const result = runCli(["--bogus"], { PATH: "" });
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("--bogus");
+  });
+
   test("passes on the repository with --partial and prints nothing", () => {
     const result = runCli(["--partial"]);
     expect(result).toEqual({ code: 0, stdout: "", stderr: "" });

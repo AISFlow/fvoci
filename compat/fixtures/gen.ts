@@ -32,7 +32,7 @@ export function buildPdf(): Uint8Array {
   // Minimal PDF 1.4, uncompressed content stream, Helvetica.
   const stream = enc.encode("BT /F1 12 Tf 72 720 Td (compat probe) Tj ET\n");
   const obj = (n: number, payload: Uint8Array) =>
-    concat([enc.encode(`${n} 0 obj\n`), payload, enc.encode("\nendobj\n")]);
+    concat([enc.encode(`${String(n)} 0 obj\n`), payload, enc.encode("\nendobj\n")]);
   const objs = [
     obj(1, enc.encode("<< /Type /Catalog /Pages 2 0 R >>")),
     obj(2, enc.encode("<< /Type /Pages /Kids [3 0 R] /Count 1 >>")),
@@ -46,7 +46,7 @@ export function buildPdf(): Uint8Array {
     obj(
       4,
       concat([
-        enc.encode(`<< /Length ${stream.length} >>\nstream\n`),
+        enc.encode(`<< /Length ${String(stream.length)} >>\nstream\n`),
         stream,
         enc.encode("endstream"),
       ]),
@@ -61,7 +61,7 @@ export function buildPdf(): Uint8Array {
     xref.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
     pos += o.length;
   }
-  const trailer = `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${pos}\n%%EOF\n`;
+  const trailer = `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${String(pos)}\n%%EOF\n`;
   return concat([header, ...objs, enc.encode(xref.join("") + trailer)]);
 }
 
@@ -327,7 +327,8 @@ function main(argv: string[]): number {
   }
   mkdirSync(dir, { recursive: true });
   for (const [name, build] of OUTPUTS) writeFileSync(join(dir, name), build());
-  for (const [name] of OUTPUTS) console.log(`${name} ${statSync(join(dir, name)).size} bytes`);
+  for (const [name] of OUTPUTS)
+    console.log(`${name} ${String(statSync(join(dir, name)).size)} bytes`);
   return 0;
 }
 

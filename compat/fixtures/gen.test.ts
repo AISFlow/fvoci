@@ -36,9 +36,9 @@ describe("compat fixture generator", () => {
       "Contents/header.xml",
       "Contents/section0.xml",
     ]);
-    expect(strFromU8(files["Contents/section0.xml"]!)).toContain(
-      "<hp:t>한글본문색인토큰 HWPX</hp:t>",
-    );
+    const section = files["Contents/section0.xml"];
+    if (section === undefined) throw new Error("HWPX section0.xml is missing");
+    expect(strFromU8(section)).toContain("<hp:t>한글본문색인토큰 HWPX</hp:t>");
   });
 
   test("HWP FileHeader resolves through the CFB mini stream (MS-CFB 2.6.3)", () => {
@@ -67,7 +67,9 @@ describe("compat fixture generator", () => {
     expect(u32(64)).toBe(1);
     const out: number[] = [];
     for (let m = u32(file + 116); m !== ENDOFCHAIN; m = u32(miniFat + m * 4)) {
-      const at = sectorAt(container[Math.floor((m * 64) / 512)]!) + ((m * 64) % 512);
+      const sector = container[Math.floor((m * 64) / 512)];
+      if (sector === undefined) throw new Error("HWP mini stream sector is missing");
+      const at = sectorAt(sector) + ((m * 64) % 512);
       out.push(...bytes.subarray(at, at + 64));
     }
     expect(out.length).toBe(size);

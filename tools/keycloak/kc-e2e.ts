@@ -117,8 +117,7 @@ function err(text: string): void {
 async function redactStdin(configPath: string | undefined): Promise<void> {
   if (configPath !== undefined) loadConfig(configPath);
   const secrets = knownSecrets();
-  // Invalid UTF-8 becomes U+FFFD instead of ending the stream; a BOM is kept.
-  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const splitter = new LineSplitter();
   // Each complete line is written as soon as it is read: the run log follows
   // a group live.

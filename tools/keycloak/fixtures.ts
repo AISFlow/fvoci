@@ -36,17 +36,23 @@ export async function failure(promise: Promise<unknown>): Promise<string> {
 
 export async function cli(
   args: string[],
-  options: { env?: Record<string, string>; stdin?: string } = {},
+  options: { env?: Record<string, string>; stdin?: string | Uint8Array } = {},
 ) {
   const child = Bun.spawn([process.execPath, HELPER, ...args], {
     env: { PATH: process.env.PATH ?? "", ...options.env },
-    stdin: options.stdin === undefined ? "ignore" : new TextEncoder().encode(options.stdin),
+    stdin:
+      options.stdin === undefined
+        ? "ignore"
+        : typeof options.stdin === "string"
+          ? new TextEncoder().encode(options.stdin)
+          : options.stdin,
     stdout: "pipe",
     stderr: "pipe",
   });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
+    new Response(child.stdout).arrayBuffer().then((bytes) => decoder.decode(bytes)),
+    new Response(child.stderr).arrayBuffer().then((bytes) => decoder.decode(bytes)),
     child.exited,
   ]);
   return { stdout, stderr, code };

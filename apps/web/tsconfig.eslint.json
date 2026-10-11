@@ -18,7 +18,9 @@
     "../../tools/oracle/**/*.ts",
     "../../tools/perf/**/*.ts",
     "../../tools/release/**/*.ts",
-    "../../tools/turso/**/*.ts"
+    "../../tools/turso/**/*.ts",
+    "../../tools/keycloak/**/*.ts",
+    "../../compat/fixtures/*.ts"
   ],
   "exclude": ["node_modules", "src/generated/api.ts"]
 }
