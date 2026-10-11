@@ -6,12 +6,9 @@
 차이의 전체 의도다. `scripts/run-web-e2e.sh`의 runner 호출 10곳과 web build handoff 호출 10곳은
 이 Bun CLI와 `handoff.ts`를 쓰며, `web-build-handoff.py`와 그 검사는 제거했다(차이 표는 PR 본문).
 lane driver는 `drivers/{install,postgres,sqlite}.ts`이고, Python lane driver와
-`restart_checkpoint.py`, 그 Python 검사 세 개는 제거했다. `run-selected-backend-e2e.py`와
-`current_binding.py`는 `turso-ui.py`가 아직 라이브러리로 import하므로 남아 있다.
-`test_off_registration.py`는 두 파일의 검사(turso-ui lease와 CI guard)만 남겼다. turso-ui를 옮긴
-뒤 셋을 함께 제거한다. 두 파일의 selected-backend 경로는 fail-closed다. runner `run`과 lease의
-selected-backend consumer는 제거된 driver 파일을 해시하다 실패하고, runner config-list는 제거된
-handoff 파일을 열다 실패한다. Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테스트로 두지 않는다.
+`restart_checkpoint.py`, 그 Python 검사 세 개는 제거했다. turso-ui를 옮긴 뒤
+`run-selected-backend-e2e.py`, `current_binding.py`, `test_off_registration.py`도 제거했다.
+Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테스트로 두지 않는다.
 
 | 항목                        | 원래 동작                                                                                                            | 새 동작                                                                                                                                                                                     | 이유                                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
