@@ -93,8 +93,11 @@ export const PLANNER_COMMANDS = {
   /** Text that marks the plan invocation line. */
   plan: "bun tools/ci/plan.ts",
   planMessage: "must invoke tools/ci/plan.ts",
-  /** The selector regression wrapper: an exact line in rust ci-plan, absent elsewhere. */
-  selectorRegression: "scripts/test-ci-selection.sh",
+  /** The selector regression commands: exact lines in rust ci-plan, absent elsewhere. */
+  selectorRegression: [
+    "bun tools/ci/verify-workflows.ts",
+    "bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts",
+  ],
   gate: "bun tools/ci/gate.ts",
 } as const;
 
@@ -109,7 +112,9 @@ export const SETUP_BUN_STEP: Mapping = {
 export function canonicalPlanRun(workflow: GatedWorkflow): string {
   return (
     "set -euo pipefail\n" +
-    (workflow === "rust" ? `bash ${PLANNER_COMMANDS.selectorRegression}\n` : "") +
+    (workflow === "rust"
+      ? PLANNER_COMMANDS.selectorRegression.map((line) => line + "\n").join("")
+      : "") +
     `${PLANNER_COMMANDS.plan} \\\n` +
     `  --workflow ${workflow} \\\n` +
     '  --event-json "$GITHUB_EVENT_PATH" \\\n' +
@@ -466,16 +471,17 @@ function verifyPlanJob(workflow: GatedWorkflow, data: Mapping, planJob: Mapping)
   ) {
     errors.push(`${workflow}: ${PLAN_JOB_ID} must pass --workflow ${workflow}`);
   }
-  const wrapper = PLANNER_COMMANDS.selectorRegression;
-  if (workflow === "rust") {
-    const lines = scriptLines(planRuns);
-    const wrapperAt = lines.indexOf(`bash ${wrapper}`);
-    const planAt = lines.findIndex((row) => row.includes(PLANNER_COMMANDS.plan));
-    if (wrapperAt < 0 || planAt < 0 || wrapperAt > planAt) {
-      errors.push(`${workflow}: ${PLAN_JOB_ID} must run ${wrapper} before plan output`);
+  const lines = scriptLines(planRuns);
+  const planLine = lines.findIndex((row) => row.includes(PLANNER_COMMANDS.plan));
+  for (const command of PLANNER_COMMANDS.selectorRegression) {
+    if (workflow === "rust") {
+      const at = lines.flatMap((row, index) => (row === command ? [index] : []));
+      if (at.length !== 1 || planLine < 0 || (at[0] ?? -1) > planLine) {
+        errors.push(`${workflow}: ${PLAN_JOB_ID} must run "${command}" once before plan output`);
+      }
+    } else if (planRuns.includes(command)) {
+      errors.push(`${workflow}: ${PLAN_JOB_ID} must not duplicate "${command}"`);
     }
-  } else if (planRuns.includes(wrapper)) {
-    errors.push(`${workflow}: ${PLAN_JOB_ID} must not duplicate ${wrapper}`);
   }
   return errors;
 }
