@@ -299,7 +299,9 @@ function execSubreaper([cwd, executable, ...rest]: string[]): never {
   } catch {
     fail("exec");
   }
-  const path = which(executable);
+  // Bun.spawn searches the child's PATH or, when that is unset or empty, the
+  // libc default (getconf PATH), never the driver's own PATH.
+  const path = which(executable, { PATH: process.env.PATH || "/bin:/usr/bin" });
   if (path === null) return fail("exec");
   const strings: Buffer[] = [];
   const vector = (values: string[]) => {

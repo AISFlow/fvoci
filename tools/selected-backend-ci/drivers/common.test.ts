@@ -455,6 +455,37 @@ test("a waited wrapper that cannot be executed fails its setup, not with an exit
     rmSync(directory, { recursive: true });
   }
 });
+test("a waited wrapper finds its executable where Bun.spawn would", async () => {
+  const directory = temporary();
+  try {
+    for (const [env, found] of [
+      [{}, true],
+      [{ PATH: "" }, true],
+      [{ PATH: directory }, false],
+    ] as const) {
+      let direct: number | string;
+      try {
+        direct = Bun.spawnSync(["bash", "-c", "exit 3"], { env }).exitCode;
+      } catch {
+        direct = "not found";
+      }
+      const waited = await command(["bash", "-c", "exit 3"], {
+        env,
+        log: join(directory, "wrapper.log"),
+        required: false,
+        waitOnInterrupt: true,
+      }).then(
+        (completed) => completed.returncode,
+        (error: unknown) => (error as Error).message,
+      );
+      expect([direct, waited]).toEqual(
+        found ? [3, 3] : ["not found", "owned wrapper exec setup failed; executable=bash"],
+      );
+    }
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
 // The tree keeps forking long-lived children while it reaps short-lived ones,
 // so /proc children changes under a walk that reads it before the parent has
 // stopped.
