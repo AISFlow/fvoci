@@ -319,17 +319,22 @@ async function holdResponse(page: Page, path: string, deferRequest = false) {
   const response = new Promise<number>((resolve) => {
     received = resolve;
   });
-  await page.route(
-    `**${path}`,
-    async (route) => {
-      await requestGate;
-      const result = await route.fetch();
-      received(result.status());
-      await wait;
-      await route.fulfill({ response: result });
-    },
-    { times: 1 },
-  );
+  // Keep interception enabled until the context closes. Expiring the last
+  // route with times: 1 races Chromium's Fetch.disable against the mutation's
+  // count refetches (https://github.com/microsoft/playwright/issues/41802).
+  let consumed = false;
+  await page.route(`**${path}`, async (route) => {
+    if (consumed) {
+      await route.fallback();
+      return;
+    }
+    consumed = true;
+    await requestGate;
+    const result = await route.fetch();
+    received(result.status());
+    await wait;
+    await route.fulfill({ response: result });
+  });
   return {
     response,
     release: () => {

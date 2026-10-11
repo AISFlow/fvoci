@@ -119,6 +119,10 @@ The accepted feature families remain:
   xtask, including planner/gate policy and release tooling. Development and
   harness execution use pinned Bun 1.4.3. The product image contains no
   JavaScript runtime; browser JavaScript is still part of the web app.
+- **Editor caret fix.** Home and End, with or without Shift, now settle the
+  selection on keydown, so a pending editor focus repair can no longer
+  restore the previous caret or collapse a Shift+Home selection before
+  formatting. Three intermittent browser tests were also made deterministic.
 
 The release workflow separately builds and smoke-tests the exact tagged
 image on native amd64 and arm64 before publishing it. A local fixture,
@@ -168,18 +172,19 @@ The following remain unverified or optional for this trial:
   Earlier accepted PostgreSQL or scoped SQLite results do not establish
   completion on another backend or the release commit.
 - **Turso/libSQL remote support:** on the #397 merge commit on main (the
-  release commit adds only the version, these notes and a test-only xtask
-  fix), the isolated Turso test database passed the read-only `connection`
-  and `inventory` phases and the manual `migration` phase. That phase admitted a blank catalog,
-  committed steps 1-11, applied step 12 with an invalid insert on the same
-  writer and rolled both back with the prefix unchanged, then reconnected,
-  resumed through step 12, restarted and closed with zero leases. This is
-  not normal remote installation or startup support. Remote preparation
-  installs a blank database or resumes an exact prefix, and the server starts
-  only on a current schema; that path has no end-to-end acceptance. The
-  `ui-ack` phase was not part of these runs, and real UI persist ACK remains
-  separate acceptance. The `crud`, `transactions`, `persistence` and
-  `restore` phases remain unimplemented.
+  release commit adds the version, these notes, test-only fixes and the
+  browser-side editor caret fix, none of which touch the database path), the
+  isolated Turso test database passed the read-only `connection` and
+  `inventory` phases and the manual `migration` phase. That phase admitted a
+  blank catalog, committed steps 1-11, applied step 12 with an invalid insert
+  on the same writer and rolled both back with the prefix unchanged, then
+  reconnected, resumed through step 12, restarted and closed with zero
+  leases. This is not normal remote installation or startup support. Remote
+  preparation installs a blank database or resumes an exact prefix, and the
+  server starts only on a current schema; that path has no end-to-end
+  acceptance. The `ui-ack` phase was not part of these runs, and real UI
+  persist ACK remains separate acceptance. The `crud`, `transactions`,
+  `persistence` and `restore` phases remain unimplemented.
 - **Zotero:** read-only fixture and archive evidence does not verify access
   to a real external account with live credentials.
 - **Mail and GitHub app:** SMTP was checked with a local test relay,
