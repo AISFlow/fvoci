@@ -44,11 +44,11 @@
         "tailwind-merge": "^3.7.0",
         "vue": "3.5.43",
         "vue-router": "5.3.1",
-        "yjs": "13.6.33",
+        "yjs": "13.6.32",
         "zod": "^3.25.76",
       },
       "devDependencies": {
-        "@iconify-json/lucide": "1.2.141",
+        "@iconify-json/lucide": "1.2.137",
         "@playwright/test": "1.63.0",
         "@types/node": "^26.6.2",
         "@vitejs/plugin-vue": "6.0.9",
@@ -105,7 +105,7 @@
         "sanitize-html": "^2.17.7",
         "unified": "^11.0.5",
         "y-protocols": "1.0.7",
-        "yjs": "13.6.33",
+        "yjs": "13.6.32",
         "zod": "4.6.5",
       },
       "devDependencies": {
@@ -189,7 +189,7 @@
     "@tiptap/y-tiptap": "3.0.9",
     "vue": "3.5.43",
     "y-protocols": "1.0.7",
-    "yjs": "13.6.33",
+    "yjs": "13.6.32",
   },
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.3.0", "", {}, "sha512-U4+70Pc5ZS9osnCBCE5Jha/ciHM+Yp+CNMNC/7HvYbNRk1Ldd+f7qO65W5qfhu/TCv+/ozljlXXe9Nj8419DMA=="],
@@ -310,7 +310,7 @@
 
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
-    "@iconify-json/lucide": ["@iconify-json/lucide@1.2.141", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-V9IC4cc7giA8PtoSeNc5GbASh4Sc5sRILu3jdGO9TMRWC+4YUeU3I3prNnoAZ5QiRZpfrjBhmXkqIdwfS//PGw=="],
+    "@iconify-json/lucide": ["@iconify-json/lucide@1.2.137", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-uKz1+tFbv1RFX/mJQNksdnyKJijNfRGSNnxfiyKtr+dLNfA3ERph+IgpXClKGOlV/5GsZwLv2jgJXQ/bjF/JAg=="],
 
     "@iconify/collections": ["@iconify/collections@1.0.743", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-9r/ASVTd1A2yWXhBLZxKKo30L5hECLkE0dlJdw0n+L1xvPFXI/2P9EdkCu0QMuuUNENi6jYTjlhgNZEpqkfy1Q=="],
 
@@ -1666,7 +1666,7 @@
 
     "yauzl": ["yauzl@3.4.0", "", { "dependencies": { "pend": "~1.2.0" } }, "sha512-jIH9yLR9wqr0wOS0TpBvo/g/2UgZH5qePVbjgRliiF0BYvOZyaBknKsF+x9Iht0O6sqgnB93rCICdOZFecJuDw=="],
 
-    "yjs": ["yjs@13.6.33", "", { "dependencies": { "lib0": "^0.2.99" } }, "sha512-q/UYvr1gOk4XII+Cu1CW2dINjYqJJFifTzogEaIARznrvX7uOlHsdTEXcnOBMuIsrCGEEKdNxi74kyMLZlKVfw=="],
+    "yjs": ["yjs@13.6.32", "", { "dependencies": { "lib0": "^0.2.99" } }, "sha512-lfiJIIC4Xayt5ItynE407ehlE03pCjeOc4hkR4yxxvvNJ4kuiN25B0g+Qp8XagYz361LLL7DCzR5bvFJ81QKtQ=="],
 
     "yocto-queue": ["yocto-queue@0.1.0", "", {}, "sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q=="],
 
