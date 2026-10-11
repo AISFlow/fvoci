@@ -26,9 +26,6 @@ import { files, jsonInteger, observedExit, root, sha, sourceInputText } from "..
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
 
-// The runner shares these without loading this module.
-export { bunDriver, failureDigest } from "../io.ts";
-
 export type Receipt = Record<string, unknown>;
 export type Json = Record<string, unknown>;
 

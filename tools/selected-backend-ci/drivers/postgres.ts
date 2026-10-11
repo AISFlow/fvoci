@@ -24,14 +24,23 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
-import { env, jsonInteger, parseJson, read, resolved, root, sha } from "../io.ts";
+import {
+  bunDriver,
+  env,
+  failureDigest,
+  jsonInteger,
+  parseJson,
+  read,
+  resolved,
+  root,
+  sha,
+} from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
 import {
   assertNoEnvFile,
   attachmentJson,
   browserPacketKeys,
-  bunDriver,
   checkInterrupt,
   cleanupAttempt,
   cleanupScope,
@@ -41,7 +50,6 @@ import {
   emit,
   errorFacts,
   failureCheckpoint,
-  failureDigest,
   field,
   isRecord,
   privateText,

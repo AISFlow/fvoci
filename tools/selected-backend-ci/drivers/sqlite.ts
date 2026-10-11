@@ -20,7 +20,16 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
-import { checkpointPrefix, env, isFile, read, root, sha, type PreparationStep } from "../io.ts";
+import {
+  checkpointPrefix,
+  env,
+  failureDigest,
+  isFile,
+  read,
+  root,
+  sha,
+  type PreparationStep,
+} from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
@@ -34,7 +43,6 @@ import {
   copiedHashes,
   emit,
   failureCheckpoint,
-  failureDigest,
   identityGone,
   inodeOf,
   inputCheck,
@@ -66,7 +74,6 @@ import {
   type Seam as RestartSeam,
 } from "./restart.ts";
 
-export { checkpointPrefix, preparationSteps, publicCheckpoint } from "../io.ts";
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";

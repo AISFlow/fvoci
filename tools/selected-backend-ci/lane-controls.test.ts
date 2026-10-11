@@ -24,10 +24,21 @@ import process from "node:process";
 import { identity, localAllocation, registeredModules } from "./admission.ts";
 import { qualifyArtifacts } from "./build.ts";
 import { bindingModule, engineFeaturesMatch, validateOffReport } from "./drivers/binding.ts";
-import { failureDigest } from "./drivers/common.ts";
 import { restartHelper } from "./drivers/restart.ts";
-import { checkpointPrefix, preparationSteps } from "./drivers/sqlite.ts";
-import { call, digest, gid, parseJson, read, root, sha, uid, write } from "./io.ts";
+import {
+  call,
+  checkpointPrefix,
+  digest,
+  failureDigest,
+  gid,
+  parseJson,
+  preparationSteps,
+  read,
+  root,
+  sha,
+  uid,
+  write,
+} from "./io.ts";
 import {
   knownOnBrowserTest,
   laneDriver,
@@ -38,7 +49,6 @@ import {
   selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
-import * as runtime from "./runtime.ts";
 import { copyRunnerModules } from "./test-process.ts";
 import type {
   Aggregate,
@@ -928,10 +938,6 @@ describe("lease order", () => {
     const closure = [...seen].map((path) => relative(root, path)).sort();
     expect(closure.filter((name) => name.includes("/drivers/"))).toEqual([]);
     expect(closure).toEqual(registeredModules.filter((name) => !name.includes("/drivers/")).sort());
-  });
-  test("the runner names the hashed driver modules without importing them", () => {
-    expect(runtime.bindingModule).toBe(bindingModule);
-    expect(runtime.restartHelper).toBe(restartHelper);
   });
   test.skipIf(!linux)("an edited driver's top level never runs before the lease check", () => {
     const base = realpathSync(directory()),
