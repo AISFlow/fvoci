@@ -20,10 +20,9 @@ use fvoci_server::collab::y_sync::{encode_sync_payload, parse_sync_payload};
 use fvoci_server::collab::CollabHub;
 use fvoci_server::db::documents::CreateDocumentInput;
 use fvoci_server::db::workspace;
-use fvoci_server::db::{documents, migrate, pool, Db};
+use fvoci_server::db::{documents, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
-use rand::RngCore;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -36,12 +35,10 @@ pub const PEPPER: &str =
     r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
 pub const PUBLIC_ORIGIN: &str = "http://localhost";
 
-pub struct TestDb {
-    pub admin_url: String,
-    pub app_url: String,
-    db_name: String,
-    role_name: String,
-}
+#[path = "test_db.rs"]
+mod test_db;
+
+pub use test_db::TestDb;
 
 pub struct SessionFixture {
     pub pool: PgPool,
@@ -54,25 +51,6 @@ pub struct SessionFixture {
 pub struct WikiDocFixture {
     pub session: SessionFixture,
     pub document_id: Uuid,
-}
-
-fn server_db_url(url: &str) -> String {
-    let parsed = url::Url::parse(url).expect("database url");
-    let mut server = parsed;
-    server.set_path("");
-    server.to_string().trim_end_matches('/').to_string()
-}
-
-fn join_db_url(server_url: &str, db_name: &str) -> String {
-    let mut parsed = url::Url::parse(server_url).expect("server url");
-    parsed.set_path(&format!("/{}", db_name));
-    parsed.to_string()
-}
-
-async fn apply_grants(pool: &PgPool, role_name: &str) {
-    fvoci_server::db::migrate::apply_app_role_grants(pool, role_name)
-        .await
-        .expect("grant");
 }
 
 /// Route server `tracing` output (e.g. the underlying error behind a 1011
@@ -91,135 +69,11 @@ pub fn init_test_tracing() {
 impl TestDb {
     pub async fn bootstrap() -> Self {
         init_test_tracing();
-        let admin_base = std::env::var("TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))
-            .expect("TEST_DATABASE_URL missing; collab projection tests require real PostgreSQL");
-
-        let db_name = format!("fvoci_collab_proj_{}", Uuid::now_v7().simple());
-        let role_name = format!("fvoci_app_{}", db_name.replace('-', "_"));
-        let mut password_bytes = [0u8; 24];
-        rand::rng().fill_bytes(&mut password_bytes);
-        let role_password = hex::encode(password_bytes);
-        let server_url = server_db_url(&admin_base);
-
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&server_url)
-            .await
-            .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
-        admin_pool.close().await;
-
-        let admin_url = join_db_url(&server_url, &db_name);
-        migrate::run_migrations(&admin_url).await.expect("migrate");
-
-        let migration_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&admin_url)
-            .await
-            .expect("connect migration db");
-        sqlx::query(&format!(
-            "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
-            role_name, role_password
-        ))
-        .execute(&migration_pool)
-        .await
-        .expect("create role");
-        apply_grants(&migration_pool, &role_name).await;
-        migration_pool.close().await;
-
-        let mut app = url::Url::parse(&admin_url).expect("database url");
-        app.set_username(&role_name).ok();
-        app.set_password(Some(&role_password)).ok();
-
-        Self {
-            admin_url,
-            app_url: app.to_string(),
-            db_name,
-            role_name,
-        }
-    }
-
-    pub fn db_name(&self) -> &str {
-        &self.db_name
-    }
-
-    pub fn role_name(&self) -> &str {
-        &self.role_name
-    }
-
-    pub async fn database_exists(admin_url: &str, db_name: &str) -> Result<bool, String> {
-        let server_url = server_db_url(admin_url);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&server_url)
-            .await
-            .map_err(|e| format!("connect admin to probe database: {e}"))?;
-        let (exists,): (bool,) =
-            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
-                .bind(db_name)
-                .fetch_one(&pool)
-                .await
-                .map_err(|e| format!("probe database {db_name}: {e}"))?;
-        pool.close().await;
-        Ok(exists)
-    }
-
-    pub async fn role_exists(admin_url: &str, role_name: &str) -> Result<bool, String> {
-        let server_url = server_db_url(admin_url);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&server_url)
-            .await
-            .map_err(|e| format!("connect admin to probe role: {e}"))?;
-        let (exists,): (bool,) =
-            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)")
-                .bind(role_name)
-                .fetch_one(&pool)
-                .await
-                .map_err(|e| format!("probe role {role_name}: {e}"))?;
-        pool.close().await;
-        Ok(exists)
+        Self::create("fvoci_collab_proj_").await
     }
 
     pub async fn cleanup(self) -> Result<(), String> {
-        let server_url = server_db_url(&self.admin_url);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&server_url)
-            .await
-            .map_err(|e| format!("connect admin for cleanup: {e}"))?;
-        let mut errors = Vec::new();
-        if let Err(error) = sqlx::query(&format!(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
-            self.db_name
-        ))
-        .execute(&pool)
-        .await
-        {
-            errors.push(format!("terminate backends for {}: {error}", self.db_name));
-        }
-        if let Err(error) = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-            .execute(&pool)
-            .await
-        {
-            errors.push(format!("drop database {}: {error}", self.db_name));
-        }
-        if let Err(error) = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-            .execute(&pool)
-            .await
-        {
-            errors.push(format!("drop role {}: {error}", self.role_name));
-        }
-        pool.close().await;
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        self.drop_owned().await
     }
 }
 

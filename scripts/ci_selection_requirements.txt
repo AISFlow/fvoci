@@ -1,3 +1,0 @@
-# Pinned parser for fail-closed workflow registry validation.
-# Plan jobs install this before emitting selection outputs.
-PyYAML==6.0.3

@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-python3 scripts/web-e2e-groups.py verify --shards 8
-python3 scripts/test_web_e2e_groups.py -v
+shard_count="$(bun tools/web-e2e/groups.ts shards)"
+bun tools/web-e2e/groups.ts verify --shards "$shard_count"
+bun --bun node_modules/typescript/bin/tsc -p tools/web-e2e/tsconfig.json
+bun test --timeout=60000 ./tools/web-e2e/groups.test.ts ./tools/web-e2e/trace-summary.test.ts \
+  ./tools/web-e2e/smtp-sink.test.ts ./tools/web-e2e/run-web-e2e.test.ts \
+  ./tools/web-e2e/network-settle.test.ts ./tools/web-e2e/database-urls.test.ts
 
 bash scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh
 bash scripts/fixtures/web-e2e/failure-output-fixture-test.sh

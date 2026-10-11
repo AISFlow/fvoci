@@ -15,8 +15,6 @@ ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
 # Archive signatures remain mandatory; historical Release expiry is disabled
 # for this fixed snapshot, including Playwright's later apt commands.
-# python3: 임시: C12a Python 감사 때 제거
-# python3-yaml: 임시: C4에서 PyYAML 사용처 제거 시 삭제
 RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/bootstrap-ca.crt,readonly \
     printf '%s\n' \
       'Types: deb' \
@@ -34,11 +32,9 @@ RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.
  && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       curl git gcc g++ make binutils libc6-dev pkg-config \
-      python3 \
-      python3-yaml=6.0.3-1build1 \
       unzip xz-utils zstd sudo \
       libclang-18-dev=1:18.1.8-20ubuntu8 \
- && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 python3-yaml curl \
+ && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl \
       > /usr/local/share/ci-base-build-packages.txt \
  && cat /usr/local/share/ci-base-build-packages.txt \
  && rm -rf /var/lib/apt/lists/*
@@ -62,17 +58,17 @@ RUN install -d -o 1000 -g 1000 -m 0755 /home/ci/.cargo /home/ci/.cargo/registry 
 FROM rust-tools AS ci-base
 # CI tools use pinned official binaries.
 RUN case "$(dpkg --print-architecture)" in \
-      amd64) archive=bun-linux-x64; checksum=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913 ;; \
-      arm64) archive=bun-linux-aarch64; checksum=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7 ;; \
+      amd64) archive=bun-linux-x64; checksum=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18 ;; \
+      arm64) archive=bun-linux-aarch64; checksum=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21 ;; \
       *) exit 1 ;; \
     esac \
  && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-      "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/$archive.zip" -o /tmp/bun.zip \
+      "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/$archive.zip" -o /tmp/bun.zip \
  && printf '%s  %s\n' "$checksum" /tmp/bun.zip | sha256sum --check --strict \
  && unzip -q /tmp/bun.zip -d /tmp/bun \
  && install -m 0755 "/tmp/bun/$archive/bun" /usr/local/bin/bun \
  && ln -s bun /usr/local/bin/bunx \
- && test "$(bun --version)" = 1.4.2 \
+ && test "$(bun --version)" = 1.4.3 \
  && rm -rf /tmp/bun /tmp/bun.zip
 
 RUN version=0.9.148 \

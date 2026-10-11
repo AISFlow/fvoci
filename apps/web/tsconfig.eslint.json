@@ -8,9 +8,19 @@
     "**/*.ts",
     "**/*.tsx",
     "**/*.vue",
-    "../../scripts/ci/workflows.test.ts",
+    "../../tools/ci/workflows.test.ts",
+    "../../tools/web-e2e/**/*.ts",
+    "../../scripts/schema-baseline/*.ts",
     "../../scripts/run-selected-backend-e2e.ts",
-    "../../tools/selected-backend-ci/**/*.ts"
+    "../../scripts/eslint-fixtures.test.ts",
+    "../../tools/selected-backend-ci/**/*.ts",
+    "../../tools/ci/**/*.ts",
+    "../../tools/oracle/**/*.ts",
+    "../../tools/perf/**/*.ts",
+    "../../tools/release/**/*.ts",
+    "../../tools/turso/**/*.ts",
+    "../../tools/keycloak/**/*.ts",
+    "../../compat/fixtures/*.ts"
   ],
   "exclude": ["node_modules", "src/generated/api.ts"]
 }

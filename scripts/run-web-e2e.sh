@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 # Freeze relative output paths before changing cwd for frontend/build commands.
-CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$CARGO_TARGET_DIR")"
+# realpath -m resolves symlinks and keeps missing components (a fresh target).
+CARGO_TARGET_DIR="$(realpath -m -- "$CARGO_TARGET_DIR")"
 COLLAB_ENGINE_TARGET_DIR="$ROOT/crates/collab-engine/target"
 export CARGO_TARGET_DIR
 export FVOCI_COLLAB_ENGINE="$COLLAB_ENGINE_TARGET_DIR/debug/collab-engine"
@@ -15,8 +16,9 @@ if [[ -n "${FVOCI_WEB_E2E_DRY_RUN:-}" ]]; then
   exit 1
 fi
 
-# CI matrix runs exactly eight browser shards; do not allow runtime overrides.
-CI_SHARD_COUNT=8
+# The CI browser shard count is tools/web-e2e/groups.ts's (read in
+# run_ci_shard); runtime overrides are refused.
+CI_SHARD_COUNT=""
 CI_SHARD=""
 SPEC_ARGS=()
 SELECTED_BACKENDS=false
@@ -63,7 +65,7 @@ while (($# > 0)); do
       break
       ;;
     --ci-shard-count)
-      echo "--ci-shard-count is not supported; CI uses a fixed shard count of ${CI_SHARD_COUNT}" >&2
+      echo "--ci-shard-count is not supported; CI uses the fixed shard count from tools/web-e2e/groups.ts" >&2
       exit 1
       ;;
     *)
@@ -77,58 +79,7 @@ verify_committed_api() {
   # web-checks generates and diffs these same-checkout files; its mandatory
   # aggregate gate remains responsible for schema freshness. Never regenerate
   # or fall back if this explicit browser-only consumption fails qualification.
-  python3 - "$ROOT" "$CI_SHARD" "$SELECTED_BACKENDS" "$BROWSER_PHASE" <<'PY_API'
-import os
-from pathlib import Path
-import re
-import stat
-import subprocess
-import sys
-
-root = Path(sys.argv[1])
-def fail(message):
-    sys.exit("committed API qualification failed: " + message)
-def git(*args):
-    return subprocess.check_output(["git", "-C", str(root), *args])
-if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
-    fail("requires GitHub CI")
-lane_jobs = {
-    "collaboration-install-on", "collaboration-postgres-on", "collaboration-sqlite-on",
-    "collaboration-postgres-off", "collaboration-sqlite-off",
-}
-job = "workspace-browser-shard" if sys.argv[2] else "collaboration-flow"
-if sys.argv[4] == "prepare":
-    job = "workspace-browser-build"
-if os.environ.get("GITHUB_JOB") == "collaboration-build" and sys.argv[3] == "true":
-    job = "collaboration-build"
-if not sys.argv[2] and sys.argv[3] != "true" and sys.argv[4] != "prepare":
-    fail("requires a browser shard or selected companion")
-actual_job = os.environ.get("GITHUB_JOB")
-allowed = {job, *lane_jobs} if job == "collaboration-flow" else {job}
-if actual_job not in allowed:
-    fail("requires the allocated browser job")
-sha = os.environ.get("GITHUB_SHA", "")
-if not re.fullmatch(r"[0-9a-f]{40}", sha) or git("rev-parse", "HEAD").decode().strip() != sha:
-    fail("checkout HEAD differs from tested SHA")
-if Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve() != root:
-    fail("wrapper must belong to this checkout")
-if subprocess.run(["git", "-C", str(root), "diff", "--quiet", "HEAD", "--"]).returncode:
-    fail("tracked checkout is dirty")
-for name in ("apps/web/openapi.json", "apps/web/src/generated/api.ts"):
-    path = root / name
-    entry = git("ls-tree", "HEAD", "--", name).decode().strip()
-    if not entry.startswith("100644 blob ") or not entry.endswith("\t" + name):
-        fail(name + " must be a tracked regular output at HEAD")
-    oid = entry.split()[2]
-    if git("ls-files", "--stage", "--", name).decode().strip() != f"100644 {oid} 0\t{name}":
-        fail(name + " index differs from HEAD")
-    if not path.exists() or path.resolve() != path or not stat.S_ISREG(path.lstat().st_mode):
-        fail(name + " must be a physical regular output")
-    content = path.read_bytes()
-    if not content or content != git("cat-file", "blob", oid):
-        fail(name + " physical bytes differ from HEAD")
-print("committed API outputs match tested checkout " + sha)
-PY_API
+  bun "$ROOT/tools/web-e2e/run-web-e2e.ts" committed-api "$ROOT" "$CI_SHARD" "$SELECTED_BACKENDS" "$BROWSER_PHASE"
 }
 
 run_stage() {
@@ -153,7 +104,7 @@ require_prepared() {
   fi
 }
 
-build_current_artifacts() {
+prepare_sqlite_env() {
   local sqlite_env
   sqlite_env="$(mktemp "${TMPDIR:-/tmp}/fvoci-sqlite-env.XXXXXX")"
   if ! bash "$ROOT/scripts/prepare-sqlite-ci.sh" --env-file "$sqlite_env"; then
@@ -164,35 +115,92 @@ build_current_artifacts() {
   # shellcheck disable=SC1090
   source "$sqlite_env"
   rm -f "$sqlite_env"
-  if [[ "$CI_COMMITTED_API" == true ]]; then
-    verify_committed_api
+}
+
+# This script's one owner of each native build command, per feature profile:
+# - selected: the collaboration packet. tools/selected-backend-ci/handoff.ts
+#   qualify() requires features [api-schema, db-tests] on every server binary,
+#   so api-schema here is intentional. Always run under
+#   run-selected-backend-e2e.ts stage, which reads the JSON diagnostics.
+# - default: local/browser binaries: the fixture with db-tests only, server
+#   and migrate with default features. handoff.ts browserStage still repeats
+#   this profile for the browser packet (follow-up: take it from here).
+# Sets NATIVE_ARGV.
+native_build_argv() {
+  local profile="$1" stage="$2"
+  case "$profile/$stage" in
+    selected/main)
+      NATIVE_ARGV=(cargo build --locked --offline --features db-tests,api-schema
+        --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture) ;;
+    selected/lib)
+      NATIVE_ARGV=(cargo test --locked --offline --features db-tests,api-schema --lib --no-run) ;;
+    selected/install)
+      NATIVE_ARGV=(cargo test --locked --offline --features db-tests,api-schema
+        --test selected_install_lifetime --no-run) ;;
+    selected/engine | default/engine)
+      NATIVE_ARGV=(cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml"
+        --features worker --bin collab-engine) ;;
+    default/fixture)
+      NATIVE_ARGV=(cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests) ;;
+    default/server)
+      NATIVE_ARGV=(cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate) ;;
+    *)
+      echo "unknown native build ${profile}/${stage}" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$profile" == selected ]]; then NATIVE_ARGV+=(--message-format=json-render-diagnostics); fi
+}
+
+# run_native_stage LABEL PROFILE STAGE [WRAPPER...]: one native build stage;
+# the engine builds into its own target directory.
+run_native_stage() {
+  local label="$1" profile="$2" stage="$3" target="$CARGO_TARGET_DIR"
+  shift 3
+  native_build_argv "$profile" "$stage"
+  if [[ "$stage" == engine ]]; then target="$COLLAB_ENGINE_TARGET_DIR"; fi
+  CARGO_TARGET_DIR="$target" run_stage "$label" "$@" "${NATIVE_ARGV[@]}"
+}
+
+build_current_artifacts() {
+  if [[ "$SELECTED_PHASE" == consume ]]; then
+    # A verified-handoff consumer compiles nothing natively. Its workflow step
+    # already prepared and exported the SQLite prefix; handoff consume checks
+    # those exports and hashes the prefix against the producer's inputs.
+    if [[ -z "${SQLITE3_LIB_DIR:-}" || -z "${SQLITE3_INCLUDE_DIR:-}" ||
+      "${SQLITE3_STATIC:-}" != 1 || "${SQLITE3_NO_PKG_CONFIG:-}" != 1 ]]; then
+      echo "selected consumer requires the workflow-prepared SQLite environment" >&2
+      return 1
+    fi
   else
+    prepare_sqlite_env
+  fi
+  # Committed API outputs were already verified at entry, before any build.
+  if [[ "$CI_COMMITTED_API" != true ]]; then
     run_stage api-generation bash "$ROOT/scripts/generate-api.sh"
   fi
 
+  # Consumers still build dist: the collaboration packet carries no dist, and
+  # handoff consume requires this dist to equal the producer's asset hashes.
   cd "$ROOT/apps/web"
   run_stage web-build bun --bun run build
 
   cd "$ROOT"
   if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
   if [[ "$SELECTED_PHASE" == consume ]]; then
-    run_stage selected-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+    run_stage selected-handoff-consume bun "$ROOT/tools/selected-backend-ci/handoff.ts" consume
   elif [[ "$SELECTED_BACKENDS" == true ]]; then
-    run_stage selected-input-before python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
-    run_stage selected-main python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name main -- \
-      cargo build --locked --offline --features db-tests,api-schema --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json-render-diagnostics
-    run_stage selected-lib python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name lib -- \
-      cargo test --locked --offline --features db-tests,api-schema --lib --no-run --message-format=json-render-diagnostics
-    run_stage selected-install python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name install -- \
-      cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run --message-format=json-render-diagnostics
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage selected-engine python3 "$ROOT/scripts/run-selected-backend-e2e.py" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name engine -- \
-      cargo build --locked --offline --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine --message-format=json-render-diagnostics
-    run_stage selected-input-after python3 "$ROOT/scripts/run-selected-backend-e2e.py" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
+    local stage selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")
+    run_stage selected-input-before "${selected[@]}" record-before --output "$FVOCI_SELECTED_CI_OUTPUT"
+    for stage in main lib install engine; do
+      run_native_stage "selected-${stage}" selected "$stage" \
+        "${selected[@]}" stage --output "$FVOCI_SELECTED_CI_OUTPUT" --stage-name "$stage" --
+    done
+    run_stage selected-input-after "${selected[@]}" record-after --output "$FVOCI_SELECTED_CI_OUTPUT"
   else
-    run_stage fixture-build cargo build --locked --offline --bin fvoci-e2e-fixture --features db-tests
-    run_stage default-server-build cargo build --locked --offline --bin fvoci-server --bin fvoci-migrate
-    CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build cargo build --locked --offline \
-      --manifest-path "$ROOT/crates/collab-engine/Cargo.toml" --features worker --bin collab-engine
+    run_native_stage fixture-build default fixture
+    run_native_stage default-server-build default server
+    run_native_stage worker-build default engine
   fi
 }
 
@@ -200,7 +208,11 @@ run_ci_shard() {
   local shard_index="$1"
 
   if [[ -n "${FVOCI_WEB_E2E_SHARD_COUNT:-}" ]]; then
-    echo "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count (${CI_SHARD_COUNT})" >&2
+    echo "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count from tools/web-e2e/groups.ts" >&2
+    exit 1
+  fi
+  if ! CI_SHARD_COUNT="$(bun "$ROOT/tools/web-e2e/groups.ts" shards)" || [[ ! "$CI_SHARD_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "cannot read the CI shard count from tools/web-e2e/groups.ts" >&2
     exit 1
   fi
   if (( shard_index < 0 || shard_index >= CI_SHARD_COUNT )); then
@@ -211,11 +223,11 @@ run_ci_shard() {
   local plan_file
   plan_file="$(mktemp "${TMPDIR:-/tmp}/fvoci-web-e2e-plan.XXXXXX")"
 
-  if ! python3 "$ROOT/scripts/web-e2e-groups.py" verify --shards "$CI_SHARD_COUNT" >/dev/null; then
+  if ! bun "$ROOT/tools/web-e2e/groups.ts" verify --shards "$CI_SHARD_COUNT" >/dev/null; then
     rm -f "$plan_file"
     exit 1
   fi
-  if ! python3 "$ROOT/scripts/web-e2e-groups.py" shard-jsonl \
+  if ! bun "$ROOT/tools/web-e2e/groups.ts" shard-jsonl \
       --index "$shard_index" --shards "$CI_SHARD_COUNT" >"$plan_file"; then
     rm -f "$plan_file"
     exit 1
@@ -228,7 +240,7 @@ run_ci_shard() {
 
   echo "=== web e2e shard ${shard_index}/${CI_SHARD_COUNT}: qualify artifacts ===" >&2
   if [[ "$BROWSER_PHASE" == consume ]]; then
-    run_stage browser-handoff-consume python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" consume
+    run_stage browser-handoff-consume bun "$ROOT/tools/selected-backend-ci/handoff.ts" consume
   else
     build_current_artifacts
   fi
@@ -241,16 +253,12 @@ run_ci_shard() {
     exit 1
   fi
 
-  local group_json specs_line group_label
+  local group_json specs_text specs_line group_label
   for group_json in "${plan_lines[@]}"; do
     [[ -z "$group_json" ]] && continue
-    mapfile -t specs_line < <(
-      python3 -c 'import json,sys; print("\n".join(json.loads(sys.argv[1])["specs"]))' "$group_json"
-    )
-    if ((${#specs_line[@]} < 1)); then
-      echo "shard plan group has no specs: ${group_json}" >&2
-      exit 1
-    fi
+    # The helper refuses a malformed line or an empty spec list.
+    specs_text="$(bun "$ROOT/tools/web-e2e/run-web-e2e.ts" plan-specs "$group_json")" || exit 1
+    mapfile -t specs_line <<<"$specs_text"
     group_label="$(basename "${specs_line[0]%.spec.ts}")"
     if ((${#specs_line[@]} > 1)); then
       group_label="${group_label}+$(basename "${specs_line[1]%.spec.ts}")"
@@ -315,20 +323,20 @@ fi
 
 if [[ "$CI_COMMITTED_API" == true ]]; then verify_committed_api; fi
 if [[ "$SELECTED_PHASE" == consume ]]; then
-  run_stage selected-handoff-admit python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" admit
+  run_stage selected-handoff-admit bun "$ROOT/tools/selected-backend-ci/handoff.ts" admit
 fi
 require_prepared
 
 if [[ "$BROWSER_PHASE" == prepare ]]; then
   [[ ! -e "$ROOT/apps/web/dist" ]] || { echo "browser producer requires absent dist" >&2; exit 1; }
-  run_stage browser-input-before python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-before
+  run_stage browser-input-before bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-before
   (cd "$ROOT/apps/web" && run_stage web-build bun --bun run build)
   verify_committed_api
-  run_stage fixture-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage fixture
-  run_stage default-server-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage default
-  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-stage engine
-  run_stage browser-input-after python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" browser-after
-  run_stage browser-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  run_stage fixture-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage fixture
+  run_stage default-server-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage default
+  CARGO_TARGET_DIR="$COLLAB_ENGINE_TARGET_DIR" run_stage worker-build bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-stage engine
+  run_stage browser-input-after bun "$ROOT/tools/selected-backend-ci/handoff.ts" browser-after
+  run_stage browser-handoff-export bun "$ROOT/tools/selected-backend-ci/handoff.ts" export
   exit 0
 fi
 
@@ -343,7 +351,7 @@ fi
 
 build_current_artifacts
 if [[ "$SELECTED_PHASE" == prepare ]]; then
-  run_stage selected-handoff-export python3 "$ROOT/scripts/selected-backend-ci/web-build-handoff.py" export
+  run_stage selected-handoff-export bun "$ROOT/tools/selected-backend-ci/handoff.ts" export
   exit 0
 fi
 pending_status=0
@@ -354,30 +362,17 @@ if [[ "$SELECTED_BACKENDS" == true ]]; then
   # Preparation/build and original pending suite keep the existing CI runner UID.
   # Only this job-owned output/native prefix transfers to the1000 runtime actor.
   : "${FVOCI_SELECTED_CI_SQLITE_PARENT:?required exact job-owned SQLite parent}"
-  python3 - "$SQLITE3_LIB_DIR" "$FVOCI_SELECTED_CI_SQLITE_PARENT" <<'PY_PARENT'
-from pathlib import Path
-import sys
-assert Path(sys.argv[1]).resolve().is_relative_to(Path(sys.argv[2]).resolve())
-PY_PARENT
+  bun "$ROOT/tools/web-e2e/run-web-e2e.ts" path-within "$SQLITE3_LIB_DIR" "$FVOCI_SELECTED_CI_SQLITE_PARENT"
   # Exclusive runner-owned safe output stays outside the transferred prefixes.
   safe_diagnostics="$RUNNER_TEMP/fvoci-selected-diagnostics"
-  python3 - "$safe_diagnostics" <<'PY_DIAGNOSTICS'
-from pathlib import Path
-import os,sys
-prefix=Path(sys.argv[1])
-assert prefix == Path(os.environ['RUNNER_TEMP']).resolve()/'fvoci-selected-diagnostics'
-prefix.mkdir(mode=0o700)  # occupied/symlink/foreign destinations are refused
-assert prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
-if os.environ.get('GITHUB_OUTPUT'):
-    with open(os.environ['GITHUB_OUTPUT'],'a') as output:
-        output.write('selected-safe-diagnostics='+str(prefix)+'\n')
-PY_DIAGNOSTICS
+  # Occupied, symlinked or foreign destinations are refused.
+  bun "$ROOT/tools/web-e2e/run-web-e2e.ts" safe-diagnostics "$safe_diagnostics"
   runner_uid="$(id -u)"
   runner_gid="$(id -g)"
   docker_gid="$(stat -c %g /var/run/docker.sock)"
   # Qualify only the existing primary read group actually required by current
   # code/input ancestry. Inaccessible files fail before private ownership moves.
-  runtime_groups="$(python3 "$ROOT/scripts/run-selected-backend-e2e.py" permissions \
+  runtime_groups="$(bun "$ROOT/scripts/run-selected-backend-e2e.ts" permissions \
     --output "$FVOCI_SELECTED_CI_OUTPUT" --sqlite-parent "$FVOCI_SELECTED_CI_SQLITE_PARENT" --docker-gid "$docker_gid")"
   export PLAYWRIGHT_BROWSERS_PATH="$FVOCI_SELECTED_CI_OUTPUT/browser"
   if [[ -n "${FVOCI_COLLAB_LANE:-}" && "$FVOCI_COLLAB_LANE" != install/on ]]; then
@@ -402,7 +397,7 @@ PY_DIAGNOSTICS
       sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,FVOCI_WEB_BUILD_PHASE,PLAYWRIGHT_BROWSERS_PATH \
         setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
         env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-          python3 "$ROOT/scripts/run-selected-backend-e2e.py" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
+          bun "$ROOT/scripts/run-selected-backend-e2e.ts" config-list --output "$FVOCI_SELECTED_CI_OUTPUT" \
           >"$safe_diagnostics/config-list.stdout.log" 2>"$safe_diagnostics/config-list.stderr.log") || config_list_exit=$?
     selected_status="$config_list_exit"
   fi
@@ -418,7 +413,7 @@ PY_DIAGNOSTICS
     sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB,PLAYWRIGHT_BROWSERS_PATH \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
       env TMPDIR="$FVOCI_SELECTED_CI_OUTPUT/tmp" \
-        python3 "$ROOT/scripts/run-selected-backend-e2e.py" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
+        bun "$ROOT/scripts/run-selected-backend-e2e.ts" run --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" || selected_status=$?
     launcher_status="$selected_status"
   fi
   # The launcher has returned, but require existing exact resource-retirement
@@ -427,7 +422,7 @@ PY_DIAGNOSTICS
   (umask 077
     sudo --preserve-env=PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB \
       setpriv --reuid=1000 --regid=1000 --groups="$runtime_groups" \
-      python3 "$ROOT/scripts/run-selected-backend-e2e.py" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
+      bun "$ROOT/scripts/run-selected-backend-e2e.ts" owner-return --output "$FVOCI_SELECTED_CI_OUTPUT" "${lane_args[@]}" \
       >"$safe_diagnostics/ownership-stage.json") || ownership_status=$?
   if [[ "$ownership_status" -eq 0 ]]; then
     if ! sudo chown -h -R "$runner_uid:$runner_gid" "$FVOCI_SELECTED_CI_OUTPUT" "$FVOCI_SELECTED_CI_SQLITE_PARENT"; then
@@ -454,17 +449,8 @@ PY_DIAGNOSTICS
     if [[ "$selected_status" -eq 0 ]]; then selected_status=1; fi
   fi
   diagnostic_status=0
-  python3 - "$safe_diagnostics" "$launcher_status" "$ownership_status" "$selected_status" "$pending_status" "$config_list_exit" <<'PY_STATUS' || diagnostic_status=$?
-from pathlib import Path
-import json,os,sys
-prefix=Path(sys.argv[1])
-assert not prefix.is_symlink() and prefix.stat().st_uid == os.getuid() and prefix.stat().st_mode & 0o777 == 0o700
-with (prefix/'launcher-stage.json').open('x') as receipt:
-    os.fchmod(receipt.fileno(),0o600)
-    values = [None if value == 'not-run' else int(value) for value in sys.argv[2:]]
-    json.dump(dict(zip(('actual_launcher_exit','ownership_return_exit','selected_final_exit','pending_exit','config_list_exit'),values)),receipt)
-    receipt.write('\n')
-PY_STATUS
+  bun "$ROOT/tools/web-e2e/run-web-e2e.ts" launcher-receipt "$safe_diagnostics" "$launcher_status" \
+    "$ownership_status" "$selected_status" "$pending_status" "$config_list_exit" || diagnostic_status=$?
   if [[ "$diagnostic_status" -ne 0 && "$selected_status" -eq 0 ]]; then selected_status=1; fi
 fi
 if [[ "$pending_status" -ne 0 ]]; then exit "$pending_status"; fi

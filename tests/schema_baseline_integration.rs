@@ -7,7 +7,7 @@
 //! `FVOCI_SCHEMA_CATALOG_DATABASE_URL` (the migration owner URL of a throwaway
 //! database that already has the schema and, when `FVOCI_SCHEMA_CATALOG_APP_ROLE`
 //! is set, the app-role grants) and writes a normalized JSON catalog to
-//! `FVOCI_SCHEMA_CATALOG_OUT`. `scripts/schema-baseline/compare-catalogs.py`
+//! `FVOCI_SCHEMA_CATALOG_OUT`. `scripts/schema-baseline/compare-catalogs.ts`
 //! diffs two dumps. Raw SQL equality is never the criterion: the dump carries
 //! catalog facts (pg_get_*def, attributes, ACLs, seeds).
 //!

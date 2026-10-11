@@ -16,7 +16,7 @@ const expected = {
   "@types/bun": "1.4.2",
 };
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-if (process.versions.bun !== "1.4.2") throw new Error("Web checks require pinned Bun 1.4.2");
+if (process.versions.bun !== "1.4.3") throw new Error("Web checks require pinned Bun 1.4.3");
 for (const [name, version] of Object.entries(expected)) {
   const installed = require(`${name}/package.json`).version;
   if (manifest.devDependencies[name] !== version || installed !== version) {

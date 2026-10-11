@@ -93,20 +93,50 @@ export function localAllocation(
     isAbsolute(grant.outputRoot) &&
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),
   );
-  for (const name of [
-    "run-selected-backend-e2e.py",
-    "selected-backend-ci/current_binding.py",
-    "selected-backend-ci/restart_checkpoint.py",
-    "selected-backend-ci/current-install-driver.py",
-    "selected-backend-ci/current-postgres-driver.py",
-    "selected-backend-ci/current-sqlite-driver.py",
-  ]) {
-    assert.equal(grant.registrationHashes[name], sha(join(root, "scripts", name)));
-  }
+  for (const name of registeredModules)
+    assert.ok(
+      grant.registrationHashes[name] === sha(join(root, name)),
+      "unregistered module " + name,
+    );
   return grant;
 }
+// The runner and lane driver modules a local lease is issued for: the CLI
+// entry and every module it loads (they run before this check), and the lane
+// drivers the runner starts as separate processes. Repo-relative; the lease
+// producer hashes the same files.
+export const registeredModules = [
+  "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/config-list.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/selected-backend-ci/runtime.ts",
+  "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/binding.ts",
+  "tools/selected-backend-ci/drivers/restart.ts",
+  "tools/selected-backend-ci/drivers/install.ts",
+  "tools/selected-backend-ci/drivers/postgres.ts",
+  "tools/selected-backend-ci/drivers/sqlite.ts",
+] as const;
 
-export function identity(mode = "handoff", output?: string): string {
+// The whole-flow job and the five per-lane jobs that start the selected runtime.
+export const runtimeJobs = [
+  "collaboration-flow",
+  "collaboration-install-on",
+  "collaboration-postgres-on",
+  "collaboration-sqlite-on",
+  "collaboration-postgres-off",
+  "collaboration-sqlite-off",
+] as const;
+export function assertRuntimeJob(): void {
+  const job = process.env.GITHUB_JOB;
+  assert.ok(
+    job !== undefined && (runtimeJobs as readonly string[]).includes(job),
+    "selected runtime job only",
+  );
+}
+
+export function identity(mode = "handoff", output?: string, checkout = root): string {
   const execution = process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci";
   assert.ok(execution === "github-ci" || execution === "orca-local");
   if (execution === "orca-local") {
@@ -118,10 +148,12 @@ export function identity(mode = "handoff", output?: string): string {
     process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true",
     "allocated GitHub CI job only",
   );
-  assert.equal(call(["git", "rev-parse", "HEAD"]), env("GITHUB_SHA"));
+  assert.equal(call(["git", "rev-parse", "HEAD"], checkout), env("GITHUB_SHA"));
   assert.equal(
     observedExit(
-      spawnSync(["git", "-c", "safe.directory=" + root, "diff", "--quiet", "HEAD"], { cwd: root }),
+      spawnSync(["git", "-c", "safe.directory=" + checkout, "diff", "--quiet", "HEAD"], {
+        cwd: checkout,
+      }),
     ),
     0,
     "current tracked source must equal tested SHA",
@@ -131,18 +163,7 @@ export function identity(mode = "handoff", output?: string): string {
     assert.ok(["handoff", "record-before", "stage", "record-after"].includes(mode));
     assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "prepare");
   } else {
-    const job = process.env.GITHUB_JOB;
-    assert.ok(job);
-    assert.ok(
-      [
-        "collaboration-flow",
-        "collaboration-install-on",
-        "collaboration-postgres-on",
-        "collaboration-sqlite-on",
-        "collaboration-postgres-off",
-        "collaboration-sqlite-off",
-      ].includes(job),
-    );
+    assertRuntimeJob();
     assert.ok(
       process.env.FVOCI_WEB_BUILD_PHASE === undefined ||
         process.env.FVOCI_WEB_BUILD_PHASE === "consume",
@@ -170,7 +191,10 @@ export function browserInventory(
   function visit(path: string, key: string): void {
     const facts = lstatSync(path);
     assert.ok(facts.isFile() || facts.isDirectory(), "nonregular browser asset");
-    if (owner) assert.ok(facts.uid === owner[0] && facts.gid === owner[1] && owner[1] >= 1000);
+    if (owner)
+      assert.ok(
+        owner[0] !== 0 && owner[1] !== 0 && facts.uid === owner[0] && facts.gid === owner[1],
+      );
     if (facts.isFile())
       result[key] = metadata ? { sha256: sha(path), mode: facts.mode & 0o7777 } : sha(path);
     else {
@@ -228,7 +252,16 @@ export function runtimeAccess(files: string[], browser: Browser): void {
   for (const path of [browser.bun.path, browser.chromium.path])
     assert.ok(accessible(path, constants.R_OK | constants.X_OK));
 }
-export function expectedFiles(bundle: Bundle, output: string): string[] {
+export const collaborationStages = ["main", "lib", "install", "engine"] as const;
+export const browserStages = ["fixture", "default", "engine"] as const;
+// The packet file list of a collaboration build, or of a browser build when its
+// web receipt is given (browser stages, served dist assets, no schema core).
+export function expectedFiles(
+  bundle: Bundle,
+  output: string,
+  web?: Web,
+  checkout = root,
+): string[] {
   const names = [
     "before.json",
     "after.json",
@@ -239,7 +272,7 @@ export function expectedFiles(bundle: Bundle, output: string): string[] {
     "web-receipt.json",
     "abi-receipt.json",
   ];
-  for (const name of ["main", "lib", "install", "engine"])
+  for (const name of web ? browserStages : collaborationStages)
     names.push(name + "-stage.json", name + "-compiler.jsonl");
   const core = new Set(
     bundle.compiler_artifacts
@@ -251,13 +284,18 @@ export function expectedFiles(bundle: Bundle, output: string): string[] {
       )
       .flatMap((a) => a.filenames.filter((p) => /\.(rlib|rmeta)$/.test(p))),
   );
-  assert.ok(
-    [...core].some((p) => p.endsWith(".rlib")),
-    "missing emitted core library",
-  );
+  if (web) assert.equal(core.size, 0, "browser packet must not contain schema-feature core");
+  else
+    assert.ok(
+      [...core].some((p) => p.endsWith(".rlib")),
+      "missing emitted core library",
+    );
   const result = [
     ...names.map((name) => join(output, name)),
     ...Object.keys(bundle.binaries).sort(),
+    ...(web
+      ? Object.keys(web.dist_files).map((name) => join(checkout, "apps/web/dist", name))
+      : []),
     ...[...core].sort(),
   ];
   assert.equal(result.length, new Set(result).size);
@@ -273,7 +311,10 @@ export interface Consumed {
   fresh_dist_equal: boolean;
   received: Record<string, { sha256: string; inode: number; mode: number }>;
 }
-export function configListInputs(output: string): {
+export function configListInputs(
+  output: string,
+  checkout = root,
+): {
   before: Inputs;
   browser: Browser;
   modules: Record<string, string>;
@@ -281,7 +322,7 @@ export function configListInputs(output: string): {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
   assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "consume");
   assert.ok(uid() === 1000 && gid() === 1000);
-  const owner = identity("config-list", output);
+  const owner = identity("config-list", output, checkout);
   assert.ok(
     !existsSync(join(output, "runtime")) &&
       !readdirSync(output).some((p) => /-(allocation|binding)\.json$/.test(p)),
@@ -290,7 +331,8 @@ export function configListInputs(output: string): {
     before = read(join(output, "before.json")) as Inputs;
   assert.ok(consumed.source === before.head && before.head === env("GITHUB_SHA"));
   assert.ok(
-    consumed.tree === before.tree && before.tree === call(["git", "rev-parse", "HEAD^{tree}"]),
+    consumed.tree === before.tree &&
+      before.tree === call(["git", "rev-parse", "HEAD^{tree}"], checkout),
   );
   assert.ok(
     consumed.repository === env("GITHUB_REPOSITORY") &&
@@ -300,23 +342,26 @@ export function configListInputs(output: string): {
   assert.equal(consumed.full_current_physical_inputs_equal, true);
   assert.equal(consumed.fresh_dist_equal, true);
   assert.ok(deepEquals(read(join(output, "after.json")), before));
-  assert.equal(call(["git", "status", "--short"]), before.status.trim());
+  assert.equal(call(["git", "status", "--short"], checkout), before.status.trim());
   assert.ok(
     deepEquals(
-      new Set(call(["git", "ls-files", "-z"]).split("\0").filter(Boolean)),
+      new Set(call(["git", "ls-files", "-z"], checkout).split("\0").filter(Boolean)),
       new Set(Object.keys(before.tracked)),
     ),
   );
   for (const [values, base] of [
-    [before.tracked, root],
+    [before.tracked, checkout],
     [before.external, "/"],
-    [before.untracked, root],
+    [before.untracked, checkout],
   ] as const)
     for (const [name, digest] of Object.entries(values))
       assert.equal(sha(resolve(base, name)), digest);
   const bundle = read(join(output, "bundle.json")) as Bundle;
   assert.ok(
-    deepEquals(new Set(Object.keys(consumed.received)), new Set(expectedFiles(bundle, output))),
+    deepEquals(
+      new Set(Object.keys(consumed.received)),
+      new Set(expectedFiles(bundle, output, undefined, checkout)),
+    ),
   );
   for (const [path, recorded] of Object.entries(consumed.received)) {
     physical(path);
@@ -334,7 +379,7 @@ export function configListInputs(output: string): {
   assert.ok(
     web.source === before.head &&
       web.tree === before.tree &&
-      deepEquals(web.dist_files, inventory(join(root, "apps/web/dist"))),
+      deepEquals(web.dist_files, inventory(join(checkout, "apps/web/dist"))),
   );
   const abi = read(join(output, "abi-receipt.json")) as {
     currentSource: string;
@@ -353,7 +398,7 @@ export function configListInputs(output: string): {
   );
   assert.ok(deepEquals(groups(), access.groups));
   const bun = realpathSync(tool("bun"));
-  assert.equal((read(join(output, "build-environment.json")) as { bun: string }).bun, "1.4.2");
+  assert.equal((read(join(output, "build-environment.json")) as { bun: string }).bun, "1.4.3");
   assert.equal(sha(bun), before.external[bun]);
   const chromium = admittedBrowser(output);
   const browser: Browser = {
@@ -363,7 +408,7 @@ export function configListInputs(output: string): {
   };
   runtimeAccess(
     [
-      ...Object.keys(before.tracked).map((p) => join(root, p)),
+      ...Object.keys(before.tracked).map((p) => join(checkout, p)),
       ...Object.keys(before.external),
       ...Object.keys(bundle.binaries),
     ],
@@ -373,13 +418,13 @@ export function configListInputs(output: string): {
     assert.ok(accessible(path, constants.R_OK | constants.X_OK));
   const modules: Record<string, string> = {};
   for (const name of ["@playwright/test", "playwright", "playwright-core"]) {
-    const path = join(root, "node_modules", name, "package.json"),
+    const path = join(checkout, "node_modules", name, "package.json"),
       data = read(path) as { version: string; bin?: { playwright: string } };
     assert.equal(data.version, "1.63.0");
     if (name === "playwright") assert.equal(data.bin?.playwright, "cli.js");
     modules[name] = sha(path);
   }
-  const cli = join(root, "node_modules/playwright/cli.js");
+  const cli = join(checkout, "node_modules/playwright/cli.js");
   assert.ok(!lstatSync(cli).isSymbolicLink() && statSync(cli).isFile() && accessible(cli));
   assert.equal(sha(cli), before.external[cli]);
   modules["playwright/cli.js"] = sha(cli);

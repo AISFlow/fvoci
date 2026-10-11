@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page, Locator } from "@playwright/test";
-import { z } from "zod";
+import { browserProcesses } from "./proc";
 
 const session = process.env.FVOCI_NATIVE_IME_SESSION;
 if (!session) throw new Error("FVOCI_NATIVE_IME_SESSION is required for native evidence");
@@ -35,14 +35,6 @@ export function nativeImeEvents(page: Page): Promise<NativeImeEvent[]> {
     return events;
   });
 }
-const browserCandidates = z.array(
-  z.object({
-    pid: z.string(),
-    args: z.array(z.string()),
-    exe: z.string(),
-    display: z.string().nullable(),
-  }),
-);
 export function native(command: string, args: string[]) {
   if (args.includes("--window")) throw new Error("XSendEvent targeting is forbidden");
   const out = execFileSync(command, args, { encoding: "utf8" });
@@ -133,32 +125,7 @@ export async function snapshot(page: Page, name: string) {
   await page.screenshot({ path: join(evidence, name + ".png") });
 }
 export async function focusNative(page: Page, field: Locator, profile: string) {
-  const candidates = browserCandidates.parse(
-    JSON.parse(
-      execFileSync(
-        "python3",
-        [
-          "-c",
-          `
-import pathlib,json,sys,shlex
-matches=[]
-for p in pathlib.Path('/proc').iterdir():
- if not p.name.isdigit():continue
- try:
-  args=(p/'cmdline').read_bytes().decode().split('\\0')
-  if len([a for a in args if a])==1:args=shlex.split(args[0])
-  if '--user-data-dir='+sys.argv[1] in args and not any(x.startswith('--type=') for x in args):
-   env=dict(x.split('=',1) for x in (p/'environ').read_bytes().decode().split('\\0') if '=' in x)
-   matches.append({'pid':p.name,'args':args,'exe':str((p/'exe').resolve()),'display':env.get('DISPLAY')})
- except (OSError,UnicodeError):pass
-print(json.dumps(matches))
-`,
-          profile,
-        ],
-        { encoding: "utf8" },
-      ),
-    ),
-  );
+  const candidates = browserProcesses(profile);
   if (candidates.length !== 1)
     throw new Error("Ambiguous owned browser process: " + JSON.stringify(candidates));
   const candidate = candidates[0];

@@ -2,8 +2,9 @@
 # One perf run: fresh DB + app role, release server on 127.0.0.1:0, Playwright.
 set -euo pipefail
 
-: "${ROOT:?}" "${RUN_DIR:?}" "${RELEASE:?}" "${FVOCI_PERF_OUT:?}" "${FVOCI_PERF_DATASET:?}"
+: "${ROOT:?}" "${RUN_DIR:?}" "${RELEASE:?}" "${FVOCI_PERF_OUT:?}" "${FVOCI_PERF_DATASET:?}" "${TEST_DATABASE_URL:?}"
 PG_CONTAINER="${FVOCI_TEST_PG_CONTAINER:?missing test postgres container}"
+PERF_TS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../tools/perf" && pwd)/perf-inner.ts"
 SERVER_LOG="$RUN_DIR/server.log"
 SERVER_PID=""
 cleanup() {
@@ -32,18 +33,12 @@ startup_failure() {
 DB_NAME="fvoci_perf_$(openssl rand -hex 8)"
 ROLE_NAME="fvoci_app_${DB_NAME}"
 ROLE_PASSWORD="$(openssl rand -hex 16)"
-psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
-mapfile -t urls < <(DB_NAME="$DB_NAME" ROLE_NAME="$ROLE_NAME" ROLE_PASSWORD="$ROLE_PASSWORD" python3 - <<'PY'
-import os, urllib.parse
-admin = urllib.parse.urlparse(os.environ["TEST_DATABASE_URL"])
-db = os.environ["DB_NAME"]
-print(urllib.parse.urlunparse(admin._replace(path=f"/{db}")))
-user = urllib.parse.quote(os.environ["ROLE_NAME"], safe="")
-pw = urllib.parse.quote(os.environ["ROLE_PASSWORD"], safe="")
-print(f"postgres://{user}:{pw}@{admin.hostname or '127.0.0.1'}:{admin.port or 5432}/{db}")
-PY
-)
+# Validates TEST_DATABASE_URL before anything is created; credentials pass
+# through the environment and stdout only.
+urls_text="$(DB_NAME="$DB_NAME" ROLE_NAME="$ROLE_NAME" ROLE_PASSWORD="$ROLE_PASSWORD" bun "$PERF_TS" db-urls)"
+mapfile -t urls <<<"$urls_text"
 export DATABASE_URL="${urls[0]}" DATABASE_APP_URL="${urls[1]}"
+psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
 "$RELEASE/fvoci-migrate" >/dev/null
 psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
 "$RELEASE/fvoci-migrate" --grant-app-role "$ROLE_NAME" >/dev/null
@@ -81,12 +76,7 @@ if [[ -n "${FVOCI_PERF_GREP:-}" ]]; then
   GREP_ARGS=(--grep "$FVOCI_PERF_GREP")
   [[ -n "$TAG" ]] || { echo "FVOCI_PERF_GREP requires FVOCI_PERF_TAG" >&2; exit 1; }
 fi
-python3 - "$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json" "$PG_VERSION" <<'PY'
-import json, sys, datetime
-json.dump({"dataset_run_started": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-           "postgres_server_version": sys.argv[2], "network": "loopback 127.0.0.1",
-           "server": "release fvoci-server (source build)"}, open(sys.argv[1], "w"), indent=1)
-PY
+bun "$PERF_TS" run-json "$FVOCI_PERF_OUT/run-$FVOCI_PERF_DATASET$TAG.json" "$PG_VERSION"
 
 cd "$ROOT/apps/web"
 set +e

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Full CLI companion; operational callers remain on the original Python runner.
+// Selected backend CLI called by scripts/run-web-e2e.sh.
 import { strict as assert } from "node:assert";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -26,6 +26,7 @@ export interface Arguments {
   stageName?: string;
   sqliteParent?: string;
   dockerGid?: number;
+  lane?: string;
   command: string[];
 }
 export function parseCLI(args: string[]): Arguments | null {
@@ -34,6 +35,7 @@ export function parseCLI(args: string[]): Arguments | null {
     "stage-name": { type: "string" },
     "sqlite-parent": { type: "string" },
     "docker-gid": { type: "string" },
+    lane: { type: "string" },
     help: { type: "boolean", short: "h" },
   } as const;
   // parseArgs owns option parsing. Tokens retain the exact stage argv, including
@@ -47,7 +49,7 @@ export function parseCLI(args: string[]): Arguments | null {
       tokens: true,
     });
     if (result.values.help) return null;
-    for (const name of ["output", "stage-name", "sqlite-parent", "docker-gid"] as const) {
+    for (const name of ["output", "stage-name", "sqlite-parent", "docker-gid", "lane"] as const) {
       if (result.values[name] !== undefined && typeof result.values[name] !== "string")
         throw new CliError("missing option value");
     }
@@ -81,6 +83,7 @@ export function parseCLI(args: string[]): Arguments | null {
       stageName: result.values["stage-name"] as string | undefined,
       sqliteParent: result.values["sqlite-parent"] as string | undefined,
       dockerGid: docker === undefined ? undefined : Number(docker),
+      lane: result.values.lane as string | undefined,
       command,
     };
   } catch (error) {
@@ -94,13 +97,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write(
       "usage: run-selected-backend-e2e.ts {" +
         modes.join(",") +
-        "} --output OUTPUT [--stage-name NAME] [--sqlite-parent PATH] [--docker-gid INTEGER] [-- COMMAND ...]\n",
+        "} --output OUTPUT [--stage-name NAME] [--sqlite-parent PATH] [--docker-gid INTEGER] [--lane LANE/FLOW] [-- COMMAND ...]\n",
     );
     return 0;
   }
   assert.ok(
     args.mode === "stage" || !args.command.length,
     "unexpected arguments outside compiler stage",
+  );
+  assert.ok(
+    args.lane === undefined || args.mode === "run" || args.mode === "owner-return",
+    "lane argument is only for the selected runtime",
   );
   assert.ok(
     args.mode === "permissions" ||
@@ -126,12 +133,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       runtimePermissions(output, args.sqliteParent, args.dockerGid);
       break;
     case "owner-return":
-      ownershipReturn(output);
+      ownershipReturn(output, undefined, args.lane);
       break;
     case "config-list":
       return configList(output);
     case "run":
-      return await run(output);
+      return await run(output, undefined, undefined, args.lane);
   }
   return 0;
 }

@@ -1,5 +1,5 @@
 # Test copy of infra/rust/compose.user.yml (the .env install, values passed as
-# environment); scripts/test_release_dist.py also checks the real file when present.
+# environment); tools/release/dist.test.ts also checks the real file when present.
 # FVOCI install. In an empty folder with this file and env.example (the
 # release asset; infra/rust/compose.user.env.example in the source):
 #

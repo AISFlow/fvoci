@@ -22,29 +22,28 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "release-publish: $*" >&2; exit 1; }
 ASSETS=(compose.yml env.example INSTALL.md SHA256SUMS release.json RELEASE-NOTES.md)
+API="$ROOT/tools/release/release-api.ts"
+JSON="$ROOT/tools/release/release-json.ts"
 
 (cd "$DIST" && sha256sum --strict -c SHA256SUMS >/dev/null) || fail "SHA256SUMS does not match $DIST"
-VERSION="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert "v"+r["version"]==sys.argv[2], r; print(r["version"])' "$DIST/release.json" "$TAG")"
-DIGEST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["indexDigest"])' "$DIST/release.json")"
+VERSION="$(bun "$JSON" version "$DIST/release.json" "$TAG")"
+DIGEST="$(bun "$JSON" field "$DIST/release.json" indexDigest)"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Release state from the API (drafts included for this contents: write token),
 # not from gh error text.
-STATE="$(python3 "$ROOT/scripts/release-api.py" release-state --tag "$TAG")"
-case "$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["state"])' "$STATE")" in
+STATE="$(bun "$API" release-state --tag "$TAG")"
+RELEASE_STATE="$(bun "$JSON" state "$STATE")"
+case "$RELEASE_STATE" in
   none) ;;
   published)
     gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern release.json --dir "$WORK" \
       || fail "release $TAG exists without release.json; inspect and delete it by hand"
-    RECORDED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["indexDigest"])' "$WORK/release.json")"
+    RECORDED="$(bun "$JSON" field "$WORK/release.json" indexDigest)"
     [[ "$RECORDED" == "$DIGEST" ]] || fail "release $TAG already records $RECORDED, not $DIGEST; refusing to overwrite"
-    python3 - "$STATE" "${ASSETS[@]}" <<'PY' || fail "release $TAG for $DIGEST lacks assets; delete the partial release by hand and re-run"
-import json, sys
-missing = sorted(set(sys.argv[2:]) - set(json.loads(sys.argv[1])["assets"]))
-sys.exit(f"missing {missing}" if missing else 0)
-PY
+    bun "$JSON" assets-complete "$STATE" "${ASSETS[@]}" || fail "release $TAG for $DIGEST lacks assets; delete the partial release by hand and re-run"
     echo "release $TAG already published for $DIGEST; nothing to do"
     exit 0
     ;;
@@ -53,8 +52,8 @@ esac
 
 # The publish job tagged the index only after both smokes passed; the release
 # names exactly that tag (anonymous read: the package is public by now).
-IMAGE_REF="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["image"])' "$DIST/release.json")"
-TAGGED="$(env -u REGISTRY_USER -u REGISTRY_PASSWORD python3 "$ROOT/scripts/release-api.py" registry-digest \
+IMAGE_REF="$(bun "$JSON" field "$DIST/release.json" image)"
+TAGGED="$(env -u REGISTRY_USER -u REGISTRY_PASSWORD bun "$API" registry-digest \
   --image "${IMAGE_REF%%:*}" --tag "$VERSION")"
 [[ "$TAGGED" == "$DIGEST" ]] || fail "${IMAGE_REF%%:*}:$VERSION is '${TAGGED:-missing}', not $DIGEST; run the publish job first"
 

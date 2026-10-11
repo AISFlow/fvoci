@@ -8,7 +8,7 @@
 # These pinned images supply toolchain executables only. Every build and the
 # final runtime execute on the same Ubuntu 26.04 multiarchitecture base.
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
-FROM oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS bun-toolchain
+FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun-toolchain
 FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu
 
 FROM ubuntu AS rust-sources
@@ -28,6 +28,7 @@ COPY infra/rust/.env.example ./infra/rust/.env.example
 # `/api/docs/json` embeds the committed OpenAPI export (include_str!).
 COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
+COPY xtask ./xtask
 COPY crates/collab-engine ./crates/collab-engine
 # FVOCI-owned same-version read-only Yrs accessor patch (direct path dependency).
 COPY crates/vendor/yrs-0.28.0 ./crates/vendor/yrs-0.28.0
@@ -40,13 +41,14 @@ COPY vendor/libsql-0.9.30 ./vendor/libsql-0.9.30
 
 FROM rust-sources AS rust-deps
 RUN cargo fetch --locked \
+ && cargo fetch --locked --manifest-path xtask/Cargo.toml \
  && cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml \
  && cd crates/document-extract && bash fetch-rhwp.sh && cargo fetch --locked
 
 FROM rust-deps AS rust-build
 # Native bindgen/C prerequisites exist only in the builder (both GNU arches).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 locales \
+ && apt-get install -y --no-install-recommends gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 locales \
  && localedef -i en_US -f UTF-8 en_US.UTF-8 \
  && locale -a > /tmp/fvoci-locales \
  && grep -Fx en_US.utf8 /tmp/fvoci-locales \

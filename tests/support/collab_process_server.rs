@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -14,31 +15,139 @@ use super::{TestDb, PEPPER, PUBLIC_ORIGIN};
 
 const LOG_PUMP_EOF_WITHIN: Duration = Duration::from_secs(5);
 
+/// A spawned server that leads its own process group, so the collab-engine
+/// helpers it spawns (same group: the product does not setsid them) die with
+/// it on cleanup. A terminal Ctrl-C reaches only the test process, not this
+/// group, and a signal-killed test runs no Drop; so the server also carries
+/// `PR_SET_PDEATHSIG(SIGKILL)` and dies with the test thread that spawned it
+/// (its helpers then die by their own parent-death signal). Spawn only from a
+/// thread that outlives the handle (a test thread or the runtime's block_on
+/// thread, never a blocking-pool thread).
 pub struct OwnedChild {
     pub child: Option<Child>,
+    /// Helpers a test observed, kept for its own `wait_pids_exit` assertion.
+    /// Cleanup does not need it: they share the server's process group,
+    /// which `kill_and_wait` SIGKILLs.
     pub helper_pids: Vec<u32>,
+    pgid: libc::pid_t,
     log_pumps: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// `kill(2)`; `ESRCH` (no such process or group) is `Ok(false)`.
+pub fn send_signal(target: libc::pid_t, signal: libc::c_int) -> std::io::Result<bool> {
+    // SAFETY: kill(2) takes plain integers and touches no memory.
+    if unsafe { libc::kill(target, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+/// A cleanup failure fails the test, except while already unwinding (Drop
+/// after an earlier panic), where a second panic would abort and hide the
+/// first one.
+pub fn cleanup_failure(message: String) {
+    if std::thread::panicking() {
+        eprintln!("{message}");
+    } else {
+        panic!("{message}");
+    }
+}
+
 impl OwnedChild {
+    pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        // SAFETY: getpid has no preconditions.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: the hook only calls async-signal-safe prctl/getppid and
+        // builds errors from raw errno values (no allocation).
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The test died before the death signal was armed.
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+        let child = command.process_group(0).spawn()?;
+        let pgid = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
+        Ok(Self {
+            child: Some(child),
+            helper_pids: Vec::new(),
+            pgid,
+            log_pumps: Vec::new(),
+        })
+    }
+
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
 
+    /// The leader's exit status if it has exited, WITHOUT reaping it
+    /// (`waitid(WNOWAIT)`): the zombie leader keeps its pid and group id
+    /// pinned, so later signals here can never reach a recycled id. Only
+    /// `kill_and_wait` reaps.
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        match self.child.as_mut() {
-            Some(child) => child.try_wait(),
-            None => Ok(None),
+        use std::os::unix::process::ExitStatusExt;
+        let Some(child) = self.child.as_ref() else {
+            return Ok(None);
+        };
+        // SAFETY: an all-zero siginfo_t is valid; waitid only writes into it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+        // SAFETY: `info` is a valid, exclusively borrowed siginfo_t.
+        if unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, options) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: waitid filled a SIGCHLD siginfo (or left it zeroed).
+        let (pid, status) = unsafe { (info.si_pid(), info.si_status()) };
+        if pid == 0 {
+            return Ok(None);
+        }
+        let raw = match info.si_code {
+            libc::CLD_EXITED => (status & 0xff) << 8,
+            libc::CLD_KILLED => status,
+            libc::CLD_DUMPED => status | 0x80,
+            code => {
+                return Err(std::io::Error::other(format!(
+                    "unexpected waitid si_code {code} for pid {pid}"
+                )))
+            }
+        };
+        Ok(Some(ExitStatus::from_raw(raw)))
+    }
+
+    /// SIGTERM to the server only: the tests observe the server's own helper
+    /// drain, so the helpers must not be signalled directly.
+    pub fn send_sigterm(&self) {
+        let pid = self
+            .pid()
+            .expect("no live server handle to send SIGTERM to");
+        let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+        match send_signal(pid, libc::SIGTERM) {
+            Ok(true) => {}
+            Ok(false) => panic!("SIGTERM to server pid {pid}: no such process"),
+            Err(error) => panic!("SIGTERM to server pid {pid}: {error}"),
         }
     }
 
-    pub fn send_sigterm(&self) {
-        let Some(pid) = self.pid() else {
-            return;
-        };
-        let _ = Command::new("kill")
-            .args(["-s", "TERM", &pid.to_string()])
-            .status();
+    /// SIGKILL to the server only (not its group), so whatever kills the
+    /// helpers afterwards is the product's own parent-death handling.
+    pub fn kill_leader(&mut self) {
+        let child = self
+            .child
+            .as_mut()
+            .expect("no live server handle to SIGKILL");
+        if let Err(error) = child.kill() {
+            panic!("SIGKILL to server pid {}: {error}", child.id());
+        }
     }
 
     fn join_log_pumps_within(&mut self, within: Duration) -> bool {
@@ -56,29 +165,26 @@ impl OwnedChild {
         true
     }
 
-    pub fn kill_and_wait(&mut self) {
+    /// SIGKILLs the whole process group (any helper still alive, even after
+    /// the server itself exited), then reaps the leader. Safe because nothing
+    /// but this call reaps the leader: until then its zombie pins the group
+    /// id. Returns the leader's status; `None` only after an earlier call.
+    pub fn kill_and_wait(&mut self) -> Option<ExitStatus> {
+        let mut reaped = None;
         if let Some(mut child) = self.child.take() {
-            match child.try_wait() {
-                Ok(Some(_)) => {}
-                _ => {
-                    let pid = child.id();
-                    let _ = Command::new("kill")
-                        .args(["-s", "TERM", &pid.to_string()])
-                        .status();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+            if let Err(error) = send_signal(-self.pgid, libc::SIGKILL) {
+                cleanup_failure(format!(
+                    "SIGKILL to server process group {}: {error}",
+                    self.pgid
+                ));
+            }
+            match child.wait() {
+                Ok(status) => reaped = Some(status),
+                Err(error) => cleanup_failure(format!("reap server pid {}: {error}", self.pgid)),
             }
         }
-        self.helper_pids
-            .retain(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
-        for helper in &self.helper_pids {
-            let _ = Command::new("kill")
-                .args(["-s", "KILL", &helper.to_string()])
-                .status();
-        }
-        self.helper_pids.clear();
         let _ = self.join_log_pumps_within(LOG_PUMP_EOF_WITHIN);
+        reaped
     }
 }
 
@@ -87,6 +193,10 @@ impl Drop for OwnedChild {
         self.kill_and_wait();
     }
 }
+
+// The /proc reads below observe the helpers themselves (which processes a
+// room owns and whether they exited with their server); that observation is
+// what the calling tests assert. Kill/reap goes through the handle above.
 
 fn process_comm(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -153,12 +263,21 @@ fn server_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fvoci-server"))
 }
 
+/// The helper the process server runs is the one the caller selected
+/// explicitly (CI: the sealed `--features worker` build). No unset fallback:
+/// the fallback's `crates/collab-engine/target/debug/collab-engine` is also
+/// written by a local `cargo test --features test-hang` there, with test-only
+/// helper controls compiled in. Set-but-unusable values are rejected by the
+/// product's own resolver.
 fn collab_engine_bin() -> PathBuf {
-    std::env::var("FVOCI_COLLAB_ENGINE")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file())
-        .unwrap_or_else(fvoci_server::collab::config::require_collab_engine_for_tests)
+    let Some(selected) = std::env::var_os("FVOCI_COLLAB_ENGINE") else {
+        panic!(
+            "process-server tests require FVOCI_COLLAB_ENGINE; build the helper with `cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --bin collab-engine` and point the variable at it"
+        );
+    };
+    fvoci_server::collab::config::collab_engine_path_for_tests().unwrap_or_else(|| {
+        panic!("FVOCI_COLLAB_ENGINE={selected:?} is not an existing regular file")
+    })
 }
 
 fn pump_lines<R: Read + Send + 'static>(
@@ -249,7 +368,7 @@ pub fn assert_nonzero_deadline_exit(
         use std::os::unix::process::ExitStatusExt;
         assert!(
             status.signal().is_none(),
-            "{label} must exit from the process, not a default signal kill ({status:?}); logs={log_text}"
+            "{label} must exit from the process, not a default signal kill (got {status}); logs={log_text}"
         );
     }
     assert!(
@@ -301,15 +420,17 @@ fn spawn_server_process_inner(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command.spawn().expect("spawn fvoci-server");
+    let mut owned = OwnedChild::spawn(&mut command).expect("spawn fvoci-server");
+    let child = owned.child.as_mut().expect("spawned child");
     let stderr = child.stderr.take().expect("stderr");
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel::<String>();
-    let log_pumps = vec![
+    owned.log_pumps = vec![
         pump_lines(stderr, logs.clone(), tx.clone()),
         pump_lines(stdout, logs.clone(), tx),
     ];
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let startup = Duration::from_secs(10);
+    let deadline = Instant::now() + startup;
     let mut listen = None;
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -320,43 +441,36 @@ fn spawn_server_process_inner(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if child.try_wait().ok().flatten().is_some() {
+                if owned.try_wait().ok().flatten().is_some() {
                     break;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let addr = match listen {
-        Some(url) => {
-            let parsed = url::Url::parse(&url).expect("listen url");
-            SocketAddr::new(
-                parsed.host_str().expect("listen host").parse().expect("ip"),
-                parsed.port().expect("listen port"),
-            )
-        }
-        None => {
-            let mut failed = OwnedChild {
-                child: Some(child),
-                helper_pids: Vec::new(),
-                log_pumps,
-            };
-            failed.kill_and_wait();
-            panic!(
-                "fvoci-server did not print listen address; logs={:?}",
-                logs.lock().unwrap()
-            );
-        }
+    let Some(url) = listen else {
+        let exited = owned.try_wait();
+        // Either way its group (any helper it already spawned) is killed.
+        let reaped = owned.kill_and_wait();
+        let outcome = match (exited, reaped) {
+            (Ok(Some(status)), _) => format!("exited on its own before listening: {status}"),
+            (Ok(None), Some(status)) => format!(
+                "still not listening after {startup:?}; harness sent SIGKILL to its process group, reaped: {status}"
+            ),
+            (Ok(None), None) => "still not listening; reap failed".to_string(),
+            (Err(error), _) => format!("exit check failed: {error}"),
+        };
+        panic!(
+            "fvoci-server did not print listen address ({outcome}); logs={:?}",
+            logs.lock().unwrap()
+        );
     };
-    (
-        OwnedChild {
-            child: Some(child),
-            helper_pids: Vec::new(),
-            log_pumps,
-        },
-        addr,
-        logs,
-    )
+    let parsed = url::Url::parse(&url).expect("listen url");
+    let addr = SocketAddr::new(
+        parsed.host_str().expect("listen host").parse().expect("ip"),
+        parsed.port().expect("listen port"),
+    );
+    (owned, addr, logs)
 }
 
 pub fn spawn_server_process(
@@ -416,7 +530,9 @@ pub fn wait_for_exit(child: &mut OwnedChild, within: Duration) -> ExitStatus {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                child.child = None;
+                // The exited leader stays unreaped (see `try_wait`) until
+                // `kill_and_wait`/Drop, which also SIGKILLs any helper left
+                // in its group, including after this assertion fails.
                 assert!(
                     child.join_log_pumps_within(LOG_PUMP_EOF_WITHIN),
                     "server exited ({status}) but its stdout/stderr stayed open for {LOG_PUMP_EOF_WITHIN:?}; a descendant inherited the pipes"
@@ -425,9 +541,14 @@ pub fn wait_for_exit(child: &mut OwnedChild, within: Duration) -> ExitStatus {
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let logs_note = format!("pid={:?}", child.pid());
-                    child.kill_and_wait();
-                    panic!("server still running after {within:?} ({logs_note})");
+                    let pid = child.pid();
+                    let reaped = match child.kill_and_wait() {
+                        Some(status) => status.to_string(),
+                        None => "not reaped".to_string(),
+                    };
+                    panic!(
+                        "server pid={pid:?} still running after {within:?}; harness sent SIGKILL to its process group, reaped: {reaped}"
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }

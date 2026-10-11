@@ -9,13 +9,15 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import process from "node:process";
 import { main, modes, parseCLI } from "../../scripts/run-selected-backend-e2e.ts";
 import {
@@ -26,8 +28,10 @@ import {
   expectedFiles,
   identity,
   localAllocation,
+  registeredModules,
+  runtimeJobs,
 } from "./admission.ts";
-import { buildEnv, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
+import { buildEnv, cargoInputs, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
 import { qualifyListing } from "./config-list.ts";
 import type { Listing } from "./config-list.ts";
 import {
@@ -38,27 +42,30 @@ import {
   jsonInteger,
   observedExit,
   read,
+  resolved,
   root,
   sha,
   sourceInputText,
   spawnSelectedCommand,
-  templates,
-  tool,
   uid,
   write,
 } from "./io.ts";
 import {
   driverCommand,
+  executeDriver,
   knownOnBrowserTest,
+  laneDriver,
   laneRetirement,
   ownershipReturn,
   prepareBrowser,
   publicFailureFields,
   requestedRuns,
   run,
+  runtimePermissions,
   selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
+import { copyRunnerModules } from "./test-process.ts";
 import type {
   Aggregate,
   Artifact,
@@ -72,6 +79,21 @@ import type {
   Reference,
 } from "./types.ts";
 
+// The modules a local lease binds: the runner and the lane drivers.
+const leaseModules = [
+  "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/config-list.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/selected-backend-ci/runtime.ts",
+  "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/binding.ts",
+  "tools/selected-backend-ci/drivers/restart.ts",
+  "tools/selected-backend-ci/drivers/install.ts",
+  "tools/selected-backend-ci/drivers/postgres.ts",
+  "tools/selected-backend-ci/drivers/sqlite.ts",
+];
 const temporary: string[] = [];
 function directory(): string {
   const path = mkdtempSync(join(tmpdir(), "selected-backend-ts-"));
@@ -182,7 +204,7 @@ function cohort() {
         lane: Lane;
         flow: Flow;
       };
-      expect(driver).toBe(join(templates, "current-" + allocation.lane + "-driver.py"));
+      expect(driver).toBe(join(root, "tools/selected-backend-ci/drivers", allocation.lane + ".ts"));
       retirementFiles(allocation.runRoot, allocation.lane, allocation.flow);
       writeFileSync(log, "fixture only\n");
       return 0;
@@ -193,6 +215,7 @@ function cohort() {
 function localFixture(
   actorUid: number,
   actorGid: number,
+  worktree = root,
 ): {
   output: string;
   env: Record<string, string>;
@@ -200,14 +223,7 @@ function localFixture(
   const output = directory(),
     path = join(output, "local.json");
   const registrationHashes = Object.fromEntries(
-    [
-      "run-selected-backend-e2e.py",
-      "selected-backend-ci/current_binding.py",
-      "selected-backend-ci/restart_checkpoint.py",
-      "selected-backend-ci/current-install-driver.py",
-      "selected-backend-ci/current-postgres-driver.py",
-      "selected-backend-ci/current-sqlite-driver.py",
-    ].map((name) => [name, sha(join(root, "scripts", name))]),
+    leaseModules.map((name) => [name, sha(join(root, name))]),
   );
   const grant: LocalGrant = {
     schema: 1,
@@ -221,7 +237,7 @@ function localFixture(
     taskId: "task_ef56",
     workerTerminal: "fixture-worker",
     rootTerminal: "fixture-root",
-    worktree: root,
+    worktree,
     uid: actorUid,
     gid: actorGid,
     source,
@@ -372,13 +388,6 @@ function expectFixedActorRefusal(
 
 describe.serial("selected runner contract and fail-closed controls", () => {
   test("original five lane tuple and all seven CLI modes remain exact", () => {
-    const original = readFileSync(join(root, "scripts/run-selected-backend-e2e.py"), "utf8");
-    expect(original).toContain(
-      "return (('install','on'),('postgres','on'),('sqlite','on'),('postgres','off'),('sqlite','off'))",
-    );
-    expect(original).toContain(
-      "subprocess.run([sys.executable,str(driver)],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)",
-    );
     expect(selectedRuns).toEqual([
       ["install", "on"],
       ["postgres", "on"],
@@ -396,15 +405,26 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       "config-list",
     ]);
     for (const [lane] of selectedRuns)
-      expect(driverCommand(join(templates, "current-" + lane + "-driver.py"))).toEqual([
-        tool("python3"),
-        join(templates, "current-" + lane + "-driver.py"),
+      expect(driverCommand(laneDriver(lane))).toEqual([
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/selected-backend-ci/drivers", lane + ".ts"),
       ]);
+    expect<readonly string[]>(registeredModules).toEqual(leaseModules);
     const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
-    for (const mode of modes.filter((value) => value !== "stage"))
-      expect(caller).toContain('scripts/run-selected-backend-e2e.py" ' + mode);
-    expect(caller.match(/scripts\/run-selected-backend-e2e\.py" stage/g)).toHaveLength(4);
-    expect(caller).not.toContain("run-selected-backend-e2e.ts");
+    // The build-side modes go through one `selected` array; the rest are spelled out.
+    expect(caller).toContain('selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")');
+    for (const mode of ["record-before", "record-after"])
+      expect(caller).toContain('"${selected[@]}" ' + mode + " ");
+    for (const mode of modes.filter(
+      (value) => !["record-before", "stage", "record-after"].includes(value),
+    ))
+      expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" ' + mode);
+    expect(caller).toContain(
+      'for stage in main lib install engine; do\n      run_native_stage "selected-${stage}" selected "$stage" \\\n        "${selected[@]}" stage ',
+    );
+    expect(caller.match(/"\$\{selected\[@\]\}" stage /g)).toHaveLength(1);
+    expect(caller).not.toContain("run-selected-backend-e2e.py");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
     expect(() => requestedRuns("")).toThrow("unknown collaboration lane");
@@ -456,17 +476,12 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     ["run", "--output"],
     ["permissions", "--output", "/fixture", "--docker-gid", "nan"],
   ])
-    test("actual Bun CLI versus original Python exit: " + JSON.stringify(args), () => {
-      const ts = spawnSync(
+    test("actual CLI keeps a fixed exit for " + JSON.stringify(args), () => {
+      const result = spawnSync(
         [process.execPath, join(root, "scripts/run-selected-backend-e2e.ts"), ...args],
         { stdout: "pipe", stderr: "pipe" },
       );
-      const py = spawnSync(
-        [tool("python3"), join(root, "scripts/run-selected-backend-e2e.py"), ...args],
-        { stdout: "pipe", stderr: "pipe", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
-      );
-      expect(ts.exitCode).toBe(py.exitCode);
-      expect(ts.exitCode).toBe(args.includes("--help") ? 0 : 2);
+      expect(result.exitCode).toBe(args.includes("--help") ? 0 : 2);
     });
   for (const mode of modes)
     test("actual CLI refuses unallocated " + mode + " without starting resources", () => {
@@ -541,7 +556,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       };
       expect(grant.bindingSha256).toBe(sha(manifestPath));
       expect(grant.driverSha256).toBe(sha(driver));
-      expect(grant.bindingModuleSha256).toBe(sha(join(templates, "current_binding.py")));
+      expect(grant.bindingModuleSha256).toBe(
+        sha(join(root, "tools/selected-backend-ci/drivers/binding.ts")),
+      );
       expect(manifest.sourceInputsBefore.sha256).toBe(sha(join(output, "before.json")));
       expect(manifest.sourceInputsAfter.sha256).toBe(sha(join(output, "after.json")));
       expect(grant.runRoot).toMatch(new RegExp("/root-current-" + grant.lane + "-[0-9a-f]{12}$"));
@@ -571,7 +588,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         expect(restart.binding.sourceInputsSha256).toBe(digest(sourceInputText(before)));
         expect(restart.binding.parentDriverSha256).toBe(sha(driver));
         expect(restart.binding.restartHelperSha256).toBe(
-          sha(join(templates, "restart_checkpoint.py")),
+          sha(join(root, "tools/selected-backend-ci/drivers/restart.ts")),
         );
         expect(restart.binding.backend).toBe(grant.lane);
         expect(restart.binding.runRoot).toBe(grant.runRoot);
@@ -816,6 +833,112 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       });
     });
 
+  test("single install lane writes an exclusive private closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-install-on" }, async () => {
+      const { output, boundary } = cohort();
+      expect(await run(output, boundary, [uid(), gid()], "install/on")).toBe(0);
+      const aggregate = read(join(output, "selected-ci-receipt.json")) as Aggregate;
+      expect(aggregate.runs.map((r) => [r.lane, r.flow])).toEqual([["install", "on"]]);
+      expect(aggregate.allRequestedRunsExecuted).toBe(true);
+      const install = aggregate.runs[0]?.runRoot as string,
+        closed = join(output, "closed-install-receipt.json");
+      expect(statSync(closed).mode & 0o777).toBe(0o600);
+      expect(readFileSync(closed)).toEqual(readFileSync(join(install, "receipt.json")));
+      mkdirSync(join(install, "retained-run"));
+      for (let index = 0; index < 15; index++)
+        write(join(install, "retained-run", String(index) + "-process.json"), { status: 0 });
+      expect(() => {
+        ownershipReturn(output, [uid(), gid()], undefined, () => owner);
+      }).toThrow();
+      ownershipReturn(output, [uid(), gid()], "install/on", () => owner);
+      expect(read(join(output, "runtime-close-stage.json"))).toMatchObject({
+        ownership_return_qualified: true,
+        closed_current_runs: [{ lane: "install", flow: "on" }],
+        installation_process_receipts: 15,
+      });
+    });
+  });
+  test("single install lane never replaces an occupied closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-install-on" }, async () => {
+      const { output, boundary } = cohort();
+      write(join(output, "closed-install-receipt.json"), { occupied: true });
+      expect(await run(output, boundary, [uid(), gid()], "install/on")).toBe(1);
+      expect(read(join(output, "closed-install-receipt.json"))).toEqual({ occupied: true });
+      expect(
+        (read(join(output, "selected-ci-receipt.json")) as Aggregate).launcherFailure,
+      ).toMatchObject({ code: "SELECTED_LAUNCHER_FAILED" });
+    });
+  });
+  test("a later single lane binds the caller's closed install receipt", async () => {
+    await withEnvironment({ ...ci, GITHUB_JOB: "collaboration-postgres-off" }, async () => {
+      const missing = cohort();
+      let started = false;
+      missing.boundary.execute = () => {
+        started = true;
+        return 0;
+      };
+      await assert.rejects(run(missing.output, missing.boundary, [uid(), gid()], "postgres/off"));
+      expect(started).toBe(false);
+      const { output, boundary } = cohort();
+      const closed = join(output, "closed-install-receipt.json");
+      write(closed, receipt("install", "on"));
+      const execute = boundary.execute;
+      let bound: Reference | null | undefined;
+      boundary.execute = (driver, environment, log, signal) => {
+        bound = (
+          read(environment.FVOCI_ROOT_CURRENT_BINDING as string) as {
+            closedInstallReceipt: Reference | null;
+          }
+        ).closedInstallReceipt;
+        return execute(driver, environment, log, signal);
+      };
+      expect(await run(output, boundary, [uid(), gid()], "postgres/off")).toBe(0);
+      expect(bound).toEqual({ path: realpathSync(closed), sha256: sha(closed) });
+      ownershipReturn(output, [uid(), gid()], "postgres/off", () => owner);
+      const close = read(join(output, "runtime-close-stage.json")) as Record<string, unknown>;
+      expect(close.closed_current_runs).toEqual([{ lane: "postgres", flow: "off" }]);
+      expect(close).not.toHaveProperty("installation_process_receipts");
+    });
+  });
+  test("runtime admits only the whole-flow and five lane jobs", async () => {
+    // The fixed contract, independent of the production list it checks.
+    expect(runtimeJobs).toEqual([
+      "collaboration-flow",
+      "collaboration-install-on",
+      "collaboration-postgres-on",
+      "collaboration-sqlite-on",
+      "collaboration-postgres-off",
+      "collaboration-sqlite-off",
+    ]);
+    for (const job of runtimeJobs)
+      await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
+        expect(identity("run")).toBe("github:fixture/repo:123:1:" + job);
+      });
+    for (const job of ["collaboration-build", "collaboration-sqlite-on-2", "web-browser-shard-1"])
+      await withEnvironment({ ...ci, GITHUB_JOB: job }, () => {
+        expect(() => identity("run")).toThrow();
+      });
+  });
+  test("permissions never grant group 0 as the docker group", () => {
+    expect(() => {
+      runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
+    }).toThrow("root group is never granted as the docker group");
+  });
+  test("lane argument is parsed and allowed only for run and owner-return", async () => {
+    expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({
+      mode: "run",
+      lane: "sqlite/off",
+      command: [],
+    });
+    expect(parseCLI(["owner-return", "--output", "/fixture", "--lane=install/on"])?.lane).toBe(
+      "install/on",
+    );
+    for (const mode of ["record-before", "record-after", "permissions", "config-list", "stage"])
+      await assert.rejects(main([mode, "--output", "/fixture", "--lane", "sqlite/off"]), {
+        message: "lane argument is only for the selected runtime",
+      });
+  });
+
   for (const change of [
     "CI",
     "GITHUB_JOB",
@@ -862,14 +985,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       const output = directory(),
         path = join(output, "local.json");
       const registrationHashes = Object.fromEntries(
-        [
-          "run-selected-backend-e2e.py",
-          "selected-backend-ci/current_binding.py",
-          "selected-backend-ci/restart_checkpoint.py",
-          "selected-backend-ci/current-install-driver.py",
-          "selected-backend-ci/current-postgres-driver.py",
-          "selected-backend-ci/current-sqlite-driver.py",
-        ].map((name) => [name, sha(join(root, "scripts", name))]),
+        leaseModules.map((name) => [name, sha(join(root, name))]),
       );
       const grant: LocalGrant = {
         schema: 1,
@@ -898,7 +1014,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "foreign-source") grant.source = "0".repeat(40);
       if (mutation === "foreign-tree") grant.tree = "0".repeat(40);
       if (mutation === "bad-registration")
-        grant.registrationHashes["run-selected-backend-e2e.py"] = "0".repeat(64);
+        grant.registrationHashes["tools/selected-backend-ci/drivers/sqlite.ts"] = "0".repeat(64);
       if (mutation === "extra-mode") grant.allowedModes.push("permissions");
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
@@ -946,9 +1062,14 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     copyFileSync(process.execPath, bunCopy);
     chmodSync(bunCopy, 0o755);
     const probe = join(shared, "probe.ts");
-    const admission = JSON.stringify(join(import.meta.dir, "admission.ts"));
-    const io = JSON.stringify(join(import.meta.dir, "io.ts"));
-    const runtime = JSON.stringify(join(import.meta.dir, "runtime.ts"));
+    // The probe imports a world-readable copy of the runner modules: the actors
+    // below must not depend on reading the host checkout (a 0750 home on
+    // developer hosts). The copy root is that probe's worktree root.
+    const copied = join(shared, "tools/selected-backend-ci");
+    copyRunnerModules(copied);
+    const admission = JSON.stringify(join(copied, "admission.ts"));
+    const io = JSON.stringify(join(copied, "io.ts"));
+    const runtime = JSON.stringify(join(copied, "runtime.ts"));
     writeFileSync(
       probe,
       `import process from "node:process";
@@ -1032,8 +1153,8 @@ try {
     const rootOwned = directory();
     const mismatch = directory();
     const cohortOutput = cohort().output;
-    const rootGrant = localFixture(0, 0);
-    const ciGrant = localFixture(1001, 1001);
+    const rootGrant = localFixture(0, 0, shared);
+    const ciGrant = localFixture(1001, 1001, shared);
     give(ciOwned, "1001:1001");
     give(rootOwned, "0:0");
     give(mismatch, `${String(uid() + 1)}:${String(gid() + 1)}`);
@@ -1279,6 +1400,28 @@ try {
     });
   });
 
+  test("browser owner check is the actual owner pair, not a numeric range, and never root", () => {
+    const parent = directory(),
+      assets = join(parent, "chromium-1");
+    mkdirSync(assets);
+    writeFileSync(join(assets, "chrome"), "fixture");
+    // A host group below 1000 (macOS staff is 20) is a valid preparation owner.
+    const hostGroup = 100;
+    try {
+      expect(
+        spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(hostGroup)}`, parent])
+          .exitCode,
+      ).toBe(0);
+      expect(Object.keys(browserInventory(assets, [uid(), hostGroup]))).toEqual(["chrome"]);
+      expect(() =>
+        browserInventory(assets, [uid(), gid() === hostGroup ? hostGroup + 1 : gid()]),
+      ).toThrow();
+      expect(spawnSync(["sudo", "-n", "chown", "-R", "0:0", parent]).exitCode).toBe(0);
+      expect(() => browserInventory(assets, [0, 0])).toThrow();
+    } finally {
+      spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, parent]);
+    }
+  });
   test("browser staging preserves source bytes/modes and rejects symlink/owner/byte/mode changes", async () => {
     const cache = directory(),
       component = join(cache, "chromium-123"),
@@ -1424,6 +1567,44 @@ try {
     for (const code of [1, 2, 127, -15])
       expect(() => elfDependencies(code, "unexpected", "")).toThrow();
   });
+  test("Cargo inputs keep registry/git bytes and config but not sparse index caches", () => {
+    const cargo = directory();
+    const retained = [
+      "registry/index/fixture/config.json",
+      "registry/index/fixture/data",
+      "registry/index/fixture/nested/.cache/data",
+      "registry/cache/fixture/retained.crate",
+      "registry/cache/fixture/other.crate",
+      "registry/cache/fixture/.cache/data",
+      "registry/src/fixture/source.rs",
+      "registry/src/fixture/.cache/data",
+      "git/checkouts/fixture/source.rs",
+      "git/checkouts/fixture/.cache/data",
+      "config.toml",
+    ];
+    const caches = [
+      "registry/index/fixture/.cache/data",
+      "registry/index/fixture/.cache/nested/data",
+    ];
+    for (const name of [...retained, ...caches]) {
+      mkdirSync(join(cargo, name, ".."), { recursive: true });
+      writeFileSync(join(cargo, name), "actual Cargo input fixture bytes");
+    }
+    const before = cargoInputs(cargo);
+    expect(Object.keys(before).sort()).toEqual(retained.map((name) => join(cargo, name)).sort());
+    for (const name of retained) expect(before[join(cargo, name)]).toBe(sha(join(cargo, name)));
+    // One flipped byte in an index cache leaves the map unchanged.
+    const cache = join(cargo, caches[0] as string);
+    writeFileSync(cache, "Actual Cargo input fixture bytes");
+    expect(cargoInputs(cargo)).toEqual(before);
+    // One flipped byte in a retained crate changes exactly that entry.
+    const crate = join(cargo, "registry/cache/fixture/retained.crate");
+    writeFileSync(crate, "Actual Cargo input fixture bytes");
+    const after = cargoInputs(cargo);
+    expect(Object.keys(after).filter((key) => after[key] !== before[key])).toEqual([crate]);
+    writeFileSync(join(cargo, "credentials.toml"), "");
+    expect(() => cargoInputs(cargo)).toThrow("public offline CI cannot borrow account credentials");
+  });
   test("compiler environment contains hashes only and rejects wrappers/accounts", async () => {
     await withEnvironment(
       { CARGO_BUILD_JOBS: "2", RUSTC_WRAPPER: "", RUSTC_WORKSPACE_WRAPPER: "" },
@@ -1467,52 +1648,47 @@ try {
       },
     );
   for (const exit of [0, 7])
-    test("real stage CLI comparison against unchanged Python: " + String(exit), () => {
+    test("actual stage CLI preserves child exit " + String(exit) + " and the receipt", () => {
       const command = [
         process.execPath,
         "--eval",
         `console.log('compiler-fixture'); process.exit(${String(exit)});`,
       ];
-      const receipts: unknown[] = [];
-      for (const [executable, runner] of [
-        [process.execPath, "run-selected-backend-e2e.ts"],
-        [tool("python3"), "run-selected-backend-e2e.py"],
-      ]) {
-        const output = directory();
-        write(join(output, "before.json"), { head: source, tree });
-        const result = spawnSync(
-          [
-            executable as string,
-            join(root, "scripts", runner as string),
-            "stage",
-            "--output",
-            output,
-            "--stage-name",
-            "main",
-            "--",
-            ...command,
-          ],
-          {
-            cwd: root,
-            env: { ...process.env, ...ci, PYTHONDONTWRITEBYTECODE: "1" },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(result.exitCode).toBe(exit);
-        const receipt = read(join(output, "main-stage.json")) as {
-          seconds: number;
-          [key: string]: unknown;
-        };
-        expect(receipt.seconds).toBeGreaterThanOrEqual(0);
-        const { seconds: elapsed, ...contract } = receipt;
-        expect(Number.isFinite(elapsed)).toBe(true);
-        receipts.push(contract);
-        expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe(
-          "compiler-fixture\n",
-        );
-      }
-      expect(receipts[0]).toEqual(receipts[1]);
+      const output = directory();
+      write(join(output, "before.json"), { head: source, tree });
+      const result = spawnSync(
+        [
+          process.execPath,
+          join(root, "scripts/run-selected-backend-e2e.ts"),
+          "stage",
+          "--output",
+          output,
+          "--stage-name",
+          "main",
+          "--",
+          ...command,
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, ...ci },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).toBe(exit);
+      const receipt = read(join(output, "main-stage.json")) as {
+        source: string;
+        tree: string;
+        command: string[];
+        exit_code: number;
+        seconds: number;
+      };
+      const { seconds, ...contract } = receipt;
+      expect(contract).toEqual({ source, tree, command, exit_code: exit });
+      expect(Object.keys(receipt)).toEqual(["source", "tree", "command", "exit_code", "seconds"]);
+      expect(seconds).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(seconds)).toBe(true);
+      expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe("compiler-fixture\n");
     });
   test("main rejects broad permission arguments and nonphysical config output", async () => {
     const output = directory();
@@ -1631,7 +1807,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
           failed_phase: "container-prepare",
           failure_code: "SELECTED_DRIVER_EXCEPTION",
           original_driver_failure: { type: "ReturnedNonzero" },
-          known_driver_checkpoint: "scripts/selected-backend-ci/current-sqlite-driver.py:120",
+          known_driver_checkpoint: "tools/selected-backend-ci/drivers/sqlite.ts#container-create",
           preparation_command_exit: 15,
         }).replace('"preparation_command_exit":15', '"preparation_command_exit":' + token),
       );
@@ -1656,7 +1832,11 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       try {
         const ready = await reader.read();
         expect(ready.done).toBe(false);
-        expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+        expect(
+          Number(
+            new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(ready.value).trim(),
+          ),
+        ).toBe(child.pid);
       } finally {
         reader.releaseLock();
       }
@@ -1685,7 +1865,11 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
         try {
           const ready = await reader.read();
           expect(ready.done).toBe(false);
-          expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+          expect(
+            Number(
+              new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(ready.value).trim(),
+            ),
+          ).toBe(child.pid);
         } finally {
           reader.releaseLock();
         }
@@ -1707,6 +1891,93 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       exit: 130,
       allRequestedRunsExecuted: false,
       runs: [],
+    });
+  });
+  // B2: a lane driver owns fixture wrappers, so an interrupt waits for it.
+  const driverFixture = join(import.meta.dir, "driver-interrupt.fixture.ts");
+  // The fixture driver's pid, once its log says its SIGINT handler is installed.
+  const driverReady = (log: string) =>
+    new Promise<number>((resolve) => {
+      const check = () => {
+        const match = /^ready ([0-9]+)$/m.exec(readFileSync(log, "utf8"));
+        if (!match) return;
+        watcher.close();
+        resolve(Number(match[1]));
+      };
+      const watcher = watch(log, check);
+      check();
+    });
+  const refusal = async (pending: Promise<number>) => {
+    try {
+      return { exit: await pending };
+    } catch (error) {
+      return { error };
+    }
+  };
+  test("B2 an interrupted lane driver finishes its cleanup before executeDriver returns", async () => {
+    const base = directory(),
+      log = join(base, "driver.log"),
+      marker = join(base, "cleaned");
+    const controller = new AbortController();
+    const pending = executeDriver(
+      [process.execPath, driverFixture, marker],
+      process.env,
+      log,
+      controller.signal,
+    );
+    const pid = await driverReady(log);
+    const reason = new Error("driver interrupt fixture");
+    controller.abort(reason);
+    expect(await refusal(pending)).toEqual({ error: reason });
+    expect(readFileSync(marker, "utf8")).toBe("cleaned\n");
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+  test("B2 a lane driver that ignores SIGINT is SIGKILLed after the grace", async () => {
+    const base = directory(),
+      log = join(base, "driver.log"),
+      marker = join(base, "cleaned");
+    const controller = new AbortController();
+    const pending = executeDriver(
+      [process.execPath, driverFixture, marker, "ignore"],
+      process.env,
+      log,
+      controller.signal,
+      200,
+    );
+    const pid = await driverReady(log);
+    const reason = new Error("driver interrupt fixture");
+    controller.abort(reason);
+    expect(await refusal(pending)).toEqual({ error: reason });
+    expect(existsSync(marker)).toBe(false);
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+  test("B2 an interrupted run records exit130 only after its driver closed the lane", async () => {
+    const { output, boundary } = cohort();
+    const marker = join(directory(), "cleaned");
+    boundary.execute = async (_driver, environment, log, signal) => {
+      const pending = executeDriver(
+        [process.execPath, driverFixture, marker],
+        environment,
+        log,
+        signal,
+      );
+      await driverReady(log);
+      process.emit("SIGINT");
+      return pending;
+    };
+    await withEnvironment(ci, async () => {
+      expect(await run(output, boundary, [uid(), gid()])).toBe(130);
+    });
+    expect(readFileSync(marker, "utf8")).toBe("cleaned\n");
+    expect(read(join(output, "selected-ci-receipt.json"))).toMatchObject({
+      exit: 130,
+      allRequestedRunsExecuted: false,
+      runs: [],
+      launcherFailure: { receiptWrite: "confirmed" },
+    });
+    expect(read(join(output, "selected-launcher-failure.private.json"))).toEqual({
+      type: "InterruptError",
+      message: "selected launcher interrupted",
     });
   });
   test("B3 actual stage CLI kills a SIGINT-resistant child and writes exit130", async () => {
@@ -1739,4 +2010,154 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       await child.exited;
     }
   });
+});
+test("resolved() keeps Python Path.resolve semantics for a missing tail", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-resolved-")));
+  try {
+    mkdirSync(join(base, "real"));
+    symlinkSync(join(base, "real"), join(base, "link"));
+    // CARGO_TARGET_DIR before the first build: the link resolves, the tail stays.
+    expect(resolved(join(base, "link/target/debug"))).toBe(join(base, "real/target/debug"));
+    expect(resolved(join(base, "link"))).toBe(join(base, "real"));
+    expect(resolved(join(base, "missing"))).toBe(join(base, "missing"));
+    // ".." applies after the symlink, as in Python: link -> real/inner, so
+    // link/../cargo is real/cargo, not the lexical base/cargo.
+    mkdirSync(join(base, "real/inner"));
+    mkdirSync(join(base, "real/cargo"));
+    mkdirSync(join(base, "cargo"));
+    rmSync(join(base, "link"));
+    symlinkSync(join(base, "real/inner"), join(base, "link"));
+    writeFileSync(join(base, "real/cargo/config.toml"), "[alias]\nactual-config = 'build'\n");
+    writeFileSync(join(base, "cargo/config.toml"), "lexical decoy");
+    const home = resolved(`${base}/link/../cargo`);
+    expect(home).toBe(join(base, "real/cargo"));
+    expect(Object.keys(cargoInputs(home))).toEqual([join(base, "real/cargo/config.toml")]);
+    expect(resolved(`${base}/missing/../real`)).toBe(join(base, "real"));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+test("resolved() matches posixpath.realpath(strict=False) for dangling links and loops", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-resolved-")));
+  try {
+    mkdirSync(join(base, "a"));
+    mkdirSync(join(base, "b/nested"), { recursive: true });
+    mkdirSync(join(base, "b/cargo"));
+    symlinkSync(join(base, "b/nested"), join(base, "a/link"));
+    symlinkSync("b/nested", join(base, "rel"));
+    symlinkSync("missing/dir", join(base, "dangling"));
+    symlinkSync("loop", join(base, "loop"));
+    symlinkSync("loopB", join(base, "loopA"));
+    symlinkSync("loopA", join(base, "loopB"));
+    writeFileSync(join(base, "file"), "fixture");
+    // Expected values captured once from CPython 3.14.4
+    // posixpath.realpath(p, strict=False) on this fixture in a throwaway
+    // directory; "<base>" is the fixture root, "" and "." are the cwd.
+    const cases: [string, string][] = [
+      ["", process.cwd()],
+      [".", process.cwd()],
+      ["/", "/"],
+      ["/../../", "/"],
+      [`${relative(process.cwd(), base)}/a/link/../cargo`, "<base>/b/cargo"],
+      ["<base>/a/link/../cargo", "<base>/b/cargo"],
+      ["<base>/rel/../cargo", "<base>/b/cargo"],
+      ["<base>/a/link/new/target/debug", "<base>/b/nested/new/target/debug"],
+      ["<base>/new/../b", "<base>/b"],
+      ["/new/missing/../../../../", "/"],
+      ["/<base>//missing/../", "<base>"],
+      ["<base>/dangling", "<base>/missing/dir"],
+      ["<base>/dangling/sub", "<base>/missing/dir/sub"],
+      ["<base>/dangling/../cargo", "<base>/missing/cargo"],
+      ["<base>/loop", "<base>/loop"],
+      ["<base>/loop/sub", "<base>/loop/sub"],
+      ["<base>/loop/../b", "<base>/b"],
+      ["<base>/loopA", "<base>/loopA"],
+      ["<base>/file/sub", "<base>/file/sub"],
+      ["<base>/file/../b", "<base>/b"],
+    ];
+    const at = (p: string) => p.replace("<base>", base);
+    expect(cases.map(([input]) => resolved(at(input)))).toEqual(
+      cases.map(([, expected]) => at(expected)),
+    );
+    // A fresh CARGO_HOME symlink whose target Cargo has not created yet.
+    symlinkSync("fresh-cargo", join(base, "fresh-link"));
+    const home = resolved(join(base, "fresh-link"));
+    expect(home).toBe(join(base, "fresh-cargo"));
+    expect(cargoInputs(home)).toEqual({});
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+test("inputs() admits a fresh CARGO_HOME link left untracked in the checkout", () => {
+  // The reviewer's fresh-home probe: CARGO_HOME=<repo>/fresh-link -> fresh-cargo
+  // (not created yet), the link itself untracked in the repo root. The Python
+  // original (Path.resolve, Path.is_file) and `cargo --list` exit 0 there.
+  const base = realpathSync(directory());
+  const repo = join(base, "repo");
+  const copied = join(repo, "tools/selected-backend-ci");
+  for (const d of ["bin", "sysroot", "compiler/include", "clang", "sqlite/lib"])
+    mkdirSync(join(base, d), { recursive: true });
+  mkdirSync(copied, { recursive: true });
+  mkdirSync(join(repo, "node_modules"));
+  for (const name of ["build.ts", "admission.ts", "io.ts", "types.ts"])
+    copyFileSync(join(import.meta.dir, name), join(copied, name));
+  writeFileSync(join(repo, "config.ts"), "tracked fixture");
+  const git = (...args: string[]) => {
+    expect(
+      spawnSync(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" }).exitCode,
+    ).toBe(0);
+  };
+  git("init", "-q");
+  git("add", "config.ts");
+  git("-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "commit", "-qm", "fixture");
+  symlinkSync("fresh-cargo", join(repo, "fresh-link"));
+  // A dangling link inside an input directory: Python add() rglob + is_file
+  // skips it; the regular file beside it stays an input.
+  writeFileSync(join(repo, ".git/info/exclude"), "node_modules/\n");
+  writeFileSync(join(repo, "node_modules/real.js"), "module");
+  symlinkSync("missing.js", join(repo, "node_modules/dangling.js"));
+  for (const name of ["cargo", "ar", "ld", "bun"])
+    symlinkSync("/usr/bin/true", join(base, "bin", name));
+  for (const [name, path] of [
+    ["rustc", join(base, "sysroot")],
+    ["cc", join(base, "compiler/include")],
+  ] as const) {
+    writeFileSync(join(base, "bin", name), `#!/bin/sh\nprintf "%s\\n" "${path}"\n`);
+    chmodSync(join(base, "bin", name), 0o755);
+  }
+  const output = join(base, "inputs.json");
+  const probe = join(base, "probe.ts");
+  writeFileSync(
+    probe,
+    `import { inputs } from ${JSON.stringify(join(copied, "build.ts"))};
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
+  );
+  const result = spawnSync([process.execPath, probe], {
+    cwd: repo,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !/^(CARGO_|RUSTC|FVOCI_)/.test(name)),
+      ),
+      CARGO_HOME: join(repo, "fresh-link"),
+      PATH: `${join(base, "bin")}:/usr/bin:/bin`,
+      LIBCLANG_PATH: join(base, "clang"),
+      SQLITE3_LIB_DIR: join(base, "sqlite/lib"),
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  const recorded = JSON.parse(readFileSync(output, "utf8")) as Record<
+    "tracked" | "untracked" | "external",
+    Record<string, string>
+  >;
+  // Python Path.is_file() is false for the dangling link: not an input.
+  expect(Object.keys(recorded.tracked)).toEqual(["config.ts"]);
+  expect(Object.keys(recorded.untracked).sort()).toEqual(
+    ["admission.ts", "build.ts", "io.ts", "types.ts"].map((n) => `tools/selected-backend-ci/${n}`),
+  );
+  expect(Object.keys(recorded.external).filter((p) => p.startsWith(repo))).toEqual([
+    join(repo, "node_modules/real.js"),
+  ]);
 });

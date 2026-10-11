@@ -11,9 +11,9 @@ failure and old-image rollback; ordinary PR and main CI does not run it, only an
 
 Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
 Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.98.1, and
-Bun 1.4.2. The Docker Rust/web builders and final runtime use the same pinned
+Bun 1.4.3. The Docker Rust/web builders and final runtime use the same pinned
 Ubuntu 26.04 base. Native SQLite builds require `libclang-18-dev=1:18.1.8-20ubuntu8`
-with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, Python 3, and curl.
+with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, and curl.
 Rebuild native outputs on this OS; caches are scoped to Ubuntu 26.04, architecture,
 toolchain, and build features.
 
@@ -764,10 +764,10 @@ convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript 
 Bun is used only to build the web assets and run development oracles/tests.
 `scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
-The installed document smoke uses a host-side Python standard-library client;
-it checks the installed Rust API before and after restart, including parsed
-OOXML text. Python and its test client are not copied into the product image.
-Development/CI Python fixtures and independent readers remain supported.
+The installed document smoke uses a host-side Bun client
+(`tools/release/smoke-documents.ts`); it checks the installed Rust API before
+and after restart, including parsed OOXML text. The test client is not copied
+into the product image.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -1187,7 +1187,19 @@ secure cookies. Proxy body-size and timeout limits for uploads are under
 
 ### Verification
 
-`scripts/install-smoke.sh` builds the image, starts an isolated Compose project
+`scripts/install-smoke.sh` runs on an image built from the checkout by
+`cargo xtask install-image`:
+
+```sh
+cargo xtask install-image build                 # labels: source tree, arch, Dockerfile hash, toolchain
+FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/install-smoke.sh
+FVOCI_INSTALL_IMAGE=fvoci-rust-install:local bash scripts/backup-restore-smoke.sh
+```
+
+An image whose labels do not match the checkout is refused, not rebuilt.
+Without `FVOCI_INSTALL_IMAGE` a local run builds it first; CI builds it once
+per architecture, hands it to both smokes with `install-image save`/`load`,
+and refuses a smoke without it. The smoke starts an isolated Compose project
 (unique name, ephemeral published port, run-owned volumes), exercises setup/login,
 wiki collab body projection, HWPX upload + extraction, `/collab` availability,
 a graceful `docker compose stop server` (stopped container must report exit code 0),
@@ -1329,8 +1341,9 @@ On success the trap runs `down -v` for each project with the compose file of
 the source tree that started it, then checks that no container, volume or
 network with that project label remains. Only then does it delete the work dir
 and its 0600 env files. A failed `down` or a leftover fails the run and keeps
-the work dir. On any other failure after a project started, it keeps the
-projects and the work dir for diagnosis and prints the cleanup commands. The
+the work dir and prints the cleanup commands. On any other failure it first
+writes each project's `ps -a` and last log lines (redacted) to the evidence
+dir, then tears the projects down the same way. The
 evidence dir holds logs with the generated secrets redacted. It is kept on
 success and on failure, including build failures. It defaults to a new 0700
 directory under `TMPDIR`, and `--evidence-dir` overrides it. Generated secrets
@@ -1427,8 +1440,7 @@ image runs `fvoci-migrate --backup-manifest` and the offline
 `--restore-preflight` with only the key environment, a read-only backup mount
 for restore, and no network. PostgreSQL dump/restore, storage archiving and
 the Rust `--verify-storage`/`--verify-secrets` probes run in the specified
-Compose containers. Python is not required for the operational scripts;
-independent Python compatibility fixtures remain available for testing.
+Compose containers. Python is not required for the operational scripts.
 
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
@@ -1565,8 +1577,8 @@ adds two workspace realms and runs the ignored Rust test
 `keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
 license, not the release server) against them.
 
-Needs docker with compose, openssl, python3, git, cargo, bun, setsid
-(util-linux), the web dependencies and Chromium from
+Needs docker with compose, openssl, git, cargo, bun, setsid (util-linux),
+realpath (coreutils), the web dependencies and Chromium from
 `scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
 image pull. As in the web e2e harness, the web build (`bun --bun run build`)
 and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
@@ -1597,7 +1609,7 @@ KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
   docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
 ```
 
-`scripts/backup-restore-smoke.sh` builds the install image, seeds an isolated
+`scripts/backup-restore-smoke.sh` takes the same image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
 project/task, a document comment, an MFA secret sealed with `ENCRYPTION_KEYS`),
 backs it up, checks a restore with a different pepper and one with a different
@@ -1605,7 +1617,8 @@ key under the backed-up `ENCRYPTION_KEYS` id are refused before any volume
 exists, restores into a second project with a rotated superset keyring (the
 secret opens), and checks those artifacts
 plus uid `1000` and that the restored server receives only `DATABASE_APP_URL`.
-Trap cleanup removes only those two projects. CI runs it as a separate job on
+Trap cleanup removes only those projects, on failure and interrupt too, and a
+leftover container, volume or network fails the run. CI runs it as a separate job on
 `ubuntu-26.04` and `ubuntu-26.04-arm` in `.github/workflows/install.yml` (no
 secrets, no image publish).
 

@@ -4,9 +4,8 @@ on:
   pull_request:
     paths: &image-paths
       - docker/ci-base/**
-      - scripts/ci/**
+      - tools/ci/**
       - .github/workflows/ci-base-image.yml
-      - scripts/ci_selection.py
       - rust-toolchain.toml
       - .bun-version
       - apps/web/package.json
@@ -47,15 +46,15 @@ jobs:
           work="$RUNNER_TEMP/ci-base-bun"
           mkdir "$work"
           case "$(uname -m)" in
-            x86_64) archive=bun-linux-x64; checksum=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913 ;;
-            aarch64) archive=bun-linux-aarch64; checksum=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7 ;;
+            x86_64) archive=bun-linux-x64; checksum=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18 ;;
+            aarch64) archive=bun-linux-aarch64; checksum=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21 ;;
             *) exit 1 ;;
           esac
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/$archive.zip" -o "$work/bun.zip"
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/$archive.zip" -o "$work/bun.zip"
           printf '%s  %s\n' "$checksum" "$work/bun.zip" | sha256sum --check --strict
           unzip -q "$work/bun.zip" -d "$work"
-          test "$("$work/$archive/bun" --version)" = 1.4.2
+          test "$("$work/$archive/bun" --version)" = 1.4.3
           printf '%s\n' "$work/$archive" >> "$GITHUB_PATH"
       - name: GHCR login (publication only)
         if: github.ref == 'refs/heads/main'
@@ -73,8 +72,8 @@ jobs:
           DOCKER_CONFIG: ${{ runner.temp }}/ci-base-docker
         run: |
           set -euo pipefail
-          bun scripts/ci/ci-base-image.ts inputs
-          bun test scripts/ci/ci-base-image.test.ts
+          bun tools/ci/ci-base-image.ts inputs
+          bun test tools/ci/ci-base-image.test.ts
           [[ "$(uname -m)" == "$([[ "$ARCH" == amd64 ]] && echo x86_64 || echo aarch64)" ]]
           IMAGE="ghcr.io/aisflow/fvoci-$TARGET"
           work=$(mktemp -d "$RUNNER_TEMP/ci-base.XXXXXX")
@@ -84,7 +83,7 @@ jobs:
           cleanup() {
             code=$?
             if [[ -f "$work/build.log" ]]; then
-              if ! bun scripts/ci/ci-base-image.ts summary "$work/build.log" "$work/image.json" | tee -a "$GITHUB_STEP_SUMMARY"; then
+              if ! bun tools/ci/ci-base-image.ts summary "$work/build.log" "$work/image.json" | tee -a "$GITHUB_STEP_SUMMARY"; then
                 if [[ "$code" == 0 ]]; then code=1; fi
               fi
             fi
@@ -108,12 +107,12 @@ jobs:
           docker image inspect "$ref" --format '{{json .}}' > "$work/image.json"
           docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.source"}}'
           docker image save "$ref" --output "$work/image.tar"
-          bun scripts/ci/ci-base-image.ts scan "$work/image.tar" "$work/image.json" "$ARCH"
+          bun tools/ci/ci-base-image.ts scan "$work/image.tar" "$work/image.json" "$ARCH"
           docker run --rm --network none "$ref" bash -ec '
             set -o pipefail
             test "$(id -u):$(id -g)" = 1000:1000
             test "$(rustc --version | cut -d" " -f2)" = 1.98.1
-            test "$(bun --version)" = 1.4.2
+            test "$(bun --version)" = 1.4.3
             non_root_owned=$(find /opt/rustup /opt/cargo ! -uid 0 -print -quit)
             test -z "$non_root_owned"
             world_writable=$(find -L /opt/rustup /opt/cargo -perm -0002 -print -quit)
@@ -199,14 +198,14 @@ jobs:
             ref="$IMAGE:$prefix-$arch"
             docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$work/config.json"
             docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/manifest.json"
-            digest=$(bun scripts/ci/ci-base-image.ts arch-digest "$work/config.json" "$work/manifest.json" "$arch")
+            digest=$(bun tools/ci/ci-base-image.ts arch-digest "$work/config.json" "$work/manifest.json" "$arch")
             sources+=("$IMAGE@$digest")
             docker buildx imagetools inspect "$ref" --raw > "$work/raw.json"
-            bun scripts/ci/ci-base-image.ts layer-size "$work/raw.json" "$arch" | tee -a "$GITHUB_STEP_SUMMARY"
+            bun tools/ci/ci-base-image.ts layer-size "$work/raw.json" "$arch" | tee -a "$GITHUB_STEP_SUMMARY"
           done
           started=$SECONDS
           ref="$IMAGE:sha-$GITHUB_SHA"
           docker buildx imagetools create --tag "$ref" "${sources[@]}"
           docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$work/index.json"
-          bun scripts/ci/ci-base-image.ts manifest "$work/index.json" "$IMAGE" "${sources[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          bun tools/ci/ci-base-image.ts manifest "$work/index.json" "$IMAGE" "${sources[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           printf 'Manifest publish: %ss\n' "$((SECONDS-started))" | tee -a "$GITHUB_STEP_SUMMARY"

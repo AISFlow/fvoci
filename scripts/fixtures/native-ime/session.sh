@@ -29,18 +29,5 @@ timeout 20 ibus engine hangul
 ibus engine >"$FVOCI_NATIVE_IME_SESSION/selected-engine.txt"
 [[ "$(cat "$FVOCI_NATIVE_IME_SESSION/selected-engine.txt")" == hangul ]]
 printf 'display=%s\nbus=%s\nibus_pid=%s\nhangul_pid=%s\n' "$DISPLAY" "$DBUS_SESSION_BUS_ADDRESS" "$ime_pid" "$hangul_pid" >"$FVOCI_NATIVE_IME_SESSION/session.txt"
-python3 - <<'PY'
-import json, os, pathlib
-owned=[]
-for p in pathlib.Path('/proc').iterdir():
-    if not p.name.isdigit(): continue
-    try:
-        env=dict(x.split('=',1) for x in (p/'environ').read_bytes().decode().split('\0') if '=' in x)
-        if env.get('FVOCI_NATIVE_IME_SESSION') != os.environ['FVOCI_NATIVE_IME_SESSION']: continue
-        owned.append({'pid':int(p.name),'exe':os.readlink(p/'exe'),
-                      'command':(p/'cmdline').read_bytes().decode().replace('\0',' '),
-                      'display':env.get('DISPLAY'),'start_ticks':(p/'stat').read_text().split()[21]})
-    except (OSError,UnicodeError): pass
-pathlib.Path(os.environ['FVOCI_NATIVE_IME_SESSION'],'fixture-processes.json').write_text(json.dumps(owned,indent=2))
-PY
+bun "$(dirname "$0")/../../../apps/web/e2e-native-ime/fixture-processes.ts"
 "$@"

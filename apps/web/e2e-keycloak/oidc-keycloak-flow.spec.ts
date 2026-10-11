@@ -25,28 +25,12 @@ import {
   type Response as PlaywrightResponse,
 } from "@playwright/test";
 import { login, logout, watchCspViolations } from "../e2e/helpers";
-
-type KcUserKey = "alice" | "bob" | "carol" | "mallory" | "erin" | "tina";
-type KcUser = { username: string; password: string; email: string };
-type KcConfig = {
-  issuer: string;
-  realm: string;
-  clientId: string;
-  label: string;
-  keycloakOrigin: string;
-  admin: { username: string; password: string };
-  users: Record<KcUserKey, KcUser>;
-  /** Passwords of the FVOCI accounts this spec creates (the runner's redactor knows them). */
-  fvoci: { ownerPassword: string; memberPassword: string };
-};
+import { loadKcConfig, type KcConfig, type KcUser } from "./config";
 
 const configPath = process.env.FVOCI_KC_E2E_CONFIG ?? "";
 const mode = process.env.FVOCI_KC_E2E_MODE ?? "";
 const outDir = process.env.FVOCI_KC_E2E_OUT ?? "";
-const kc: KcConfig | null =
-  configPath && existsSync(configPath)
-    ? (JSON.parse(readFileSync(configPath, "utf8")) as KcConfig)
-    : null;
+const kc = loadKcConfig(configPath);
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:1";
 const fvociOrigin = new URL(baseURL).origin;

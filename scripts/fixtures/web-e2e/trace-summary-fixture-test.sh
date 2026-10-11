@@ -1,248 +1,12 @@
 #!/usr/bin/env bash
-# Test-only: feed scripts/web-e2e-trace-summary.py a synthetic trace.zip with
-# tokens in paths, parameters, console text and page errors, and check that
-# none reaches the summary, that diagnostic paths survive, and that a large
-# key-like blob is summarized quickly (the parameter regex stays linear).
+# Test-only: the template observer's pure contract fixture, then its digest by
+# tools/web-e2e/trace-summary.ts. The summary's redaction and diagnostic
+# controls are Bun tests (tools/web-e2e/trace-summary.test.ts).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-trace-summary.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-
-python3 - "$WORK/trace.zip" <<'PY'
-import json, sys, zipfile
-share = "S" * 43
-bare = "B" * 45
-def snap(url, status, failure="", kind="document", t=1.0):
-    return {"type": "resource-snapshot", "snapshot": {
-        "request": {"method": "GET", "url": url},
-        "response": {"status": status, "_failureText": failure},
-        "_resourceType": kind, "startedDateTime": "2026-09-29T00:00:00.000Z",
-        "time": 12, "_monotonicTime": t}}
-network = [
-    snap(f"http://127.0.0.1:4000/s/{share}?code=QUERYSECRET", 404),
-    snap("http://127.0.0.1:4000/assets/index-DiwrgTda.js", 0, "net::ERR_ABORTED", "script", 1.5),
-    # Shorter than LONG_TOKEN: only the path-token rule redacts it.
-    snap("http://127.0.0.1:4000/api/v1/invitations/PATHSECRET/accept", 404, kind="fetch", t=1.7),
-]
-events = [
-    {"type": "console", "messageType": "error", "time": 2.0,
-     "text": f"fetch failed access_token=PARAMSECRET1 inviteToken=PARAMSECRET2 {bare} postgresql://u:DBSECRET@h/db",
-     "location": {"url": "http://127.0.0.1:4000/assets/app.js"}},
-    {"type": "event", "method": "pageError", "time": 3.0,
-     "params": {"error": {"error": {"name": "Error", "message": "a" * 200000 + " state=PARAMSECRET3"}}}},
-]
-with zipfile.ZipFile(sys.argv[1], "w") as z:
-    z.writestr("0-trace.network", "\n".join(json.dumps(e) for e in network))
-    z.writestr("0-trace.trace", "\n".join(json.dumps(e) for e in events))
-PY
-
-fail() {
-  echo "trace-summary fixture: $1" >&2
-  cat "$WORK/summary.txt" >&2 || true
-  exit 1
-}
-
-timeout 20 python3 "$ROOT/scripts/web-e2e-trace-summary.py" "$WORK/trace.zip" >"$WORK/summary.txt" \
-  || fail "summarizer failed or took over 20 s"
-[[ "$(head -n1 "$WORK/summary.txt")" == "browser summary: "* ]] || fail "missing header"
-for secret in PATHSECRET QUERYSECRET PARAMSECRET1 PARAMSECRET2 PARAMSECRET3 DBSECRET SSSSSSSSSSSSSSSSSSSS BBBBBBBBBBBBBBBBBBBB; do
-  ! grep -q "$secret" "$WORK/summary.txt" || fail "$secret leaked"
-done
-grep -q '/s/<redacted>?…' "$WORK/summary.txt" || fail "share path not summarized"
-grep -q '/api/v1/invitations/<redacted>/accept' "$WORK/summary.txt" || fail "invitation path token not redacted"
-grep -q 'GET ERR script /assets/index-DiwrgTda.js' "$WORK/summary.txt" || fail "failed asset request not listed"
-grep -q 'net::ERR_ABORTED' "$WORK/summary.txt" || fail "failure text missing"
-grep -q 'console   error fetch failed' "$WORK/summary.txt" || fail "console error missing"
-grep -q 'pageerror' "$WORK/summary.txt" || fail "page error missing"
-echo "trace-summary-fixture-test: ok"
-
-# Independently declared fixture data, not a converted production snapshot.
-# The approved CI artifact already includes this stdout/browser-summary file;
-# no raw ZIP, document content or arbitrary attachment becomes uploadable.
-python3 - "$ROOT/scripts/web-e2e-trace-summary.py" "$WORK" <<'PY'
-import copy, json, pathlib, subprocess, sys, zipfile
-script, work = sys.argv[1], pathlib.Path(sys.argv[2])
-name = "w3-template-native-selection-observation.json"
-member = "attachments/" + "a" * 40
-secret = "DIAGNOSTIC_PRIVATE_VALUE"
-frame = {
-    "at": 10, "stage": "ShiftHome:original-return", "owner": "[1,2,1,3,4,5,6]",
-    "bindingGeneration": 1, "nativeId": "NATIVE_ID_PRIVATE",
-    "native": {"inside": True, "text": "한글과 😀 링크", "positions": {"anchor": 9, "head": 1}},
-    "pm": {"anchor": 9, "head": 1, "empty": False, "type": "text", "marks": [{"href": secret}]},
-    "focus": {"activeTag": "DIV", "activeLabel": secret, "editor": True, "editorEditable": True,
-              "domEditable": "true", "composing": False},
-    "auth": {"authenticated": True, "synced": True, "scope": "read-write", "status": "connected", "password": secret},
-    "updates": 0, "localUpdates": 0, "generationUpdates": 0, "generationLocalUpdates": 0,
-    "bubble": {"visibility": "visible", "opacity": "1"}, "dialog": False,
-    "pmDocument": {"type": "doc", "attrs": {"rawFuture": secret}, "text": secret},
-    "unknown": "https://private.example/" + secret + "?password=" + secret,
-}
-actions = ["openDoc:original", "ShiftHome:original-return", "bubble:original-visible",
-           "popup:original-open-focus", "compositionEnter:original-no-link", "Cancel:original-native-text",
-           "Apply:original-selected-text", "save:original", "finally"]
-boundary = [dict(copy.deepcopy(frame), stage=stage) for stage in actions]
-transition = {"at": 20, "stage": "provider:status", "previousOwner": frame["owner"],
-              "owner": "[11,12,11,13,14,15,16]", "bindingGeneration": 2}
-data = {"frames": [frame], "critical": boundary, "actionBoundaries": boundary[:-1],
-        "ownerChanges": [transition], "observedMismatches": [frame], "firstObservedState": frame,
-        "updates": 1, "localUpdates": 1, "earlyBindingNotCaptured": True,
-        "totals": {"frames": 1, "critical": 9, "actionBoundaries": 8, "ownerChanges": 1, "observedMismatches": 1},
-        "dropped": {"frames": 0, "critical": 0, "actionBoundaries": 0, "ownerChanges": 0, "observedMismatches": 0}}
-reference = {"name": name, "contentType": "application/json", "file": member}
-network = {"type": "resource-snapshot", "snapshot": {"request": {"method": "GET", "url": "http://localhost/assets/fixture.js"},
-           "response": {"status": 200}, "_resourceType": "script", "time": 1, "_monotonicTime": 1}}
-def run(label, payload=data, ref=reference, test=None, extra=None, duplicate=False):
-    archive = work / (label + ".zip")
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("0-trace.network", json.dumps(network))
-        z.writestr("test.trace", test if test is not None else json.dumps({"type": "after", "attachments": [ref]}))
-        z.writestr(member, payload if isinstance(payload, bytes) else json.dumps(payload))
-        if extra:
-            for path, value in extra: z.writestr(path, value)
-        if duplicate: z.writestr(member, json.dumps(data))
-    output = subprocess.check_output([sys.executable, script, str(archive)], text=True, timeout=20)
-    assert "GET 200 script /assets/fixture.js" in output, label + ": base digest lost"
-    for forbidden in [secret, "NATIVE_ID_PRIVATE", "private.example", "한글과", "😀", "rawFuture", "activeLabel", "pmDocument", "password"]:
-        assert forbidden not in output, label + ": private field leaked"
-    prefix = "w3-template-diagnostic "
-    records = [json.loads(line[len(prefix):]) for line in output.splitlines() if line.startswith(prefix)]
-    assert len(records) == 1, label + ": missing diagnostic outcome"
-    assert len(json.dumps(records[0]).encode()) <= 49152, label + ": diagnostic output bound lost"
-    return records[0]
-
-valid = run("valid")
-assert valid["available"] is True
-assert valid["counts"]["frames"] == {"retained": 1, "total": 1, "dropped": 0, "unknown": False}
-selected = valid["actions"]["ShiftHome:original-return"]
-assert selected["native"] == {"inside": True, "codePoints": 8, "equalsKnownFixtureCjkEmoji": True,
-                               "positions": {"anchor": 9, "head": 1}, "mappingUnknown": False}
-assert selected["pm"] == {"anchor": 9, "head": 1, "empty": False, "type": "text"}
-assert selected["auth"] == {"authenticated": True, "synced": True, "scope": "read-write", "status": "connected"}
-assert selected["nativeId"]["present"] is True and len(selected["nativeId"]["hash"]) == 16
-assert valid["firstIdentityChange"]["previousOwner"] == [1,2,1,3,4,5,6]
-assert valid["firstIdentityChange"]["owner"] == [11,12,11,13,14,15,16]
-assert valid["firstMismatch"]["native"]["positions"] == {"anchor": 9, "head": 1}
-assert valid["missingActions"] == ["caret:after-click", "caret:after-End"]
-assert all(valid["actions"][action] is not None for action in actions)
-assert valid["earlyBindingNotCaptured"] is True
-
-caret_data = copy.deepcopy(data)
-caret_data["caretBoundaries"] = [
-    {"stage": "after-click", "ownerRecordStage": "caret:after-click", "at": 5,
-     "native": {"anchor": {"inside": True, "noneditableLeaf": False, "position": 5},
-                "head": {"inside": True, "noneditableLeaf": False, "position": 5}, "text": secret},
-     "wide": True, "rich": True, "rawDom": secret},
-    {"stage": "after-End", "ownerRecordStage": "caret:after-End", "at": 7,
-     "native": {"anchor": {"inside": False, "noneditableLeaf": True, "position": 9, "nodeAttrs": secret},
-                "head": {"inside": True, "noneditableLeaf": False, "position": 9}, "text": secret},
-     "wide": False, "rich": False, "focus": {"activeLabel": secret}, "error": secret},
-]
-for label, at, pos in (("caret:after-click", 5, 5), ("caret:after-End", 7, 9)):
-    captured = dict(copy.deepcopy(frame), stage=label, at=at,
-                    pm={"anchor": pos, "head": pos, "empty": True, "type": "text"})
-    captured["native"]["positions"] = {"anchor": pos, "head": pos}
-    caret_data["critical"].append(captured)
-    caret_data["actionBoundaries"].append(captured)
-caret_data["totals"]["critical"] += 2
-caret_data["totals"]["actionBoundaries"] += 2
-caret_valid = run("caret_valid", caret_data)
-assert caret_valid["missingActions"] == []
-click = caret_valid["actions"]["caret:after-click"]
-end = caret_valid["actions"]["caret:after-End"]
-assert click["caret"] == {"anchor": {"inside": True, "noneditableLeaf": False, "position": 5},
-                          "head": {"inside": True, "noneditableLeaf": False, "position": 5},
-                          "wide": True, "rich": True}
-assert end["caret"] == {"anchor": {"inside": False, "noneditableLeaf": True, "position": 9},
-                        "head": {"inside": True, "noneditableLeaf": False, "position": 9},
-                        "wide": False, "rich": False}
-assert click["owner"] == [1,2,1,3,4,5,6] and end["owner"] == [1,2,1,3,4,5,6]
-assert click["pm"] == {"anchor": 5, "head": 5, "empty": True, "type": "text"}
-assert end["native"]["positions"] == {"anchor": 9, "head": 9}
-assert end["focus"]["editor"] is True
-assert valid["actions"]["ShiftHome:original-return"]["caret"] is None
-caret_unknown = copy.deepcopy(caret_data)
-caret_unknown["caretBoundaries"][1] = {
-    "stage": "after-End", "ownerRecordStage": "caret:after-End", "at": 7,
-    "native": {"anchor": {"inside": None, "noneditableLeaf": None, "position": None}, "head": {}},
-}
-assert run("caret_unknown", caret_unknown)["actions"]["caret:after-End"]["caret"] == {
-    "anchor": {"inside": None, "noneditableLeaf": None, "position": None},
-    "head": {"inside": None, "noneditableLeaf": None, "position": None}, "wide": None, "rich": None,
-}
-caret_rejects = []
-for label, value in (("array", secret), ("overflow", caret_data["caretBoundaries"] * 2),
-                     ("duplicate", [caret_data["caretBoundaries"][0]] * 2),
-                     ("entry", [secret])):
-    invalid = copy.deepcopy(caret_data); invalid["caretBoundaries"] = value
-    caret_rejects.append((label, invalid, "invalid_caret_boundary_schema"))
-for label, key, value, reason in (
-    ("stage", "stage", secret, "invalid_caret_boundary_schema"),
-    ("owner_stage", "ownerRecordStage", "caret:after-click", "invalid_caret_boundary_schema"),
-    ("at", "at", secret, "invalid_caret_boundary_schema"),
-    ("native", "native", secret, "invalid_caret_boundary_schema"),
-    ("wide", "wide", "true", "invalid_boolean_schema"),
-    ("rich", "rich", 1, "invalid_boolean_schema"),
-):
-    invalid = copy.deepcopy(caret_data); invalid["caretBoundaries"][1][key] = value
-    caret_rejects.append((label, invalid, reason))
-for label, key, value, reason in (
-    ("endpoint", None, secret, "invalid_caret_boundary_schema"),
-    ("inside", "inside", 1, "invalid_boolean_schema"),
-    ("leaf", "noneditableLeaf", "false", "invalid_boolean_schema"),
-    ("position_type", "position", "9", "invalid_position_schema"),
-    ("position_range", "position", 1_000_000_001, "invalid_position_schema"),
-):
-    invalid = copy.deepcopy(caret_data)
-    if key is None: invalid["caretBoundaries"][1]["native"]["anchor"] = value
-    else: invalid["caretBoundaries"][1]["native"]["anchor"][key] = value
-    caret_rejects.append((label, invalid, reason))
-for label, payload, reason in caret_rejects:
-    assert run("caret_reject_" + label, payload) == {"available": False, "reason": reason}, label
-print("trace-summary caret fixtures: 2 exact/private/nullable inputs + 15 typed/shape/overflow rejection controls PASS")
-
-hostile = copy.deepcopy(data)
-hostile["frames"][0]["stage"] = "keydown:" + secret
-hostile["frames"][0]["auth"]["scope"] = secret
-hostile["frames"][0]["focus"]["activeTag"] = secret
-hostile["frames"][0]["native"]["positions"] = {"unknown": secret}
-hostile["frames"][0]["native"]["text"] = secret
-safe = run("hostile", hostile)["tail"][0]
-assert safe["stage"] == "unknown" and safe["auth"]["scope"] == "unknown"
-assert safe["native"]["equalsKnownFixtureCjkEmoji"] is False and safe["native"]["mappingUnknown"] is True
-assert safe["at"] == 10
-
-truncated = copy.deepcopy(data)
-truncated["totals"]["frames"] = 501
-truncated["dropped"]["frames"] = 500
-assert run("truncated", truncated)["counts"]["frames"]["dropped"] == 500
-legacy = copy.deepcopy(data)
-del legacy["totals"]; del legacy["dropped"]
-assert run("legacy_unknown", legacy)["counts"]["frames"]["unknown"] is True
-
-rejects = [
-    ("path", dict(ref=dict(reference, file="../" + secret)), "invalid_attachment_reference"),
-    ("content_type", dict(ref=dict(reference, contentType="text/plain")), "invalid_attachment_reference"),
-    ("missing", dict(ref=dict(reference, file="attachments/" + "b" * 40)), "missing_or_invalid_attachment_member"),
-    ("malformed", dict(payload=("{" + secret).encode()), "invalid_attachment_data"),
-    ("oversize", dict(payload=b" " * (1024*1024 + 1)), "attachment_size_limit"),
-    ("schema", dict(payload={"frames": secret}), "invalid_event_schema_or_limit"),
-    ("duplicate", dict(duplicate=True), "missing_or_invalid_attachment_member"),
-    ("events", dict(test="\n".join("{}" for _ in range(10001))), "test_event_limit"),
-    ("bad_test", dict(test="{" + secret), "invalid_attachment_data"),
-    ("non_json_number", dict(payload=json.dumps(data).replace('"at": 10', '"at": NaN').encode()), "invalid_attachment_data"),
-    ("no_reference", dict(test="{}"), "missing_or_duplicate_attachment"),
-    ("member_limit", dict(extra=[("unrelated/" + str(i), "") for i in range(4096)]), "member_limit"),
-]
-inconsistent = copy.deepcopy(data); inconsistent["totals"]["frames"] = 2
-rejects.append(("counts", dict(payload=inconsistent), "inconsistent_collection_counts"))
-malformed_snapshot = copy.deepcopy(data); malformed_snapshot["frames"][0]["native"] = secret
-rejects.append(("nested_schema", dict(payload=malformed_snapshot), "invalid_snapshot_schema"))
-for label, arguments, reason in rejects:
-    assert run(label, **arguments) == {"available": False, "reason": reason}, label
-print("trace-summary diagnostic fixtures: 4 valid/hostile/partial/legacy + 14 rejection controls PASS")
-PY
 
 # Pure observer contract fixture: real Y.Doc updates and test-owned public
 # Editor/provider emitters. This tests callback ownership, not browser behavior.
@@ -366,16 +130,14 @@ assert.equal(JSON.stringify(result), stoppedSnapshot);
 assert.equal(rootA.editor.count(), 0); assert.equal(providerA.count(), 0);
 assert.equal(rootB.editor.count(), 0); assert.equal(providerB.count(), 0);
 const child = require("node:child_process");
-const jsonPath = work + "/observer-gap.json", zipPath = work + "/observer-gap.zip";
-fs.writeFileSync(jsonPath, JSON.stringify(result));
-child.execFileSync("python3", ["-c", `
-import json,sys,zipfile
-member="attachments/"+"c"*40
-with zipfile.ZipFile(sys.argv[2],"w") as archive:
- archive.writestr("test.trace",json.dumps({"type":"after","attachments":[{"name":"w3-template-native-selection-observation.json","contentType":"application/json","file":member}]}))
- archive.writestr(member,open(sys.argv[1],"rb").read())
-`, jsonPath, zipPath]);
-const summary = child.execFileSync("python3", [root + "/scripts/web-e2e-trace-summary.py", zipPath], { encoding: "utf8" });
+const zipPath = work + "/observer-gap.zip";
+const { zipSync, strToU8 } = require(root + "/node_modules/fflate");
+const member = "attachments/" + "c".repeat(40);
+fs.writeFileSync(zipPath, zipSync({
+  "test.trace": strToU8(JSON.stringify({ type: "after", attachments: [{ name: "w3-template-native-selection-observation.json", contentType: "application/json", file: member }] })),
+  [member]: strToU8(JSON.stringify(result)),
+}));
+const summary = child.execFileSync(process.execPath, [root + "/tools/web-e2e/trace-summary.ts", zipPath], { encoding: "utf8" });
 const prefix = "w3-template-diagnostic ";
 const digest = JSON.parse(summary.split("\n").find(line => line.startsWith(prefix)).slice(prefix.length));
 assert.equal(digest.available, true);

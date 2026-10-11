@@ -3,6 +3,8 @@
 
 #[path = "support/project_harness.rs"]
 mod project_harness;
+#[path = "support/zip_check.rs"]
+mod zip_check;
 
 use axum::http::StatusCode;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -589,23 +591,6 @@ async fn bytes_request(
     (status, bytes, headers)
 }
 
-fn external_zip_check(bytes: &[u8]) {
-    let path = std::env::temp_dir().join(format!("fvoci-ws-export-{}.zip", Uuid::now_v7()));
-    std::fs::write(&path, bytes).unwrap();
-    let output = std::process::Command::new("python3")
-        .args(["-m", "zipfile", "-t"])
-        .arg(&path)
-        .output()
-        .expect("python3 is required for the external zip check");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        output.status.success(),
-        "python3 -m zipfile -t failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn read_zip_entry(bytes: &[u8], want: &str) -> Option<Vec<u8>> {
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
@@ -688,7 +673,7 @@ async fn workspace_zip_export_requires_manage_and_streams_zip() {
         headers.get("content-disposition").unwrap(),
         "attachment; filename=\"fvoci-workspace.zip\""
     );
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let names = read_zip_names(&body);
     assert!(names.iter().any(|n| n == "workspace.json"));
     assert!(names.iter().any(|n| n == "documents.json"));
@@ -759,7 +744,7 @@ async fn workspace_zip_omits_private_project_without_membership() {
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let workspace_json: serde_json::Value =
         serde_json::from_slice(&read_zip_entry(&body, "workspace.json").expect("workspace.json"))
             .unwrap();
@@ -851,7 +836,7 @@ async fn workspace_zip_skips_infected_attachment_bytes() {
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let meta: serde_json::Value =
         serde_json::from_slice(&read_zip_entry(&body, "attachments.json").unwrap()).unwrap();
     let ids: Vec<String> = meta
@@ -1164,7 +1149,7 @@ async fn workspace_zip_export_includes_task_and_project_document_comments() {
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let comments: serde_json::Value =
         serde_json::from_slice(&read_zip_entry(&body, "comments.json").unwrap()).unwrap();
     let ids: Vec<String> = comments
@@ -1360,7 +1345,7 @@ async fn workspace_zip_export_releases_inflight_after_snapshot_db_error() {
     disarm_workspace_export_snapshot_db_error(workspace_id);
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
 
     harness.cleanup().await;
 }
@@ -1424,7 +1409,7 @@ async fn workspace_zip_skips_missing_storage_object() {
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let names = read_zip_names(&body);
     assert!(
         !names.iter().any(|n| n.contains(&missing_id.to_string())),
@@ -1463,7 +1448,7 @@ async fn workspace_zip_includes_project_document_attachment_bytes() {
     let path = format!("/api/v1/workspaces/{workspace_id}/export");
     let (status, body, _) = bytes_request(app, "GET", &path, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK);
-    external_zip_check(&body);
+    zip_check::external_zip_check(&body);
     let names = read_zip_names(&body);
     assert!(
         names.iter().any(|n| n.contains(&attachment_id.to_string())),

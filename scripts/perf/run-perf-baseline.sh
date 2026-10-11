@@ -26,8 +26,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR must point at the release build}"
 : "${FVOCI_PERF_OUT:?FVOCI_PERF_OUT must name the evidence directory}"
-CARGO_TARGET_DIR="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$CARGO_TARGET_DIR")"
-FVOCI_PERF_OUT="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$FVOCI_PERF_OUT")"
+CARGO_TARGET_DIR="$(realpath -m -- "$CARGO_TARGET_DIR")"
+FVOCI_PERF_OUT="$(realpath -m -- "$FVOCI_PERF_OUT")"
 case "$FVOCI_PERF_OUT" in
   "$ROOT"/*) echo "FVOCI_PERF_OUT must be outside the repository" >&2; exit 1 ;;
 esac

@@ -29,16 +29,33 @@
 # same bucket, requires --verify-storage to refuse before the server starts,
 # restores both objects from bucket versions, and only then starts the server.
 #
-# On success the trap tears both projects down with the compose file of the tree
-# each was started from and checks that no container, volume or network of
-# either project remains; only then does it remove the work dir. A failed
-# teardown or a leftover fails the run and keeps the work dir. On any other
-# failure it keeps the projects and work dir for diagnosis and prints the
-# cleanup commands. The evidence dir (default: a new 0700 dir under TMPDIR)
-# holds redacted logs only and is kept on success and failure.
+# On success, failure and INT/TERM the trap first (on failure) writes each
+# project's `ps -a` and last 200 log lines, redacted, to the evidence dir, then
+# tears both projects down with the compose file of the tree each was started
+# from and checks that no container, volume or network of either project
+# remains; only then does it remove the work dir. A failed teardown or a
+# leftover fails the run, keeps the work dir and prints the cleanup commands.
+# The evidence dir (default: a new 0700 dir under TMPDIR) holds redacted logs
+# only and is kept on success and failure. Phases are `::group::` blocks in
+# GitHub Actions (tools/install-smoke/smoke.ts).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image and leftover checks are
+# `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/upgrade-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" upgrade-smoke
+# Until `cleanup` owns the EXIT trap (usage and early failures).
+trap 'rm -f "$SMOKE_STATE"' EXIT
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 OLD_REF=""
 NEW_REF=""
 MAIN_REF="origin/main"
@@ -72,13 +89,10 @@ done
 
 require_cmd() {
   for cmd in "$@"; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      echo "missing required command: $cmd" >&2
-      exit 1
-    }
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing required command: $cmd"
   done
 }
-require_cmd git docker openssl curl bun python3 sha256sum tar awk diff
+require_cmd git docker openssl curl bun cargo sha256sum tar awk diff
 
 RUN_ID="$(openssl rand -hex 8)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fvoci-upgrade.${RUN_ID}.XXXXXX")"
@@ -113,23 +127,13 @@ log_assert() {
   printf '%s\n' "$1" | tee -a "$ASSERT_LOG"
 }
 
-fail() {
-  echo "FAIL: $*" >&2
-  printf 'FAIL: %s\n' "$*" >>"$ASSERT_LOG"
-  exit 1
-}
+# FAIL lines also go to the assertion log in the evidence dir.
+smoke_ts init "$SMOKE_STATE" upgrade-smoke "$ASSERT_LOG"
 
 # Replace every generated secret with a marker before a log reaches the evidence dir.
 # The secrets go through the environment, not argv, so ps does not list them.
 redact() {
-  FVOCI_REDACT="$(printf '%s\n' "${SECRETS[@]}")" python3 -c '
-import os, sys
-data = sys.stdin.read()
-for secret in os.environ["FVOCI_REDACT"].split("\n"):
-    if secret:
-        data = data.replace(secret, "[redacted]")
-sys.stdout.write(data)
-'
+  FVOCI_REDACT="$(printf '%s\n' "${SECRETS[@]}")" smoke_ts redact
 }
 
 project_compose() {
@@ -143,18 +147,9 @@ project_compose() {
   docker compose "${files[@]}" --project-name "$project" --env-file "$env_file" "$@"
 }
 
-# Containers, volumes and networks that still carry the project's compose label.
-owned_resources() {
-  local filter="label=com.docker.compose.project=$1" containers volumes networks
-  containers="$(docker ps -a -q --filter "$filter")" || return 1
-  volumes="$(docker volume ls -q --filter "$filter")" || return 1
-  networks="$(docker network ls -q --filter "$filter")" || return 1
-  printf '%s\n' "$containers" "$volumes" "$networks" | awk 'NF' | paste -sd' ' -
-}
-
 # `down -v` with the tree the project was started from, then prove nothing is left.
 teardown_project() {
-  local project="$1" env_file="$2" tree="$3" left rc=0
+  local project="$1" env_file="$2" tree="$3" rc=0
   if [[ -f "$env_file" ]]; then
     project_compose "$project" "$env_file" "$tree" down -v --remove-orphans 2>&1 \
       | redact >"$EVIDENCE_DIR/teardown-${project}.log"
@@ -163,57 +158,52 @@ teardown_project() {
       rc=1
     fi
   fi
-  if ! left="$(owned_resources "$project")"; then
-    echo "cleanup: could not list the resources of $project" >&2
-    return 1
-  fi
-  if [[ -n "$left" ]]; then
-    echo "cleanup: $project still has: $left" >&2
-    rc=1
-  fi
+  xtask install-image leftovers --project "$project" || rc=1
   return "$rc"
 }
 
 cleanup() {
-  local status=$?
+  local status=$? torn=0
   set +e
-  if (( status == 0 )); then
-    local torn=0
-    if (( STACK_STARTED )); then
-      # Rollback first: with S3 its server joins the upgrade project's network.
-      teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
-      teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
-    fi
-    if (( torn )); then
-      printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
-      echo "upgrade-smoke passed its checks but cleanup failed; kept for diagnosis:" >&2
-      echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
-      echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
-      status=1
-    else
-      (( STACK_STARTED )) && log_assert "cleanup: both projects down, no container, volume or network left: ok"
-      rm -rf "$WORK"
-    fi
-  elif (( STACK_STARTED == 0 )); then
-    # Nothing was started and no env file was written; the work dir holds only
-    # the two source archives and recipes.
-    rm -rf "$WORK"
-  else
-    [[ -f "$UPGRADE_ENV" ]] && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200 \
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
+  if (( status != 0 && STACK_STARTED )); then
+    smoke_ts group "collect: redacted ps and logs into $EVIDENCE_DIR"
+    [[ -f "$UPGRADE_ENV" ]] && { project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" ps -a \
+      && project_compose "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${UPGRADE_PROJECT}.log"
-    [[ -f "$ROLLBACK_ENV" ]] && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200 \
+    [[ -f "$ROLLBACK_ENV" ]] && { project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" ps -a \
+      && project_compose "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" logs --no-color --tail 200; } \
       2>&1 | redact >"$EVIDENCE_DIR/failure-${ROLLBACK_PROJECT}.log"
-    echo "upgrade-smoke failed after $((SECONDS - START_TS))s; kept for diagnosis:" >&2
+    smoke_ts endgroup
+  fi
+  if (( STACK_STARTED )); then
+    smoke_ts group "cleanup: ${ROLLBACK_PROJECT} ${UPGRADE_PROJECT}"
+    # Rollback first: with S3 its server joins the upgrade project's network.
+    teardown_project "$ROLLBACK_PROJECT" "$ROLLBACK_ENV" "$OLD_TREE" || torn=1
+    teardown_project "$UPGRADE_PROJECT" "$UPGRADE_ENV" "$UPGRADE_TREE" || torn=1
+    smoke_ts endgroup
+  fi
+  if (( torn )); then
+    printf 'FAIL: cleanup left resources or failed\n' >>"$ASSERT_LOG"
+    echo "upgrade-smoke cleanup failed; kept for diagnosis:" >&2
     echo "  projects, in this order: $ROLLBACK_PROJECT $UPGRADE_PROJECT (docker compose -p NAME down -v)" >&2
     echo "  work dir (0700, env files hold generated secrets): $WORK" >&2
+    (( status != 0 )) || status=1
+  else
+    (( STACK_STARTED )) && log_assert "cleanup: both projects down, no container, volume or network left: ok"
+    rm -rf "$WORK"
   fi
+  (( status == 0 )) || echo "upgrade-smoke failed after $((SECONDS - START_TS))s" >&2
   echo "evidence (redacted, kept): $EVIDENCE_DIR" >&2
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+phase plan
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 # --- Source identity -------------------------------------------------------
@@ -267,6 +257,7 @@ if [[ "$STORAGE" == s3 ]]; then
   log_assert "storage s3: compose.s3.yml in both trees, old backup.sh refuses S3"
 fi
 
+phase images
 # --- Images ----------------------------------------------------------------
 docker_free_gib() {
   df -P -BG "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /)" 2>/dev/null \
@@ -330,7 +321,7 @@ log_assert "images distinct: old=${OLD_IMAGE_ID} new=${NEW_IMAGE_ID}"
 
 # --- Helpers ---------------------------------------------------------------
 pick_port() {
-  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+  smoke_ts port
 }
 
 wait_http() {
@@ -362,10 +353,7 @@ running_ids() {
 
 # One container of the service, running, from the expected image.
 expect_service_image() {
-  local project="$1" service="$2" image="$3" ids
-  ids="$(running_ids "$project" "$service")"
-  [[ -n "$ids" && "$(wc -l <<<"$ids")" == 1 ]] || fail "$project/$service: expected one running container, got '${ids}'"
-  [[ "$(docker inspect -f '{{.Image}}' "$ids")" == "$image" ]] || fail "$project/$service does not run image $image"
+  xtask install-image running "$1" "$2" "$3" || fail "$1/$2 does not run image $3 (see install-image above)"
 }
 
 login() {
@@ -373,13 +361,13 @@ login() {
   : >"$COOKIE_JAR"
   curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $base" \
     -X POST "$base/api/v1/auth/login" -d "{\"email\":\"${OWNER_EMAIL}\",\"password\":\"${OWNER_LOGIN_PASSWORD}\"}" \
-    | python3 -c 'import json,sys; assert json.load(sys.stdin).get("userId")'
+    | smoke_check user-id -
 }
 
 check_seeded_data() {
   local base="$1" label="$2"
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/body" \
-    | python3 -c 'import json,sys; body=json.load(sys.stdin); assert body["contentJson"]==json.loads(sys.argv[1])["contentJson"], body' "$BODY_BEFORE" \
+    | smoke_check same-body - "$BODY_BEFORE" \
     || fail "$label: document body differs"
   local id
   for id in "${ATTACHMENT_IDS[@]}"; do
@@ -387,12 +375,7 @@ check_seeded_data() {
     [[ "$(sha256sum "$DOWNLOAD_PATH" | awk '{print $1}')" == "$FIXTURE_SHA" ]] || fail "$label: attachment $id bytes differ"
   done
   curl -fsS -b "$COOKIE_JAR" "$base/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
-    | python3 -c '
-import json, sys
-body = json.load(sys.stdin)
-items = body.get("items", body if isinstance(body, list) else [])
-assert any(c.get("id") == sys.argv[1] and c.get("body") == "업그레이드 댓글 🙂" for c in items), body
-' "$COMMENT_ID" || fail "$label: comment missing"
+    | smoke_check comment - "$COMMENT_ID" "업그레이드 댓글 🙂" || fail "$label: comment missing"
   log_assert "${label}: login, document body, ${#ATTACHMENT_IDS[@]} attachment(s) sha256 ${FIXTURE_SHA:0:12}, comment: ok"
 }
 
@@ -458,16 +441,7 @@ storage_key() {
 # The pinned mcli emits no isLatest; the latest version is the one with the
 # highest versionOrdinal (newest first numbering), which must be unique.
 object_versions() {
-  bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | python3 -c '
-import json, sys
-rows = [json.loads(line) for line in sys.stdin if line.strip()]
-assert rows and all(v.get("status") == "success" for v in rows), rows
-ordinals = [v["versionOrdinal"] for v in rows]
-assert all(isinstance(o, int) for o in ordinals) and len(set(ordinals)) == len(ordinals), rows
-for v in rows:
-    print(v["versionId"], v.get("size", 0), str(bool(v.get("isDeleteMarker"))).lower(),
-          str(v["versionOrdinal"] == max(ordinals)).lower(), v.get("etag") or "-")
-'
+  bucket_mc ls --versions "b/${S3_BUCKET_NAME}/$1" | smoke_ts object-versions
 }
 
 # Field of the latest version line (1 id, 2 size, 3 marker, 5 etag).
@@ -491,18 +465,10 @@ verify_storage() {
 
 # Asserts the single JSON report of the last verify_storage call.
 expect_storage_report() {
-  python3 -c '
-import json, sys
-reports = [l for l in sys.stdin.read().splitlines() if l.startswith("{")]
-assert len(reports) == 1, reports
-r = json.loads(reports[0])
-want = {"checked": int(sys.argv[1]), "missing": sorted(filter(None, sys.argv[2].split(","))),
-        "sizeMismatch": sorted(filter(None, sys.argv[3].split(",")))}
-got = {"checked": r["checked"], "missing": sorted(r["missing"]), "sizeMismatch": sorted(r["sizeMismatch"])}
-assert got == want and not r["previewMissing"] and not r["previewSizeMismatch"], (got, want, r)
-' "$@" <<<"$VS_OUT"
+  smoke_check storage-report "$VS_OUT" "$@"
 }
 
+phase old-install
 # --- 1. Old install with data ---------------------------------------------
 PORT="$(pick_port)"
 BASE="http://127.0.0.1:${PORT}"
@@ -523,19 +489,15 @@ SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 login "$BASE"
 SESSION="$(awk '$6 == "fvoci_session" { print $7; exit }' "$COOKIE_JAR")"
 SECRETS+=("$SESSION")
-WORKSPACE_ID="$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/me/workspaces" | python3 -c 'import json,sys; print(json.load(sys.stdin)["items"][0]["id"])')"
+WORKSPACE_ID="$(curl -fsS -b "$COOKIE_JAR" "$BASE/api/v1/me/workspaces" | json_field - items 0 id)"
 DOCUMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d '{"parentId":null,"title":"Upgrade doc"}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  | json_field - id)"
 if [[ "$STORAGE" == s3 ]]; then
   # RUNNING.md "S3 storage backup", item 1: the operator enables versioning
   # before relying on it. The server wrote no object yet (fresh install).
   bucket_mc version enable "b/${S3_BUCKET_NAME}" >/dev/null
-  bucket_mc version info "b/${S3_BUCKET_NAME}" | python3 -c '
-import json, sys
-info = json.load(sys.stdin)
-assert info.get("versioning", {}).get("status") == "Enabled", info
-' || fail "bucket versioning is not enabled"
+  bucket_mc version info "b/${S3_BUCKET_NAME}" | smoke_check versioning-enabled - || fail "bucket versioning is not enabled"
   [[ "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(running_ids "$UPGRADE_PROJECT" server)" \
     | grep -c '^STORAGE_DRIVER=s3$')" == 1 ]] || fail "old server does not run with STORAGE_DRIVER=s3"
   log_assert "old server on STORAGE_DRIVER=s3, run-owned silo bucket ${S3_BUCKET_NAME} versioning Enabled: ok"
@@ -551,8 +513,8 @@ upload_fixture() {
   init="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
     -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/uploads" \
     -d "{\"name\":\"${name}\",\"sizeBytes\":$(wc -c <"$FIXTURE_HWPX"),\"declaredMime\":\"application/x-hwp\"}")"
-  id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["attachmentId"])' "$init")"
-  part_url="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["parts"][0]["url"])' "$init")"
+  id="$(json_field "$init" attachmentId)"
+  part_url="$(json_field "$init" parts 0 url)"
   etag="$(curl -fsS -b "$COOKIE_JAR" -H "origin: $BASE" -X PUT "$BASE${part_url}" \
     --data-binary @"$FIXTURE_HWPX" -D - -o /dev/null | awk '/^[Ee]tag:/ { print $2; exit }' | tr -d '\r')"
   curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
@@ -575,7 +537,7 @@ if [[ "$STORAGE" == s3 ]]; then
 fi
 COMMENT_ID="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/comments" \
-  -d '{"body":"업그레이드 댓글 🙂"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  -d '{"body":"업그레이드 댓글 🙂"}' | json_field - id)"
 # A TOTP secret sealed with ENCRYPTION_KEYS k1 (setup only; login stays single-factor).
 curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/auth/mfa/setup" -d "{\"currentPassword\":\"${OWNER_LOGIN_PASSWORD}\"}" >/dev/null
@@ -584,6 +546,7 @@ SEALED_SQL="SELECT count(*) FROM fvoci.user_mfa WHERE totp_secret LIKE 'enc:v2:k
 check_seeded_data "$BASE" "old image seeded"
 log_assert "old image seed: collab body, HWPX extract ok, sealed MFA secret (k1): ok"
 
+phase backup
 # --- 2. Pre-upgrade backup with the old checkout ---------------------------
 if [[ "$STORAGE" == local ]]; then
   log_assert "== old checkout backup.sh --leave-stopped"
@@ -640,6 +603,7 @@ cp -p "$UPGRADE_ENV" "$BACKUP_ENV"
 [[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "server still running after the pre-upgrade backup"
 log_assert "pre-upgrade backup taken, old server stopped, env copy kept (0600): ok"
 
+phase upgrade
 # --- 3. Upgrade whose init fails -------------------------------------------
 sed -i "s#^FVOCI_IMAGE=.*#FVOCI_IMAGE=${NEW_TAG}#" "$UPGRADE_ENV"
 UPGRADE_TREE="$NEW_TREE"
@@ -687,10 +651,11 @@ done
 wait_http "$BASE"
 log_assert "retry: init exit 0, server on new image, schema through ${LAST_VERSION}, no old-image container in project: ok"
 
+phase verify-upgrade
 # --- 5. Upgraded data -------------------------------------------------------
 DOCTOR="$(project_compose "${UP[@]}" "$NEW_TREE" exec -T server /opt/fvoci/bin/fvoci-migrate --doctor)" \
   || { redact <<<"$DOCTOR" >&2; fail "doctor failed on upgraded install"; }
-python3 -c 'import json,sys; assert json.load(sys.stdin)["ok"] is True' <<<"$DOCTOR" || fail "doctor not ok"
+smoke_check doctor-ok "$DOCTOR" || fail "doctor not ok"
 login "$BASE"
 check_seeded_data "$BASE" "upgraded"
 [[ "$(sql "${UP[@]}" "$NEW_TREE" "SELECT extract_status FROM fvoci.attachments WHERE id='${ATTACHMENT_ID}'")" == ok ]] \
@@ -711,20 +676,14 @@ else
 fi
 redact <<<"$WRONG_VERIFY" >"$EVIDENCE_DIR/verify-secrets-wrong-key.log"
 (( WRONG_STATUS != 0 )) || fail "verify-secrets accepted a different k1"
-python3 -c '
-import json, sys
-reports = [line for line in sys.stdin.read().splitlines() if line.startswith("{")]
-assert len(reports) == 1, reports
-mfa = json.loads(reports[0])["userMfa"]
-assert mfa["checked"] == 1 and len(mfa["invalid"]) == 1 and mfa["keyUnavailable"] == [], mfa
-' <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
+smoke_check mfa-invalid - <"$EVIDENCE_DIR/verify-secrets-wrong-key.log" || fail "wrong-key verify-secrets did not report the MFA secret invalid"
 grep -q 'do not open with the configured ENCRYPTION_KEYS' "$EVIDENCE_DIR/verify-secrets-wrong-key.log" \
   || fail "wrong-key verify-secrets failed for another reason (exit ${WRONG_STATUS})"
-POST_DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+POST_DOC_COMMAND_ID="$(smoke_ts uuid)"
 POST_DOC_CREATE_BODY="{\"commandId\":\"${POST_DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"After upgrade\"}"
 POST_DOC="$(curl -fsS -b "$COOKIE_JAR" -H "content-type: application/json" -H "origin: $BASE" \
   -X POST "$BASE/api/v1/workspaces/${WORKSPACE_ID}/documents" -d "$POST_DOC_CREATE_BODY" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+  | json_field - id)"
 if [[ "$STORAGE" == s3 ]]; then
   verify_storage upgraded "${UP[@]}" "$NEW_TREE"
   (( VS_STATUS == 0 )) || fail "verify-storage failed on the upgraded install"
@@ -733,6 +692,7 @@ if [[ "$STORAGE" == s3 ]]; then
 fi
 log_assert "upgraded: doctor ok, extraction kept, sealed secret opens with k1 and is invalid under another k1 (exit ${WRONG_STATUS}), new write ok: ok"
 
+phase rollback
 log_assert "== stop upgraded server before rollback"
 UPGRADED_CID="$(running_ids "$UPGRADE_PROJECT" server)"
 project_compose "${UP[@]}" "$NEW_TREE" stop -t 45 server
@@ -886,7 +846,7 @@ if [[ "$STORAGE" == local ]]; then
   RESTORE_OUT="$(bash "$OLD_TREE/scripts/restore.sh" --project "$ROLLBACK_PROJECT" --env-file "$ROLLBACK_ENV" --input "$BACKUP_DIR" 2>&1)" \
     || { redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"; fail "old restore.sh failed"; }
   redact <<<"$RESTORE_OUT" >"$EVIDENCE_DIR/restore.log"
-  python3 -c 'import json,sys; assert json.loads(sys.argv[1].strip().splitlines()[-1]).get("secretsVerified") is True' "$RESTORE_OUT" \
+  smoke_check secrets-verified "$RESTORE_OUT" \
     || fail "restore did not verify secrets"
 else
   s3_rollback
@@ -903,4 +863,5 @@ POST_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
 [[ -z "$(running_ids "$UPGRADE_PROJECT" server)" ]] || fail "upgraded server running during rollback"
 log_assert "rollback: old image, schema through ${OLD_VERSIONS##*,}, secrets verified, seeded data present, post-backup write absent (expected loss): ok"
 
+phase collect
 log_assert "== upgrade-smoke complete ($((SECONDS - START_TS))s) old=${OLD_SHA} new=${NEW_SHA}"

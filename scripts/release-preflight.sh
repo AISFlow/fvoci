@@ -37,17 +37,7 @@ grep -qxF "<!-- notes-for: ${VERSION} -->" "$NOTES" \
   || fail "scripts/release-notes-template.md is not marked '<!-- notes-for: ${VERSION} -->'; rewrite the notes for this version"
 echo "release notes written for ${VERSION}: ok"
 
-python3 - "$ROOT/infra/rust/Dockerfile" <<'PY' || fail "infra/rust/Dockerfile: the rust-build stage must declare ARG FVOCI_BUILD_SHA"
-import re, sys
-stage = None
-for line in open(sys.argv[1], encoding="utf-8"):
-    start = re.match(r"\s*FROM\s+\S+(?:\s+AS\s+(\S+))?", line, re.IGNORECASE)
-    if start:
-        stage = (start.group(1) or "").lower()
-    elif stage == "rust-build" and re.match(r"\s*ARG\s+FVOCI_BUILD_SHA(=|\s|$)", line):
-        sys.exit(0)
-sys.exit(1)
-PY
+bun "$ROOT/tools/release/dist-check.ts" dockerfile "$ROOT/infra/rust/Dockerfile" || fail "infra/rust/Dockerfile: the rust-build stage must declare ARG FVOCI_BUILD_SHA"
 echo "Dockerfile rust-build stage declares ARG FVOCI_BUILD_SHA: ok"
 
 WORK="$(mktemp -d)"
@@ -65,39 +55,5 @@ fi
 sed -E 's/^([A-Z][A-Z0-9_]*)=$/\1=preflight-\1/' "$WORK/dist/env.example" >"$WORK/empty/.env"
 (cd "$WORK/empty" && env -i PATH="$PATH" HOME="$WORK" docker compose -f compose.yml config --format json) >"$WORK/config.json" \
   || fail "docker compose config rejects the rendered user compose with a filled .env"
-python3 - "$WORK/config.json" "$IMAGE:$VERSION@$ZERO" <<'PY' || fail "the rendered user compose does not match the release contract (docs/RELEASING.md)"
-import json, re, sys
-config = json.load(open(sys.argv[1]))
-services = config["services"]
-image = sys.argv[2]
-product = sorted(name for name, spec in services.items() if spec.get("image") == image)
-apps = sorted(name for name, spec in services.items()
-              if any(p.get("target") == 8080 for p in spec.get("ports") or []))
-problems = []
-if len(apps) != 1:
-    problems.append(f"expected one service publishing container port 8080, found {apps}")
-elif apps[0] not in product:
-    problems.append(f"{apps[0]} (publishes 8080) does not use the product image")
-if "postgres" not in services:
-    problems.append("no postgres service")
-for name, spec in services.items():
-    if spec.get("env_file"):
-        problems.append(f"{name} needs an env_file")
-# The filled .env gives each empty entry VAR the value preflight-VAR. Outside
-# the app, a service may receive only the value its own image needs; nowhere
-# may one appear outside `environment` (a command line is readable by every
-# host user).
-generated = re.compile(r"preflight-([A-Z][A-Z0-9_]*)")
-needed_outside_app = {"postgres": {"POSTGRES_PASSWORD"}, "meilisearch": {"MEILI_MASTER_KEY"}}
-for name, spec in services.items():
-    received = sorted({m for v in (spec.get("environment") or {}).values() for m in generated.findall(str(v))})
-    unneeded = [] if name in apps else [v for v in received if v not in needed_outside_app.get(name, set())]
-    if unneeded:
-        problems.append(f"{name} gets .env values it does not need: {unneeded}")
-    elsewhere = sorted(set(generated.findall(json.dumps({k: v for k, v in spec.items() if k != "environment"}))))
-    if elsewhere:
-        problems.append(f"{name} has .env values outside its environment: {elsewhere}")
-print(f"product image services: {product}; app: {apps}")
-sys.exit("\n".join(problems) if problems else 0)
-PY
+bun "$ROOT/tools/release/dist-check.ts" compose-config "$WORK/config.json" "$IMAGE:$VERSION@$ZERO" || fail "the rendered user compose does not match the release contract (docs/RELEASING.md)"
 echo "rendered user compose: unfilled env.example refused, filled .env accepted by docker compose config, each generated value only in the environment of a service that needs it: ok"

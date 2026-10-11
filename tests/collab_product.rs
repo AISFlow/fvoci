@@ -1,10 +1,12 @@
 #![cfg(feature = "db-tests")]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use axum::Router;
@@ -92,6 +94,7 @@ async fn fixture_password_hash() -> &'static str {
 
 /// Parallel tests in one binary must not storm past the process-wide live-helper cap.
 /// Reserve one slot per hub/server (four for the 4-room cap tests).
+/// Release it once that hub or server is shut down, before `TestDb::cleanup`.
 ///
 /// A test holds at most one reservation at a time: it releases the first
 /// before it takes a second. The semaphore is fair, so a queued four-slot
@@ -112,9 +115,36 @@ fn helper_capacity_semaphore(config: &CollabConfig) -> Arc<Semaphore> {
     guard.1.clone()
 }
 
+/// Slots held per test thread. Each `#[tokio::test]` runs a current-thread
+/// runtime on its own thread, so every hold a test takes is counted there.
+static HELPER_HOLDS_BY_THREAD: LazyLock<Mutex<HashMap<ThreadId, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn helper_holds_on_this_thread() -> usize {
+    HELPER_HOLDS_BY_THREAD
+        .lock()
+        .expect("helper holds")
+        .get(&std::thread::current().id())
+        .copied()
+        .unwrap_or(0)
+}
+
 struct HelperChildCapacityHold {
     #[allow(dead_code)]
     permits: Vec<OwnedSemaphorePermit>,
+    thread: ThreadId,
+}
+
+impl Drop for HelperChildCapacityHold {
+    fn drop(&mut self) {
+        let mut holds = HELPER_HOLDS_BY_THREAD.lock().expect("helper holds");
+        if let Some(count) = holds.get_mut(&self.thread) {
+            *count -= 1;
+            if *count == 0 {
+                holds.remove(&self.thread);
+            }
+        }
+    }
 }
 
 impl HelperChildCapacityHold {
@@ -127,8 +157,21 @@ impl HelperChildCapacityHold {
             .acquire_many_owned(u32::try_from(room_slots).expect("room slots"))
             .await
             .expect("helper child capacity");
+        // The per-thread count below is only this test's own on its own runtime.
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread,
+            "helper holds are counted per test thread"
+        );
+        let thread = std::thread::current().id();
+        *HELPER_HOLDS_BY_THREAD
+            .lock()
+            .expect("helper holds")
+            .entry(thread)
+            .or_insert(0) += 1;
         Self {
             permits: vec![permits],
+            thread,
         }
     }
 }
@@ -286,7 +329,11 @@ impl TestDb {
         }
     }
 
+    /// Fails the test if it still holds a helper slot (after dropping the
+    /// database): DROP DATABASE takes seconds under parallel load, and a slot
+    /// held through it stalls every test queued on HELPER_CHILD_CAPACITY.
     async fn cleanup(self) {
+        let held_helper_slots = helper_holds_on_this_thread();
         let server_url = server_db_url(&self.admin_url);
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -308,6 +355,10 @@ impl TestDb {
                 .await;
             pool.close().await;
         }
+        assert_eq!(
+            held_helper_slots, 0,
+            "helper capacity still held at DB cleanup; drop it after the hub or server shutdown"
+        );
     }
 }
 
@@ -1629,7 +1680,7 @@ async fn collab_concurrent_first_joins_both_succeed() {
     run_lifecycle_test("collab_concurrent_first_joins_both_succeed", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub_arc(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
                 .await;
         let key = (wiki.session.workspace_id, wiki.document_id);
@@ -1666,6 +1717,7 @@ async fn collab_concurrent_first_joins_both_succeed() {
         assert!(hub.room_occupies_slot(key).await);
         hub.shutdown().await;
         assert_eq!(hub.available_room_slots(), slots_before);
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -1686,7 +1738,7 @@ async fn collab_seed_pool_saturation_leaves_room_open_headroom() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let config = test_collab_config(4, 30_000);
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub(config.clone(), wiki.session.pool.clone(), 1).await;
             assert_eq!(
                 collab_engine::process::max_seed_child_concurrency(),
@@ -1732,6 +1784,7 @@ async fn collab_seed_pool_saturation_leaves_room_open_headroom() {
             assert!(!update.is_empty());
             drop(leases);
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -1747,7 +1800,7 @@ async fn collab_lifecycle_failed_start_reuses_slot() {
             .await
             .expect("db")
             .expect("room lock should be free");
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let mut leases = DirectHubLeases::new();
         assert_eq!(hub.available_room_slots(), 4);
@@ -1759,6 +1812,7 @@ async fn collab_lifecycle_failed_start_reuses_slot() {
         assert_eq!(hub.available_room_slots(), 3);
         hub.shutdown().await;
         assert_eq!(hub.available_room_slots(), 4);
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -1769,7 +1823,7 @@ async fn collab_lifecycle_cancelled_start_releases_slot() {
     run_lifecycle_test("collab_lifecycle_cancelled_start_releases_slot", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub_arc(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
                 .await;
         let join_task = tokio::spawn({
@@ -1785,6 +1839,7 @@ async fn collab_lifecycle_cancelled_start_releases_slot() {
             result.ok()
         );
         assert_eq!(hub.available_room_slots(), 4);
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -1798,7 +1853,7 @@ async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let outsider = setup_owner_session(&harness).await;
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1)
                     .await;
             let mut leases = DirectHubLeases::new();
@@ -1824,6 +1879,7 @@ async fn collab_lifecycle_denied_joins_do_not_reserve_slots() {
             assert!(hub_join(&mut leases, &hub, &wiki, 1).await.is_ok());
             assert_eq!(hub.available_room_slots(), 3);
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -1838,7 +1894,7 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let (hub, _helper_capacity) = new_test_collab_hub_arc(
+            let (hub, helper_capacity) = new_test_collab_hub_arc(
                 test_collab_config(4, 30_000),
                 wiki.session.pool.clone(),
                 1,
@@ -1883,6 +1939,7 @@ async fn collab_lifecycle_starting_gate_blocks_second_creator() {
             assert_eq!(hub.available_room_slots(), slots_before - 1);
             disarm_spawn_room_block(wiki.document_id).await;
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -1897,7 +1954,7 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub_arc(test_collab_config(4, 200), wiki.session.pool.clone(), 1)
                     .await;
             let key = (wiki.session.workspace_id, wiki.document_id);
@@ -1921,6 +1978,7 @@ async fn collab_lifecycle_aborted_booting_creator_releases_slot() {
             assert!(hub_join(&mut leases, &hub, &wiki, 2).await.is_ok());
             disarm_spawn_room_block(wiki.document_id).await;
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -1932,7 +1990,7 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
     run_lifecycle_test("collab_lifecycle_max_rooms_then_reuse_after_leave", async {
         let harness = TestDb::bootstrap().await;
         let docs = setup_wiki_doc_batch(&harness, 5).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 200), docs[0].session.pool.clone(), 4).await;
         let mut leases = DirectHubLeases::new();
 
@@ -1954,6 +2012,7 @@ async fn collab_lifecycle_max_rooms_then_reuse_after_leave() {
         assert_eq!(hub.available_room_slots(), 1);
         assert!(hub_join(&mut leases, &hub, &docs[4], 2).await.is_ok());
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -1972,7 +2031,7 @@ async fn collab_room_cap_reclaims_empty_room_before_refusing() {
             // path reads. At 120 s it is four times this test's whole time budget, so the
             // within-grace refusal below cannot become a reclaim on a stalled runner; the
             // past-grace case ages the room explicitly.
-            let (hub, _helper_capacity) = new_test_collab_hub(
+            let (hub, helper_capacity) = new_test_collab_hub(
                 CollabConfig {
                     rpc_timeout_ms: 120_000,
                     ..test_collab_config(4, 600_000)
@@ -2061,6 +2120,7 @@ async fn collab_room_cap_reclaims_empty_room_before_refusing() {
                 "every live room has a member, got {again:?}"
             );
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2113,7 +2173,7 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_join() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 5).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 5_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             for doc in docs.iter().take(3) {
@@ -2167,6 +2227,7 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_join() {
             assert_eq!(hub.room_member_count(keys[3]).await, 1);
             disarm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2182,7 +2243,7 @@ async fn collab_room_cap_reclaim_skips_empty_room_with_paused_rejoin() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 5).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 5_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             let mut conn_ids = Vec::new();
@@ -2227,6 +2288,7 @@ async fn collab_room_cap_reclaim_skips_empty_room_with_paused_rejoin() {
             assert_eq!(hub.room_member_count(keys[3]).await, 1);
             disarm_hub_join_barrier(docs[3].document_id, HUB_JOIN_BARRIER_AFTER_SLOT_READY).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2243,7 +2305,7 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_borrow() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 5).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 5_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 5_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             for doc in docs.iter().take(3) {
@@ -2288,6 +2350,7 @@ async fn collab_room_cap_reclaim_skips_room_started_for_paused_borrow() {
             assert_eq!(room_start_count(docs[3].document_id).await, 1);
             disarm_hub_join_barrier(docs[3].document_id, HUB_BORROW_BARRIER_AFTER_SLOT_READY).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2381,7 +2444,7 @@ async fn reclaim_keeps_last_disconnect_session_revision(stale_head: bool) {
     let harness = TestDb::bootstrap().await;
     let docs = setup_wiki_doc_batch(&harness, 5).await;
     // The ACL tick never fires, so no later loop iteration can run the retry.
-    let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+    let (hub, helper_capacity) = room_cap_hub(&docs, 600_000).await;
     let keys = hub_keys(&docs);
     let mut leases = DirectHubLeases::new();
     let mut conn_ids = Vec::new();
@@ -2433,6 +2496,7 @@ async fn reclaim_keeps_last_disconnect_session_revision(stale_head: bool) {
     );
     disarm_session_revision_persist_barrier(docs[0].document_id).await;
     assert!(hub.shutdown().await.is_clean());
+    drop(helper_capacity);
     harness.cleanup().await;
 }
 
@@ -2474,7 +2538,7 @@ async fn collab_room_cap_reclaim_skips_room_with_borrowed_operation() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 5).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 600_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             let mut conn_ids = Vec::new();
@@ -2537,6 +2601,7 @@ async fn collab_room_cap_reclaim_skips_room_with_borrowed_operation() {
             );
             disarm_session_revision_persist_barrier(docs[3].document_id).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2553,7 +2618,7 @@ async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 5).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 600_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             let mut conn_ids = Vec::new();
@@ -2607,6 +2672,7 @@ async fn collab_room_cap_cancelled_reclaim_restores_capacity() {
             }
             disarm_teardown_barrier(docs[0].document_id).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2623,7 +2689,7 @@ async fn collab_room_cap_concurrent_admissions_reclaim_distinct_rooms() {
         async {
             let harness = TestDb::bootstrap().await;
             let docs = setup_wiki_doc_batch(&harness, 6).await;
-            let (hub, _helper_capacity) = room_cap_hub(&docs, 600_000).await;
+            let (hub, helper_capacity) = room_cap_hub(&docs, 600_000).await;
             let keys = hub_keys(&docs);
             let mut leases = DirectHubLeases::new();
             let mut conn_ids = Vec::new();
@@ -2712,6 +2778,7 @@ async fn collab_room_cap_concurrent_admissions_reclaim_distinct_rooms() {
             disarm_hub_join_barrier(docs[4].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
             disarm_hub_join_barrier(docs[5].document_id, HUB_JOIN_BARRIER_AFTER_RECLAIM_SCAN).await;
             assert!(hub.shutdown().await.is_clean());
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2725,12 +2792,13 @@ async fn collab_memory_budget_refusal_frees_room_slot() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 200);
         cfg.memory_budget_bytes = 1;
-        let (hub, _helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
+        let (hub, helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
         let mut leases = DirectHubLeases::new();
         let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
         assert!(matches!(denied, Err(JoinError::CapacityRetry)));
         assert_eq!(hub.available_room_slots(), 4);
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -2946,7 +3014,7 @@ async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
             let mut tight_cfg = test_collab_config(4, 200);
             tight_cfg.memory_budget_bytes = 20 * 1024 * 1024;
             let tight_budget = tight_cfg.memory_budget_bytes;
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub(tight_cfg, wiki.session.pool.clone(), 1).await;
             let mut leases = DirectHubLeases::new();
             let denied = hub_join(&mut leases, &hub, &wiki, 1).await;
@@ -2957,6 +3025,7 @@ async fn collab_memory_budget_uses_persisted_factor_not_floor_only() {
             "20 MiB budget would admit the 16 MiB floor alone; denial must come from 14× persisted"
         );
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -2979,7 +3048,7 @@ async fn collab_memory_budget_counts_rooms_admitted_before_their_first_load() {
             let mut cfg = test_collab_config(4, 30_000);
             cfg.memory_budget_bytes =
                 2 * collab_engine::limits::MIN_ROOM_MEMORY_RESERVATION_BYTES + 1024 * 1024;
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub_arc(cfg, docs[0].session.pool.clone(), 4).await;
             let mut releases = Vec::new();
             for doc in &docs {
@@ -3050,6 +3119,7 @@ async fn collab_memory_budget_counts_rooms_admitted_before_their_first_load() {
                 leases.retain(lease);
             }
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -3061,7 +3131,7 @@ async fn collab_estimate_fail_frees_room_slot() {
     run_lifecycle_test("collab_estimate_fail_frees_room_slot", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
         arm_force_estimate_fail(wiki.document_id);
         let mut leases = DirectHubLeases::new();
@@ -3070,6 +3140,7 @@ async fn collab_estimate_fail_frees_room_slot() {
         assert!(matches!(denied, Err(JoinError::DbError)));
         assert_eq!(hub.available_room_slots(), 4);
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -3195,7 +3266,7 @@ async fn collab_lifecycle_idle_eviction_allows_rejoin() {
     run_lifecycle_test("collab_lifecycle_idle_eviction_allows_rejoin", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let mut leases = DirectHubLeases::new();
@@ -3207,6 +3278,7 @@ async fn collab_lifecycle_idle_eviction_allows_rejoin() {
         assert!(hub_join(&mut leases, &hub, &wiki, 2).await.is_ok());
         assert_eq!(hub.available_room_slots(), 3);
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -4137,7 +4209,7 @@ async fn collab_two_readonly_joins_then_writer_edits() {
             .unwrap();
         admin.close().await;
 
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let mut leases = DirectHubLeases::new();
@@ -4195,6 +4267,7 @@ async fn collab_two_readonly_joins_then_writer_edits() {
             "writer update must persist after two readonly joins"
         );
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -4402,7 +4475,7 @@ async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
         async {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
-            let (hub, _helper_capacity) =
+            let (hub, helper_capacity) =
                 new_test_collab_hub(test_collab_config(4, 200), wiki.session.pool.clone(), 1).await;
             let key = (wiki.session.workspace_id, wiki.document_id);
             let mut leases = DirectHubLeases::new();
@@ -4426,6 +4499,7 @@ async fn collab_lifecycle_foreign_leave_does_not_evict_member() {
             hub.leave_room(key, conn_id).await;
             wait_for_phase(&hub, key, RoomLifecyclePhase::Absent).await;
             hub.shutdown().await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -4440,7 +4514,7 @@ async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
             let harness = TestDb::bootstrap().await;
             let wiki = setup_wiki_doc(&harness).await;
             let release = arm_spawn_room_block(wiki.document_id).await;
-            let (hub, _helper_capacity) = new_test_collab_hub_arc(
+            let (hub, helper_capacity) = new_test_collab_hub_arc(
                 test_collab_config(4, 30_000),
                 wiki.session.pool.clone(),
                 1,
@@ -4479,6 +4553,7 @@ async fn collab_lifecycle_shutdown_during_booting_reclaims_slot() {
                 RoomLifecyclePhase::Absent
             );
             disarm_spawn_room_block(wiki.document_id).await;
+            drop(helper_capacity);
             harness.cleanup().await;
         },
     )
@@ -4742,7 +4817,7 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
     run_lifecycle_test("collab_outbound_queue_saturation", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
@@ -4940,6 +5015,7 @@ async fn collab_outbound_queue_saturation_closes_slow_peer() {
             "late joiner must not receive ghost presence for the evicted peer"
         );
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -4950,7 +5026,7 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
     run_lifecycle_test("collab_awareness_generation_takeover", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
@@ -5050,6 +5126,7 @@ async fn collab_awareness_generation_takeover_old_leave_cannot_clear() {
             "stale connection leave must not remove newer generation claim"
         );
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -5062,7 +5139,7 @@ async fn collab_client_id_live_ownership_blocks_other_user() {
         let wiki = setup_wiki_doc(&harness).await;
         let mut cfg = test_collab_config(4, 30_000);
         cfg.client_id_ttl_ms = 5_000;
-        let (hub, _helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
+        let (hub, helper_capacity) = new_test_collab_hub(cfg, wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
         let peer = setup_second_member(&harness, &wiki).await;
@@ -5152,6 +5229,7 @@ async fn collab_client_id_live_ownership_blocks_other_user() {
             .await
             .expect("same user generation takeover must still be allowed");
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;
@@ -5162,7 +5240,7 @@ async fn collab_late_join_receives_peer_awareness_snapshot() {
     run_lifecycle_test("collab_late_join_awareness", async {
         let harness = TestDb::bootstrap().await;
         let wiki = setup_wiki_doc(&harness).await;
-        let (hub, _helper_capacity) =
+        let (hub, helper_capacity) =
             new_test_collab_hub(test_collab_config(4, 30_000), wiki.session.pool.clone(), 1).await;
         let key = (wiki.session.workspace_id, wiki.document_id);
         let routing_key = room_key(wiki.session.workspace_id, wiki.document_id);
@@ -5258,6 +5336,7 @@ async fn collab_late_join_receives_peer_awareness_snapshot() {
             "late joiner must receive existing peer awareness snapshot on join"
         );
         hub.shutdown().await;
+        drop(helper_capacity);
         harness.cleanup().await;
     })
     .await;

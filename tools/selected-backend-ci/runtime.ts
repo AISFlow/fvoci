@@ -1,4 +1,4 @@
-import { deepEquals, spawnSync } from "bun";
+import { deepEquals, spawn, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
@@ -11,35 +11,45 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import process from "node:process";
-import { admittedBrowser, browserInventory, identity, runtimeAccess } from "./admission.ts";
+import {
+  admittedBrowser,
+  assertRuntimeJob,
+  browserInventory,
+  identity,
+  runtimeAccess,
+} from "./admission.ts";
 import { reference } from "./build.ts";
 import {
   accessible,
   ancestors,
   assertHandoffActor,
   below,
+  bunDriver,
   call,
   digest,
   env,
+  failureDigest,
   files,
   gid,
   inventory,
   jsonInteger,
   observedExit,
+  publicCheckpoint,
   read,
   root,
   sha,
   sourceInputText,
-  spawnSelectedCommand,
-  templates,
   tool,
   uid,
+  wrapperInterruptGrace,
   write,
 } from "./io.ts";
 import type {
@@ -65,9 +75,9 @@ export const selectedRuns = [
   ["postgres", "off"],
   ["sqlite", "off"],
 ] as const;
-export function requestedRuns(
-  value = process.env.FVOCI_COLLAB_LANE,
-): readonly (readonly [Lane, Flow])[] {
+// The caller's `--lane` argument is the only lane source; the runtime actor's
+// sudo environment does not carry the shell's FVOCI_COLLAB_LANE.
+export function requestedRuns(value?: string): readonly (readonly [Lane, Flow])[] {
   if (value === undefined) return selectedRuns;
   const match = /^(install|postgres|sqlite)\/(on|off)$/.exec(value);
   assert.ok(match, "unknown collaboration lane");
@@ -99,15 +109,6 @@ const reportStates = [
   "spec-mismatch",
   "status-not-known",
 ];
-// Diagnostics are hashes of canonical JSON, never a Python exception repr.
-function failureDigest(value: unknown): string {
-  const keys = new Set<string>();
-  JSON.stringify(value, (key, child: unknown) => {
-    if (key) keys.add(key);
-    return child;
-  });
-  return digest(JSON.stringify(value, [...keys].sort()));
-}
 export function publicFailureFields(facts: DriverReceipt): Record<string, unknown> {
   const phase = facts.failed_phase,
     original = facts.original_driver_failure;
@@ -140,12 +141,7 @@ export function publicFailureFields(facts: DriverReceipt): Record<string, unknow
     failureTypes.includes(kind) &&
     typeof code === "string" &&
     failureCodes.includes(code);
-  const driverCheckpoint =
-    preparation &&
-    typeof driver === "string" &&
-    /^scripts\/selected-backend-ci\/current-sqlite-driver\.py:[1-9][0-9]{0,3}$/.test(driver)
-      ? driver
-      : null;
+  const driverCheckpoint = preparation ? publicCheckpoint(driver) : null;
   return {
     failed_phase: typeof phase === "string" && publicPhases.includes(phase) ? phase : null,
     known_driver_checkpoint: driverCheckpoint,
@@ -240,16 +236,17 @@ export function laneRetirement(
 }
 
 export function prepareBrowser(output: string, chromium: string): string {
+  // The preparation owner is the actual host user, never root; its numeric
+  // value is not an ownership check (macOS and CI hosts differ).
   const runner = uid();
-  assert.ok(runner >= 1000);
+  assert.ok(runner !== 0 && gid() !== 0, "browser preparation refuses root");
   const component = dirname(dirname(chromium)),
     cache = dirname(component);
   assert.match(basename(component), /^chromium-[0-9]+$/);
   assert.ok(
     !lstatSync(cache).isSymbolicLink() &&
       statSync(cache).uid === runner &&
-      statSync(cache).gid === gid() &&
-      gid() >= 1000,
+      statSync(cache).gid === gid(),
   );
   const components = readdirSync(cache)
     .filter((name) => /^(chromium|chromium_headless_shell|ffmpeg)-[0-9]+$/.test(name))
@@ -309,10 +306,30 @@ export function prepareBrowser(output: string, chromium: string): string {
   });
   return copied;
 }
-export function runtimePermissions(output: string, sqliteParent: string, dockerGid: number): void {
+export interface PermissionBoundary {
+  identity: typeof identity;
+  // Private runtime copy of the admitted browser; returns the copied executable.
+  browser: (output: string, bun: string) => string;
+}
+const permissionBoundary: PermissionBoundary = {
+  identity,
+  browser: (output, bun) =>
+    prepareBrowser(
+      output,
+      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
+    ),
+};
+export function runtimePermissions(
+  output: string,
+  sqliteParent: string,
+  dockerGid: number,
+  boundary: PermissionBoundary = permissionBoundary,
+): void {
+  // The docker socket group joins the actor's groups; group 0 is never granted.
+  assert.ok(dockerGid > 0, "root group is never granted as the docker group");
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
-  const owner = identity("run", output);
-  assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
+  const owner = boundary.identity("run", output);
+  assertRuntimeJob();
   const runnerUid = uid(),
     runnerGid = gid(),
     temp = realpathSync(env("RUNNER_TEMP"));
@@ -340,10 +357,7 @@ export function runtimePermissions(output: string, sqliteParent: string, dockerG
   assert.equal(before.head, env("GITHUB_SHA"));
   assert.ok(deepEquals(read(join(output, "after.json")), before));
   const bun = realpathSync(tool("bun")),
-    chromium = prepareBrowser(
-      output,
-      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
-    );
+    chromium = boundary.browser(output, bun);
   const paths: Record<string, number> = Object.fromEntries(
     Object.keys(before.tracked).map((p) => [join(root, p), constants.R_OK]),
   );
@@ -378,7 +392,9 @@ export function runtimePermissions(output: string, sqliteParent: string, dockerG
         facts.gid === runnerGid &&
         ((facts.mode >> 3) & required) === required
       ) {
-        assert.ok(runnerGid >= 1000);
+        // A group-grant boundary, not an ownership check: never hand a system or
+        // privileged group (root, adm, sudo, ... below GID 1000) to the actor.
+        assert.ok(runnerGid >= 1000, "privileged preparation group is never granted");
         allowedGroups.add(runnerGid);
         needed[entry] = {
           path_sha256: digest(entry),
@@ -448,7 +464,15 @@ export interface RunBoundary {
     signal: AbortSignal,
   ) => number | Promise<number>;
 }
-export const driverCommand = (driver: string) => [tool("python3"), driver];
+// The lane drivers run on this Bun without .env autoload; each refuses to start
+// without `--no-env-file`.
+export const driverCommand = bunDriver;
+export const laneDriver = (lane: Lane) =>
+  join(root, "tools/selected-backend-ci/drivers", lane + ".ts");
+// The grants hash these driver modules by path. The runner never imports a
+// lane-driver module: its top level would run before the lease is checked.
+export const bindingModule = join(root, "tools/selected-backend-ci/drivers/binding.ts");
+export const restartHelper = join(root, "tools/selected-backend-ci/drivers/restart.ts");
 const runBoundary: RunBoundary = {
   identity,
   access: runtimeAccess,
@@ -467,26 +491,63 @@ const runBoundary: RunBoundary = {
       chromium_directory_files: inventory(dirname(chromium)),
     };
   },
-  async execute(driver, environment, log, signal) {
-    // Same interpreter selected by the Python caller's PATH, same driver argv.
-    // These retained lane drivers are not a fallback to the old runner.
-    const fd = openSync(log, "wx");
+  execute(driver, environment, log, signal) {
+    return executeDriver(driverCommand(driver), environment, log, signal);
+  },
+};
+// Outlasts the longest grace a lane driver gives its own fixture wrappers (the
+// PostgreSQL wrapper, 2 x wrapperInterruptGrace) and the cleanup after it.
+export const driverInterruptGrace = 3 * wrapperInterruptGrace;
+// A lane driver owns fixture wrappers whose EXIT traps remove their
+// containers. On an interrupt it is not killed at once, as a stage child is:
+// it gets SIGINT and is waited for, so it closes its lane and writes its
+// receipt before the runner returns. Only a driver still running after
+// `grace` is SIGKILLed. The interrupt is then raised as before (exit 130).
+export async function executeDriver(
+  command: string[],
+  environment: Environment,
+  log: string,
+  signal: AbortSignal,
+  grace = driverInterruptGrace,
+): Promise<number> {
+  signal.throwIfAborted();
+  const fd = openSync(log, "wx");
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const child = spawn(command, {
+      cwd: root,
+      env: environment,
+      stdout: fd,
+      stderr: fd,
+      stdin: "inherit",
+    });
+    const interrupt = () => {
+      child.kill("SIGINT");
+      deadline ??= setTimeout(() => {
+        child.kill("SIGKILL");
+      }, grace);
+    };
+    signal.addEventListener("abort", interrupt, { once: true });
     try {
-      const child = spawnSelectedCommand(driverCommand(driver), environment, fd, fd, signal);
       const exitCode = await child.exited;
       if (signal.aborted) throw signal.reason;
       return observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
     } finally {
-      closeSync(fd);
+      signal.removeEventListener("abort", interrupt);
     }
-  },
-};
+  } finally {
+    clearTimeout(deadline);
+    closeSync(fd);
+  }
+}
 export async function run(
   output: string,
   boundary: RunBoundary = runBoundary,
   expected: readonly [number, number] = [1000, 1000],
+  lane?: string,
 ): Promise<number> {
   assert.notEqual(process.env.GITHUB_JOB, "collaboration-build");
+  const runs = requestedRuns(lane);
   assertHandoffActor(output, expected);
   const owner = boundary.identity("run", output),
     before = read(join(output, "before.json")) as Inputs;
@@ -513,7 +574,6 @@ export async function run(
     FVOCI_CI_BUN: browser.bun.path,
     FVOCI_CI_SELECTED_RUNS: runtime,
     FVOCI_ROOT_RUN_OWNER: owner,
-    PYTHONDONTWRITEBYTECODE: "1",
   };
   const local = process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local";
   const authority = local
@@ -529,11 +589,13 @@ export async function run(
         runId: env("GITHUB_RUN_ID"),
         runAttempt: env("GITHUB_RUN_ATTEMPT"),
       };
-  const runs = requestedRuns();
-  const only = runs.length === 1 ? runs[0] : undefined;
+  // A later single lane reads the install receipt its caller placed in output.
+  const closedInstall = join(output, "closed-install-receipt.json");
   let closed: Reference | null = null;
-  if (only && only[0] !== "install") closed = reference(env("FVOCI_CLOSED_INSTALL_RECEIPT"));
-  else assert.equal(process.env.FVOCI_CLOSED_INSTALL_RECEIPT, undefined);
+  if (runs.length === 1 && runs[0]?.[0] !== "install") {
+    assert.ok(lstatSync(closedInstall).isFile(), "closed install receipt required");
+    closed = reference(closedInstall);
+  }
   let code = 0;
   const results: RunResult[] = [];
   let launcherFailure: {
@@ -548,11 +610,13 @@ export async function run(
     error.name = "InterruptError";
     controller.abort(error);
   };
-  process.once("SIGINT", interrupt);
+  // Not once: the runner now waits for the driver, and a second SIGINT must not
+  // end it before the aggregate receipt is written.
+  process.on("SIGINT", interrupt);
   try {
     for (const [lane, flow] of runs) {
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),
-        driver = join(templates, "current-" + lane + "-driver.py");
+        driver = laneDriver(lane);
       const manifest: Record<string, unknown> = {
         schema: 1,
         ready: true,
@@ -581,7 +645,7 @@ export async function run(
           backend: lane,
           runRoot,
           parentDriverSha256: sha(driver),
-          restartHelperSha256: sha(join(templates, "restart_checkpoint.py")),
+          restartHelperSha256: sha(restartHelper),
           sourceInputsSha256: digest(sourceInputText(sourceWritten)),
           artifactHashes: Object.fromEntries(
             Object.entries(bundle.binaries).map(([p, r]) => [p, r.sha256]),
@@ -622,7 +686,7 @@ export async function run(
         runRoot,
         driverSha256: sha(driver),
         bindingSha256: sha(manifestPath),
-        bindingModuleSha256: sha(join(templates, "current_binding.py")),
+        bindingModuleSha256: sha(bindingModule),
       });
       environment.FVOCI_ROOT_CURRENT_BINDING = manifestPath;
       environment.FVOCI_ROOT_CURRENT_ALLOCATION = allocation;
@@ -659,8 +723,9 @@ export async function run(
       if (lane === "install") {
         const receipt = join(runRoot, "receipt.json");
         closed = reference(receipt);
+        // Exclusive private copy: never replace an occupied destination.
         if (runs.length === 1)
-          cpSync(receipt, join(output, "closed-install-receipt.json"), { errorOnExist: true });
+          writeFileSync(closedInstall, readFileSync(receipt), { flag: "wx", mode: 0o600 });
       }
     }
   } catch (error) {
@@ -724,6 +789,8 @@ export async function run(
 export function ownershipReturn(
   output: string,
   expected: readonly [number, number] = [1000, 1000],
+  lane?: string,
+  admit: typeof identity = identity,
 ): void {
   const diagnostic: Record<string, unknown> = {
     schema: 1,
@@ -738,9 +805,10 @@ export function ownershipReturn(
   try {
     assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
     assertHandoffActor(output, expected);
-    const owner = identity("run", output);
+    const owner = admit("run", output);
     diagnostic.phase = "current-source";
-    assert.equal(process.env.GITHUB_JOB, "collaboration-flow");
+    assertRuntimeJob();
+    const requested = requestedRuns(lane);
     const before = read(join(output, "before.json")) as Inputs;
     assert.equal(before.head, env("GITHUB_SHA"));
     diagnostic.source = before.head;
@@ -851,16 +919,15 @@ export function ownershipReturn(
           }
         }
       }
-      const expected = requestedRuns();
       assert.ok(
         deepEquals(
           result.runs.map((r) => [r.lane, r.flow]),
-          expected,
+          requested,
         ),
       );
       proof = {
-        closed_current_runs: expected.map(([lane, flow]) => ({ lane, flow })),
-        ...(expected.some(([lane]) => lane === "install")
+        closed_current_runs: requested.map(([lane, flow]) => ({ lane, flow })),
+        ...(requested.some(([lane]) => lane === "install")
           ? { installation_process_receipts: 15 }
           : {}),
       };

@@ -14,10 +14,27 @@
 # The image stands in for the release reference exactly as release files do:
 # the `${FVOCI_IMAGE:-...}` default is replaced, nothing else changes. The file
 # publishes 127.0.0.1:8080, which must be free. Host tools: docker, curl, jq,
-# python3. Secret values are compared in memory and never printed.
+# bun. Secret values are compared in memory and never printed.
+# Each `step` is a phase (tools/install-smoke/smoke.ts). The trap removes every
+# project the run created on success, failure and INT/TERM and fails a passing
+# run if a container, volume or network of one remains. Two runs on one host
+# collide on 127.0.0.1:8080: that port is part of the user compose file under test.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Trap glue only: phases, the first error and log groups are
+# tools/install-smoke/smoke.ts; image identity, running-image and leftover
+# checks are `cargo xtask install-image`.
+smoke_ts() { bun "$ROOT/tools/install-smoke/smoke.ts" "$@"; }
+xtask() { cargo run --quiet --locked --manifest-path "$ROOT/xtask/Cargo.toml" -- "$@"; }
+json_field() { smoke_ts field "$@"; }
+smoke_check() { smoke_ts check "$@"; }
+SMOKE_STATE="$(mktemp "${TMPDIR:-/tmp}/standalone-install-smoke-state.XXXXXX")"
+smoke_ts init "$SMOKE_STATE" standalone-install-smoke
+phase() { smoke_ts phase "$SMOKE_STATE" "$1"; }
+fail() { smoke_ts fail "$SMOKE_STATE" "$*"; exit 1; }
+set -E
+trap 'SMOKE_ERR=$?; [[ $BASHPID != "$$" ]] || smoke_ts error "$SMOKE_STATE" "$SMOKE_ERR" "$LINENO" "$BASH_COMMAND"' ERR
 IMAGE="${FVOCI_INSTALL_IMAGE:?FVOCI_INSTALL_IMAGE must name a built product image}"
 RUN_ID="$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 export COMPOSE_PROJECT_NAME="fvoci-install-smoke-${RUN_ID}"
@@ -28,25 +45,47 @@ BASE=http://localhost:8080
 ORIGIN=http://localhost:8080
 PROJECTS=("$MAIN")
 
-step() { printf '== %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+step() { phase "$*"; }
+
+# teardown PROJECT COMPOSE...: down -v, then nothing labelled PROJECT may remain.
+teardown() {
+  local project="$1" out rc=0
+  shift
+  if ! out="$("$@" down -v --remove-orphans 2>&1)"; then
+    printf 'cleanup: down failed for %s:\n%s\n' "$project" "$out" >&2
+    rc=1
+  fi
+  xtask install-image leftovers --project "$project" || rc=1
+  return "$rc"
+}
 
 cleanup() {
-  local status=$? p
-  if (( status != 0 )); then
-    (cd "$WORK" && docker compose ps -a >&2; docker compose logs --no-color --tail 80 >&2) || true
+  local status=$? p torn=0
+  set +e
+  trap - ERR
+  smoke_ts report "$SMOKE_STATE" "$status"
+  if [[ -f "$WORK/compose.yml" ]]; then
+    if (( status != 0 )); then
+      smoke_ts group "collect: compose ps and logs (last 80 lines)"
+      (cd "$WORK" && docker compose ps -a; docker compose logs --no-color --tail 80) 2>&1 | smoke_ts quote >&2
+      smoke_ts endgroup
+    fi
+    smoke_ts group "cleanup: ${PROJECTS[*]}"
+    for p in "${PROJECTS[@]}"; do
+      teardown "$p" docker compose --project-directory "$WORK" -f "$WORK/compose.yml" -p "$p" || torn=1
+    done
+    smoke_ts endgroup
   fi
-  for p in "${PROJECTS[@]}"; do
-    (cd "$WORK" && COMPOSE_PROJECT_NAME="$p" docker compose down -v --remove-orphans >/dev/null 2>&1) || true
-  done
+  (( torn == 0 || status != 0 )) || status=1
   rm -rf "$WORK"
+  smoke_ts finish "$SMOKE_STATE" "$status"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for cmd in docker curl jq python3; do
+for cmd in docker curl jq bun; do
   command -v "$cmd" >/dev/null || fail "missing host command: $cmd"
 done
 docker image inspect "$IMAGE" >/dev/null || fail "image not found: $IMAGE"
@@ -58,39 +97,11 @@ grep -q "&fvoci-image ${IMAGE}\$" "$WORK/compose.yml" || fail "image substitutio
 cp "$ROOT/infra/rust/compose.user.env.example" "$WORK/env.example"
 cd "$WORK"
 
-# fill_env: .env from env.example, a fresh value for every empty entry in the
-# format its comment shows (openssl rand -hex 32; *_KEYS keyring under its
-# *_ACTIVE_KEY_ID).
-fill_env() {
-  python3 - env.example .env <<'PY'
-import re, secrets, sys
-text = open(sys.argv[1], encoding="utf-8").read()
-values = dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", text, re.MULTILINE))
-out = []
-for line in text.splitlines():
-    empty = re.fullmatch(r"([A-Z][A-Z0-9_]*)=", line)
-    if empty:
-        key = empty.group(1)
-        if key.endswith("_KEYS"):
-            line = f'{key}={{"{values[key[:-5] + "_ACTIVE_KEY_ID"]}":"{secrets.token_hex(32)}"}}'
-        else:
-            line = f"{key}={secrets.token_hex(32)}"
-    out.append(line)
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out) + "\n")
-PY
-  chmod 600 .env
-}
+# .env from env.example as the user procedure fills it, and single-key edits
+# (tools/install-smoke/smoke.ts fill-env / set-env).
+fill_env() { smoke_ts fill-env env.example .env || fail "cannot fill .env from env.example"; }
 env_value() { sed -n "s/^$1=//p" .env; }
-set_env() { # KEY VALUE
-  python3 - .env "$1" "$2" <<'PY'
-import re, sys
-path, key, value = sys.argv[1:]
-text = open(path, encoding="utf-8").read()
-text, n = re.subn(rf"^{key}=.*$", lambda _: f"{key}={value}", text, flags=re.MULTILINE)
-assert n == 1, key
-open(path, "w", encoding="utf-8").write(text)
-PY
-}
+set_env() { smoke_ts set-env .env "$1" "$2" || fail "cannot set $1 in .env"; }
 logs() { docker compose logs --no-color "$1" 2>&1; }
 state() {
   local cid
@@ -326,7 +337,7 @@ curl -fsS -c "$JAR" -b "$JAR" -H 'content-type: application/json' -H "origin: $O
   -d '{"email":"owner@install.test","password":"installpass1","givenName":"Owner","workspaceSlug":"install","workspaceName":"Install"}' >/dev/null
 login
 WS="$(curl -fsS -b "$JAR" "$BASE/api/v1/me/workspaces" | jq -er '.items[0].id')"
-DOC_COMMAND_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+DOC_COMMAND_ID="$(smoke_ts uuid)"
 DOC_CREATE_BODY="{\"commandId\":\"${DOC_COMMAND_ID}\",\"parentId\":null,\"title\":\"Install doc\"}"
 DOC="$(curl -fsS -b "$JAR" -H 'content-type: application/json' -H "origin: $ORIGIN" \
   -X POST "$BASE/api/v1/workspaces/${WS}/documents" -d "$DOC_CREATE_BODY" | jq -er .id)"
@@ -380,7 +391,7 @@ done
 echo "checked $N secret values against $(wc -l <<<"$LOGS") log lines: none found"
 
 step "a changed POSTGRES_PASSWORD: restart keeps the old value, up -d applies it and is refused, the original starts again"
-set_env POSTGRES_PASSWORD "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+set_env POSTGRES_PASSWORD "$(smoke_ts random-hex)"
 # The container keeps the environment it was created with.
 docker compose restart fvoci
 wait_healthy

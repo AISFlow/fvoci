@@ -1,0 +1,13 @@
+756b56944a3e66a9d7b86486102c929a14d29e1559fac7b0c47d29c46bbcf547  D-B1-extract-version-255.zip
+39d98a9526208a4dcef76edbd44f506fd3ac3ed5073f64a3d47bce17eb9c4c4f  D-B1-extract-version-64.zip
+17c5c605ffee912ceaba78dc57216322fb8a8b234722500f1e1b857658e54739  D-B2-zip64-extra-twice-size-ffffffff.zip
+56102485899fa65623b58cb7111685b2c611308c447436facdc290b63a2e4557  D-B2-zip64-extra-twice-size-u64max.zip
+9314de7cf7386adc5f4bc2017f810aa8aa0d9f44945b37ab3b8f5ff8962e8f65  D-N1-unicode-path-bad-utf8.zip
+35e01e41e42cd5baf98ce83ea942efb51b5607ac05fd4c338701484cb26d8e5f  D-N1-unicode-path-short.zip
+ac6e99dba1101c27ce7d28ba7a75013e57c2ef51bc4ca9aa593e6a64995b30d7  D-N1-utf8-flag-invalid-name.zip
+e9f787e33d1077ddeaff52ea948ccd3b75fa35541ccd6bee2a6e1a13cb56c989  D-N3-zip64-sentinel-no-extra.zip
+a6248a0a09d28ed4813a945530137a874d587209c7260ca5c7db4575d03b8b86  G1-version-0x0314-must-accept.zip
+abd85e8f55f841bfabef1ec76bf88eade6a6d6a4a650296b99c4e383a72f7a83  G2-extract-version-63-must-accept.zip
+a710d8fca87c67c2f74b340a6c979c686e883fe1a185026603c61025c0529198  G3-zip64-extra-twice-resolved-1TiB-must-accept.zip
+b47f9390374610ffec2c58e190cd1a8417a47deaefcf3420535820954cf446c6  G4-zip64-extra-twice-unneeded-must-accept.zip
+17190ccaa616d214ec8f67b94e6d326ab9a54641021b6bf84abd2df43d95e979  G5-duplicate-entry-count6.zip

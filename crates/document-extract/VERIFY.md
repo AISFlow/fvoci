@@ -5,9 +5,8 @@ Rust 1.98.1. Pin `edwardkim/rhwp` `e8800c8def63449808a4092798442652ed460552`.
 Native extraction is **not** product-accepted.
 
 ```sh
-export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
-export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
-export PATH="$CARGO_HOME/bin:$PATH"
+# Rust 1.98.1 from rust-toolchain.toml; for a non-default toolchain set
+# CARGO_HOME, RUSTUP_HOME and PATH as in RUNNING.md.
 cd crates/document-extract
 export CARGO_TARGET_DIR="$PWD/target"
 ```

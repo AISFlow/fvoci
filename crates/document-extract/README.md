@@ -110,9 +110,8 @@ Worktree-local target. Do **not** `cargo git` clone rhwp into the shared
 `CARGO_HOME`. From this crate directory:
 
 ```sh
-export CARGO_HOME=/home/kinesis/orca/toolchains/fvoci-rust/cargo
-export RUSTUP_HOME=/home/kinesis/orca/toolchains/fvoci-rust/rustup
-export PATH="$CARGO_HOME/bin:$PATH"
+# Rust 1.98.1 from rust-toolchain.toml; for a non-default toolchain set
+# CARGO_HOME, RUSTUP_HOME and PATH as in RUNNING.md.
 cd crates/document-extract
 export CARGO_TARGET_DIR="$PWD/target"
 sh fetch-rhwp.sh
