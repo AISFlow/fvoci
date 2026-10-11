@@ -5,7 +5,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 ## 어디를 보나
 
 - 스키마: `migrations/postgres/060`, `migrations/sqlite/060`, `src/db/migrate.rs`
-- CI 선택: `scripts/ci_selection.py`. 게이트: `.github/workflows/{rust,web,install,documents,collab-engine}.yml`
+- CI 선택: `tools/ci/{plan,verify-workflows,gate,argv}.ts`·`tools/ci/{planner,verify,gate}/`. 게이트: `.github/workflows/{rust,web,install,documents,collab-engine}.yml`
 - 웹 정적 검사: `.github/workflows/web.yml` `web-static`, 루트 `package.json`. Turso: `docs/testing-turso.md`
 - 프론트 기능·상태는 `fvoci-vue-implementation`, 시각·CJK는 `frontend-design`, Rust 구현은 `fvoci-rust-slice`다. 인증·인가·DB·migration은 `fvoci-db-security`, PostgreSQL 성능은 `fvoci-postgres-performance`다.
 - 표준·SDK 선택은 `fvoci-standard-implementations`, 원본 호환 조사에는 `fvoci-source-contract`, 설치·native child·build 경계에는 `fvoci-runtime-boundaries`를 쓴다. 검사 선택은 `fvoci-fast-verify`, 제출·재개·병합은 `fvoci-handoff`다.
@@ -19,7 +19,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 - `src/`, `crates/`, `migrations/`: `cargo fmt --check`와 그 타깃의 `cargo test --locked --offline`
 - `apps/web/`, `packages/` TS·Vue: 루트에서 `bun run lint`, `bun run format:check`, 해당 스크립트가 있는 패키지에서 `bun --bun run typecheck`, `bun run test`를 실행한다. 자체 스크립트가 없는 공유 패키지는 바뀐 계약을 소비하는 패키지의 검사로 검증하고 cwd와 선택 근거를 남긴다. bare `bun test`는 쓰지 않는다.
-- `.github/workflows/`, `scripts/ci_selection.py`: `bash scripts/test-ci-selection.sh`
+- `.github/workflows/`, `tools/ci/{plan,verify-workflows,gate,argv}.ts`·`tools/ci/{planner,verify,gate}/`: 루트에서 `bun tools/ci/verify-workflows.ts`와 `bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts`
 - 인가·RLS·잠금·원자성: 실제 DB·앱 역할. `TEST_DATABASE_URL`이 없으면 실패로 남긴다.
 
 되돌릴 수 있고 영향이 작은 변경에는 구현을 그대로 반영하는 테스트를 새로 쓰지 말고, 변경에 맞는 테스트와 필수 검사가 통과하면 새 문제가 없는 한 테스트를 넓히지 마라.
@@ -30,7 +30,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 
 - main 병합은 병합 검사가 통과하고 병합 SHA를 방에 먼저 게시한 뒤에 허용된다. 0.x는 리뷰어 2/2와 게이트 5개(`rust-ci-gate`, `web-ci-gate`, `install-ci-gate`, `documents-ci-gate`, `collab-engine-ci-gate`) PASS. 1.0.0 병합은 메인테이너 말이 있을 때 허용된다. 절차는 `fvoci-handoff`다.
 - 브랜치 삭제는 main에 포함됐는지 다시 확인한 뒤 그 목록을 게시한 다음에 허용된다. 절차는 `fvoci-handoff`다.
-- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. `docs/rewrite.md`는 1명. workflow, xtask, 게이트, ruleset, `scripts/ci_selection.py`는 2명 ACCEPT. workflow·xtask·게이트의 0.x 병합은 그 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 허용된다. AGENTS.md와 `.agents/` 스킬은 리뷰어 ACCEPT와 CI에 더해, 그 커밋 40자 SHA에 대한 메인테이너의 명시 승인이 있어야 한다(메인테이너, 2026-10-10 11:08 KST). GitHub ruleset·branch protection·권한 설정 변경은 문서 정책 변경과 구분한다. 리뷰어 2명 ACCEPT에 더해 정확한 대상과 변경 내용에 대한 메인테이너 명시 승인이 필요하며, 기존 보호 조건을 우회·약화하지 않는다. 주 리뷰어: AGENTS.md·`.agents/` 스킬은 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
+- 리뷰 수는 여기에만 적는다. 작은 변경은 1명. `docs/rewrite.md`는 1명. workflow, xtask, 게이트, ruleset, `tools/ci/{plan,verify-workflows,gate,argv}.ts`·`tools/ci/{planner,verify,gate}/`는 2명 ACCEPT. workflow·xtask·게이트의 0.x 병합은 그 2명 ACCEPT와 필수 CI PASS 뒤에, 병합 SHA와 규칙 요약을 게시한 다음 허용된다. AGENTS.md와 `.agents/` 스킬은 리뷰어 ACCEPT와 CI에 더해, 그 커밋 40자 SHA에 대한 메인테이너의 명시 승인이 있어야 한다(메인테이너, 2026-10-10 11:08 KST). GitHub ruleset·branch protection·권한 설정 변경은 문서 정책 변경과 구분한다. 리뷰어 2명 ACCEPT에 더해 정확한 대상과 변경 내용에 대한 메인테이너 명시 승인이 필요하며, 기존 보호 조건을 우회·약화하지 않는다. 주 리뷰어: AGENTS.md·`.agents/` 스킬은 리드가 배정하고 기본은 CI·웹과 Rust. xtask는 Rust가 주고 CI·웹이 교차. 의존성 변경은 Rust가 주고 DB가 교차.
 - 작성자와 리뷰어는 다른 주체다. 리뷰어는 검토하는 커밋을 고치지 않는다.
 - 태그와 릴리스는 메인테이너 말이 있고 대상 SHA가 방에 먼저 게시된 뒤에 허용된다. 이미 게시된 태그, `:0.y.z` 이미지, Release 파일은 그 내용 그대로 남을 때 유지된다.
 - 배포, 시크릿, 패키지 공개 범위, 유료 사용은 메인테이너 말이 있을 때 허용된다.
