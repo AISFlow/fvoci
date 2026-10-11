@@ -119,7 +119,19 @@ fn raw_archive(path: &Path, members: Vec<Raw>) {
     for member in members {
         let mut header = Header::new_gnu();
         let name = &mut header.as_gnu_mut().unwrap().name;
-        name[..member.name.len()].copy_from_slice(&member.name);
+        let fits = member.name.len().min(name.len());
+        name[..fits].copy_from_slice(&member.name[..fits]);
+        if fits < member.name.len() {
+            // A name past the 100-byte field (an absolute path under a long
+            // TMPDIR) goes in a GNU long-name record, kept verbatim.
+            let mut long = Header::new_gnu();
+            long.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+            long.set_entry_type(EntryType::GNULongName);
+            let data = [member.name.as_slice(), b"\0"].concat();
+            long.set_size(data.len() as u64);
+            long.set_cksum();
+            builder.append(&long, data.as_slice()).unwrap();
+        }
         header.set_entry_type(member.kind);
         header.set_mode(0o755);
         header.set_size(member.data.len() as u64);
@@ -350,14 +362,17 @@ fn nonregular_unsafe_and_extra_members_refuse_before_writing() {
 
 #[test]
 fn member_paths_outside_target_refuse_before_writing() {
+    // None is an absolute path under this case's own root, outside target/.
     for path in [
-        "/tmp/first",
-        "./target/db-tests/first",
-        "src/first",
-        "target//first",
-        "target/./first",
+        None,
+        Some("./target/db-tests/first"),
+        Some("src/first"),
+        Some("target//first"),
+        Some("target/./first"),
     ] {
         let root = temp();
+        let outside = root.join("outside/first");
+        let path = path.unwrap_or_else(|| outside.to_str().unwrap());
         let (context, mut entries) = fixture(&root, "exit 0");
         let source = fs::read(root.join(FIRST)).unwrap();
         let first = entries.get_mut("first").unwrap();
@@ -374,10 +389,7 @@ fn member_paths_outside_target_refuse_before_writing() {
         fs::remove_dir_all(root.join("target")).unwrap();
         let error = unpack_both(&archive, &context, &root).unwrap_err();
         assert!(error.contains("path escape"), "{path}: {error}");
-        assert!(
-            !root.join("target").exists() && !Path::new("/tmp/first").exists(),
-            "{path}"
-        );
+        assert!(!root.join("target").exists() && !outside.exists(), "{path}");
     }
 }
 
