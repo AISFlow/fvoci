@@ -31,7 +31,9 @@ afterEach(() => {
   if (fixtureDirectory) rmSync(fixtureDirectory, { recursive: true, force: true });
   fixtureDirectory = undefined;
 });
-after(() => rmSync(fixtures, { recursive: true, force: true }));
+after(() => {
+  rmSync(fixtures, { recursive: true, force: true });
+});
 
 function quote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
