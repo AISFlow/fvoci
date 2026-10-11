@@ -15,7 +15,12 @@ const configs = [
   ["e2e/perf/perf.config.ts", "focused.perf.ts"],
 ] as const;
 
-function runFixture(config: string, filename: string, ci: string | undefined, focused = true) {
+async function runFixture(
+  config: string,
+  filename: string,
+  ci: string | undefined,
+  focused = true,
+) {
   // Keep package resolution inside this worktree, with a separate testDir and
   // receipts per invocation. No browser, server or external service is needed.
   const directory = mkdtempSync(join(webRoot, ".forbid-only-"));
@@ -41,7 +46,11 @@ function runFixture(config: string, filename: string, ci: string | undefined, fo
        test("ordinary", () => appendFileSync(${JSON.stringify(receipt)}, "ordinary\\n"));
        test${focused ? ".only" : ""}("focused", () => appendFileSync(${JSON.stringify(receipt)}, "focused\\n"));`,
     );
-    const result = Bun.spawnSync([process.execPath, cli, "test", "--config", configPath], {
+    // Not Bun.spawnSync: in a `bun test --parallel` worker (Bun 1.4.2) its
+    // private wait loop can lose the child's exit and spin forever past the
+    // test timeout (oven-sh/bun#34069, #43697). An async child lets the
+    // per-test timeout fail the test instead.
+    const child = Bun.spawn([process.execPath, cli, "test", "--config", configPath], {
       cwd: webRoot,
       env: {
         PATH: process.env.PATH,
@@ -52,13 +61,18 @@ function runFixture(config: string, filename: string, ci: string | undefined, fo
       stdout: "pipe",
       stderr: "pipe",
     });
-    expect(result.stderr.toString()).toBe("");
-    const report = JSON.parse(result.stdout.toString()) as JSONReport;
+    const [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).arrayBuffer().then((data) => Buffer.from(data)),
+      new Response(child.stderr).arrayBuffer().then((data) => Buffer.from(data)),
+      child.exited,
+    ]);
+    expect(stderr.toString()).toBe("");
+    const report = JSON.parse(stdout.toString()) as JSONReport;
     expect(report.config.workers).toBe(1);
     expect(report.config.projects).toHaveLength(1);
     expect(report.config.projects[0]?.retries).toBe(0);
     return {
-      code: result.exitCode,
+      code: child.exitCode,
       report,
       executed: existsSync(receipt) ? readFileSync(receipt, "utf8") : "",
     };
@@ -69,8 +83,8 @@ function runFixture(config: string, filename: string, ci: string | undefined, fo
 
 for (const [config, filename] of configs) {
   for (const ci of ["1", "0"]) {
-    test(`${config}: CI=${ci} rejects test.only before any test body runs`, () => {
-      const { code, report, executed } = runFixture(config, filename, ci);
+    test(`${config}: CI=${ci} rejects test.only before any test body runs`, async () => {
+      const { code, report, executed } = await runFixture(config, filename, ci);
       expect(code).not.toBe(0);
       expect(report.config.forbidOnly).toBe(true);
       expect(report.errors).toHaveLength(1);
@@ -82,8 +96,8 @@ for (const [config, filename] of configs) {
     });
   }
   for (const ci of [undefined, ""]) {
-    test(`${config}: CI ${ci === undefined ? "unset" : "empty"} keeps local test.only selection`, () => {
-      const { code, report, executed } = runFixture(config, filename, ci);
+    test(`${config}: CI ${ci === undefined ? "unset" : "empty"} keeps local test.only selection`, async () => {
+      const { code, report, executed } = await runFixture(config, filename, ci);
       expect(code).toBe(0);
       expect(report.config.forbidOnly).toBe(false);
       expect(report.errors).toHaveLength(0);
@@ -92,8 +106,8 @@ for (const [config, filename] of configs) {
       expect(executed).toBe("focused\n");
     });
   }
-  test(`${config}: CI=1 still runs both tests without test.only`, () => {
-    const { code, report, executed } = runFixture(config, filename, "1", false);
+  test(`${config}: CI=1 still runs both tests without test.only`, async () => {
+    const { code, report, executed } = await runFixture(config, filename, "1", false);
     expect(code).toBe(0);
     expect(report.errors).toHaveLength(0);
     expect(report.stats.expected).toBe(2);

@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { spawnSync } from "bun";
+import { spawn } from "bun";
 
 const root = resolve(import.meta.dir, "../../../..");
 const probe = join(root, "scripts/collab-capacity-probe.sh");
@@ -106,7 +106,7 @@ interface Fixture {
   buildExit?: number;
 }
 
-function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
+async function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
   const directory = mkdtempSync(join(fixtures, "case-"));
   const emptyPath = join(directory, "empty-path");
   mkdirSync(emptyPath);
@@ -114,7 +114,11 @@ function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
   const argv = join(directory, "argv.log");
   writeFileSync(events, "");
   writeFileSync(argv, "");
-  const result = spawnSync(
+  // Not spawnSync: in a `bun test --parallel` worker (Bun 1.4.2) its private
+  // wait loop can lose the child's exit and spin forever past the test
+  // timeout (oven-sh/bun#34069, #43697). An async child lets the per-test
+  // timeout fail the test instead.
+  const child = spawn(
     [
       "/usr/bin/bash",
       "--noprofile",
@@ -142,12 +146,17 @@ function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
       stderr: "pipe",
     },
   );
-  writeFileSync(join(directory, "stdout.log"), result.stdout);
-  writeFileSync(join(directory, "stderr.log"), result.stderr);
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout).arrayBuffer().then((data) => Buffer.from(data)),
+    new Response(child.stderr).arrayBuffer().then((data) => Buffer.from(data)),
+    child.exited,
+  ]);
+  writeFileSync(join(directory, "stdout.log"), stdout);
+  writeFileSync(join(directory, "stderr.log"), stderr);
   return {
-    exit: result.exitCode,
-    stdout: result.stdout.toString(),
-    stderr: result.stderr.toString(),
+    exit: child.exitCode,
+    stdout: stdout.toString(),
+    stderr: stderr.toString(),
     events: readFileSync(events, "utf8").trim().split("\n"),
     argv: readFileSync(argv, "utf8")
       .split("\0\0")
@@ -159,7 +168,7 @@ function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
 
 // Mandatory preparation, separate from guard tests. A failure throws before any
 // test can source the product; every later source repeats both readiness checks.
-const readiness = runFixture({ stdout: "" }, "preflight");
+const readiness = await runFixture({ stdout: "" }, "preflight");
 assert.equal(readiness.exit, 0, "fixture preflight failed; product entrypoint blocked");
 assert.deepEqual(readiness.events, ["child:ready", "parent:ready"]);
 assert.deepEqual(readiness.argv, []);
@@ -235,8 +244,8 @@ const cases: { name: string; log: string; exit: number }[] = [
 ];
 
 for (const fixture of cases) {
-  await test(fixture.name, () => {
-    const result = runFixture({ stdout: fixture.log });
+  await test(fixture.name, async () => {
+    const result = await runFixture({ stdout: fixture.log });
     assert.equal(result.exit, fixture.exit);
     assert.deepEqual(result.events, [
       "child:ready",
@@ -260,8 +269,8 @@ for (const fixture of cases) {
   });
 }
 
-await test("source entrypoint preserves cargo argv and probe defaults in its child", () => {
-  const result = runFixture({ stdout: passed, stderr: target });
+await test("source entrypoint preserves cargo argv and probe defaults in its child", async () => {
+  const result = await runFixture({ stdout: passed, stderr: target });
   assert.equal(result.exit, 0);
   assert.deepEqual(result.argv, [
     [
@@ -314,16 +323,16 @@ await test("source entrypoint preserves cargo argv and probe defaults in its chi
   ]);
 });
 
-await test("cargo nonzero propagates even with a successful summary", () => {
-  const result = runFixture({ stdout: target + passed, testExit: 23 });
+await test("cargo nonzero propagates even with a successful summary", async () => {
+  const result = await runFixture({ stdout: target + passed, testExit: 23 });
   assert.equal(result.exit, 23);
   assert.match(result.stderr, /failed \(exit 23\)/);
   assert.ok(!result.stdout.includes("collab capacity probe passed;"));
 });
 
 for (const build of ["helperExit", "buildExit"] as const) {
-  await test(`${build} stops before the driver`, () => {
-    const result = runFixture({ stdout: target + passed, [build]: 17 });
+  await test(`${build} stops before the driver`, async () => {
+    const result = await runFixture({ stdout: target + passed, [build]: 17 });
     assert.equal(result.exit, 17);
     assert.deepEqual(result.events, ["child:ready", "parent:ready"]);
     assert.equal(result.argv.length, build === "helperExit" ? 1 : 2);
