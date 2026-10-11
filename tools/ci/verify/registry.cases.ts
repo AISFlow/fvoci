@@ -214,21 +214,53 @@ function caseList(): MutationCase[] {
     swap(WEB_GATE, "          # " + WEB_GATE.trimStart() + "          true\n"),
     "canonical gate invocation",
   );
-  add(
-    "rust-missing-selector-wrapper",
-    "rust.yml",
-    swap("          bash scripts/test-ci-selection.sh\n", ""),
-    "must run scripts/test-ci-selection.sh",
-  );
-  add(
-    "web-duplicate-selector-wrapper",
-    "web.yml",
-    swap(
-      "          bun tools/ci/plan.ts \\\n",
-      "          bash scripts/test-ci-selection.sh\n          bun tools/ci/plan.ts \\\n",
-    ),
-    "must not duplicate scripts/test-ci-selection.sh",
-  );
+  // rust ci-plan runs the selector regression commands itself, before the plan.
+  const VERIFY_WORKFLOWS = "          bun tools/ci/verify-workflows.ts\n";
+  const SELECTOR_TESTS =
+    "          bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts\n";
+  const GITHUB_OUTPUT_ARG = '            --github-output "$GITHUB_OUTPUT"\n';
+  const mustRun = (line: string) =>
+    `rust: ci-plan must run "${line.trim()}" once before plan output`;
+  for (const [name, edit, needle] of [
+    ["missing-verify-workflows", swap(VERIFY_WORKFLOWS, ""), mustRun(VERIFY_WORKFLOWS)],
+    ["missing-selector-tests", swap(SELECTOR_TESTS, ""), mustRun(SELECTOR_TESTS)],
+    [
+      "selector-test-path-dropped",
+      swap(" ./tools/ci/gate/ ./tools/ci/verify/", " ./tools/ci/verify/"),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "selector-test-file-dropped",
+      swap(" ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts", " ./tools/ci/argv.test.ts"),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "selector-after-plan",
+      (text: string) =>
+        swap(GITHUB_OUTPUT_ARG, GITHUB_OUTPUT_ARG + SELECTOR_TESTS)(swap(SELECTOR_TESTS, "")(text)),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "duplicate-verify-workflows",
+      swap(VERIFY_WORKFLOWS, VERIFY_WORKFLOWS + VERIFY_WORKFLOWS),
+      mustRun(VERIFY_WORKFLOWS),
+    ],
+    [
+      "wrapper-back",
+      swap(VERIFY_WORKFLOWS + SELECTOR_TESTS, "          bash scripts/test-ci-selection.sh\n"),
+      mustRun(VERIFY_WORKFLOWS),
+    ],
+  ] as const) {
+    add(`rust-selector-${name}`, "rust.yml", edit, needle);
+  }
+  for (const line of [VERIFY_WORKFLOWS, SELECTOR_TESTS]) {
+    add(
+      `web-duplicate-selector-${line.includes("verify-workflows") ? "verify" : "tests"}`,
+      "web.yml",
+      swap("          bun tools/ci/plan.ts \\\n", line + "          bun tools/ci/plan.ts \\\n"),
+      `web: ci-plan must not duplicate "${line.trim()}"`,
+    );
+  }
   for (const workflow of GATED) {
     const file = `${workflow}.yml`;
     const gate = `${workflow}-ci-gate`;

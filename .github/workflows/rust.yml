@@ -50,7 +50,8 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          bash scripts/test-ci-selection.sh
+          bun tools/ci/verify-workflows.ts
+          bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts
           bun tools/ci/plan.ts \
             --workflow rust \
             --event-json "$GITHUB_EVENT_PATH" \
