@@ -1143,6 +1143,170 @@ function caseList(): MutationCase[] {
       "rust: postgres strategy must be exactly",
     );
   }
+  // rust.yml runs the prebuilt xtask and Bun; each former python3 caller is rejected.
+  const XTASK = "xtask/target/debug/xtask";
+  const OLD = "python3 scripts/ci_selection.py";
+  const NOT_PYTHON = "must run xtask or Bun, not Python";
+  for (const [name, edit, needle] of [
+    [
+      "build",
+      swap(`${XTASK} rust-binaries build `, `${OLD} rust-binaries build `),
+      "binary producer must build the complete registered cohort",
+    ],
+    [
+      "pack",
+      swap(`${XTASK} rust-binaries pack `, `${OLD} rust-binaries pack `),
+      "binary producer must seal the cohort with the prebuilt xtask",
+    ],
+    [
+      "unpack-postgres",
+      swap(
+        `${XTASK} rust-binaries unpack --cohort postgres `,
+        `${OLD} rust-binaries unpack --cohort postgres `,
+      ),
+      "binary consumers must validate all inputs and hashes unconditionally",
+    ],
+    [
+      "unpack-helper",
+      swap(
+        `${XTASK} rust-binaries unpack --cohort helper `,
+        `${OLD} rust-binaries unpack --cohort helper `,
+      ),
+      "binary consumers must validate all inputs and hashes unconditionally",
+    ],
+    [
+      "run",
+      swap(`run: ${XTASK} rust-binaries run `, `run: ${OLD} rust-binaries run `),
+      "PostgreSQL integration step must execute validated db-tests binaries",
+    ],
+    [
+      "s3",
+      swap(
+        `start-test-minio.sh ${XTASK} rust-binaries run `,
+        `start-test-minio.sh ${OLD} rust-binaries run `,
+      ),
+      "S3 integration step must invoke start-test-minio.sh",
+    ],
+    [
+      "schema",
+      swap(
+        `          ${XTASK} schema-baseline\n`,
+        "          python3 - <<'PYSCHEMA'\n          PYSCHEMA\n",
+      ),
+      "schema baseline requires exact configured extraction",
+    ],
+    [
+      "install",
+      swap(`sudo ${XTASK} selected-install `, "sudo python3 - "),
+      "selected install step must keep exact",
+    ],
+    [
+      "library",
+      swap(
+        "          xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
+        "          python3 - <<'PYLIB'\n          PYLIB\n",
+      ),
+      "selected library step must keep exact unconditional command",
+    ],
+    [
+      "encryption",
+      swap(
+        "      - run: bun tools/oracle/encryption-keys.ts self-test\n",
+        "      - run: python3 scripts/encryption_keys.py self-test\n",
+      ),
+      NOT_PYTHON,
+    ],
+    [
+      "rustup-metadata",
+      swap(
+        "          bun test scripts/schema-baseline/compare-catalogs.test.ts\n",
+        "          bun test scripts/schema-baseline/compare-catalogs.test.ts\n          python3 scripts/fixtures/rustup-ci/test_metadata.py\n",
+      ),
+      NOT_PYTHON,
+    ],
+    [
+      "fast-apt",
+      within(
+        "  fast:\n",
+        "  native-arm64:\n",
+        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+      ),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "job-default-shell",
+      swap(
+        "  native-arm64:\n    needs: ci-plan\n",
+        "  native-arm64:\n    needs: ci-plan\n    defaults:\n      run:\n        shell: python {0}\n",
+      ),
+      "rust: native-arm64 " + NOT_PYTHON,
+    ],
+    [
+      "setup-python",
+      within(
+        "  collaboration:\n",
+        "  rust-ci-gate:\n",
+        swap(
+          "      - run: cargo fetch --locked\n",
+          "      - uses: actions/setup-python@v5\n      - run: cargo fetch --locked\n",
+        ),
+      ),
+      "rust: collaboration " + NOT_PYTHON,
+    ],
+    [
+      "xtask-before-prepare",
+      within(
+        "  collaboration:\n",
+        "  rust-ci-gate:\n",
+        swap(
+          "      - name: Prepare pinned SQLite root build inputs\n",
+          "      - run: xtask/target/debug/xtask --help\n      - name: Prepare pinned SQLite root build inputs\n",
+        ),
+      ),
+      "rust: collaboration SQLite prefix verification must precede",
+    ],
+    [
+      "postgres-apt",
+      within(
+        "  postgres:\n",
+        "  collaboration:\n",
+        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+      ),
+      "rust: postgres " + NOT_PYTHON,
+    ],
+    [
+      "shell",
+      swap(
+        "        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+        "        shell: python\n        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+      ),
+      "rust: collaboration " + NOT_PYTHON,
+    ],
+    [
+      "dpkg-identity",
+      within(
+        "  postgres-build:\n",
+        "  postgres:\n",
+        swap("libclang-18-dev curl >", "libclang-18-dev python3 curl >"),
+      ),
+      "postgres-build SQLite prefix cache must retain exact",
+    ],
+    [
+      "no-xtask-clippy",
+      swap(
+        "      - run: cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings\n",
+        "",
+      ),
+      '--all-targets -- -D warnings" once after the xtask tests',
+    ],
+    [
+      "no-encryption-self-test",
+      swap("      - run: bun tools/oracle/encryption-keys.ts self-test\n", ""),
+      'fast must run "bun tools/oracle/encryption-keys.ts self-test" once',
+    ],
+  ] as const) {
+    add(`rust-python-${name}`, "rust.yml", edit, needle);
+  }
   return cases;
 }
 

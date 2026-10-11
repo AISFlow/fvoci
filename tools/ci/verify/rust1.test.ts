@@ -10,7 +10,6 @@ import {
   RUST_SELECTED_LIBRARY_FILTERS,
   RUST_SELECTED_LIBRARY_FILTERS_FILE,
   readSelectedLibraryFilters,
-  selectedLibraryResultError,
   verifySelectedLibraryExecution,
   verifySelectedLibraryExecutionCtx,
 } from "./rust-library.ts";
@@ -205,62 +204,14 @@ describe("postgres budget", () => {
 });
 
 describe("selected library", () => {
-  const success = (name: string) =>
-    "running 1 test\n" +
-    `test ${name} ... ok\n` +
-    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n";
-
-  test("all 54 filters pass with a single successful exact result", () => {
+  // The per-test result rule moved with the runner: xtask/src/selected_library.rs tests it.
+  test("the registry keeps 54 filters and the original44 prefix", () => {
     expect(RUST_SELECTED_LIBRARY_FILTERS).toHaveLength(54);
     expect(
       createHash("sha256")
         .update(RUST_SELECTED_LIBRARY_FILTERS.slice(0, 44).join("\n"))
         .digest("hex"),
     ).toBe("b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1");
-    for (const name of RUST_SELECTED_LIBRARY_FILTERS) {
-      expect(selectedLibraryResultError(name, 0, success(name))).toBeNull();
-    }
-  });
-
-  test("zero, ignored, wrong, extra and failed results are not a pass", () => {
-    const name = RUST_SELECTED_LIBRARY_FILTERS[0] ?? "";
-    const good = success(name);
-    const cases: [number, string][] = [
-      [0, ""],
-      [0, "running 1 test\n"],
-      [0, good.split("test result:")[0] ?? ""],
-      [0, good.replace(`test ${name} ... ok\n`, "")],
-      [1, good],
-      [0, good.replace("running 1 test", "running 0 tests").replace("1 passed", "0 passed")],
-      [
-        0,
-        good
-          .replace("... ok", "... ignored")
-          .replace("1 passed", "0 passed")
-          .replace("0 ignored", "1 ignored"),
-      ],
-      [0, good.replace(name, "different::test")],
-      [0, good.replace("running 1 test", "running 2 tests").replace("1 passed", "2 passed")],
-      [0, good + "test different::test ... ok\n"],
-      [0, good + good],
-      [0, good.replace("0 measured", "1 measured")],
-      [0, good.replace("0 failed", "1 failed")],
-      [0, good.replace("\n", "\r\n")],
-    ];
-    for (const expected of RUST_SELECTED_LIBRARY_FILTERS) {
-      for (const [code, output] of cases) {
-        expect(
-          selectedLibraryResultError(expected, code, output.replaceAll(name, expected)),
-        ).not.toBeNull();
-      }
-    }
-    // Only the count line differs: the running-count rule alone must refuse it.
-    expect(
-      selectedLibraryResultError(name, 0, good.replace("running 1 test", "running 2 tests")),
-    ).toBe("rust: selected library command must run exactly one test");
-    expect(selectedLibraryResultError("missing::filter", 0, success("missing::filter"))).toBe(
-      "rust: unregistered selected library filter",
-    );
   });
 
   test("the workflow check reads the runner's filter file from the verified tree", () => {

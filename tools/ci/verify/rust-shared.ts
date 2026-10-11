@@ -31,9 +31,13 @@ export const RUST_DB_TESTS_FEATURE = "db-tests";
 export const RUST_SELECTED_INSTALL_STEP = "Selected SQLite install lifetime controls";
 export const RUST_SELECTED_INSTALL_TARGET = "selected_install_lifetime";
 export const RUST_SELECTED_INSTALL_IF = "matrix.shard == 'b' && matrix.pg_major == '18'";
-// Binds the owned setup, compiler artifact selection and execution/count gate.
-export const RUST_SELECTED_INSTALL_RUN_SHA256 =
-  "cc1a88016e90b5aa59944736c9690a454a2c98e7fe1aa5cb201a47d8afbc29ee";
+// The prebuilt xtask (scripts/prepare-sqlite-ci.sh builds it before any consumer).
+export const RUST_XTASK = "xtask/target/debug/xtask";
+// The setup, artifact selection and execution/count gate live in xtask selected-install;
+// root runs only the prebuilt binary, never Cargo.
+export const RUST_SELECTED_INSTALL_RUN =
+  "set -euo pipefail\n" +
+  `sudo ${RUST_XTASK} selected-install "$RUNNER_TEMP/rust-binaries/selected-install-build.jsonl" "$FVOCI_COLLAB_ENGINE"`;
 export const RUST_POSTGRES_INTEGRATION_STEP = "PostgreSQL integration tests";
 export const RUST_S3_INTEGRATION_STEP =
   "S3-compatible storage integration tests (pinned test server)";
@@ -57,9 +61,11 @@ export const RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS: ReadonlySet<string> = new Set
 ]);
 export const CARGO_TEST_NAME_RE = /^[A-Za-z0-9_-]+$/;
 export const RUST_POSTGRES_INTEGRATION_RUN_CANONICAL =
-  'python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}';
+  RUST_XTASK + ' rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}';
 export const RUST_S3_INTEGRATION_RUN_CANONICAL =
-  'bash scripts/start-test-minio.sh python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration';
+  "bash scripts/start-test-minio.sh " +
+  RUST_XTASK +
+  ' rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration';
 export const POSTGRES_MATRIX_CATALOG_ENV = "FVOCI_POSTGRES_MATRIX_CATALOG";
 
 export function isFile(path: string): boolean {

@@ -1,18 +1,19 @@
-// Selected SQLite library cohort: the exact filters the fast job must execute and
-// the per-test result rule. A zero-match Cargo run or an ignored test is not execution.
+// Selected SQLite library cohort: the exact filters the fast job must execute. The
+// per-test result rule (a zero-match or ignored test is not execution) lives in
+// xtask/src/selected_library.rs, which runs them.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   type Mapping,
   type VerifyContext,
-  PY_NON_WS,
   field,
   indexOfSame,
   rustJobs,
   same,
   steps,
 } from "./rust-common.ts";
+import { RUST_XTASK } from "./rust-shared.ts";
 
 export const RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)";
 // The list `xtask selected-library` runs, one exact libtest name per LF-terminated
@@ -54,21 +55,9 @@ export const RUST_SELECTED_LIBRARY_SLICE_PINS: readonly (readonly [
 ];
 
 // The maintained step body, byte-exact (the YAML block scalar adds the final newline).
-export const RUST_SELECTED_LIBRARY_RUN = `set -euo pipefail
-python3 - <<'PYLIB'
-import subprocess
-from scripts.ci_selection import RUST_SELECTED_LIBRARY_FILTERS, selected_library_result_error
-
-for test_filter in RUST_SELECTED_LIBRARY_FILTERS:
-    result = subprocess.run(
-        ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--lib", test_filter, "--", "--exact"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    print(result.stdout, end="", flush=True)
-    error = selected_library_result_error(test_filter, result.returncode, result.stdout)
-    if error:
-        raise SystemExit(error)
-PYLIB`;
+// No env: the prebuilt xtask runs Cargo itself for the library test build.
+export const RUST_SELECTED_LIBRARY_RUN =
+  RUST_XTASK + " selected-library --target-dir target/db-lib";
 export const RUST_DEFAULT_LIBRARY_STEP: Mapping = {
   run: "cargo test --locked --offline --lib --bin fvoci-server",
   env: { CARGO_TARGET_DIR: "target/default" },
@@ -89,41 +78,6 @@ export function selectedLibraryRegistryIntact(
   );
 }
 
-// Python re.MULTILINE semantics: lines end at "\n" only and "." also spans "\r".
-const runningLine = /^running ([0-9]+) tests?$/s;
-const testLine = new RegExp(`^test (${PY_NON_WS}+) \\.\\.\\. (${PY_NON_WS}+).*$`, "s");
-const summaryLine = /^test result: (.*)$/s;
-const passedSummary =
-  /^ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s$/;
-
-/** Accept exactly the requested, nonignored library test, never compilation. */
-export function selectedLibraryResultError(
-  testFilter: string,
-  returncode: number,
-  output: string,
-  filters: readonly string[] = RUST_SELECTED_LIBRARY_FILTERS,
-): string | null {
-  if (!filters.includes(testFilter)) return "rust: unregistered selected library filter";
-  if (returncode !== 0) return "rust: selected library test command failed";
-  const lines = output.split("\n");
-  const counts = lines.flatMap((line) => runningLine.exec(line)?.[1] ?? []);
-  if (counts.length !== 1 || counts[0] !== "1") {
-    return "rust: selected library command must run exactly one test";
-  }
-  const executed = lines.flatMap((line) => {
-    const match = testLine.exec(line);
-    return match ? [[match[1], match[2]]] : [];
-  });
-  if (!same(executed, [[testFilter, "ok"]])) {
-    return "rust: selected library result must be the exact requested test and ok";
-  }
-  const summaries = lines.flatMap((line) => summaryLine.exec(line)?.[1] ?? []);
-  if (summaries.length !== 1 || !passedSummary.test(summaries[0] ?? "")) {
-    return "rust: selected library result must pass one test without failure or ignore";
-  }
-  return null;
-}
-
 /** Bind the maintained step, its environment and the exact 54-filter cohort. */
 export function verifySelectedLibraryExecution(
   jobs: Mapping,
@@ -142,11 +96,7 @@ export function verifySelectedLibraryExecution(
     errors.push("rust: selected library step must appear exactly once in fast");
     return errors;
   }
-  const expected = {
-    name: RUST_SELECTED_LIBRARY_STEP,
-    env: { CARGO_TARGET_DIR: "target/db-lib" },
-    run: RUST_SELECTED_LIBRARY_RUN + "\n",
-  };
+  const expected = { name: RUST_SELECTED_LIBRARY_STEP, run: RUST_SELECTED_LIBRARY_RUN + "\n" };
   if (!same(matches[0], expected)) {
     errors.push(
       "rust: selected library step must keep exact unconditional command without extra env or flags",

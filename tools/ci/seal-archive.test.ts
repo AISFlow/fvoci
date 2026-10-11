@@ -35,6 +35,35 @@ function flipByte(bytes: Uint8Array, index: number) {
   if (value === undefined) throw new Error("fixture byte out of range");
   bytes[index] = value ^ 1;
 }
+// The consumer steps run the prebuilt xtask; build it as scripts/prepare-sqlite-ci.sh
+// does in CI, so these tests never run a missing or stale binary.
+{
+  const overrides = new Set([
+    "CARGO_BUILD_TARGET",
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+  ]);
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !overrides.has(name)),
+  );
+  const built = Bun.spawnSync(
+    [
+      "cargo",
+      "build",
+      "--quiet",
+      "--locked",
+      "--manifest-path",
+      join(root, "xtask/Cargo.toml"),
+      "--target-dir",
+      join(root, "xtask/target"),
+    ],
+    { cwd: root, env, stdout: "inherit", stderr: "inherit" },
+  );
+  if (built.exitCode !== 0) throw new Error(`xtask build exit ${String(built.exitCode)}`);
+}
 const compress = step("postgres-build", "Compress sealed executable archives with zstd");
 const hash = step("postgres-build", "Hash compressed executable archives");
 
@@ -48,7 +77,8 @@ function fixture() {
     RUNNER_TEMP: directory,
     RUNNER_ARCH: "X64",
     GITHUB_SHA: command(["git", "rev-parse", "HEAD"]).stdout.toString().trim(),
-    PYTHONDONTWRITEBYTECODE: "1",
+    GITHUB_RUN_ID: "4242",
+    GITHUB_RUN_ATTEMPT: "1",
   };
   const packet = join(directory, "rust-binaries");
   const stage = join(directory, "stage");
@@ -59,6 +89,8 @@ function fixture() {
     version: 1,
     context: {
       sha: env.GITHUB_SHA,
+      run_id: env.GITHUB_RUN_ID,
+      run_attempt: env.GITHUB_RUN_ATTEMPT,
       workspace: root,
       arch: env.RUNNER_ARCH,
       os: readFileSync("/etc/os-release", "utf8"),

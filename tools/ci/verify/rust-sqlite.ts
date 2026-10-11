@@ -9,13 +9,14 @@ import {
   steps,
   str,
 } from "./rust-common.ts";
+import { RUST_XTASK } from "./rust-shared.ts";
 
 export const SQLITE_PREFIX_PATH =
   "${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}";
 export const SQLITE_PREFIX_KEY =
   "v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}";
 export const SQLITE_PACKAGES =
-  'dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"';
+  'dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"';
 const SQLITE_PREFLIGHT =
   'bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n' +
   '  --identity-only --github-output "$GITHUB_OUTPUT"\n';
@@ -109,7 +110,8 @@ export function sqlitePrefixCacheErrors(jobs: Mapping): string[] {
       const consumes =
         consumerPathPrefixes.some((prefix) => str(step.with, "path").startsWith(prefix)) ||
         run.includes("cargo ") ||
-        run.includes("rust-binaries unpack");
+        run.includes("rust-binaries unpack") ||
+        run.includes(RUST_XTASK);
       if (consumes && index < verifyAt) errors.push(order);
     });
   }

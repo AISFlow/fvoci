@@ -18,6 +18,7 @@ import {
   RUST_NATIVE_ARM64_RUN,
   RUST_POSTGRES_INTEGRATION_STEP,
   RUST_S3_INTEGRATION_STEP,
+  RUST_SELECTED_INSTALL_RUN,
   RUST_SELECTED_INSTALL_STEP,
   cargoTestFlagsInText,
   validateMatrixTestsFragment,
@@ -72,21 +73,21 @@ test("schema baseline target mapping refuses omissions and masking", () => {
     "missing-url": (step) => {
       delete (step["env"] as Mapping)["PREPARATION_DATABASE_URL"];
     },
-    skip: (step) =>
+    // The skip, count and owner-URL gates are xtask schema-baseline's own tests.
+    "wrong-command": (step) =>
+      void (step["run"] = (step["run"] as string).replace("schema-baseline", "rust-binaries")),
+    "extra-argument": (step) =>
       void (step["run"] = (step["run"] as string).replace(
-        "'--nocapture'",
-        "'--skip','postgres_catalog_dump'",
+        "schema-baseline\n",
+        "schema-baseline --help\n",
       )),
-    count: (step) =>
+    "cargo-run": (step) =>
       void (step["run"] = (step["run"] as string).replace(
-        "4 passed; 0 failed; 0 ignored;",
-        "3 passed; 0 failed; 0 ignored;",
+        "xtask/target/debug/xtask",
+        "cargo xtask",
       )),
-    "owner-in-tests": (step) =>
-      void (step["run"] = (step["run"] as string).replace(
-        "'DATABASE_URL':owner_url",
-        "'TEST_DATABASE_URL':owner_url",
-      )),
+    "old-python": (step) =>
+      void (step["run"] = "set -euo pipefail\npython3 - <<'PYSCHEMA'\nPYSCHEMA\n"),
   };
   for (const [name, mutate] of Object.entries(mutations)) {
     const bad = clone(jobs);
@@ -172,8 +173,8 @@ test("selected install exact supported execution scope", () => {
   expect(verifyRustSuiteRegistry(ctx)).toEqual([]);
   const jobs = (ctx.workflows["rust.yml"] as Mapping)["jobs"] as Mapping;
   expect(selectedInstallInventory(jobs)).toEqual([new Set(["selected_install_lifetime"]), null]);
-  expect(namedStep(jobs["postgres"] as Mapping, RUST_SELECTED_INSTALL_STEP)["run"]).toContain(
-    'prefix="fvoci-selected-install-", dir="/run"',
+  expect(namedStep(jobs["postgres"] as Mapping, RUST_SELECTED_INSTALL_STEP)["run"]).toBe(
+    RUST_SELECTED_INSTALL_RUN + "\n",
   );
 });
 
@@ -188,13 +189,18 @@ test("selected install missing or masked execution fails", () => {
     "no-run-only": (_job, step) =>
       void (step["run"] =
         "cargo test --features db-tests --test selected_install_lifetime --no-run"),
-    filtered: (_job, step) =>
+    // The filter and count gates are xtask selected-install's own tests.
+    "no-sudo": (_job, step) => void (step["run"] = (step["run"] as string).replace("sudo ", "")),
+    "cargo-as-root": (_job, step) =>
       void (step["run"] = (step["run"] as string).replace(
-        '"--test-threads=1", "--nocapture"',
-        '"nonexistent_filter", "--nocapture"',
+        "sudo xtask/target/debug/xtask",
+        "sudo cargo xtask",
       )),
-    "zero-count": (_job, step) =>
-      void (step["run"] = (step["run"] as string).replace("4 passed;", "0 passed;")),
+    "other-engine": (_job, step) =>
+      void (step["run"] = (step["run"] as string).replace('"$FVOCI_COLLAB_ENGINE"', "/bin/sh")),
+    "old-python": (_job, step) =>
+      void (step["run"] =
+        'set -euo pipefail\nsudo python3 - "$RUNNER_TEMP/rust-binaries/selected-install-build.jsonl" "$FVOCI_COLLAB_ENGINE" <<\'PYINSTALL\'\nPYINSTALL\n'),
     "wrong-helper-feature": (job) => {
       const helper = namedStep(job, helperName);
       helper["run"] = (helper["run"] as string).replace("--cohort postgres ", "--cohort helper ");
@@ -379,8 +385,8 @@ test("postgres decoy step without matrix execution fails", () => {
         decoy + "      - name: PostgreSQL integration tests\n",
       )
       .replace(
-        '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}\n',
-        '        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries"\n',
+        '        run: xtask/target/debug/xtask rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}\n',
+        '        run: xtask/target/debug/xtask rust-binaries run --directory "$RUNNER_TEMP/rust-binaries"\n',
       ),
   );
   expect(joined(verifyRustSuiteRegistry(tree.context()))).toContain("matrix.tests");
