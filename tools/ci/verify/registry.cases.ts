@@ -432,6 +432,109 @@ function caseList(): MutationCase[] {
     swap("    tags:", "    branches: [main]\n    tags:"),
     "release.yml: push must list only v0.* tags",
   );
+
+  // Release steps run the tools/release Bun entries, never the Python originals.
+  const RELEASE_API = "bun tools/release/release-api.ts ";
+  const PROVENANCE = 'bun tooling/tools/release/provenance.ts --dist "$RUNNER_TEMP/dist"';
+  const RELEASE_SETUP_BUN =
+    / {6}- uses: oven-sh\/setup-bun@[^\n]*\n {8}with:\n {10}bun-version-file: [^\n]*\n/;
+  const releaseRuntime: [string, Edit, string][] = [
+    [
+      "push-index-python",
+      swap(RELEASE_API + "push-index", "python3 scripts/release-api.py push-index"),
+      "release.yml: index runs Python",
+    ],
+    [
+      "describe-python",
+      swap(RELEASE_API + "describe", "python3 scripts/release-api.py describe"),
+      "release.yml: index must run 'bun tools/release/release-api.ts describe",
+    ],
+    [
+      "tag-python",
+      swap(RELEASE_API + "tag", "python3 scripts/release-api.py tag"),
+      "release.yml: publish runs Python",
+    ],
+    [
+      "floating-dropped",
+      swap('--tag "$MINOR" --floating\n', '--tag "$MINOR"\n'),
+      "release.yml: publish must run",
+    ],
+    [
+      "provenance-python",
+      swap(PROVENANCE, 'python3 tooling/scripts/release-provenance.py --dist "$RUNNER_TEMP/dist"'),
+      "release.yml: dist runs Python",
+    ],
+    [
+      "provenance-from-tag-tree",
+      swap(PROVENANCE, 'bun tools/release/provenance.ts --dist "$RUNNER_TEMP/dist"'),
+      "release.yml: dist must run 'bun tooling/tools/release/provenance.ts",
+    ],
+    [
+      "check-ci-python",
+      swap(
+        'run: bash scripts/release-check-ci.sh "${{ steps.source.outputs.sha }}"',
+        'run: python3 scripts/release-check-ci.py "${{ steps.source.outputs.sha }}"',
+      ),
+      "release.yml: verify runs Python",
+    ],
+    [
+      "bun-version-unpinned",
+      swap("          bun-version-file: .bun-version\n", "          bun-version: latest\n"),
+      "release.yml: verify must set up Bun",
+    ],
+  ];
+  releaseRuntime.push(
+    [
+      "dist-bun-from-tag-tree",
+      swap("bun-version-file: tooling/.bun-version\n", "bun-version-file: .bun-version\n"),
+      "release.yml: dist must set up Bun (oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6, bun-version-file tooling/.bun-version)",
+    ],
+    [
+      "setup-python",
+      within(
+        "\n  publish:\n",
+        null,
+        swap(
+          "      - name: Tag the smoked index",
+          "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n      - name: Tag the smoked index",
+        ),
+      ),
+      "release.yml: publish runs Python",
+    ],
+    [
+      "python-shell",
+      swap(
+        "      - name: Tag the smoked index 0.y.z (immutable)\n",
+        "      - name: Tag the smoked index 0.y.z (immutable)\n        shell: python\n",
+      ),
+      "release.yml: publish runs Python",
+    ],
+  );
+  for (const job of ["index", "publish"]) {
+    add(
+      `release-${job}-tooling-from-tag`,
+      "release.yml",
+      within(
+        `\n  ${job}:\n`,
+        null,
+        swap(
+          "          ref: ${{ github.sha }}\n",
+          "          ref: ${{ needs.verify.outputs.sha }}\n",
+        ),
+      ),
+      `release.yml: ${job} must check out only the workflow ref`,
+    );
+  }
+  for (const [name, edit, needle] of releaseRuntime)
+    add(`release-${name}`, "release.yml", edit, needle);
+  for (const job of ["verify", "index", "dist", "smoke", "publish", "release"]) {
+    add(
+      `release-${job}-without-bun`,
+      "release.yml",
+      within(`\n  ${job}:\n`, null, (text) => text.replace(RELEASE_SETUP_BUN, "")),
+      `release.yml: ${job} must set up Bun`,
+    );
+  }
   for (const [job, scope] of [
     ["build", "packages"],
     ["push", "issues"],
@@ -920,6 +1023,108 @@ function caseList(): MutationCase[] {
     swap("  documents-ci-gate:\n", "  documents-gate:\n"),
     "documents.yml: required check documents-ci-gate missing",
   );
+  // The documents workflow's Bun native-dependency check (tools/ci/verify/documents.ts).
+  const inNative = (edit: Edit) => within("  native-extraction:\n", "  documents-ci-gate:\n", edit);
+  const depsLine =
+    '          bun ../../tools/ci/document-client-deps.ts "$RUNNER_TEMP/extract-client-metadata.json"\n';
+  const metadataLine =
+    '          cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/extract-client-metadata.json"\n';
+  const thinName = "      - name: Thin process client without native parser dependencies\n";
+  const thinDir = "        working-directory: crates/document-extract-client\n";
+  const rhwpRestore = "      - name: Restore pinned public rhwp source\n";
+  const aptLine =
+    "          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
+  const rustup =
+    "      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy\n";
+  const thinNeedle =
+    "documents.yml: native-extraction must check the process client's cargo metadata";
+  const pythonNeedle = "documents.yml: native-extraction must not run or install Python";
+  const bunNeedle =
+    "documents.yml: native-extraction must install pinned Bun from .bun-version once";
+  const heredoc =
+    "          python3 - \"$RUNNER_TEMP/extract-client-metadata.json\" <<'PYTHON'\n" +
+    "          import json, sys\n" +
+    '          names = {p["name"] for p in json.load(open(sys.argv[1]))["packages"]}\n' +
+    '          forbidden = names & {"rhwp", "cfb", "zip", "flate2", "skia-safe", "skia-bindings"}\n' +
+    '          assert not forbidden, f"native dependencies leaked into process client: {forbidden}"\n' +
+    "          PYTHON\n";
+  for (const [name, edit, needle] of [
+    ["python-heredoc-restored", swap(depsLine, heredoc), pythonNeedle],
+    ["python-heredoc-restored-thin", swap(depsLine, heredoc), thinNeedle],
+    ["python-heredoc-beside-bun", swap(depsLine, depsLine + heredoc), pythonNeedle],
+    [
+      "apt-python3-restored",
+      swap(
+        aptLine,
+        aptLine.replace("no-install-recommends gcc", "no-install-recommends python3 gcc"),
+      ),
+      pythonNeedle,
+    ],
+    [
+      "setup-python-added",
+      swap(rustup, `      - uses: actions/setup-python@${"2".repeat(40)}\n` + rustup),
+      pythonNeedle,
+    ],
+    [
+      "job-shell-python",
+      swap(
+        "        working-directory: crates/document-extract\n    steps:\n",
+        "        working-directory: crates/document-extract\n        shell: python3 {0}\n    steps:\n",
+      ),
+      pythonNeedle,
+    ],
+    [
+      "job-container-python",
+      swap(
+        "        working-directory: crates/document-extract\n    steps:\n",
+        "        working-directory: crates/document-extract\n    container: python:3.13\n    steps:\n",
+      ),
+      pythonNeedle,
+    ],
+    ["deps-check-dropped", swap(depsLine, ""), thinNeedle],
+    [
+      "deps-check-before-metadata",
+      swap(metadataLine + depsLine, depsLine + metadataLine),
+      thinNeedle,
+    ],
+    [
+      "deps-check-masked",
+      swap(depsLine, depsLine.replace('.json"\n', '.json" || true\n')),
+      thinNeedle,
+    ],
+    [
+      "deps-check-other-path",
+      swap(depsLine, depsLine.replace("../../tools/ci/", "tools/ci/")),
+      thinNeedle,
+    ],
+    ["thin-client-renamed", swap(thinName, thinName.replace("Thin", "Lean")), thinNeedle],
+    [
+      "thin-client-workdir",
+      swap(thinDir, "        working-directory: crates/document-extract\n"),
+      thinNeedle,
+    ],
+    [
+      "thin-client-continue-on-error",
+      swap(thinDir, thinDir + "        continue-on-error: true\n"),
+      thinNeedle,
+    ],
+    ["thin-client-condition", swap(thinDir, thinDir + "        if: false\n"), thinNeedle],
+    ["setup-bun-dropped", inNative(swap(SETUP_BUN, "")), bunNeedle],
+    ["setup-bun-twice", inNative(swap(SETUP_BUN, SETUP_BUN + SETUP_BUN)), bunNeedle],
+    ["setup-bun-other-pin", inNative(swap(SETUP_BUN_PIN, OTHER_PIN)), bunNeedle],
+    [
+      "setup-bun-after-check",
+      inNative((text) => swap(rhwpRestore, SETUP_BUN + rhwpRestore)(swap(SETUP_BUN, "")(text))),
+      bunNeedle,
+    ],
+    [
+      "setup-bun-before-checkout",
+      inNative((text) => swap(CHECKOUT, SETUP_BUN + CHECKOUT)(swap(SETUP_BUN, "")(text))),
+      bunNeedle,
+    ],
+  ] as const) {
+    add(`documents-${name}`, "documents.yml", edit, needle);
+  }
   const flow =
     '[{"runner":"ubuntu-26.04","pg_major":"18","shard":"a","tests":"--test db_integration"}]';
   for (const [name, line] of [

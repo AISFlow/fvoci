@@ -22,6 +22,8 @@
     "../../scripts/eslint-fixtures.test.ts",
     "./ci-base-image.ts",
     "./ci-base-image.test.ts",
-    "./seal-archive.test.ts"
+    "./seal-archive.test.ts",
+    "./document-client-deps.ts",
+    "./document-client-deps.test.ts"
   ]
 }

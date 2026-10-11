@@ -98,7 +98,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 phase image
-require_cmd docker openssl curl bun cargo python3 sha256sum
+require_cmd docker openssl curl bun cargo sha256sum
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 IMAGE_ENV="$(xtask install-image acquire)" || fail "install image refused or not built (see install-image above)"
@@ -234,7 +234,7 @@ if ! grep -q '"contentJson"' <<<"$BODY_BEFORE"; then
 fi
 log_assert "collab wiki body save + projection: ok"
 
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+bun "$ROOT/tools/release/smoke-documents.ts" "$BASE_URL" "$WORKSPACE_ID" \
   "$COOKIE_JAR" "$DOCUMENT_STATE" create
 log_assert "document import/edit/exports/public PDF on the runtime image: ok"
 
@@ -367,7 +367,7 @@ if [[ "$EXTRACT_STATUS" != "ok" ]] || ! grep -q '안녕' <<<"$EXTRACT_TEXT"; the
   fail "post-restart extraction lost: $EXTRACT_STATUS $EXTRACT_TEXT"
 fi
 log_assert "post-restart doc body, attachment bytes, extraction: ok"
-python3 "$ROOT/scripts/install-smoke-documents.py" "$BASE_URL" "$WORKSPACE_ID" \
+bun "$ROOT/tools/release/smoke-documents.ts" "$BASE_URL" "$WORKSPACE_ID" \
   "$COOKIE_JAR" "$DOCUMENT_STATE" restart
 log_assert "post-restart imported document and import job: ok"
 
