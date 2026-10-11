@@ -42,7 +42,7 @@
     "@iconify-json/lucide": "1.2.137",
     "@playwright/test": "1.63.0",
     "@types/node": "^26.6.2",
-    "@vitejs/plugin-vue": "6.0.9",
+    "@vitejs/plugin-vue": "6.0.10",
     "openapi-typescript": "7.13.0",
     "tailwindcss": "^4.3.3",
     "typescript": "5.9.3",
