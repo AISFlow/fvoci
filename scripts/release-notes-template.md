@@ -93,11 +93,13 @@ The accepted feature families remain:
   use server-owned intervals, single-running ownership, replay and conflict
   checks. Stopping a timer keeps the task status. Calendar and task forms
   preserve dirty drafts when metadata refetch fails.
-- **Current data and archives.** Native archive/import and whole-install
-  recovery work preserves current IDs, history, references, attachments and
-  permissions within the accepted scope. Backend-to-backend archive support
-  and rejection must be checked for the actual source and destination;
-  this is not a compatibility promise for old development schemas.
+- **Current data and archives.** Current-format native archive/import is
+  integrated, and whole-install backup and restore is a separate mechanism.
+  Preserving IDs, history, references, attachments and permissions remains
+  the contract of `docs/rewrite.md` sections 3.5 and 3.6; it is not yet
+  verified on this release commit. Backend-to-backend archive support and
+  rejection must be checked for the actual source and destination; this is
+  not a compatibility promise for old development schemas.
 - **Backend integration.** Selected-backend services connect PostgreSQL,
   local SQLite and remote libSQL/Turso operations to authorization,
   collaboration, attachment cleanup and maintenance. Fresh installation
@@ -110,7 +112,8 @@ The accepted feature families remain:
   actionlint runner labels. #382 strengthens XLSX negative controls and
   #383 isolates browser-test email identities and cursor-wait observations.
   #374 and #393 clarify repository verification and approval rules. #385
-  updates the locked Jiff dependency.
+  updates the locked Jiff dependency, and #346 adds the Renovate
+  configuration.
 - **Harness runtime.** #397 replaces repository-managed Python dev, test,
   build, CI and release harness dependencies with TypeScript/Bun and Rust
   xtask, including planner/gate policy and release tooling. Development and
