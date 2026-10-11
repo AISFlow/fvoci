@@ -167,8 +167,15 @@ The following remain unverified or optional for this trial:
   and historical ACKs, data precision and equal-work ON/OFF resource costs.
   Earlier accepted PostgreSQL or scoped SQLite results do not establish
   completion on another backend or the release commit.
-- **Turso/libSQL remote support:** live verification on the release commit pending.
-  TURSO-RESULT: pending — coordinator to record release-commit live verification.
+- **Turso/libSQL remote support:** on the #397 merge commit on main, whose
+  code this release changes only in version and notes, the isolated Turso
+  test database passed the read-only `connection` and `inventory` phases and
+  the manual `migration` phase: steps 1-12 applied to a blank database, a
+  foreign-key rejection rolled back on the same writer, then reconnect, resume
+  and close with zero leases. This is not normal remote installation or
+  startup support. The server and `fvoci-migrate` still refuse a remote
+  target, and the CRUD, transaction, persistence, restore and UI ACK phases
+  remain unimplemented.
 - **Zotero:** read-only fixture and archive evidence does not verify access
   to a real external account with live credentials.
 - **Mail and GitHub app:** SMTP was checked with a local test relay,
