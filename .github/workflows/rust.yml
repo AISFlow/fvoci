@@ -78,7 +78,6 @@ jobs:
       - name: Script unit tests without a database
         run: |
           bun test scripts/schema-baseline/compare-catalogs.test.ts
-          python3 scripts/fixtures/rustup-ci/test_metadata.py
           python3 scripts/selected-backend-ci/test_early_driver_failure.py
           python3 scripts/selected-backend-ci/test_restart_ledger.py
           python3 scripts/selected-backend-ci/test_current_binding_engine_features.py
@@ -112,9 +111,9 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
@@ -154,30 +153,15 @@ jobs:
         run: |
           cargo fmt --check --manifest-path xtask/Cargo.toml
           cargo test --locked --manifest-path xtask/Cargo.toml
-      - run: python3 scripts/encryption_keys.py self-test
+      - run: cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+      - run: bun tools/oracle/encryption-keys.ts self-test
       - run: cargo clippy --target-dir target/clippy --locked --offline --all-targets --features db-tests -- -D warnings
       - run: cargo test --locked --offline --lib --bin fvoci-server
         env:
           CARGO_TARGET_DIR: target/default
       - name: Selected SQLite library controls (54 exact tests)
-        env:
-          CARGO_TARGET_DIR: target/db-lib
         run: |
-          set -euo pipefail
-          python3 - <<'PYLIB'
-          import subprocess
-          from scripts.ci_selection import RUST_SELECTED_LIBRARY_FILTERS, selected_library_result_error
-
-          for test_filter in RUST_SELECTED_LIBRARY_FILTERS:
-              result = subprocess.run(
-                  ["cargo", "test", "--locked", "--offline", "--features", "db-tests", "--lib", test_filter, "--", "--exact"],
-                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-              )
-              print(result.stdout, end="", flush=True)
-              error = selected_library_result_error(test_filter, result.returncode, result.stdout)
-              if error:
-                  raise SystemExit(error)
-          PYLIB
+          xtask/target/debug/xtask selected-library --target-dir target/db-lib
       - run: cargo test --locked --offline --test collab_wire
         env:
           CARGO_TARGET_DIR: target/default
@@ -250,9 +234,9 @@ jobs:
           test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
           printf '%s\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
@@ -321,9 +305,9 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
@@ -374,7 +358,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/db-tests
         run: |
           mkdir "$RUNNER_TEMP/rust-binaries"
-          python3 scripts/ci_selection.py rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"
+          xtask/target/debug/xtask rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"
       - name: Build default-feature schema migrator
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/schema-default
@@ -402,7 +386,7 @@ jobs:
             printf 'ci-step stage=postgres-build-step-15 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             trap 'fvoci_timing_exit=$?; printf "ci-step stage=postgres-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           fi
-          python3 scripts/ci_selection.py rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+          xtask/target/debug/xtask rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - name: Verify zstd CLI for executable handoff
         run: zstd --version
       - name: Compress sealed executable archives with zstd
@@ -627,9 +611,9 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
@@ -655,14 +639,14 @@ jobs:
           zstd --version
           zstd --decompress --no-progress -- "$RUNNER_TEMP/rust-binaries/postgres.tar.zst"
       - name: Validate and restore finished postgres executables (no rebuild fallback)
-        run: python3 scripts/ci_selection.py rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+        run: xtask/target/debug/xtask rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - name: PostgreSQL integration tests
         env:
           FVOCI_COLLAB_ENGINE: ${{ matrix.shard == 'b' && format('{0}/crates/collab-engine/target/debug/collab-engine', github.workspace) || '' }}
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
           FVOCI_MEILI_URL: http://127.0.0.1:${{ job.services.meilisearch.ports['7700'] }}
           FVOCI_MEILI_KEY: ci-ephemeral-meili-master
-        run: python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}
+        run: xtask/target/debug/xtask rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" ${{ matrix.tests }}
 
       - name: Schema baseline SQLite controls and prepared PostgreSQL catalog
         if: matrix.shard == 'a'
@@ -671,80 +655,7 @@ jobs:
           PREPARATION_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
         run: |
           set -euo pipefail
-          python3 - <<'PYSCHEMA'
-          import hashlib, json, os, pathlib, re, secrets, stat, subprocess, tempfile, urllib.parse
-          assert os.environ['CI'] == os.environ['GITHUB_ACTIONS'] == 'true'
-          assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
-          container = os.environ['PG_CONTAINER']
-          assert re.fullmatch('[0-9a-f]{64}', container)
-          url = urllib.parse.urlsplit(os.environ['PREPARATION_DATABASE_URL'])
-          assert url.scheme == 'postgres' and url.hostname == '127.0.0.1' and url.port and url.path == '/postgres'
-          assert url.username == 'postgres' and not url.query and not url.fragment
-          root = pathlib.Path(tempfile.mkdtemp(prefix='fvoci-schema-ci-', dir=os.environ['RUNNER_TEMP']))
-          assert stat.S_IMODE(root.stat().st_mode) == 0o700 and root.stat().st_uid == os.getuid()
-          identity = secrets.token_hex(8)
-          database, role = 'fvoci_schema_ci_' + identity, 'fvoci_schema_app_' + identity
-          password = secrets.token_hex(32)
-          created_db = created_role = False
-          failed = False
-          # Owner URL is confined to preparation and this documented read-only catalog
-          # extractor, never exported to normal product servers or other test targets.
-          def private(name, data):
-              with (root / name).open('xb') as handle:
-                  os.fchmod(handle.fileno(), 0o600); handle.write(data)
-          def command(name, args, *, env=None, sql=None):
-              result = subprocess.run(args, env=env, input=sql, capture_output=True)
-              private(name + '.stdout.log', result.stdout); private(name + '.stderr.log', result.stderr)
-              if result.returncode:
-                  raise RuntimeError(name + ' exit=' + str(result.returncode))
-              return result.stdout.decode()
-          def sql(name, text, db='postgres'):
-              return command(name, ['docker','exec','-i',container,'psql','-X','-U','postgres','-d',db,'-v','ON_ERROR_STOP=1'], sql=text.encode())
-          owner_url = urllib.parse.urlunsplit(url._replace(path='/' + database))
-          migrate = str(pathlib.Path('target/schema-default/debug/fvoci-migrate').resolve())
-          assert stat.S_ISREG(pathlib.Path(migrate).lstat().st_mode)
-          try:
-              # CREATE has no IF NOT EXISTS: collision is a refusal, not adoption.
-              sql('create-role', f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;")
-              created_role = True
-              sql('create-database', f'CREATE DATABASE "{database}";')
-              created_db = True
-              preparation = {**os.environ, 'FVOCI_DATABASE_BACKEND':'postgres', 'DATABASE_URL':owner_url}
-              command('normal-install', [migrate], env=preparation)
-              command('normal-app-grants', [migrate,'--grant-app-role',role], env=preparation)
-              catalog = root / 'catalog.private.json'; private(catalog.name, b'')
-              observer = {**os.environ, 'FVOCI_SCHEMA_CATALOG_DATABASE_URL':owner_url,
-                          'FVOCI_SCHEMA_CATALOG_APP_ROLE':role, 'FVOCI_SCHEMA_CATALOG_OUT':str(catalog)}
-              # The fourth test owns a separate PG database/role on this isolated service.
-              observer['TEST_DATABASE_URL'] = os.environ['PREPARATION_DATABASE_URL']
-              observer.pop('PREPARATION_DATABASE_URL', None)
-              stdout = command('schema-target', ['python3','scripts/ci_selection.py','rust-binaries','run','--directory',
-                                os.environ['RUNNER_TEMP'] + '/rust-binaries','--test','schema_baseline_integration','--nocapture'], env=observer)
-              assert re.search(r'test result: ok\. 4 passed; 0 failed; 0 ignored;', stdout), 'exact four actual controls required'
-              assert 'SKIP postgres_catalog_dump' not in (root/'schema-target.stderr.log').read_text()
-              facts = json.loads(catalog.read_bytes())
-              assert facts['tables'] and len(facts['ledger']) == 12
-              authority = facts['app_role']; attrs = authority['attributes']
-              assert authority['role'] == role and attrs['exists'] and attrs['login']
-              assert all(attrs[k] is False for k in ('superuser','createdb','createrole','replication','bypassrls'))
-              assert attrs['member_of'] == []
-              private('scope.json', json.dumps({'source':os.environ['GITHUB_SHA'],'catalog_sha256':hashlib.sha256(catalog.read_bytes()).hexdigest(),
-                  'actual_controls':4,'sqlite_controls':2,'postgres_catalog_reads':1,'postgres_app_role_gate_controls':1,
-                  'normal_product_role_tests':'separate existing PostgreSQL integration suites'}).encode())
-          except BaseException:
-              failed = True
-              # Keep all raw tool output private; do not expose URLs or seed fields.
-              print('schema baseline controls failed; private evidence retained', flush=True)
-              raise RuntimeError('schema baseline CI preparation/execution failed') from None
-          finally:
-              # Only identities positively created by this invocation can be retired.
-              if created_db:
-                  sql('drop-database', f'DROP DATABASE "{database}" WITH (FORCE);')
-              if created_role:
-                  sql('drop-role', f'DROP ROLE "{role}";')
-              if not failed:
-                  print('schema baseline: 2 SQLite controls + 1 prepared-owner catalog read + 1 PostgreSQL app-role gate passed; owned DB/role retired', flush=True)
-          PYSCHEMA
+          xtask/target/debug/xtask schema-baseline
 
       - name: Selected SQLite install lifetime controls
         if: matrix.shard == 'b' && matrix.pg_major == '18'
@@ -752,67 +663,13 @@ jobs:
           FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
         run: |
           set -euo pipefail
-          sudo python3 - "$RUNNER_TEMP/rust-binaries/selected-install-build.jsonl" "$FVOCI_COLLAB_ENGINE" <<'PYINSTALL'
-          import hashlib, json, os, pathlib, re, secrets, shutil, stat, subprocess, sys, tempfile
-          records = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-          artifacts = [r for r in records if r.get("reason") == "compiler-artifact" and r.get("executable")]
-          def executable(name, kind, test):
-              matches = [r for r in artifacts if r["target"]["name"] == name and kind in r["target"]["kind"] and r["profile"]["test"] == test]
-              assert len(matches) == 1, (name, matches)
-              assert "db-tests" in matches[0]["features"], name
-              return pathlib.Path(matches[0]["executable"])
-          server = executable("fvoci-server", "bin", False)
-          migrate = executable("fvoci-migrate", "bin", False)
-          test = executable("selected_install_lifetime", "test", True)
-          assert server.parent == migrate.parent
-          engine = pathlib.Path(sys.argv[2])
-          for file in (server, migrate, test, engine):
-              assert file.is_absolute() and stat.S_ISREG(file.lstat().st_mode), file
-              os.chown(file, 0, 0)
-              os.chmod(file, 0o755)
-          run_root = pathlib.Path(tempfile.mkdtemp(prefix="fvoci-selected-install-", dir="/run"))
-          try:
-              os.chown(run_root, 0, 1000)
-              os.chmod(run_root, 0o710)
-              storage = run_root / "storage"
-              storage.mkdir(mode=0o700)
-              os.chown(storage, 1000, 1000)
-              environment = {
-                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                  "PASSWORD_PEPPER_KEYS": json.dumps({"fixture": secrets.token_hex(32)}),
-                  "PASSWORD_PEPPER_ACTIVE_KEY_ID": "fixture",
-                  "ENCRYPTION_KEYS": json.dumps({"fixture": secrets.token_hex(32)}),
-                  "ENCRYPTION_ACTIVE_KEY_ID": "fixture",
-                  "FVOCI_PUBLIC_ORIGIN": "http://127.0.0.1:8080",
-                  "FVOCI_COOKIE_SECURE": "0",
-                  "STORAGE_DRIVER": "local",
-                  "FVOCI_STORAGE_DIR": str(storage),
-                  "FVOCI_COLLAB_ENGINE": str(engine),
-                  "FVOCI_COLLAB_FAMILY_LEASE_MS": "30000",
-                  "FVOCI_COLLAB_FAMILY_RENEW_MS": "5000",
-              }
-              private = run_root / "environment.json"
-              with private.open("x") as handle:
-                  os.fchmod(handle.fileno(), 0o600)
-                  json.dump(environment, handle)
-              env = {"PATH": environment["PATH"], "FVOCI_SELECTED_INSTALL_RUN_ROOT": str(run_root), "FVOCI_SELECTED_INSTALL_ENV_FILE": str(private)}
-              for file, name in ((migrate, "MIGRATE"), (server, "SERVER")):
-                  env["FVOCI_SELECTED_INSTALL_" + name + "_SHA256"] = hashlib.sha256(file.read_bytes()).hexdigest()
-              result = subprocess.run([str(test), "--test-threads=1", "--nocapture"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-              print(result.stdout, end="", flush=True)
-              for receipt in sorted(run_root.glob("receipts-*/*.json")):
-                  print("selected-install receipt", receipt.name, receipt.read_text(), flush=True)
-              assert result.returncode == 0, result.returncode
-              assert re.search(r"test result: ok\. 4 passed; 0 failed; 0 ignored;", result.stdout), "selected install actual execution count"
-          finally:
-              shutil.rmtree(run_root)
-          PYINSTALL
+          sudo xtask/target/debug/xtask selected-install "$RUNNER_TEMP/rust-binaries/selected-install-build.jsonl" "$FVOCI_COLLAB_ENGINE"
 
       - name: S3-compatible storage integration tests (pinned test server)
         if: matrix.shard == 'b'
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
-        run: bash scripts/start-test-minio.sh python3 scripts/ci_selection.py rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration
+        run: bash scripts/start-test-minio.sh xtask/target/debug/xtask rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration
 
   collaboration:
     needs: [ci-plan, postgres-build]
@@ -873,9 +730,9 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
@@ -907,7 +764,7 @@ jobs:
           zstd --version
           zstd --decompress --no-progress -- "$RUNNER_TEMP/rust-binaries/helper.tar.zst"
       - name: Validate and restore finished helper executables (no rebuild fallback)
-        run: python3 scripts/ci_selection.py rust-binaries unpack --cohort helper --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+        run: xtask/target/debug/xtask rust-binaries unpack --cohort helper --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - run: cargo fetch --locked
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:

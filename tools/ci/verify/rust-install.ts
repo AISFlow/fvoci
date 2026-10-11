@@ -1,12 +1,13 @@
 // The privileged SQLite install fixture runs on both PG18 B runners from the
 // validated production helper artifact, never from a rebuild.
-import { get, has, pyEq, pyStrip, sha256Hex, type Mapping } from "./py.ts";
+import { get, has, pyEq, pyStrip, type Mapping } from "./py.ts";
 import {
   RUST_POSTGRES_RUNNER_ARCH,
   RUST_SELECTED_INSTALL_IF,
-  RUST_SELECTED_INSTALL_RUN_SHA256,
+  RUST_SELECTED_INSTALL_RUN,
   RUST_SELECTED_INSTALL_STEP,
   RUST_SELECTED_INSTALL_TARGET,
+  RUST_XTASK,
   postgresJobSteps,
   postgresMatrixRows,
   uniqueNamedStep,
@@ -15,7 +16,8 @@ import {
 
 const HELPER_STEP = "Validate and restore finished postgres executables (no rebuild fallback)";
 const HELPER_RUN =
-  'python3 scripts/ci_selection.py rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"';
+  RUST_XTASK +
+  ' rust-binaries unpack --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"';
 const EXPECTED_ENV = {
   FVOCI_COLLAB_ENGINE: "${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine",
 };
@@ -32,7 +34,7 @@ export function selectedInstallInventory(jobs: Mapping): Result<Set<string>> {
   if (
     !pyEq(get(step, "env"), EXPECTED_ENV) ||
     typeof run !== "string" ||
-    sha256Hex(pyStrip(run)) !== RUST_SELECTED_INSTALL_RUN_SHA256
+    pyStrip(run) !== RUST_SELECTED_INSTALL_RUN
   ) {
     return [
       null,
