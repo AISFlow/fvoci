@@ -175,8 +175,10 @@ Pure local checks: `bun tools/turso/fixtures.ts` (the admission fixtures, from
 any directory and without `bun install`: it runs the pinned guard
 `tools/turso/guard*.test.ts`, UI consumer `tools/turso/ui*.test.ts` and
 `turso-test.yml` literal `tools/ci/verify/registry.test.ts` suites with only
-`PATH` and `TMPDIR`, and refuses if a pinned suite is missing) and
-`bash scripts/test-ci-selection.sh`. These do not prove Rust compilation,
+`PATH` and `TMPDIR`, and refuses if a pinned suite is missing) and, from the
+repository root, `bun tools/ci/verify-workflows.ts` and `bun test
+./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts
+./tools/ci/workflows.test.ts`. These do not prove Rust compilation,
 SDK/network execution or actual Turso PASS. The UI consumer is
 `tools/turso/ui.ts` (`--record-before`, `--freeze`, and the member `--actor`
 the browser fixture runs); the guard's `--consume` calls its exported

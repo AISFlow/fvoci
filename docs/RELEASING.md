@@ -49,23 +49,24 @@ Before anything is built, `verify` runs `scripts/release-preflight.sh`: the
 notes marker above, `ARG FVOCI_BUILD_SHA` in the `rust-build` stage of
 `infra/rust/Dockerfile`, and the user compose rendered with a dummy digest and
 accepted by `docker compose config` from an empty directory with an empty
-environment. `python3 scripts/test_release_dist.py` dry-runs the renderer and
-the preflight against `scripts/testdata/release/compose.user.yml` (a copy of the
-user compose) and the real `infra/rust/compose.user.yml` when present.
+environment. `bun test ./tools/release/dist.test.ts` dry-runs the renderer,
+`tools/release/provenance.ts` and the preflight against
+`scripts/testdata/release/compose.user.yml` (a copy of the user compose) and
+the real `infra/rust/compose.user.yml` when present.
 
 ## Jobs and permissions
 
-The workflow default is `contents: read`. `scripts/ci_selection.py
-verify-workflows` rejects other triggers or write scopes outside the jobs below.
+The workflow default is `contents: read`. `bun tools/ci/verify-workflows.ts`
+rejects other triggers or write scopes outside the jobs below.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| verify | ubuntu-26.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates, version policy, preflight, existing release/image |
+| verify | ubuntu-26.04 | contents, checks, packages: read | tag format, first-parent `main`, CI gates (`tools/release/check-ci.ts`), version policy, preflight, existing release/image |
 | build-amd64 / build-arm64 | ubuntu-26.04 / ubuntu-26.04-arm | contents: read, packages: write | native build of the tagged SHA, OCI labels, push by digest; skipped when the version already has a tagged image |
-| index | ubuntu-26.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`scripts/release-api.py push-index`), records the index and per-arch digests |
-| dist | ubuntu-26.04 | contents: read | `scripts/release-dist.sh` at the tag: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five; then `scripts/release-provenance.py` from the workflow ref records the smoke tooling commit |
+| index | ubuntu-26.04 | contents: read, packages: write | pushes the two-platform index **by digest, without a tag** (`tools/release/release-api.ts push-index` from the workflow ref), records the index and per-arch digests |
+| dist | ubuntu-26.04 | contents: read | `scripts/release-dist.sh` at the tag: `compose.yml`, `env.example`, `INSTALL.md`, `release.json`, `RELEASE-NOTES.md`, and `SHA256SUMS` over those five; then `tools/release/provenance.ts` from the workflow ref records the smoke tooling commit |
 | smoke-amd64 / smoke-arm64 | ubuntu-26.04 / ubuntu-26.04-arm | contents: read | `scripts/release-smoke.sh` from the workflow ref against the digest, no registry login |
-| publish | ubuntu-26.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag |
+| publish | ubuntu-26.04 | contents: read, packages: write | tags the smoked index `:0.y.z` (never moved), then `:0.y` when this is the newest `v0.y.*` tag, with `tools/release/release-api.ts` from the workflow ref |
 | release | ubuntu-26.04 | contents: write | `scripts/release-publish.sh`: pre-release for the existing git tag |
 
 Only `publish` and `release` run after both smoke jobs passed, and they are the
@@ -86,17 +87,20 @@ fixed re-run builds again.
 
 ## Product commit and smoke tooling commit
 
-Every job except the smoke builds, renders or publishes from the tagged SHA
-(`verify` resolves it): the image and its `FVOCI_BUILD_SHA`, the OCI
-`version`/`revision` labels, `compose.yml`, `env.example`, `INSTALL.md`, the
-notes and the version checks. The smoke jobs are test tooling and check out
-`github.sha`, the commit the run started from: the tag commit on a tag push,
-the dispatching branch head (normally `main`) on `workflow_dispatch`. The
-smoke still tests only the tagged product: it pulls the index digest from the
-`release-dist` record, installs from the `compose.yml` and `env.example` that
+`verify`, the builds, `dist` and `release` check out the tagged SHA (`verify`
+resolves it) and build, render or publish from it: the image and its
+`FVOCI_BUILD_SHA`, the OCI `version`/`revision` labels, `compose.yml`,
+`env.example`, `INSTALL.md`, the notes and the version checks. The smoke jobs
+are test tooling and check out `github.sha`, the commit the run started from:
+the tag commit on a tag push, the dispatching branch head (normally `main`) on
+`workflow_dispatch`. The smoke still tests only the tagged product: it pulls
+the index digest from the `release-dist` record, installs from the `compose.yml` and `env.example` that
 `dist` rendered at the tag, and takes the expected version and OCI revision
 from `release.json` (`sourceSha`), never from its own checkout. The test
 clients, browser specs, fixtures and the Bun lockfile come from the workflow ref.
+`index` and `publish` also check out `github.sha` and run the registry tooling
+(`tools/release/release-api.ts`) from it: they read no file of the tagged
+tree, only the recorded digests, and an older tag has no `tools/release`.
 
 `dist` records both commits: `release.json` keeps `sourceSha` (product) and
 gains `toolingSha` and `toolingRef`; `RELEASE-NOTES.md` ends with a Provenance
@@ -130,14 +134,14 @@ Re-runs never move a recorded digest:
   that tagged but stopped before the release) already carries for the same
   version and SHA. It fails when a release records another digest, when a
   draft release exists, or when the image was built from another commit.
-- `release-api.py tag` refuses to move an existing `:0.y.z` to another digest.
+- `release-api.ts tag` refuses to move an existing `:0.y.z` to another digest.
 - `release-publish.sh` is a no-op for a complete release with the same digest,
   refuses to replace assets, and stops on a draft left by an interrupted upload.
 
 Delete a broken or draft release by hand before re-running.
 
 Registry and release state come from HTTP status codes and JSON
-(`scripts/release-api.py`), not from error text. A package the job token
+(`tools/release/release-api.ts`), not from error text. A package the job token
 cannot read (401/403, for example before the first release creates it) counts
 as untagged only while no release records a digest. `publish` checks the tag
 again with its write token before tagging.
@@ -209,7 +213,7 @@ per-arch digests, OCI labels and `--version`, and then, against the rendered
 compose: health and readiness, the uid and secret boundary above, `fvoci-migrate --doctor`,
 first-admin setup (a second setup is refused) and login, document create and
 collaborative save (`scripts/install-smoke-collab.mjs`), document
-import/export and public PDF (`scripts/install-smoke-documents.py`), HWPX
+import/export and public PDF (`tools/release/smoke-documents.ts`), HWPX
 upload, extraction and byte-exact download, workspace search, `down`/`up` with
 the same volumes (existing session, password login, body, attachment,
 extraction, imports and search survive), and a failed preparation that must

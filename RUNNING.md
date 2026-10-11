@@ -13,7 +13,7 @@ Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_H
 Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.98.1, and
 Bun 1.4.2. The Docker Rust/web builders and final runtime use the same pinned
 Ubuntu 26.04 base. Native SQLite builds require `libclang-18-dev=1:18.1.8-20ubuntu8`
-with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, Python 3, and curl.
+with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, and curl.
 Rebuild native outputs on this OS; caches are scoped to Ubuntu 26.04, architecture,
 toolchain, and build features.
 
@@ -764,10 +764,10 @@ convert helper; the final image contains no Node/Bun/Deno or bundled JavaScript 
 Bun is used only to build the web assets and run development oracles/tests.
 `scripts/document-convert` remains only
 as the development oracle for the fixture regeneration scripts (`scripts/regen-*-oracle.sh`).
-The installed document smoke uses a host-side Python standard-library client;
-it checks the installed Rust API before and after restart, including parsed
-OOXML text. Python and its test client are not copied into the product image.
-Development/CI Python fixtures and independent readers remain supported.
+The installed document smoke uses a host-side Bun client
+(`tools/release/smoke-documents.ts`); it checks the installed Rust API before
+and after restart, including parsed OOXML text. The test client is not copied
+into the product image.
 
 The child is chosen before any runtime, config or credential is loaded, gets a cleared
 environment, RLIMIT_AS 2 GiB and RLIMIT_CPU 30 s, reads one input from stdin (4 MiB cap; the
@@ -1440,8 +1440,7 @@ image runs `fvoci-migrate --backup-manifest` and the offline
 `--restore-preflight` with only the key environment, a read-only backup mount
 for restore, and no network. PostgreSQL dump/restore, storage archiving and
 the Rust `--verify-storage`/`--verify-secrets` probes run in the specified
-Compose containers. Python is not required for the operational scripts;
-independent Python compatibility fixtures remain available for testing.
+Compose containers. Python is not required for the operational scripts.
 
 **Included:** a custom-format `pg_dump` of schemas `public` (RLS helper
 functions) and `fvoci`, taken as the PostgreSQL owner role through the
@@ -1578,8 +1577,8 @@ adds two workspace realms and runs the ignored Rust test
 `keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
 license, not the release server) against them.
 
-Needs docker with compose, openssl, python3, git, cargo, bun, setsid
-(util-linux), the web dependencies and Chromium from
+Needs docker with compose, openssl, git, cargo, bun, setsid (util-linux),
+realpath (coreutils), the web dependencies and Chromium from
 `scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
 image pull. As in the web e2e harness, the web build (`bun --bun run build`)
 and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
