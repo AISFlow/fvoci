@@ -8,7 +8,16 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use xtask::selected_library::{filters, FILTERS_FILE};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 struct Temp(PathBuf);
 
@@ -127,6 +136,7 @@ fn registered() -> Vec<String> {
 
 #[test]
 fn one_build_then_every_filter_exactly_once_from_the_package_directory() {
+    let _serial = serial();
     let fixture = fixture();
     // As under `cargo xtask`: the enclosing `cargo run` set xtask's own package variables.
     let xtask_dir = "/repo/xtask";
@@ -168,6 +178,7 @@ fn one_build_then_every_filter_exactly_once_from_the_package_directory() {
 
 #[test]
 fn without_target_dir_cargo_keeps_its_own_target_selection() {
+    let _serial = serial();
     let fixture = fixture();
     let out = xtask(&fixture, "ok", &[], &[]);
     assert_eq!(out.status.code(), Some(0));
@@ -179,6 +190,7 @@ fn without_target_dir_cargo_keeps_its_own_target_selection() {
 
 #[test]
 fn a_control_that_is_not_an_exact_pass_fails_and_stops_the_run() {
+    let _serial = serial();
     let list = registered();
     let at = list[9].as_str();
     for (mode, message) in [
@@ -210,6 +222,7 @@ fn a_control_that_is_not_an_exact_pass_fails_and_stops_the_run() {
 
 #[test]
 fn a_registered_filter_that_matches_no_test_fails_the_run() {
+    let _serial = serial();
     // The list is the checkout's file: a renamed entry still runs, and the
     // libtest stand-in finds no such test.
     let fixture = fixture();
@@ -231,6 +244,7 @@ fn a_registered_filter_that_matches_no_test_fails_the_run() {
 
 #[test]
 fn a_missing_or_malformed_filter_list_refuses_before_the_build() {
+    let _serial = serial();
     let fixture = fixture();
     let path = fixture.0.join(FILTERS_FILE);
     let good = registered_text();
@@ -259,6 +273,7 @@ fn a_missing_or_malformed_filter_list_refuses_before_the_build() {
 
 #[test]
 fn build_failures_and_ambiguous_records_run_no_control() {
+    let _serial = serial();
     for (records, envs, message) in [
         (
             "ok",
@@ -288,6 +303,7 @@ fn build_failures_and_ambiguous_records_run_no_control() {
 
 #[test]
 fn a_missing_test_executable_is_a_spawn_failure() {
+    let _serial = serial();
     let fixture = fixture();
     fs::remove_file(fixture.0.join("test-exe")).unwrap();
     let out = xtask(&fixture, "ok", &[], &[]);
@@ -298,6 +314,7 @@ fn a_missing_test_executable_is_a_spawn_failure() {
 
 #[test]
 fn usage_errors_exit_2_and_help_exits_0() {
+    let _serial = serial();
     let fixture = fixture();
     for args in [
         &["extra"][..],

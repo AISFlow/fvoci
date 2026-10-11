@@ -8,7 +8,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -40,6 +49,7 @@ fn run(command: &mut Command) -> Output {
 
 #[test]
 fn build_entry_usage_and_help() {
+    let _serial = serial();
     let out = run(&mut script("prepare-sqlite-build.sh"));
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
@@ -97,6 +107,7 @@ fn build_entry_usage_and_help() {
 
 #[test]
 fn build_entry_rejects_hostile_archive_before_writing() {
+    let _serial = serial();
     let dir = temp("fvoci-sqlite-entry-");
     for fixture in [
         "hand/cases/03_dup6.zip",
@@ -136,6 +147,7 @@ fn build_entry_rejects_hostile_archive_before_writing() {
 
 #[test]
 fn build_entry_refuses_symlinked_archive_path() {
+    let _serial = serial();
     let dir = temp("fvoci-sqlite-entry-");
     fs::write(dir.join("real.zip"), b"x").unwrap();
     std::os::unix::fs::symlink(dir.join("real.zip"), dir.join("link.zip")).unwrap();
@@ -162,6 +174,7 @@ fn tool(bin: &Path, name: &str, body: &str) {
 /// downloaded bytes fail the pin, exit 1, and no GitHub file is written.
 #[test]
 fn ci_entry_rejects_wrong_source_and_writes_no_exports() {
+    let _serial = serial();
     let dir = temp("fvoci-sqlite-entry-");
     let (bin, clang, parent) = (dir.join("bin"), dir.join("clang"), dir.join("owned parent"));
     for d in [&bin, &clang, &parent] {
@@ -197,6 +210,7 @@ fn ci_entry_rejects_wrong_source_and_writes_no_exports() {
 
 #[test]
 fn ci_entry_usage_error_exits_two() {
+    let _serial = serial();
     let out = run(script("prepare-sqlite-ci.sh").arg("--no-such-option"));
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
@@ -205,6 +219,7 @@ fn ci_entry_usage_error_exits_two() {
 /// Consumer-directed Cargo overrides do not reach the xtask build itself.
 #[test]
 fn consumer_cargo_overrides_do_not_break_the_xtask_build() {
+    let _serial = serial();
     let dir = temp("fvoci-sqlite-entry-");
     let out = run(script("prepare-sqlite-ci.sh")
         .arg("--no-such-option")
@@ -226,6 +241,7 @@ fn consumer_cargo_overrides_do_not_break_the_xtask_build() {
 /// spawned pid reaches the task itself and is reported as a signal death.
 #[test]
 fn ci_entry_signal_reaches_task_directly() {
+    let _serial = serial();
     let dir = temp("fvoci-sqlite-entry-");
     let (bin, clang, parent) = (dir.join("bin"), dir.join("clang"), dir.join("parent"));
     for d in [&bin, &clang, &parent] {

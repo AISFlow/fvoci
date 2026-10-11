@@ -8,7 +8,16 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use xtask::sqlite_ci::{run, Context};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 const NAMES: [&str; 4] = [
     "SQLITE3_LIB_DIR",
@@ -271,6 +280,7 @@ exit "${CONSUMER_EXIT:-0}"
 
 #[test]
 fn verified_env_before_consumer_and_bounded_official_download() {
+    let _serial = serial();
     let f = Fixture::new();
     let outcome = f.invoke(&["--", "consumer", "--fixture-argument"]);
     assert_eq!(outcome.code, 0, "{}", outcome.stderr);
@@ -340,6 +350,7 @@ fn verified_env_before_consumer_and_bounded_official_download() {
 
 #[test]
 fn download_failure_never_runs_helper_or_consumer() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("CURL_FAIL", "1");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -353,6 +364,7 @@ fn download_failure_never_runs_helper_or_consumer() {
 
 #[test]
 fn helper_failure_never_exports_or_runs_consumer() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("HELPER_FAIL", "1");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -361,6 +373,7 @@ fn helper_failure_never_exports_or_runs_consumer() {
 
 #[test]
 fn real_helper_rejects_wrong_pin_before_native_tools() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.helper = vec![env!("CARGO_BIN_EXE_xtask").into(), "sqlite-build".into()];
     let outcome = f.invoke(&["--", "consumer"]);
@@ -378,6 +391,7 @@ fn real_helper_rejects_wrong_pin_before_native_tools() {
 
 #[test]
 fn bad_exports_never_reach_github_or_consumer() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("BAD_EXPORT", "1");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -385,6 +399,7 @@ fn bad_exports_never_reach_github_or_consumer() {
 
 #[test]
 fn missing_clang_fails_before_download() {
+    let _serial = serial();
     let f = Fixture::new();
     fs::remove_file(f.clang.join("libclang.so")).unwrap();
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -393,6 +408,7 @@ fn missing_clang_fails_before_download() {
 
 #[test]
 fn symlink_parent_never_downloads() {
+    let _serial = serial();
     let f = Fixture::new();
     let link = f.root.join("link");
     std::os::unix::fs::symlink(&f.parent, &link).unwrap();
@@ -402,6 +418,7 @@ fn symlink_parent_never_downloads() {
 
 #[test]
 fn partial_environment_refused() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("SQLITE3_STATIC", "1");
     f.rejected(&f.invoke_with(None, &["--", "consumer"]));
@@ -412,6 +429,7 @@ fn partial_environment_refused() {
 /// `SQLITE3_LIB_DIR` is still a handled failure (exit 1), never a panic.
 #[test]
 fn explicit_parent_with_partial_environment_fails_without_panic() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("SQLITE3_STATIC", "1");
     let outcome = f.invoke(&["--", "consumer"]);
@@ -429,6 +447,7 @@ fn explicit_parent_with_partial_environment_fails_without_panic() {
 
 #[test]
 fn cross_cargo_target_fails_before_download() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("CARGO_BUILD_TARGET", "unsupported-cross-target");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -442,6 +461,7 @@ fn cross_cargo_target_fails_before_download() {
 
 #[test]
 fn rustc_host_mismatch_never_exports_or_consumes() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("RUSTC_HOST", "unsupported-host");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -449,6 +469,7 @@ fn rustc_host_mismatch_never_exports_or_consumes() {
 
 #[test]
 fn rustc_failure_never_exports_or_consumes() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("RUSTC_FAIL", "1");
     f.rejected(&f.invoke(&["--", "consumer"]));
@@ -456,6 +477,7 @@ fn rustc_failure_never_exports_or_consumes() {
 
 #[test]
 fn unmatched_prefix_never_downloads_or_overwrites() {
+    let _serial = serial();
     let mut f = Fixture::new();
     for (k, v) in [
         ("SQLITE3_LIB_DIR", "/unowned/lib"),
@@ -471,6 +493,7 @@ fn unmatched_prefix_never_downloads_or_overwrites() {
 
 #[test]
 fn cache_identity_changes_with_clang_and_rust_toolchain() {
+    let _serial = serial();
     let mut f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     let first = f.last_output_line();
@@ -486,6 +509,7 @@ fn cache_identity_changes_with_clang_and_rust_toolchain() {
 
 #[test]
 fn cache_identity_tracks_bindgen_environment_without_disclosing_values() {
+    let _serial = serial();
     let mut f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     let first = f.last_output_line();
@@ -502,6 +526,7 @@ fn cache_identity_tracks_bindgen_environment_without_disclosing_values() {
 
 #[test]
 fn unknown_prefix_is_preserved() {
+    let _serial = serial();
     let f = Fixture::new();
     let prefix = f.prefix();
     fs::create_dir(&prefix).unwrap();
@@ -517,6 +542,7 @@ fn unknown_prefix_is_preserved() {
 
 #[test]
 fn corrupt_static_archive_not_replaced_or_consumed() {
+    let _serial = serial();
     let f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     fs::write(&f.github_env, "").unwrap();
@@ -529,6 +555,7 @@ fn corrupt_static_archive_not_replaced_or_consumed() {
 
 #[test]
 fn verified_existing_environment_revalidates_helper() {
+    let _serial = serial();
     let mut f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     for (k, v) in f.github_env_map() {
@@ -541,6 +568,7 @@ fn verified_existing_environment_revalidates_helper() {
 
 #[test]
 fn preflight_exports_no_build_paths_and_matches_verified_identity() {
+    let _serial = serial();
     let f = Fixture::new();
     assert_eq!(f.invoke(&["--identity-only"]).code, 0);
     assert_eq!(fs::read_to_string(&f.github_env).unwrap(), "");
@@ -559,6 +587,7 @@ fn preflight_exports_no_build_paths_and_matches_verified_identity() {
 
 #[test]
 fn identity_only_refuses_consumer_or_env_file() {
+    let _serial = serial();
     let f = Fixture::new();
     f.rejected(&f.invoke(&["--identity-only", "--", "consumer"]));
     let env_file = f.root.join("env");
@@ -569,6 +598,7 @@ fn identity_only_refuses_consumer_or_env_file() {
 
 #[test]
 fn wrong_expected_identity_cannot_export_or_build() {
+    let _serial = serial();
     let f = Fixture::new();
     f.rejected(&f.invoke(&["--expected-cache-identity", &"f".repeat(64)]));
     assert!(!f.prefix().exists());
@@ -576,6 +606,7 @@ fn wrong_expected_identity_cannot_export_or_build() {
 
 #[test]
 fn timings_do_not_change_cache_identity() {
+    let _serial = serial();
     let f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     let first = f.last_output_line();
@@ -601,6 +632,7 @@ fn timings_do_not_change_cache_identity() {
 
 #[test]
 fn explicit_cache_fallback_preserves_rejected_prefix_and_logs_build() {
+    let _serial = serial();
     let f = Fixture::new();
     assert_eq!(f.invoke(&[]).code, 0);
     let archive = f.prefix().join("lib/libsqlite3.a");
@@ -629,6 +661,7 @@ fn explicit_cache_fallback_preserves_rejected_prefix_and_logs_build() {
 
 #[test]
 fn cache_fallback_cannot_bypass_source_authentication_or_symlink() {
+    let _serial = serial();
     let f = Fixture::new();
     let archive = f.parent.join("sqlite-amalgamation-3530400.zip");
     fs::write(&archive, b"wrong source").unwrap();
@@ -640,6 +673,7 @@ fn cache_fallback_cannot_bypass_source_authentication_or_symlink() {
 
 #[test]
 fn consumer_exit_is_propagated() {
+    let _serial = serial();
     let mut f = Fixture::new();
     f.set("CONSUMER_EXIT", "23");
     assert_eq!(f.invoke(&["--", "consumer"]).code, 23);
@@ -647,6 +681,7 @@ fn consumer_exit_is_propagated() {
 
 #[test]
 fn consumer_signal_is_python_negative_returncode() {
+    let _serial = serial();
     let f = Fixture::new();
     let outcome = f.invoke(&["--", "bash", "-c", "kill -TERM $$"]);
     assert_eq!(outcome.code, -15);
@@ -654,6 +689,7 @@ fn consumer_signal_is_python_negative_returncode() {
 
 #[test]
 fn exports_are_printed_only_without_env_destinations() {
+    let _serial = serial();
     let f = Fixture::new();
     let context = Context {
         env: f.env.clone(),
@@ -681,6 +717,7 @@ fn exports_are_printed_only_without_env_destinations() {
 
 #[test]
 fn usage_errors_exit_two_before_any_work() {
+    let _serial = serial();
     let f = Fixture::new();
     for extra in [
         &["--parnet", "x"][..],
