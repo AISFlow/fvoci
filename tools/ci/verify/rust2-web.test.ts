@@ -214,7 +214,6 @@ test("selected registration commands cannot be missing or masked", () => {
   const jobs = realJobs("web.yml");
   for (const command of [
     "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
-    "python3 scripts/selected-backend-ci/test_off_registration.py",
   ]) {
     const bad = clone(jobs);
     const step = unitStep(bad);

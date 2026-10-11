@@ -1390,6 +1390,9 @@ function caseList(): MutationCase[] {
   const elsewhere = (job: string) =>
     `web: ${job} may prepare Rustup metadata only in its pinned step`;
   const python = (job: string) => `web: ${job} may not install or run python3`;
+  const LANE_JOBS = ["install-on", "postgres-on", "sqlite-on", "postgres-off", "sqlite-off"].map(
+    (lane) => `collaboration-${lane}`,
+  );
   const webCases: [string, string, Edit, string][] = [
     [
       "untimed-python-helper",
@@ -1536,6 +1539,32 @@ function caseList(): MutationCase[] {
       swap("          bun ci\n", "          bun ci\n          python3 -m pip install pyyaml\n"),
       python("web-checks"),
     ],
+    [
+      "checks-python-step",
+      "web-checks",
+      swap(
+        "      - name: Verify normal web e2e shard plan\n",
+        "      - run: python3 scripts/selected-backend-ci/test_off_registration.py\n" +
+          "      - name: Verify normal web e2e shard plan\n",
+      ),
+      python("web-checks"),
+    ],
+    [
+      "checks-python-registration-line",
+      "web-checks",
+      swap(
+        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n",
+        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n" +
+          "          python3 scripts/selected-backend-ci/test_off_registration.py\n",
+      ),
+      python("web-checks"),
+    ],
+    ...["web-checks", ...LANE_JOBS].map((job): [string, string, Edit, string] => [
+      `apt-${job}`,
+      job,
+      swap(APT_NO_PYTHON, APT_PYTHON),
+      python(job),
+    ]),
   ];
   for (const [name, job, edit, needle] of webCases) {
     add(`web-rustup-${name}`, "web.yml", inJob(job, edit), needle);

@@ -1,7 +1,7 @@
 // web.yml browser budget and the current-run native build handoff: the only
 // admitted cross-job native consumer, bound to this run's producer artifact.
 // The handoff check also pins the native jobs' Rustup metadata preparation
-// and the jobs that may still use python3.
+// and that no job uses python.
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
@@ -124,7 +124,6 @@ const UNIT_REGRESSION_COMMANDS = [
   "(cd apps/web && bun run test)",
   "(cd packages/editor && bun run test)",
   "(cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)",
-  "python3 scripts/selected-backend-ci/test_off_registration.py",
 ];
 
 const unmasked = (step: Mapping) => !has(step, "if") && !has(step, "continue-on-error");
@@ -301,15 +300,7 @@ function timingPreamble(job: string, position: number): string {
   );
 }
 
-// python3 stays only where a caller still needs it: the selected-backend lane
-// drivers (current-<lane>-driver.py) in the five collaboration lanes, and the
-// pending OFF registration check in web-checks.
-const APT_WITH_PYTHON =
-  "sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8";
-const PYTHON_LINES: Readonly<Record<string, readonly string[]>> = {
-  "web-checks": [APT_WITH_PYTHON, UNIT_REGRESSION_COMMANDS.at(-1) ?? ""],
-  ...Object.fromEntries(WEB_COLLAB_LANES.map((lane) => [lane.name, [APT_WITH_PYTHON]])),
-};
+// No web.yml job installs or runs python.
 const PYTHON = /python/i;
 
 const without = (value: unknown, key: string): unknown =>
@@ -377,18 +368,9 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
     ) {
       errors.push(`web: ${name} may prepare Rustup metadata only in its pinned step`);
     }
-    const allowed = PYTHON_LINES[name] ?? [];
-    const python =
-      PYTHON.test(JSON.stringify(without(job, "steps"))) ||
-      list.some(
-        (step) =>
-          PYTHON.test(JSON.stringify(without(step, "run"))) ||
-          pySplitlines(stepRun(step)).some(
-            (line) => PYTHON.test(line) && !allowed.includes(line.trim()),
-          ),
-      );
-    if (python)
-      errors.push(`web: ${name} may not install or run python3 beyond its registered callers`);
+    // Job keys, step fields and every run line.
+    if (PYTHON.test(JSON.stringify(job) ?? ""))
+      errors.push(`web: ${name} may not install or run python3`);
   }
   return errors;
 }
