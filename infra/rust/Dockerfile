@@ -48,7 +48,7 @@ RUN cargo fetch --locked \
 FROM rust-deps AS rust-build
 # Native bindgen/C prerequisites exist only in the builder (both GNU arches).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 locales \
+ && apt-get install -y --no-install-recommends gcc binutils curl ca-certificates libclang-18-dev=1:18.1.8-20ubuntu8 locales \
  && localedef -i en_US -f UTF-8 en_US.UTF-8 \
  && locale -a > /tmp/fvoci-locales \
  && grep -Fx en_US.utf8 /tmp/fvoci-locales \
