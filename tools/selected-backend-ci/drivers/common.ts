@@ -22,9 +22,12 @@ import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
-import { digest, files, jsonInteger, observedExit, root, sha, sourceInputText } from "../io.ts";
+import { files, jsonInteger, observedExit, root, sha, sourceInputText } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
+
+// The runner shares these without loading this module.
+export { bunDriver, failureDigest } from "../io.ts";
 
 export type Receipt = Record<string, unknown>;
 export type Json = Record<string, unknown>;
@@ -546,16 +549,6 @@ export function attachmentJson(body: unknown): unknown {
   return JSON.parse(decode(Buffer.from(body, "base64")));
 }
 
-// Same canonical digest the runner applies to a recorded failure.
-export function failureDigest(value: unknown): string {
-  const keys = new Set<string>();
-  JSON.stringify(value, (key, child: unknown) => {
-    if (key) keys.add(key);
-    return child;
-  });
-  return digest(JSON.stringify(value, [...keys].sort()));
-}
-
 // rglob('*') + is_file(): symlinked files count, dangling links do not.
 // The same SHA-256 hex as io.ts sha, through one reused buffer: io.ts allocates
 // 1 MiB per file, and an input closure is ~130k mostly small files (25 s per
@@ -900,8 +893,6 @@ export function frameLine(error: unknown, file: string): number | null {
   return null;
 }
 
-// Re-exec of a lane driver under Bun: the same executable, no .env autoload.
-export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
 export function assertNoEnvFile(): void {
   assert.ok(process.execArgv.includes("--no-env-file"), "lane driver requires bun --no-env-file");
 }

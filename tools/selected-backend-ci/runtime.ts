@@ -27,23 +27,22 @@ import {
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
-import { bindingModule } from "./drivers/binding.ts";
-import { bunDriver, failureDigest } from "./drivers/common.ts";
-import { restartHelper } from "./drivers/restart.ts";
-import { publicCheckpoint } from "./drivers/sqlite.ts";
 import {
   accessible,
   ancestors,
   assertHandoffActor,
   below,
+  bunDriver,
   call,
   digest,
   env,
+  failureDigest,
   files,
   gid,
   inventory,
   jsonInteger,
   observedExit,
+  publicCheckpoint,
   read,
   root,
   sha,
@@ -470,6 +469,10 @@ export interface RunBoundary {
 export const driverCommand = bunDriver;
 export const laneDriver = (lane: Lane) =>
   join(root, "tools/selected-backend-ci/drivers", lane + ".ts");
+// The grants hash these driver modules by path. The runner never imports a
+// lane-driver module: its top level would run before the lease is checked.
+export const bindingModule = join(root, "tools/selected-backend-ci/drivers/binding.ts");
+export const restartHelper = join(root, "tools/selected-backend-ci/drivers/restart.ts");
 const runBoundary: RunBoundary = {
   identity,
   access: runtimeAccess,

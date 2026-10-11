@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Copies the runner modules (this directory and drivers/, no tests) to
-// `destination`, the tools/selected-backend-ci of a probe checkout: runtime.ts
-// imports the lane driver modules.
+// `destination`, the tools/selected-backend-ci of a probe checkout: the lease
+// hashes the lane driver modules.
 export function copyRunnerModules(destination: string): void {
   for (const part of ["", "drivers"]) {
     mkdirSync(join(destination, part), { recursive: true, mode: 0o755 });

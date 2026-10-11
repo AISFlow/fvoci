@@ -82,6 +82,7 @@ const leaseModules = [
   "scripts/run-selected-backend-e2e.ts",
   "tools/selected-backend-ci/admission.ts",
   "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/config-list.ts",
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
@@ -1829,7 +1830,11 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       try {
         const ready = await reader.read();
         expect(ready.done).toBe(false);
-        expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+        expect(
+          Number(
+            new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(ready.value).trim(),
+          ),
+        ).toBe(child.pid);
       } finally {
         reader.releaseLock();
       }
@@ -1858,7 +1863,11 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
         try {
           const ready = await reader.read();
           expect(ready.done).toBe(false);
-          expect(Number(new TextDecoder().decode(ready.value).trim())).toBe(child.pid);
+          expect(
+            Number(
+              new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(ready.value).trim(),
+            ),
+          ).toBe(child.pid);
         } finally {
           reader.releaseLock();
         }

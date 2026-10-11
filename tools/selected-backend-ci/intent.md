@@ -8,6 +8,8 @@
 lane driver는 `drivers/{install,postgres,sqlite}.ts`이고, Python lane driver와
 `restart_checkpoint.py`, 그 Python 검사 세 개는 제거했다. `run-selected-backend-e2e.py`와
 `current_binding.py`는 `turso-ui.py`가 아직 라이브러리로 import하므로 남아 있다.
+원본처럼 runner는 lane driver 모듈을 import하지 않고, lease 검사 뒤 별도 Bun 프로세스로 시작한다.
+CLI가 읽는 모듈(`config-list.ts` 포함)과 driver는 모두 lease 해시 대상이다.
 `test_off_registration.py`는 두 파일의 검사(turso-ui lease와 CI guard)만 남겼다. turso-ui를 옮긴
 뒤 셋을 함께 제거한다. 두 파일의 selected-backend 경로는 fail-closed다. runner `run`과 lease의
 selected-backend consumer는 제거된 driver 파일을 해시하다 실패하고, runner config-list는 제거된

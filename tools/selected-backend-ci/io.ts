@@ -58,6 +58,16 @@ export function env(name: string, source: Environment = process.env): string {
 export function digest(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
+// Same canonical digest the runner and the lane drivers apply to a recorded
+// failure.
+export function failureDigest(value: unknown): string {
+  const keys = new Set<string>();
+  JSON.stringify(value, (key, child: unknown) => {
+    if (key) keys.add(key);
+    return child;
+  });
+  return digest(JSON.stringify(value, [...keys].sort()));
+}
 export function sha(path: string): string {
   const fd = openSync(path, "r"),
     hash = createHash("sha256"),
@@ -124,6 +134,44 @@ export function spawnSelectedCommand(
     signal,
     killSignal: "SIGKILL",
   });
+}
+// Re-exec of a lane driver under Bun: the same executable, no .env autoload.
+export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
+// Public preparation checkpoints of the SQLite lane driver: one fixed name per
+// owned preparation step. The runner publishes only `checkpointPrefix + <one of
+// these>`; never a stack frame, path, argv or message.
+export const checkpointPrefix = "tools/selected-backend-ci/drivers/sqlite.ts#";
+export const preparationSteps = [
+  "container-create",
+  "container-start",
+  "runtime-abi",
+  "copy-inputs",
+  "own-inputs",
+  "mode-executables",
+  "runtime-ldd",
+  "runtime-ldd-log",
+  "runtime-ldd-dependencies",
+  "mode-environment",
+  "copy-static",
+  "copied-owned-files",
+  "copied-hashes",
+  "copied-hashes-log",
+  "copied-hashes-match",
+  "network-mode",
+  "network-attachments",
+  "network-attachment-count",
+  "network-attachment-id",
+  "network-driver",
+  "network-driver-log",
+  "network-driver-host",
+] as const;
+export type PreparationStep = (typeof preparationSteps)[number];
+export function publicCheckpoint(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.startsWith(checkpointPrefix) &&
+    (preparationSteps as readonly string[]).includes(value.slice(checkpointPrefix.length))
+    ? value
+    : null;
 }
 export const jsonText = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
 // This byte form is a consumer contract: the runner's restart grant and
