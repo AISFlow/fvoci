@@ -1,14 +1,17 @@
 # 선택 backend runner 의도와 호환성
 
-원본은 변경하지 않은 `scripts/run-selected-backend-e2e.py`와
-`scripts/selected-backend-ci/current_binding.py`다. 원본이 거부하는 입력을 새 runner가
-허용하지 않는다. 아래는 언어 또는 실행 API 변경에 따른 동작 차이의 전체 의도다.
-`scripts/run-web-e2e.sh`의 runner 호출 10곳과 web build handoff 호출 10곳은 이 Bun CLI와
-`handoff.ts`를 쓰며, `web-build-handoff.py`와 그 검사는 제거했다(차이 표는 PR 본문). Python
-runner 파일은 `turso-ui.py`·Python 검사가 아직 라이브러리로 import하므로 남아 있으며, 그 importer를
-옮긴 뒤 제거한다. 남은 Python runner의 config-list 모드는 호출자가 없고, 제거된 handoff 파일을
-열다 실패하므로 fail-closed다. lane driver(`current-*-driver.py`)는 별도 이전 대상이다.
-Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테스트로 두지 않는다.
+원본은 Python runner `scripts/run-selected-backend-e2e.py`와 lane driver
+(`scripts/selected-backend-ci/current-*-driver.py`, `current_binding.py`, `restart_checkpoint.py`)다.
+원본이 거부하는 입력을 새 runner가 허용하지 않는다. 아래는 언어 또는 실행 API 변경에 따른 동작
+차이의 전체 의도다. `scripts/run-web-e2e.sh`의 runner 호출 10곳과 web build handoff 호출 10곳은
+이 Bun CLI와 `handoff.ts`를 쓰며, `web-build-handoff.py`와 그 검사는 제거했다(차이 표는 PR 본문).
+lane driver는 `drivers/{install,postgres,sqlite}.ts`이고, Python lane driver와
+`restart_checkpoint.py`, 그 Python 검사 세 개는 제거했다. `run-selected-backend-e2e.py`와
+`current_binding.py`는 `turso-ui.py`가 아직 라이브러리로 import하므로 남아 있다.
+`test_off_registration.py`는 두 파일의 검사(turso-ui lease와 CI guard)만 남겼다. turso-ui를 옮긴
+뒤 셋을 함께 제거한다. 두 파일의 selected-backend 경로는 fail-closed다. runner `run`과 lease의
+selected-backend consumer는 제거된 driver 파일을 해시하다 실패하고, runner config-list는 제거된
+handoff 파일을 열다 실패한다. Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테스트로 두지 않는다.
 
 | 항목                        | 원래 동작                                                                                                            | 새 동작                                                                                                                                                                                     | 이유                                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -36,7 +39,7 @@ Python 원본과의 패리티는 리뷰에서 한 번 확인했고, 상시 테�
 | receipt JSON·일반 로그      | Python JSON 서식·예외 표현·일반 로그                                                                                 | 표준 JSON.stringify와 Bun/Node API 표현                                                                                                                                                     | 의미·schema·권한·원본 bytes hash를 보존하며 표현 자체는 줄 단위 복제하지 않는다.                                       |
 | consumer가 재계산하는 JSON  | restart source inputs의 Python ASCII·indent·마지막 LF bytes                                                          | 기존 sourceInputText의 해당 byte 계약 유지                                                                                                                                                  | digest 소비자가 있는 형식은 바꾸지 않는다.                                                                             |
 | 실패 digest                 | Python 예외명·메시지와 Python JSON 표현                                                                              | TS 예외명·메시지의 기존 canonical JSON digest                                                                                                                                               | 진단 값은 언어에 따라 다르며 원본 파일 SHA·artifact identity와 혼동하지 않는다.                                        |
-| lane 실행                   | install/on → postgres/on → sqlite/on → postgres/off → sqlite/off, 기존 Python driver argv                            | 조합·순서·driver argv·환경·설치 close 선행·restart grant 동일                                                                                                                               | 기존 driver 실행은 runner fallback이 아니다.                                                                           |
+| lane 실행                   | install/on → postgres/on → sqlite/on → postgres/off → sqlite/off, Python driver argv                                 | 조합·순서·환경·설치 close 선행·restart grant 동일. driver는 `bun --no-env-file drivers/<lane>.ts`                                                                                           | Python driver와 runner fallback은 없다.                                                                                |
 | 완료·반환                   | 최초 실패·retirement·5 lane 및 설치 process proof                                                                    | 동일, whole060Complete도 false 유지                                                                                                                                                         | 단위 검사를 실제 제품 runtime 수락으로 대신하지 않는다.                                                                |
 | lane 지정                   | `--lane`으로 `run`·`owner-return`만 받는다                                                                           | 같은 CLI 인자다. lane을 env(`FVOCI_COLLAB_LANE`)에서 읽지 않는다                                                                                                                            | sudo가 넘기지 않는 env를 정본으로 두지 않는다. lane 정본은 호출 인자 하나다.                                           |
 | lane 검증 시점              | `run`은 runtime 디렉터리 생성 뒤 lane을 확인한다                                                                     | `run`은 actor·자원 검사 전에, `owner-return`은 job 확인 직후 lane을 확인한다                                                                                                                | 알 수 없는 lane은 어떤 자원도 만들지 않고 거부한다. 거부 범위는 같다.                                                  |

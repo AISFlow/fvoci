@@ -10,7 +10,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -18,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { gid, root, sha, uid } from "./io.ts";
-import { run } from "./test-process.ts";
+import { copyRunnerModules, run } from "./test-process.ts";
 
 const SHA = "a".repeat(40),
   TREE = "b".repeat(40),
@@ -77,10 +76,7 @@ function footerCase(
       scripts = join(repo, "scripts"),
       tools = join(repo, "tools/selected-backend-ci");
     mkdirSync(scripts, { recursive: true });
-    mkdirSync(tools, { recursive: true });
-    for (const name of readdirSync(import.meta.dir))
-      if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
-        copyFileSync(join(import.meta.dir, name), join(tools, name));
+    copyRunnerModules(tools);
     copyFileSync(
       join(root, "scripts/run-selected-backend-e2e.ts"),
       join(scripts, "selected-cli.ts"),
