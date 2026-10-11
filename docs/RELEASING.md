@@ -100,7 +100,7 @@ from `release.json` (`sourceSha`), never from its own checkout. The test
 clients, browser specs, fixtures and the Bun lockfile come from the workflow ref.
 `index` and `publish` also check out `github.sha` and run the registry tooling
 (`tools/release/release-api.ts`) from it: they read no file of the tagged
-tree, only the recorded digests, and an older tag has no `tools/release`.
+tree, only the recorded digests.
 
 `dist` records both commits: `release.json` keeps `sourceSha` (product) and
 gains `toolingSha` and `toolingRef`; `RELEASE-NOTES.md` ends with a Provenance
