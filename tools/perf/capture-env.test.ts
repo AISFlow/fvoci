@@ -33,7 +33,7 @@ const probes: Probes = {
   loadavg: [0.5, 1.25, 2],
   dockerServer: "29.0.0",
   dockerInfo: "8 cpus 16777216000 bytes",
-  bun: "1.4.2",
+  bun: "1.4.3",
   playwright: "Version 1.63.0",
   serverBytes: 10,
   collabBytes: 20,

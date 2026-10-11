@@ -1,4 +1,4 @@
-// Bun 1.4.2 / Node compatibility APIs, with only the existing FVOCI file policy.
+// Bun / Node compatibility APIs, with only the existing FVOCI file policy.
 import { spawn, spawnSync, which } from "bun";
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";

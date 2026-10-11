@@ -123,7 +123,7 @@ const recordedLdd = (path: string) => call(["ldd", path]).replace(/0x[0-9a-f]+/g
 const toolchain = () => ({
   rustc: "release: 1.98.1\nhost: x86_64-unknown-linux-gnu",
   cargo: "cargo 1.98.1",
-  bun: "1.4.2",
+  bun: "1.4.3",
 });
 const abiRecord = () => Object.fromEntries(abiFiles().map((p) => [p, sha(p)]));
 const fixtureInputs = () => ({
@@ -241,7 +241,7 @@ function collaborationFixture(): void {
   put("build-environment.json", {
     rustc: toolchain().rustc,
     cargo: "cargo 1.98.1",
-    bun: "1.4.2",
+    bun: "1.4.3",
     os_release: readFileSync("/etc/os-release", "utf8"),
     target,
     features: ["api-schema", "db-tests"],

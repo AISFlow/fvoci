@@ -173,7 +173,7 @@ def freeze():
                 'sqliteInputs': {'path': str(Path(os.environ['RUNNER_TEMP']) / 'fvoci-sqlite/consumer-inputs.json'),
                                  'sha256': digest(Path(os.environ['RUNNER_TEMP']) / 'fvoci-sqlite/consumer-inputs.json')},
                 'rustc': call(['rustc', '-vV'])}
-    require(manifest['bun']['version'] == '1.4.2', 'UI_BUN_PIN_MISMATCH')
+    require(manifest['bun']['version'] == '1.4.3', 'UI_BUN_PIN_MISMATCH')
     write(root() / 'current-build.json', manifest)
 
 

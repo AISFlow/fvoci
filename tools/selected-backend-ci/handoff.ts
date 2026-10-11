@@ -454,7 +454,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
   );
   const environment = read(output, "build-environment.json") as Environment;
   assert.ok(environment.rustc === h.toolchain().rustc && environment.cargo === h.toolchain().cargo);
-  assert.ok(environment.bun === h.toolchain().bun && environment.bun === "1.4.2");
+  assert.ok(environment.bun === h.toolchain().bun && environment.bun === "1.4.3");
   assert.equal(environment.os_release, readFileSync("/etc/os-release", "utf8"));
   assert.ok(
     environment.rustc.includes("release: 1.98.1") &&

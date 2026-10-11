@@ -87,7 +87,7 @@ try {
     "before.json": before,
     "after.json": before,
     "bundle.json": bundle,
-    "build-environment.json": { bun: "1.4.2" },
+    "build-environment.json": { bun: "1.4.3" },
     "build-env-inputs.json": {},
     "compile-receipt.json": {},
     "web-receipt.json": {

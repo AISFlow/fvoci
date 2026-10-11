@@ -51,7 +51,7 @@ jobs:
       # Setup action is pinned to the same maintained Web CI revision.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Pure admission fixtures (no credentials or network)
         run: bun --no-env-file tools/turso/fixtures.ts
       - name: Verify preexisting Environment (no configuration writes)
@@ -78,7 +78,7 @@ jobs:
       # Setup action is pinned to the same maintained Web CI revision.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Credential-free compiler and maintained SQLite inputs
         run: |
           set -euo pipefail
@@ -144,7 +144,7 @@ jobs:
       # Setup action is pinned to the same maintained Web CI revision.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       - name: Credential-free fixed dependencies and fresh browser assets
         run: |
           set -euo pipefail

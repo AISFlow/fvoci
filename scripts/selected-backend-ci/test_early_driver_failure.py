@@ -819,7 +819,7 @@ class ConfigListPreflight(unittest.TestCase):
             'target':{'name':'fvoci_server'},'profile':{'test':False},'features':['api-schema','db-tests'],
             'filenames':[str(core)]}]}
         receipts = {'before.json':before,'after.json':before,'bundle.json':bundle,
-                    'build-environment.json':{'bun':'1.4.2'},'build-env-inputs.json':{},'compile-receipt.json':{},
+                    'build-environment.json':{'bun':'1.4.3'},'build-env-inputs.json':{},'compile-receipt.json':{},
                     'web-receipt.json':{'source':SOURCE,'tree':TREE,'dist_files':{'asset.js':runner.sha(source/'apps/web/dist/asset.js')}},
                     'abi-receipt.json':{'currentSource':SOURCE,'host_runtime_files':{}}}
         for name,data in receipts.items():runner.write(self.output/name,data)

@@ -385,7 +385,7 @@ export function configListInputs(
   );
   assert.ok(deepEquals(groups(), access.groups));
   const bun = realpathSync(tool("bun"));
-  assert.equal((read(join(output, "build-environment.json")) as { bun: string }).bun, "1.4.2");
+  assert.equal((read(join(output, "build-environment.json")) as { bun: string }).bun, "1.4.3");
   assert.equal(sha(bun), before.external[bun]);
   const chromium = admittedBrowser(output);
   const browser: Browser = {

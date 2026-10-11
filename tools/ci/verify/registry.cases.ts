@@ -663,7 +663,7 @@ function caseList(): MutationCase[] {
       "          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
       "          cargo fetch --locked --manifest-path Cargo.toml\n",
     ],
-    ["          bun-version: 1.4.2\n", "          bun-version: latest\n"],
+    ["          bun-version: 1.4.3\n", "          bun-version: latest\n"],
     ["          bun install --frozen-lockfile\n", "          bun install\n"],
     ["          bun --no-env-file tools/turso/ui.ts --record-before\n", ""],
     [
@@ -706,7 +706,7 @@ function caseList(): MutationCase[] {
   const TURSO_SETUP_BUN =
     "      # Setup action is pinned to the same maintained Web CI revision.\n" +
     "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n" +
-    "        with:\n          bun-version: 1.4.2\n";
+    "        with:\n          bun-version: 1.4.3\n";
   const guardTool = "bun --no-env-file tools/turso/guard.ts";
   const uiTool = "bun --no-env-file tools/turso/ui.ts";
   const oldGuard = "python3 scripts/selected-backend-ci/turso-test-guard.py";
@@ -841,14 +841,14 @@ function caseList(): MutationCase[] {
     {
       name: "admission-bun-latest",
       job: "admission",
-      old: "          bun-version: 1.4.2\n",
+      old: "          bun-version: 1.4.3\n",
       replacement: "          bun-version: latest\n",
       needle: ADMISSION_NEEDLE,
     },
     {
       name: "connection-bun-latest",
       job: "turso-connection",
-      old: "          bun-version: 1.4.2\n",
+      old: "          bun-version: 1.4.3\n",
       replacement: "          bun-version: latest\n",
       needle: "pinned Bun before the guard runs",
     },

@@ -168,7 +168,7 @@ export function recordBefore(output: string): void {
     process.env.CARGO_BUILD_TARGET ?? "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
   );
-  assert.equal(call(["bun", "-v"]), "1.4.2");
+  assert.equal(call(["bun", "-v"]), "1.4.3");
   assert.ok(process.env.SQLITE3_STATIC === "1" && process.env.SQLITE3_NO_PKG_CONFIG === "1");
   const disk = statfsSync(output);
   assert.ok(disk.bavail * disk.bsize >= 20_000_000_000);

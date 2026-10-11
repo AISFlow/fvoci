@@ -36,7 +36,7 @@ const CHECKOUT = {
 // Every job runs a Bun tool, so each one sets up the same pinned Bun.
 const SETUP_BUN = {
   uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-  with: { "bun-version": "1.4.2" },
+  with: { "bun-version": "1.4.3" },
 };
 
 const TARGET_INIT = `printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;

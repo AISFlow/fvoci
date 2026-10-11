@@ -419,7 +419,7 @@ def record_before(output):
     assert os_release['ID'].strip(chr(34))=='ubuntu' and os_release['VERSION_ID'].strip(chr(34))=='26.04'
     assert 'release: 1.98.1' in call(['rustc','-Vv']) and 'host: x86_64-unknown-linux-gnu' in call(['rustc','-Vv'])
     assert os.environ.get('CARGO_BUILD_TARGET','x86_64-unknown-linux-gnu')=='x86_64-unknown-linux-gnu'
-    assert call(['bun','-v'])=='1.4.2'
+    assert call(['bun','-v'])=='1.4.3'
     assert os.environ['SQLITE3_STATIC']==os.environ['SQLITE3_NO_PKG_CONFIG']=='1'
     assert shutil.disk_usage(output).free>=20_000_000_000
     write(output/'build-env-inputs.json',build_env())
@@ -588,7 +588,7 @@ def config_list_inputs(output, browser_owner=(1000, 1000)):
     assert access['preflight_exit'] == 0 and access['preflight']['missing'] == 0
     assert sorted(os.getgroups()) == access['groups'], 'runtime read groups differ'
     bun = str(Path(shutil.which('bun')).resolve())
-    assert read(output/'build-environment.json')['bun'] == '1.4.2'
+    assert read(output/'build-environment.json')['bun'] == '1.4.3'
     assert sha(bun) == before['external'][bun]
     chromium = admitted_browser(output, browser_owner)
     browser = {'bun':{'path':bun,'sha256':sha(bun)},'chromium':{'path':chromium,'sha256':sha(chromium)},
@@ -631,7 +631,7 @@ def config_list(output, expected_uid=1000):
     receipt = {'schema':1,'phase':'config-list','source':before['head'],'tree':before['tree'],
                'compiledSource':before['head'],'uid':os.getuid(),'gid':os.getgid(),'groups':sorted(os.getgroups()),
                'environment_names':sorted(env),'list_only':True,'actual_browser_tests':0,'actual_db_tests':0,
-               'bun_version':'1.4.2','module_hashes':modules,
+               'bun_version':'1.4.3','module_hashes':modules,
                'executables':{name:{'sha256':facts['sha256'], 'mode':stat.S_IMODE(Path(facts['path']).stat().st_mode),
                                    'uid':Path(facts['path']).stat().st_uid,'gid':Path(facts['path']).stat().st_gid}
                               for name,facts in browser.items() if name in ('bun','chromium')}}

@@ -874,7 +874,7 @@ window.Bun.version, self.Bun.version];`,
       "-e",
       "console.log(JSON.stringify({bun:process.versions.bun,execPath:process.execPath}))",
     ]);
-    expect((JSON.parse(runtime.stdout) as { bun: string }).bun).toBe("1.4.2");
+    expect((JSON.parse(runtime.stdout) as { bun: string }).bun).toBe("1.4.3");
     const [result, report] = await lint("ProofValid.vue", VALID);
     expect(result.status, JSON.stringify(report)).toBe(0);
     for (const config of ["apps/web/tsconfig.vue.json", "packages/editor/tsconfig.vue.json"]) {

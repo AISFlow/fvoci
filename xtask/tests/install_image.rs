@@ -71,7 +71,7 @@ impl Fixture {
             "[toolchain]\nchannel = \"1.98.1\"\n",
         )
         .unwrap();
-        fs::write(repo.join(".bun-version"), "1.4.2\n").unwrap();
+        fs::write(repo.join(".bun-version"), "1.4.3\n").unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "fixture"]);
@@ -85,7 +85,7 @@ impl Fixture {
             git(&self.repo, &["rev-parse", "HEAD^{tree}"]),
             "amd64".to_owned(),
             xtask::host::hex(&Sha256::digest(&inputs)),
-            "rust=1.98.1;bun=1.4.2".to_owned(),
+            "rust=1.98.1;bun=1.4.3".to_owned(),
         ]
     }
 

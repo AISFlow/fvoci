@@ -81,7 +81,7 @@ export function configList(output: string): number {
     list_only: true,
     actual_browser_tests: 0,
     actual_db_tests: 0,
-    bun_version: "1.4.2",
+    bun_version: "1.4.3",
     module_hashes: modules,
     executables: Object.fromEntries(
       (["bun", "chromium"] as const).map((name) => {

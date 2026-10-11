@@ -28,7 +28,7 @@ import {
   UiError,
 } from "./ui-common.ts";
 
-export const PINNED_BUN = "1.4.2";
+export const PINNED_BUN = "1.4.3";
 export const BINARIES = ["fvoci-server", "fvoci-migrate", "fvoci-e2e-fixture", "collab-engine"];
 
 export interface SourceInputs {
