@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { main, parseArgs, runPlan, type PlanArgs } from "../plan.ts";
 import { WORKFLOW_JOBS, WORKFLOWS } from "./registry.ts";
-import { cleanEnv, git, PrCheckout, prEvent, tempDir } from "./test-support.ts";
+import { cleanEnv, git, PrCheckout, prEvent, removeScratch, tempDir } from "./test-support.ts";
+
+afterEach(removeScratch);
 
 // The ci-plan step as the workflows run it: real git checkouts, the event
 // file, GITHUB_EVENT_NAME / GITHUB_SHA, and the files it writes.

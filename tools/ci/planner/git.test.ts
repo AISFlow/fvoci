@@ -1,11 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { resolveSelectionInputs } from "./events.ts";
 import { diffPathsForPr, ensureCommitShas, parseNameStatusZ, repoGit, type Git } from "./git.ts";
 import { decideFromPaths } from "./paths.ts";
 import type { PyValue } from "./pyjson.ts";
-import { git, PrCheckout, Repo, SHA_A, SHA_B, writeFile } from "./test-support.ts";
+import { git, PrCheckout, removeScratch, Repo, SHA_A, SHA_B, writeFile } from "./test-support.ts";
+
+afterEach(removeScratch);
 
 const TIMEOUT = 60_000;
 const bytes = (text: string) => new TextEncoder().encode(text);

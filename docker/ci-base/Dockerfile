@@ -15,8 +15,6 @@ ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
 # Archive signatures remain mandatory; historical Release expiry is disabled
 # for this fixed snapshot, including Playwright's later apt commands.
-# python3: 임시: C12a Python 감사 때 제거
-# python3-yaml: 임시: C4에서 PyYAML 사용처 제거 시 삭제
 RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/bootstrap-ca.crt,readonly \
     printf '%s\n' \
       'Types: deb' \
@@ -34,11 +32,9 @@ RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.
  && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       curl git gcc g++ make binutils libc6-dev pkg-config \
-      python3 \
-      python3-yaml=6.0.3-1build1 \
       unzip xz-utils zstd sudo \
       libclang-18-dev=1:18.1.8-20ubuntu8 \
- && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev python3 python3-yaml curl \
+ && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl \
       > /usr/local/share/ci-base-build-packages.txt \
  && cat /usr/local/share/ci-base-build-packages.txt \
  && rm -rf /var/lib/apt/lists/*

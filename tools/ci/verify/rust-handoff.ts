@@ -20,6 +20,8 @@ import {
   steps,
   str,
 } from "./rust-common.ts";
+import { verifyRustHarness } from "./rust-harness.ts";
+import { RUST_XTASK } from "./rust-shared.ts";
 import {
   SQLITE_PREFIX_JOBS,
   sqlitePrefixCacheErrors,
@@ -50,8 +52,13 @@ const PRODUCER_BUILD_STEP = {
   env: { CARGO_TARGET_DIR: "${{ github.workspace }}/target/db-tests" },
   run:
     'mkdir "$RUNNER_TEMP/rust-binaries"\n' +
-    'python3 scripts/ci_selection.py rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"\n',
+    RUST_XTASK +
+    ' rust-binaries build --directory "$RUNNER_TEMP/rust-binaries"\n',
 };
+const PRODUCER_SEAL_STEP = "Seal finished executables and exact native inputs";
+const PRODUCER_PACK_LINE =
+  RUST_XTASK +
+  ' rust-binaries pack --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"';
 const BINARY_CONSUMERS = [
   ["postgres", "postgres"],
   ["collaboration", "helper"],
@@ -148,6 +155,14 @@ export function verifyRustBinaryHandoff(jobs: Mapping): string[] {
     producerSteps.filter((step) => step.name === PRODUCER_BUILD_STEP.name),
     [PRODUCER_BUILD_STEP],
   ), "binary producer must build the complete registered cohort");
+  const seal = producerSteps.filter((step) => step.name === PRODUCER_SEAL_STEP);
+  require(seal.length === 1 &&
+    !has(seal[0] as Mapping, "if") &&
+    !has(seal[0] as Mapping, "continue-on-error") &&
+    str(seal[0], "run").endsWith(
+      "\n" + PRODUCER_PACK_LINE + "\n",
+    ), "binary producer must seal the cohort with the prebuilt xtask");
+  errors.push(...verifyRustHarness(jobs));
   for (const [jobName, cohort] of BINARY_CONSUMERS) {
     const job = jobs[jobName];
     require(same(field(job, "needs"), [
@@ -174,7 +189,8 @@ export function verifyRustBinaryHandoff(jobs: Mapping): string[] {
       {
         name: validateName,
         run:
-          "python3 scripts/ci_selection.py rust-binaries unpack --cohort " +
+          RUST_XTASK +
+          " rust-binaries unpack --cohort " +
           cohort +
           ' --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"',
       },

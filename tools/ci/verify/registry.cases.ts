@@ -1143,6 +1143,429 @@ function caseList(): MutationCase[] {
       "rust: postgres strategy must be exactly",
     );
   }
+  // rust.yml runs the prebuilt xtask and Bun; each former python3 caller is rejected.
+  const XTASK = "xtask/target/debug/xtask";
+  const OLD = "python3 scripts/ci_selection.py";
+  const NOT_PYTHON = "must run xtask or Bun, not Python";
+  for (const [name, edit, needle] of [
+    [
+      "build",
+      swap(`${XTASK} rust-binaries build `, `${OLD} rust-binaries build `),
+      "binary producer must build the complete registered cohort",
+    ],
+    [
+      "pack",
+      swap(`${XTASK} rust-binaries pack `, `${OLD} rust-binaries pack `),
+      "binary producer must seal the cohort with the prebuilt xtask",
+    ],
+    [
+      "unpack-postgres",
+      swap(
+        `${XTASK} rust-binaries unpack --cohort postgres `,
+        `${OLD} rust-binaries unpack --cohort postgres `,
+      ),
+      "binary consumers must validate all inputs and hashes unconditionally",
+    ],
+    [
+      "unpack-helper",
+      swap(
+        `${XTASK} rust-binaries unpack --cohort helper `,
+        `${OLD} rust-binaries unpack --cohort helper `,
+      ),
+      "binary consumers must validate all inputs and hashes unconditionally",
+    ],
+    [
+      "run",
+      swap(`run: ${XTASK} rust-binaries run `, `run: ${OLD} rust-binaries run `),
+      "PostgreSQL integration step must execute validated db-tests binaries",
+    ],
+    [
+      "s3",
+      swap(
+        `start-test-minio.sh ${XTASK} rust-binaries run `,
+        `start-test-minio.sh ${OLD} rust-binaries run `,
+      ),
+      "S3 integration step must invoke start-test-minio.sh",
+    ],
+    [
+      "schema",
+      swap(
+        `          ${XTASK} schema-baseline\n`,
+        "          python3 - <<'PYSCHEMA'\n          PYSCHEMA\n",
+      ),
+      "schema baseline requires exact configured extraction",
+    ],
+    [
+      "install",
+      swap(`sudo ${XTASK} selected-install `, "sudo python3 - "),
+      "selected install step must keep exact",
+    ],
+    [
+      "library",
+      swap(
+        "          xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
+        "          python3 - <<'PYLIB'\n          PYLIB\n",
+      ),
+      "selected library step must keep exact unconditional command",
+    ],
+    [
+      "encryption",
+      swap(
+        "      - run: bun tools/oracle/encryption-keys.ts self-test\n",
+        "      - run: python3 scripts/encryption_keys.py self-test\n",
+      ),
+      NOT_PYTHON,
+    ],
+    [
+      "rustup-metadata",
+      swap(
+        "          bun test scripts/schema-baseline/compare-catalogs.test.ts\n",
+        "          bun test scripts/schema-baseline/compare-catalogs.test.ts\n          python3 scripts/fixtures/rustup-ci/test_metadata.py\n",
+      ),
+      NOT_PYTHON,
+    ],
+    [
+      "fast-apt",
+      within(
+        "  fast:\n",
+        "  native-arm64:\n",
+        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+      ),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "job-default-shell",
+      swap(
+        "  native-arm64:\n    needs: ci-plan\n",
+        "  native-arm64:\n    needs: ci-plan\n    defaults:\n      run:\n        shell: python {0}\n",
+      ),
+      "rust: native-arm64 " + NOT_PYTHON,
+    ],
+    [
+      "setup-python",
+      within(
+        "  collaboration:\n",
+        "  rust-ci-gate:\n",
+        swap(
+          "      - run: cargo fetch --locked\n",
+          "      - uses: actions/setup-python@v5\n      - run: cargo fetch --locked\n",
+        ),
+      ),
+      "rust: collaboration " + NOT_PYTHON,
+    ],
+    [
+      "xtask-before-prepare",
+      within(
+        "  collaboration:\n",
+        "  rust-ci-gate:\n",
+        swap(
+          "      - name: Prepare pinned SQLite root build inputs\n",
+          "      - run: xtask/target/debug/xtask --help\n      - name: Prepare pinned SQLite root build inputs\n",
+        ),
+      ),
+      "rust: collaboration SQLite prefix verification must precede",
+    ],
+    [
+      "postgres-apt",
+      within(
+        "  postgres:\n",
+        "  collaboration:\n",
+        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+      ),
+      "rust: postgres " + NOT_PYTHON,
+    ],
+    [
+      "shell",
+      swap(
+        "        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+        "        shell: python\n        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+      ),
+      "rust: collaboration " + NOT_PYTHON,
+    ],
+    [
+      "dpkg-identity",
+      within(
+        "  postgres-build:\n",
+        "  postgres:\n",
+        swap("libclang-18-dev curl >", "libclang-18-dev python3 curl >"),
+      ),
+      "postgres-build SQLite prefix cache must retain exact",
+    ],
+    [
+      "no-xtask-clippy",
+      swap(
+        "      - run: cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings\n",
+        "",
+      ),
+      '--all-targets -- -D warnings" once after the xtask tests',
+    ],
+    [
+      "no-encryption-self-test",
+      swap("      - run: bun tools/oracle/encryption-keys.ts self-test\n", ""),
+      'fast must run "bun tools/oracle/encryption-keys.ts self-test" once',
+    ],
+  ] as const) {
+    add(`rust-python-${name}`, "rust.yml", edit, needle);
+  }
+  // Rustup metadata through the prebuilt xtask helper, and python3 only where a
+  // caller still needs it (web.yml).
+  const inJob =
+    (job: string, edit: Edit): Edit =>
+    (text) => {
+      const header = `\n  ${job}:\n`;
+      const from = text.indexOf(header);
+      if (from < 0) throw new Error(`job marker not found: ${job}`);
+      const next = text.slice(from + header.length).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+      const to = next < 0 ? text.length : from + header.length + next;
+      return text.slice(0, from) + edit(text.slice(from, to)) + text.slice(to);
+    };
+  // Swaps the step starting at `marker` with the step after it.
+  const swapWithNext =
+    (marker: string): Edit =>
+    (section) => {
+      const a = section.indexOf(marker);
+      if (a < 0) throw new Error(`step marker not found: ${marker}`);
+      const b = section.indexOf("\n      - ", a + 1) + 1;
+      const c = section.indexOf("\n      - ", b + 1) + 1;
+      if (b <= 0 || c <= 0) throw new Error(`step end not found: ${marker}`);
+      return section.slice(0, a) + section.slice(b, c) + section.slice(a, b) + section.slice(c);
+    };
+  // Repeats the step starting at `marker` right after itself.
+  const duplicateStep =
+    (marker: string): Edit =>
+    (section) => {
+      const a = section.indexOf(marker);
+      const b = section.indexOf("\n      - ", a + 1) + 1;
+      if (a < 0 || b <= 0) throw new Error(`step marker not found: ${marker}`);
+      return section.slice(0, b) + section.slice(a, b) + section.slice(b);
+    };
+  const META =
+    "      - name: Prepare owned pinned Rustup component metadata before input capture\n";
+  const META_BUILD =
+    "          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \\\n" +
+    "            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \\\n" +
+    "            RUSTUP_AUTO_INSTALL=0 \\\n" +
+    "            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
+    '          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
+  const META_PYTHON =
+    'python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"';
+  const SQLITE_STEP = "      - name: Prepare pinned SQLite root build inputs\n";
+  const APT_NO_PYTHON =
+    "sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
+  const APT_PYTHON = APT_NO_PYTHON.replace("recommends gcc", "recommends python3 gcc");
+  const helper = (job: string) => `web: ${job} Rustup metadata must build and run the locked xtask`;
+  const order = (job: string) => `web: ${job} Rustup metadata must follow the toolchain install`;
+  const once = (job: string) => `web: ${job} requires exactly one Rustup metadata step`;
+  const elsewhere = (job: string) =>
+    `web: ${job} may prepare Rustup metadata only in its pinned step`;
+  const python = (job: string) => `web: ${job} may not install or run python3`;
+  const webCases: [string, string, Edit, string][] = [
+    [
+      "untimed-python-helper",
+      "workspace-browser-build",
+      swap(`        run: |\n${META_BUILD}`, `        run: ${META_PYTHON}\n`),
+      helper("workspace-browser-build"),
+    ],
+    [
+      "timed-python-helper",
+      "collaboration-sqlite-off",
+      swap(META_BUILD, `          ${META_PYTHON}\n`),
+      helper("collaboration-sqlite-off"),
+    ],
+    [
+      "auto-install-allowed",
+      "collaboration-build",
+      swap("            RUSTUP_AUTO_INSTALL=0 \\\n", ""),
+      helper("collaboration-build"),
+    ],
+    [
+      "target-dir-override-kept",
+      "workspace-browser-shard",
+      swap("-u CARGO_TARGET_DIR ", ""),
+      helper("workspace-browser-shard"),
+    ],
+    [
+      "cargo-alias",
+      "collaboration-install-on",
+      swap(
+        "          xtask/target/debug/xtask prepare-rustup-ci-metadata",
+        "          cargo xtask prepare-rustup-ci-metadata",
+      ),
+      helper("collaboration-install-on"),
+    ],
+    [
+      "offline-helper-build",
+      "collaboration-postgres-on",
+      swap(
+        "cargo build --quiet --locked --manifest",
+        "cargo build --quiet --locked --offline --manifest",
+      ),
+      helper("collaboration-postgres-on"),
+    ],
+    [
+      "step-env-override",
+      "collaboration-sqlite-on",
+      swap(META, `${META}        env:\n          RUSTUP_AUTO_INSTALL: "1"\n`),
+      helper("collaboration-sqlite-on"),
+    ],
+    [
+      "stale-timing-label",
+      "collaboration-install-on",
+      swap("collaboration-install-on-step-05 started", "collaboration-install-on-step-04 started"),
+      helper("collaboration-install-on"),
+    ],
+    [
+      "before-cargo-restore",
+      "workspace-browser-build",
+      swapWithNext("      - name: Restore Cargo downloads\n"),
+      order("workspace-browser-build"),
+    ],
+    [
+      "after-sqlite",
+      "collaboration-postgres-off",
+      swapWithNext(META),
+      order("collaboration-postgres-off"),
+    ],
+    [
+      "step-missing",
+      "collaboration-build",
+      swap(META, "      - name: Prepare Rustup component metadata\n"),
+      once("collaboration-build"),
+    ],
+    [
+      "step-duplicated",
+      "workspace-browser-shard",
+      duplicateStep(META),
+      once("workspace-browser-shard"),
+    ],
+    [
+      "extra-python-step",
+      "collaboration-build",
+      swap(SQLITE_STEP, `      - run: ${META_PYTHON}\n${SQLITE_STEP}`),
+      elsewhere("collaboration-build"),
+    ],
+    [
+      "unpinned-job",
+      "web-native-checks",
+      swap(
+        SQLITE_STEP,
+        '      - run: xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/m"\n' +
+          SQLITE_STEP,
+      ),
+      elsewhere("web-native-checks"),
+    ],
+    [
+      "native-checks-apt",
+      "web-native-checks",
+      swap(APT_NO_PYTHON, APT_PYTHON),
+      python("web-native-checks"),
+    ],
+    [
+      "producer-apt",
+      "collaboration-build",
+      swap(APT_NO_PYTHON, APT_PYTHON),
+      python("collaboration-build"),
+    ],
+    [
+      "static-python",
+      "web-static",
+      swap(
+        "          bun run lint\n",
+        "          bun run lint\n          python3 -m pip --version\n",
+      ),
+      python("web-static"),
+    ],
+    [
+      "setup-python",
+      "workspace-browser-shard",
+      swap(SQLITE_STEP, `      - uses: actions/setup-python@${"2".repeat(40)}\n${SQLITE_STEP}`),
+      python("workspace-browser-shard"),
+    ],
+    [
+      "job-env-python",
+      "workspace-browser-build",
+      swap(
+        "    timeout-minutes: 20\n",
+        "    timeout-minutes: 20\n    env:\n      PYTHONPATH: scripts\n",
+      ),
+      python("workspace-browser-build"),
+    ],
+    [
+      "lane-extra-python",
+      "collaboration-postgres-on",
+      swap(
+        "          bun ci\n",
+        "          bun ci\n          python3 scripts/ci_selection.py verify-workflows\n",
+      ),
+      python("collaboration-postgres-on"),
+    ],
+    [
+      "checks-extra-python",
+      "web-checks",
+      swap("          bun ci\n", "          bun ci\n          python3 -m pip install pyyaml\n"),
+      python("web-checks"),
+    ],
+  ];
+  for (const [name, job, edit, needle] of webCases) {
+    add(`web-rustup-${name}`, "web.yml", inJob(job, edit), needle);
+  }
+  const TOP_PERMISSIONS = "permissions:\n  contents: read\n";
+  for (const [name, setting] of [
+    ["env", "env:\n  PYTHONPATH: scripts\n"],
+    ["defaults-shell", "defaults:\n  run:\n    shell: python3 {0}\n"],
+  ] as const) {
+    add(
+      `web-python-workflow-${name}`,
+      "web.yml",
+      swap(TOP_PERMISSIONS, TOP_PERMISSIONS + setting),
+      "web: workflow-level settings may not configure python",
+    );
+  }
+  add(
+    "web-rustup-restore-wrong-path",
+    "web.yml",
+    inJob(
+      "collaboration-build",
+      swap(
+        "          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n",
+        "          path: target\n",
+      ),
+    ),
+    order("collaboration-build"),
+  );
+  add(
+    "web-rustup-restore-wrong-action",
+    "web.yml",
+    inJob(
+      "workspace-browser-shard",
+      within("      - name: Restore Cargo downloads\n", "      - name:", (step) =>
+        step.replace("uses: actions/cache@", "uses: actions/upload-artifact@"),
+      ),
+    ),
+    order("workspace-browser-shard"),
+  );
+  const SMOKE = "web: web-static must type-check and test the install smoke helpers";
+  add(
+    "web-install-smoke-tests-dropped",
+    "web.yml",
+    swap("          bun test ./tools/install-smoke/\n", ""),
+    SMOKE,
+  );
+  add(
+    "web-install-smoke-types-dropped",
+    "web.yml",
+    swap("          bun --bun x --no-install tsc -p tools/install-smoke/tsconfig.json\n", ""),
+    SMOKE,
+  );
+  add(
+    "web-install-smoke-masked",
+    "web.yml",
+    swap(
+      "      - name: Install smoke helper types and unit tests\n",
+      "      - name: Install smoke helper types and unit tests\n        continue-on-error: true\n",
+    ),
+    SMOKE,
+  );
   return cases;
 }
 

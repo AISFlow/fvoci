@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLANNER_ROOT } from "./paths.ts";
 import { gateJobId, loadRegistryContext, WORKFLOW_JOBS, WORKFLOWS } from "./registry.ts";
-import { copyWorkflows, tempDir } from "./test-support.ts";
+import { copyWorkflows, removeScratch, tempDir } from "./test-support.ts";
+
+afterEach(removeScratch);
 
 describe("plan registry", () => {
   test("gate ids, in registry order", () => {

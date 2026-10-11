@@ -5,7 +5,8 @@
 # seeds against the process-wide seed child cap); the other nine keep libtest's
 # default parallelism. Both always run; the first non-zero status is returned.
 #
-# This file is the only suite list: scripts/ci_selection.py reads the literal
+# This file is the only suite list: tools/ci/verify/rust-collab.ts
+# (collaborationScriptInventory) reads the literal
 # `cargo test` / `--test X \` lines below (keep that shape, one --test per line).
 # Logs: $RUNNER_TEMP/rust-collaboration-logs in CI, else a fresh temp directory.
 # stdout (libtest) and stderr (cargo status, child output) are kept apart so a

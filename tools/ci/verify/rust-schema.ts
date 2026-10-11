@@ -1,8 +1,9 @@
 // Schema baseline: two local SDK controls, the configured PG catalog tool and
 // the PG app-role gate. The catalog uses an owned prepared DB/owner, not a
 // normal-server credential.
-import { get, has, pyEq, pyStrip, sha256Hex, type Mapping } from "./py.ts";
+import { get, has, pyEq, pyStrip, type Mapping } from "./py.ts";
 import {
+  RUST_XTASK,
   postgresJobSteps,
   postgresMatrixRows,
   uniqueNamedStep,
@@ -11,8 +12,8 @@ import {
 
 export const RUST_SCHEMA_BASELINE_STEP =
   "Schema baseline SQLite controls and prepared PostgreSQL catalog";
-export const RUST_SCHEMA_BASELINE_RUN_SHA256 =
-  "919415320553e025982e0a41708b202c1fa159a0019de7d3e3b100680ed59c52";
+// xtask schema-baseline owns the identities, controls, gates and cleanup.
+export const RUST_SCHEMA_BASELINE_RUN = `set -euo pipefail\n${RUST_XTASK} schema-baseline`;
 export const RUST_SCHEMA_BASELINE_TARGET = "schema_baseline_integration";
 
 const EXPECTED_ENV = {
@@ -40,7 +41,7 @@ export function schemaBaselineInventory(jobs: Mapping): Result<Set<string>> {
     has(step, "continue-on-error") ||
     !pyEq(get(step, "env"), EXPECTED_ENV) ||
     typeof run !== "string" ||
-    sha256Hex(pyStrip(run)) !== RUST_SCHEMA_BASELINE_RUN_SHA256
+    pyStrip(run) !== RUST_SCHEMA_BASELINE_RUN
   ) {
     return [
       null,

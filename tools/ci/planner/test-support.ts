@@ -1,4 +1,3 @@
-import { afterAll } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,10 +11,13 @@ export const SHA_A = "a".repeat(40);
 export const SHA_B = "b".repeat(40);
 export const SHA_C = "c".repeat(40);
 
+// Each test file registers afterEach(removeScratch). A hook here would attach only to
+// the first file that imports this cached module, leak every later file's
+// repositories and remove them all under one hook timeout.
 const scratch: string[] = [];
-afterAll(() => {
-  for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
-});
+export function removeScratch(): void {
+  for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+}
 
 export function tempDir(label: string): string {
   const dir = mkdtempSync(join(tmpdir(), `fvoci-plan-${label}-`));

@@ -1,5 +1,4 @@
-// rust.yml mutation corpus for the rust1 tests; an out-of-tree differential also
-// replays it against scripts/ci_selection.py verify-workflows.
+// rust.yml mutation corpus for the rust1 tests.
 // Each entry edits a parsed copy and names a message its check must report.
 import { YAML } from "bun";
 import { readFileSync } from "node:fs";
@@ -64,12 +63,17 @@ const library: Mutation[] = (
     ["masked", (w: Doc) => (libraryStep(w)["continue-on-error"] = true)],
     ["env", (w: Doc) => (libraryStep(w).env = { RUST_TEST_THREADS: "0" })],
     ["job-env", (w: Doc) => (w.jobs.fast.env = { FVOCI_DATABASE_BACKEND: "libsql-remote" })],
-    ["wrong-feature", editLibraryRun('"db-tests"', '"api-schema"')],
-    ["no-exact", editLibraryRun(', "--exact"', "")],
-    ["no-lib", editLibraryRun('"--lib", ', "")],
+    ["wrong-target-dir", editLibraryRun("target/db-lib", "target/default")],
+    ["no-target-dir", editLibraryRun(" --target-dir target/db-lib", "")],
+    ["wrong-command", editLibraryRun("selected-library", "rust-binaries")],
+    ["cargo-run", editLibraryRun("xtask/target/debug/xtask", "cargo xtask")],
+    ["help", editLibraryRun("target/db-lib\n", "target/db-lib --help\n")],
     [
-      "missing-loop-filter",
-      editLibraryRun("in RUST_SELECTED_LIBRARY_FILTERS:", "in RUST_SELECTED_LIBRARY_FILTERS[:-1]:"),
+      "old-python-loop",
+      editLibraryRun(
+        "xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
+        "set -euo pipefail\npython3 - <<'PYLIB'\nPYLIB\n",
+      ),
     ],
     ["swallow-command", (w: Doc) => (libraryStep(w).run += "true\n")],
     [
