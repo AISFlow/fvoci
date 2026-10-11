@@ -875,7 +875,8 @@ describe("local lease", () => {
       expect(await refusal(admitted(env))).not.toBe("accepted");
     });
   test.skipIf(!linux)("a lease file owned by another uid or root is refused", async () => {
-    for (const owner of ["1001:1001", "0:0"]) {
+    // Another uid must differ from the runner's own: GitHub runners are uid 1001.
+    for (const owner of [`${String(uid() + 1)}:${String(gid() + 1)}`, "0:0"]) {
       const { path, env } = lease();
       expect(spawnSync(["sudo", "-n", "chown", owner, path]).exitCode).toBe(0);
       try {
