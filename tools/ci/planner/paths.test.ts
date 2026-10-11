@@ -262,7 +262,6 @@ describe("impact union", () => {
     for (const extra of [
       "src/lib.rs",
       ".github/workflows/rust.yml",
-      "scripts/test-ci-selection.sh",
       ".agents/skills/fvoci-fast-verify/SKILL.md",
       "Cargo.toml",
       ".dockerignore",

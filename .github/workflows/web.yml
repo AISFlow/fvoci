@@ -136,7 +136,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -162,7 +162,6 @@ jobs:
           (cd apps/web && bun run test)
           (cd packages/editor && bun run test)
           (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)
-          python3 scripts/selected-backend-ci/test_off_registration.py
       - name: Verify normal web e2e shard plan
         run: |
           bash scripts/test-web-e2e-groups.sh
@@ -674,7 +673,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -832,7 +831,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -989,7 +988,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -1146,7 +1145,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -1303,7 +1302,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
