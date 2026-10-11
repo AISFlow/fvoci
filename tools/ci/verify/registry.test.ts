@@ -117,7 +117,7 @@ describe("WorkflowRegistryTest", () => {
   });
 });
 
-describe("turso-test.yml literal text (turso-test-fixtures WorkflowTargetTests)", () => {
+describe("turso-test.yml literal text", () => {
   const text = workflowText("turso-test.yml");
 
   test("the real workflow passes every literal check", () => {
