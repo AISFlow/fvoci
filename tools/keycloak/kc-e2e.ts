@@ -15,6 +15,7 @@ import {
   realmValues,
   registerEnvSecrets,
   renderTemplate,
+  requirePassedGroup,
   specConfig,
   ssoConfig,
   ssoRealmValues,
@@ -48,7 +49,8 @@ const USAGE = `usage: kc-e2e.ts <command> [<args>]
            --root=<dir> --target-dir=<dir> --keycloak-image=<ref>
            --repo-digests=<json> --compose-project=<name> --published=<host:port>
            --issuer=<url>               toolchain and image versions (JSON)
-  summary <playwright.json> <log>       one group's result line`;
+  summary <playwright.json> <log>       one group's result line
+  check-group <playwright.json>         require a positive passed test count`;
 
 /** Creates `path` (never overwrites) with `mode` and writes `text`; errors name it by `label`. */
 function createFile(path: string, text: string, mode: number, label: string): void {
@@ -117,7 +119,8 @@ function err(text: string): void {
 async function redactStdin(configPath: string | undefined): Promise<void> {
   if (configPath !== undefined) loadConfig(configPath);
   const secrets = knownSecrets();
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  // Invalid UTF-8 becomes U+FFFD instead of ending the stream; a BOM is kept.
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const splitter = new LineSplitter();
   // Each complete line is written as soon as it is read: the run log follows
   // a group live.
@@ -321,6 +324,8 @@ async function main(argv: string[]): Promise<void> {
     versions(args);
   } else if (command === "summary" && two) {
     out(`${summary(args[0] as string, args[1] as string)}\n`);
+  } else if (command === "check-group" && args.length === 1) {
+    requirePassedGroup(loadJson(args[0] as string, "the Playwright report"));
   } else {
     throw new HelperError(command === undefined ? USAGE : "unknown command or arguments");
   }

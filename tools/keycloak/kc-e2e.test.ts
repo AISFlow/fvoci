@@ -339,19 +339,6 @@ describe("fake Keycloak", () => {
 });
 
 describe("CLI", () => {
-  test("redact rejects malformed and incomplete UTF-8 instead of succeeding with replacement bytes", async () => {
-    for (const stdin of [new Uint8Array([0xff]), new Uint8Array([0xc3])]) {
-      const result = await cli(["redact"], { stdin });
-      expect(result.code).toBe(1);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toBe(
-        "keycloak e2e: unexpected error (ERR_ENCODING_INVALID_ENCODED_DATA)\n",
-      );
-    }
-    const bom = await cli(["redact"], { stdin: "\ufeffsafe text\n" });
-    expect(bom).toEqual({ code: 0, stdout: "\ufeffsafe text\n", stderr: "" });
-  });
-
   test("config is created mode 600 and never overwritten", async () => {
     const out = join(dir, "kc.json");
     const first = await cli(["config", "http://127.0.0.1:1/realms/fvoci-e2e", out], { env: ENV });

@@ -476,6 +476,14 @@ function pyStr(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+/** An opt-in browser group must execute at least one passing test. */
+export function requirePassedGroup(report: unknown): void {
+  const passed = get(get(report, "stats"), "expected");
+  if (typeof passed !== "number" || !Number.isSafeInteger(passed) || passed <= 0) {
+    throw new HelperError("Playwright group has no positive passed test count");
+  }
+}
+
 /** The summary of one group: Playwright stats, else the last cargo `test result:` line. */
 export function groupSummary(report: unknown, log: string | undefined): string {
   if (report === undefined) {

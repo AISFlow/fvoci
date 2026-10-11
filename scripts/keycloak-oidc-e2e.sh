@@ -391,6 +391,9 @@ fi
 echo "=== summary (Keycloak ${KC_IMAGE}, issuer ${ISSUER}) ===" >&2
 failed=0
 for mode in "${MODES[@]}"; do
+  if [[ "${GROUP_STATUS[$mode]}" == 0 && "$mode" != workspace-sso ]]; then
+    kc check-group "$WORK/out/playwright-${mode}.json" || GROUP_STATUS[$mode]=1
+  fi
   summary="$(kc summary "$WORK/out/playwright-${mode}.json" "$WORK/out/${mode}.log")"
   echo "group ${mode}: exit ${GROUP_STATUS[$mode]} (${summary})" >&2
   if [[ "${GROUP_STATUS[$mode]}" != 0 ]]; then
