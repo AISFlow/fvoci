@@ -369,7 +369,7 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
       errors.push(`web: ${name} may prepare Rustup metadata only in its pinned step`);
     }
     // Job keys, step fields and every run line.
-    if (PYTHON.test(JSON.stringify(job) ?? ""))
+    if (PYTHON.test(JSON.stringify(job)))
       errors.push(`web: ${name} may not install or run python3`);
   }
   return errors;
