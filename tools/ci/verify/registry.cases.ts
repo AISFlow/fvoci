@@ -432,6 +432,109 @@ function caseList(): MutationCase[] {
     swap("    tags:", "    branches: [main]\n    tags:"),
     "release.yml: push must list only v0.* tags",
   );
+
+  // Release steps run the tools/release Bun entries, never the Python originals.
+  const RELEASE_API = "bun tools/release/release-api.ts ";
+  const PROVENANCE = 'bun tooling/tools/release/provenance.ts --dist "$RUNNER_TEMP/dist"';
+  const RELEASE_SETUP_BUN =
+    / {6}- uses: oven-sh\/setup-bun@[^\n]*\n {8}with:\n {10}bun-version-file: [^\n]*\n/;
+  const releaseRuntime: [string, Edit, string][] = [
+    [
+      "push-index-python",
+      swap(RELEASE_API + "push-index", "python3 scripts/release-api.py push-index"),
+      "release.yml: index runs Python",
+    ],
+    [
+      "describe-python",
+      swap(RELEASE_API + "describe", "python3 scripts/release-api.py describe"),
+      "release.yml: index must run 'bun tools/release/release-api.ts describe",
+    ],
+    [
+      "tag-python",
+      swap(RELEASE_API + "tag", "python3 scripts/release-api.py tag"),
+      "release.yml: publish runs Python",
+    ],
+    [
+      "floating-dropped",
+      swap('--tag "$MINOR" --floating\n', '--tag "$MINOR"\n'),
+      "release.yml: publish must run",
+    ],
+    [
+      "provenance-python",
+      swap(PROVENANCE, 'python3 tooling/scripts/release-provenance.py --dist "$RUNNER_TEMP/dist"'),
+      "release.yml: dist runs Python",
+    ],
+    [
+      "provenance-from-tag-tree",
+      swap(PROVENANCE, 'bun tools/release/provenance.ts --dist "$RUNNER_TEMP/dist"'),
+      "release.yml: dist must run 'bun tooling/tools/release/provenance.ts",
+    ],
+    [
+      "check-ci-python",
+      swap(
+        'run: bash scripts/release-check-ci.sh "${{ steps.source.outputs.sha }}"',
+        'run: python3 scripts/release-check-ci.py "${{ steps.source.outputs.sha }}"',
+      ),
+      "release.yml: verify runs Python",
+    ],
+    [
+      "bun-version-unpinned",
+      swap("          bun-version-file: .bun-version\n", "          bun-version: latest\n"),
+      "release.yml: verify must set up Bun",
+    ],
+  ];
+  releaseRuntime.push(
+    [
+      "dist-bun-from-tag-tree",
+      swap("bun-version-file: tooling/.bun-version\n", "bun-version-file: .bun-version\n"),
+      "release.yml: dist must set up Bun (oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6, bun-version-file tooling/.bun-version)",
+    ],
+    [
+      "setup-python",
+      within(
+        "\n  publish:\n",
+        null,
+        swap(
+          "      - name: Tag the smoked index",
+          "      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\n      - name: Tag the smoked index",
+        ),
+      ),
+      "release.yml: publish runs Python",
+    ],
+    [
+      "python-shell",
+      swap(
+        "      - name: Tag the smoked index 0.y.z (immutable)\n",
+        "      - name: Tag the smoked index 0.y.z (immutable)\n        shell: python\n",
+      ),
+      "release.yml: publish runs Python",
+    ],
+  );
+  for (const job of ["index", "publish"]) {
+    add(
+      `release-${job}-tooling-from-tag`,
+      "release.yml",
+      within(
+        `\n  ${job}:\n`,
+        null,
+        swap(
+          "          ref: ${{ github.sha }}\n",
+          "          ref: ${{ needs.verify.outputs.sha }}\n",
+        ),
+      ),
+      `release.yml: ${job} must check out only the workflow ref`,
+    );
+  }
+  for (const [name, edit, needle] of releaseRuntime)
+    add(`release-${name}`, "release.yml", edit, needle);
+  for (const job of ["verify", "index", "dist", "smoke", "publish", "release"]) {
+    add(
+      `release-${job}-without-bun`,
+      "release.yml",
+      within(`\n  ${job}:\n`, null, (text) => text.replace(RELEASE_SETUP_BUN, "")),
+      `release.yml: ${job} must set up Bun`,
+    );
+  }
   for (const [job, scope] of [
     ["build", "packages"],
     ["push", "issues"],
