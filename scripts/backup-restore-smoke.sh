@@ -162,7 +162,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 phase image
-require_cmd docker openssl curl bun cargo python3 sha256sum
+require_cmd docker openssl curl bun cargo sha256sum
 [[ -f "$FIXTURE_HWPX" ]] || fail "missing HWPX fixture: $FIXTURE_HWPX"
 
 pick_port() {
@@ -395,7 +395,7 @@ SOURCE_BASE="http://127.0.0.1:${SOURCE_PORT}"
 write_env "$SOURCE_ENV" "$OWNER_PASSWORD" "$APP_PASSWORD" "$MEILI_MASTER_KEY" "$SOURCE_BASE" "$SOURCE_PORT" \
   "$SOURCE_ENCRYPTION_KEYS" "$ENC_ID"
 
-python3 "$ROOT/scripts/encryption_keys.py" self-test
+bun "$ROOT/tools/oracle/encryption-keys.ts" self-test
 log_assert "encryption keyring fingerprint self-test: ok"
 
 phase start-source
