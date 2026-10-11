@@ -1,6 +1,6 @@
 # Web lint and formatting
 
-Use `bun ci` with the root workspace's Bun 1.4.2 lockfile. Run `bun run lint`,
+Use `bun ci` with the root workspace's Bun 1.4.3 lockfile. Run `bun run lint`,
 `bun run format:check`, and `bun run lint:fixtures`. The scripts execute the
 installed CLI with `bun --bun` and validate exact package versions; they never
 download a tool at invocation time. There is no global CLI or Node requirement.

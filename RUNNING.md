@@ -11,7 +11,7 @@ failure and old-image rollback; ordinary PR and main CI does not run it, only an
 
 Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
 Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.98.1, and
-Bun 1.4.2. The Docker Rust/web builders and final runtime use the same pinned
+Bun 1.4.3. The Docker Rust/web builders and final runtime use the same pinned
 Ubuntu 26.04 base. Native SQLite builds require `libclang-18-dev=1:18.1.8-20ubuntu8`
 with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, Python 3, and curl.
 Rebuild native outputs on this OS; caches are scoped to Ubuntu 26.04, architecture,

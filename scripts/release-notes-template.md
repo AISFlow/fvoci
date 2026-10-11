@@ -102,7 +102,7 @@ The accepted feature families remain:
   retirement, exact persistence frames and readback bodies, navigation and
   draft-retry flows. CI selects relevant checks for pull requests and runs
   the required gates on the merged main commit. Development uses pinned
-  Bun 1.4.2; importer-specific Zod versions remain isolated. The runtime
+  Bun 1.4.3; importer-specific Zod versions remain isolated. The runtime
   image contains no JavaScript runtime.
 
 These notes describe changes already merged into the release source. The
