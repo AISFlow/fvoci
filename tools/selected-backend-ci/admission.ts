@@ -101,12 +101,14 @@ export function localAllocation(
   return grant;
 }
 // The runner and lane driver modules a local lease is issued for: the CLI
-// entry, the modules that admit, build, write grants and launch the lanes,
-// and the drivers. Repo-relative; the lease producer hashes the same files.
+// entry and every module it loads (they run before this check), and the lane
+// drivers the runner starts as separate processes. Repo-relative; the lease
+// producer hashes the same files.
 export const registeredModules = [
   "scripts/run-selected-backend-e2e.ts",
   "tools/selected-backend-ci/admission.ts",
   "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/config-list.ts",
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
