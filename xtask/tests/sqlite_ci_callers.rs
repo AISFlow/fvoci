@@ -8,6 +8,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +95,7 @@ impl CallerRoot {
 
 #[test]
 fn local_root_callers_require_preflight_and_forward_cargo_arguments() {
+    let _serial = serial();
     let r = CallerRoot::new(&["generate-api.sh", "run-db-tests.sh"]);
     write_exec(
         &r.bin.join("bun"),
@@ -136,6 +146,7 @@ fn local_root_callers_require_preflight_and_forward_cargo_arguments() {
 
 #[test]
 fn web_build_stops_on_preflight_failure() {
+    let _serial = serial();
     let r = CallerRoot::new(&["run-web-e2e.sh"]);
     write_exec(
         &r.bin.join("bun"),
@@ -618,6 +629,7 @@ fn contract(root: &Path) -> Check {
 
 #[test]
 fn workflow_root_cache_preparation_order_and_independent_crates() {
+    let _serial = serial();
     contract(&repo()).unwrap();
 }
 
@@ -677,6 +689,7 @@ fn assert_mutations_fail(
 
 #[test]
 fn new_producer_mutations_fail_same_wiring_contract() {
+    let _serial = serial();
     let (_temp, root) = contract_copy();
     for (workflow, name) in [
         ("rust", "postgres-build"),
@@ -795,6 +808,7 @@ fn new_producer_mutations_fail_same_wiring_contract() {
 
 #[test]
 fn web_producer_consumer_mutations_fail_same_wiring_contract() {
+    let _serial = serial();
     let (_temp, root) = contract_copy();
     let path = root.join(".github/workflows/web.yml");
     let original = fs::read_to_string(&path).unwrap();
@@ -833,6 +847,7 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
 /// still fails.
 #[test]
 fn xtask_steps_before_preparation_are_independent_work() {
+    let _serial = serial();
     let (_temp, root) = contract_copy();
     let path = root.join(".github/workflows/rust.yml");
     let original = fs::read_to_string(&path).unwrap();
@@ -861,6 +876,7 @@ fn xtask_steps_before_preparation_are_independent_work() {
 
 #[test]
 fn native_arm64_preparation_mutations_fail_same_wiring_contract() {
+    let _serial = serial();
     let (_temp, root) = contract_copy();
     let path = root.join(".github/workflows/rust.yml");
     let original = fs::read_to_string(&path).unwrap();
