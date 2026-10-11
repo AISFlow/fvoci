@@ -684,6 +684,37 @@ test.each(compressions)("reject DB URL in %s text", async (format) => {
 test.each(["root/.env", "home/ci/.env.production"])("reject env file %s", async (name) => {
   expect((await rejection(saved([{ [name]: "KEY=x" }]))).message).toContain("environment file");
 });
+test.each([
+  "usr/bin/python3.14",
+  "usr/local/bin/python3",
+  "bin/python",
+  "usr/lib/python3.14/os.py",
+])("reject Python interpreter %s", async (name) => {
+  expect((await rejection(saved([{ [name]: "x" }]))).message).toContain("Python interpreter");
+});
+test("reject Python interpreter symlink in a lower layer", async () => {
+  const dir = join(root, "source");
+  await mkdir(join(dir, "usr/bin"), { recursive: true });
+  await symlink("python3.14", join(dir, "usr/bin/python3"));
+  const tar = Bun.spawn(["tar", "-cf", "-", "."], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const [layer] = await Promise.all([
+    new Response(tar.stdout).bytes(),
+    new Response(tar.stderr).text(),
+  ]);
+  expect(await tar.exited).toBe(0);
+  expect((await rejection(saved([layer, { "etc/os-release": "ID=ubuntu" }]))).message).toContain(
+    "Python interpreter",
+  );
+});
+test("allow Python-named files that are not an interpreter", async () => {
+  await saved([
+    {
+      "usr/share/doc/python3-yaml/copyright": "x",
+      "usr/bin/python3-config.txt": "x",
+      "usr/lib/python3/dist-packages/README": "x",
+    },
+  ]);
+});
 test("reject DB URL in text", async () => {
   expect(
     (await rejection(saved([{ "etc/app.conf": "URL=redis://private-host:6379" }]))).message,

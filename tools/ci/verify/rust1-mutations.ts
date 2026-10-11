@@ -1,5 +1,4 @@
-// rust.yml mutation corpus for the rust1 tests; an out-of-tree differential also
-// replays it against scripts/ci_selection.py verify-workflows.
+// rust.yml mutation corpus for the rust1 tests.
 // Each entry edits a parsed copy and names a message its check must report.
 import { YAML } from "bun";
 import { readFileSync } from "node:fs";
