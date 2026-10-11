@@ -6,7 +6,6 @@ on:
       - docker/ci-base/**
       - tools/ci/**
       - .github/workflows/ci-base-image.yml
-      - scripts/ci_selection.py
       - rust-toolchain.toml
       - .bun-version
       - apps/web/package.json
