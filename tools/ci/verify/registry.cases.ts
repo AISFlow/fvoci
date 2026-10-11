@@ -766,7 +766,13 @@ function caseList(): MutationCase[] {
   ];
   for (const { name, job, old, replacement, needle } of runtime) {
     const edit = swap(old, replacement);
-    add(`turso-bun-${name}`, "turso-test.yml", job ? within(...JOBS[job], edit) : edit, needle);
+    const scope = job ? JOBS[job] : null;
+    add(
+      `turso-bun-${name}`,
+      "turso-test.yml",
+      scope ? within(scope[0], scope[1], edit) : edit,
+      needle,
+    );
   }
   const inputs: [string, string][] = [
     ["      ui_source_sha:\n", "      arbitrary_source:\n"],
