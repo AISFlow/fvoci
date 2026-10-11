@@ -27,6 +27,7 @@ import {
   expectedFiles,
   identity,
   localAllocation,
+  registeredModules,
   runtimeJobs,
 } from "./admission.ts";
 import { buildEnv, cargoInputs, elfDependencies, qualifyArtifacts, stage } from "./build.ts";
@@ -45,14 +46,13 @@ import {
   sha,
   sourceInputText,
   spawnSelectedCommand,
-  templates,
-  tool,
   uid,
   write,
 } from "./io.ts";
 import {
   driverCommand,
   knownOnBrowserTest,
+  laneDriver,
   laneRetirement,
   ownershipReturn,
   prepareBrowser,
@@ -63,6 +63,7 @@ import {
   selectedRuns,
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
+import { copyRunnerModules } from "./test-process.ts";
 import type {
   Aggregate,
   Artifact,
@@ -76,6 +77,20 @@ import type {
   Reference,
 } from "./types.ts";
 
+// The modules a local lease binds: the runner and the lane drivers.
+const leaseModules = [
+  "scripts/run-selected-backend-e2e.ts",
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/selected-backend-ci/runtime.ts",
+  "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/binding.ts",
+  "tools/selected-backend-ci/drivers/restart.ts",
+  "tools/selected-backend-ci/drivers/install.ts",
+  "tools/selected-backend-ci/drivers/postgres.ts",
+  "tools/selected-backend-ci/drivers/sqlite.ts",
+];
 const temporary: string[] = [];
 function directory(): string {
   const path = mkdtempSync(join(tmpdir(), "selected-backend-ts-"));
@@ -186,7 +201,7 @@ function cohort() {
         lane: Lane;
         flow: Flow;
       };
-      expect(driver).toBe(join(templates, "current-" + allocation.lane + "-driver.py"));
+      expect(driver).toBe(join(root, "tools/selected-backend-ci/drivers", allocation.lane + ".ts"));
       retirementFiles(allocation.runRoot, allocation.lane, allocation.flow);
       writeFileSync(log, "fixture only\n");
       return 0;
@@ -205,14 +220,7 @@ function localFixture(
   const output = directory(),
     path = join(output, "local.json");
   const registrationHashes = Object.fromEntries(
-    [
-      "run-selected-backend-e2e.py",
-      "selected-backend-ci/current_binding.py",
-      "selected-backend-ci/restart_checkpoint.py",
-      "selected-backend-ci/current-install-driver.py",
-      "selected-backend-ci/current-postgres-driver.py",
-      "selected-backend-ci/current-sqlite-driver.py",
-    ].map((name) => [name, sha(join(root, "scripts", name))]),
+    leaseModules.map((name) => [name, sha(join(root, name))]),
   );
   const grant: LocalGrant = {
     schema: 1,
@@ -394,10 +402,12 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       "config-list",
     ]);
     for (const [lane] of selectedRuns)
-      expect(driverCommand(join(templates, "current-" + lane + "-driver.py"))).toEqual([
-        tool("python3"),
-        join(templates, "current-" + lane + "-driver.py"),
+      expect(driverCommand(laneDriver(lane))).toEqual([
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/selected-backend-ci/drivers", lane + ".ts"),
       ]);
+    expect<readonly string[]>(registeredModules).toEqual(leaseModules);
     const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
     // The build-side modes go through one `selected` array; the rest are spelled out.
     expect(caller).toContain('selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")');
@@ -543,7 +553,9 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       };
       expect(grant.bindingSha256).toBe(sha(manifestPath));
       expect(grant.driverSha256).toBe(sha(driver));
-      expect(grant.bindingModuleSha256).toBe(sha(join(templates, "current_binding.py")));
+      expect(grant.bindingModuleSha256).toBe(
+        sha(join(root, "tools/selected-backend-ci/drivers/binding.ts")),
+      );
       expect(manifest.sourceInputsBefore.sha256).toBe(sha(join(output, "before.json")));
       expect(manifest.sourceInputsAfter.sha256).toBe(sha(join(output, "after.json")));
       expect(grant.runRoot).toMatch(new RegExp("/root-current-" + grant.lane + "-[0-9a-f]{12}$"));
@@ -573,7 +585,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         expect(restart.binding.sourceInputsSha256).toBe(digest(sourceInputText(before)));
         expect(restart.binding.parentDriverSha256).toBe(sha(driver));
         expect(restart.binding.restartHelperSha256).toBe(
-          sha(join(templates, "restart_checkpoint.py")),
+          sha(join(root, "tools/selected-backend-ci/drivers/restart.ts")),
         );
         expect(restart.binding.backend).toBe(grant.lane);
         expect(restart.binding.runRoot).toBe(grant.runRoot);
@@ -970,14 +982,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       const output = directory(),
         path = join(output, "local.json");
       const registrationHashes = Object.fromEntries(
-        [
-          "run-selected-backend-e2e.py",
-          "selected-backend-ci/current_binding.py",
-          "selected-backend-ci/restart_checkpoint.py",
-          "selected-backend-ci/current-install-driver.py",
-          "selected-backend-ci/current-postgres-driver.py",
-          "selected-backend-ci/current-sqlite-driver.py",
-        ].map((name) => [name, sha(join(root, "scripts", name))]),
+        leaseModules.map((name) => [name, sha(join(root, name))]),
       );
       const grant: LocalGrant = {
         schema: 1,
@@ -1006,7 +1011,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "foreign-source") grant.source = "0".repeat(40);
       if (mutation === "foreign-tree") grant.tree = "0".repeat(40);
       if (mutation === "bad-registration")
-        grant.registrationHashes["run-selected-backend-e2e.py"] = "0".repeat(64);
+        grant.registrationHashes["tools/selected-backend-ci/drivers/sqlite.ts"] = "0".repeat(64);
       if (mutation === "extra-mode") grant.allowedModes.push("permissions");
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
@@ -1058,10 +1063,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     // below must not depend on reading the host checkout (a 0750 home on
     // developer hosts). The copy root is that probe's worktree root.
     const copied = join(shared, "tools/selected-backend-ci");
-    mkdirSync(copied, { recursive: true, mode: 0o755 });
-    for (const name of readdirSync(import.meta.dir))
-      if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
-        copyFileSync(join(import.meta.dir, name), join(copied, name));
+    copyRunnerModules(copied);
     const admission = JSON.stringify(join(copied, "admission.ts"));
     const io = JSON.stringify(join(copied, "io.ts"));
     const runtime = JSON.stringify(join(copied, "runtime.ts"));
@@ -1802,7 +1804,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
           failed_phase: "container-prepare",
           failure_code: "SELECTED_DRIVER_EXCEPTION",
           original_driver_failure: { type: "ReturnedNonzero" },
-          known_driver_checkpoint: "scripts/selected-backend-ci/current-sqlite-driver.py:120",
+          known_driver_checkpoint: "tools/selected-backend-ci/drivers/sqlite.ts#container-create",
           preparation_command_exit: 15,
         }).replace('"preparation_command_exit":15', '"preparation_command_exit":' + token),
       );
