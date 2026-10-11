@@ -2,22 +2,33 @@
 // and the fast job keeps the xtask clippy and Bun encryption-key checks.
 import { type Mapping, field, same, steps, str } from "./rust-common.ts";
 
-// The only Python left in rust.yml: the fast job's selected-backend script
-// tests, which run on the runner image's python3.
-const FAST_PYTHON_LINES: ReadonlySet<string> = new Set([
-  "python3 scripts/selected-backend-ci/test_early_driver_failure.py",
-  "python3 scripts/selected-backend-ci/test_restart_ledger.py",
-  "python3 scripts/selected-backend-ci/test_current_binding_engine_features.py",
-]);
 const XTASK_WIRING_STEP = "Pinned SQLite build wiring (xtask, no native compilation)";
 const FAST_HARNESS_STEPS = [
   { run: "cargo clippy --locked --manifest-path xtask/Cargo.toml --all-targets -- -D warnings" },
   { run: "bun tools/oracle/encryption-keys.ts self-test" },
 ];
+// The fast job runs no `bun ci`, so its selected-backend list holds only the
+// tests that need no node_modules (drivers/sqlite.test.ts needs Playwright).
+// web-checks runs the whole directory after `bun ci`.
+const FAST_SCRIPT_TESTS_STEP = "Script unit tests without a database";
+const FAST_SCRIPT_TESTS = [
+  "bun test scripts/schema-baseline/compare-catalogs.test.ts",
+  "bun test " +
+    [
+      "lane-controls.test.ts",
+      "drivers/binding.test.ts",
+      "drivers/common.test.ts",
+      "drivers/restart.test.ts",
+      "drivers/postgres.test.ts",
+      "drivers/install.test.ts",
+    ]
+      .map((file) => "./tools/selected-backend-ci/" + file)
+      .join(" "),
+];
 
 const python = (text: string) => /python/i.test(text);
 
-/** No job runs Python except the fast job's listed lines. */
+/** No job runs Python. */
 export function pythonErrors(jobs: Mapping): string[] {
   const errors: string[] = [];
   const refuse = (name: string, what: string) =>
@@ -26,10 +37,7 @@ export function pythonErrors(jobs: Mapping): string[] {
     const shell = str(field(field(job, "defaults"), "run"), "shell");
     if (python(shell)) refuse(name, shell);
     for (const step of steps(job)) {
-      const lines = str(step, "run").split("\n");
-      const found = lines.find(
-        (line) => python(line) && !(name === "fast" && FAST_PYTHON_LINES.has(line.trim())),
-      );
+      const found = str(step, "run").split("\n").find(python);
       if (found !== undefined) refuse(name, found);
       for (const key of ["shell", "uses"]) {
         if (python(str(step, key))) refuse(name, str(step, key));
@@ -51,6 +59,18 @@ export function fastHarnessErrors(jobs: Mapping): string[] {
   });
 }
 
+/** The fast job runs exactly the pinned script tests, unmasked. */
+export function fastScriptTestErrors(jobs: Mapping): string[] {
+  const found = steps(jobs.fast).filter((step) => step.name === FAST_SCRIPT_TESTS_STEP);
+  const step = found[0];
+  return found.length === 1 &&
+    step !== undefined &&
+    same(Object.keys(step).sort(), ["name", "run"]) &&
+    same(str(step, "run").split("\n"), [...FAST_SCRIPT_TESTS, ""])
+    ? []
+    : [`rust: fast "${FAST_SCRIPT_TESTS_STEP}" must run exactly the pinned script tests`];
+}
+
 export function verifyRustHarness(jobs: Mapping): string[] {
-  return [...pythonErrors(jobs), ...fastHarnessErrors(jobs)];
+  return [...pythonErrors(jobs), ...fastHarnessErrors(jobs), ...fastScriptTestErrors(jobs)];
 }

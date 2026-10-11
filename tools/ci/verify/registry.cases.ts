@@ -1147,6 +1147,13 @@ function caseList(): MutationCase[] {
   const XTASK = "xtask/target/debug/xtask";
   const OLD = "python3 scripts/ci_selection.py";
   const NOT_PYTHON = "must run xtask or Bun, not Python";
+  const FAST_SCRIPT_STEP = "      - name: Script unit tests without a database\n";
+  const FAST_SELECTED =
+    "          bun test ./tools/selected-backend-ci/lane-controls.test.ts" +
+    " ./tools/selected-backend-ci/drivers/binding.test.ts ./tools/selected-backend-ci/drivers/common.test.ts" +
+    " ./tools/selected-backend-ci/drivers/restart.test.ts ./tools/selected-backend-ci/drivers/postgres.test.ts" +
+    " ./tools/selected-backend-ci/drivers/install.test.ts\n";
+  const FAST_PINNED = `rust: fast "Script unit tests without a database" must run exactly the pinned script tests`;
   for (const [name, edit, needle] of [
     [
       "build",
@@ -1303,6 +1310,30 @@ function caseList(): MutationCase[] {
       "no-encryption-self-test",
       swap("      - run: bun tools/oracle/encryption-keys.ts self-test\n", ""),
       'fast must run "bun tools/oracle/encryption-keys.ts self-test" once',
+    ],
+    [
+      "fast-selected-python-back",
+      swap(FAST_SELECTED, "          python3 scripts/selected-backend-ci/test_restart_ledger.py\n"),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "fast-selected-python-added",
+      swap(
+        FAST_SELECTED,
+        FAST_SELECTED +
+          "          python3 scripts/selected-backend-ci/test_current_binding_engine_features.py\n",
+      ),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "fast-selected-test-dropped",
+      swap(" ./tools/selected-backend-ci/drivers/restart.test.ts", ""),
+      FAST_PINNED,
+    ],
+    [
+      "fast-selected-tests-masked",
+      swap(FAST_SCRIPT_STEP, FAST_SCRIPT_STEP + "        continue-on-error: true\n"),
+      FAST_PINNED,
     ],
   ] as const) {
     add(`rust-python-${name}`, "rust.yml", edit, needle);

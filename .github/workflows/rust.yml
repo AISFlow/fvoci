@@ -78,9 +78,7 @@ jobs:
       - name: Script unit tests without a database
         run: |
           bun test scripts/schema-baseline/compare-catalogs.test.ts
-          python3 scripts/selected-backend-ci/test_early_driver_failure.py
-          python3 scripts/selected-backend-ci/test_restart_ledger.py
-          python3 scripts/selected-backend-ci/test_current_binding_engine_features.py
+          bun test ./tools/selected-backend-ci/lane-controls.test.ts ./tools/selected-backend-ci/drivers/binding.test.ts ./tools/selected-backend-ci/drivers/common.test.ts ./tools/selected-backend-ci/drivers/restart.test.ts ./tools/selected-backend-ci/drivers/postgres.test.ts ./tools/selected-backend-ci/drivers/install.test.ts
       - name: restore.sh env-file parsing and app password argv checks
         run: bash scripts/test-restore-env.sh
       - name: Restore Cargo downloads
