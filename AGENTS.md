@@ -44,7 +44,7 @@ Rust 서버(Tokio, axum 0.8, SQLx, Serde, tracing), UI는 Vue 3 + Nuxt UI + Vite
 - 통과는 타임아웃 증액·retry·sleep·skip 없이 나온다. regression·resolved·flaky 라벨에는 재현 근거가 있다.
 - 원인이 알려진 flaky는 수정 없이 재실행하지 않는다. 같은 실패가 두 번이면 원인을 조사하고 고친다. 스타일·이름·절차에 대한 반복 리뷰는 2라운드까지다. 재현되거나 구체적인 호출 경로로 입증된 기능·API 계약 위반, 보안·fail-closed, 데이터 유실, 잘못된 저장 ACK, 복구 실패, 잘못된 영속 상태는 라운드와 관계없이 차단한다. 두 라운드 뒤에도 판단이 갈리면 근거와 미해결 쟁점을 메인테이너에게 전달하며 자동 ACCEPT로 바꾸지 않는다.
 - 하네스(메인테이너, 2026-10-09 11:31 KST): 코드는 Rust(xtask)와 TypeScript(Bun)뿐이다. Python·shell 하네스 파일은 옮긴 뒤 제거한다. 이전은 intent부터다. diff·intent 표는 커밋 메시지와 PR 본문에만 있다.
-- 메인테이너, 2026-10-10 10:39 KST. 경계는 2026-10-10 10:42 KST: 새 `.py`와 새 Python 코드는 없다. 이전 전까지 기존 Python 파일(예: `scripts/ci_selection.py`)의 기존 검사 수정은 허용된다. 새 기능이나 새 테스트 준비는 TypeScript 또는 Rust에 둔다.
+- 메인테이너, 2026-10-10 10:39 KST. 경계는 2026-10-10 10:42 KST: 새 `.py`와 새 Python 코드는 없다. 새 기능이나 새 테스트 준비는 TypeScript 또는 Rust에 둔다.
 - 외부 Python 도구(2026-10-09 repowise 결정): uv로 설치해 도구로 쓴다. 그 도구 때문에 레포에 Python 코드를 더하지 않는다.
 - Bun/TS를 Bun에서 다시 띄울 때만 `process.execPath`를 쓴다. 그때 Playwright 자식 env에서는 `JEST_WORKER_ID`를 뺀다. Rust native helper·child는 그 바이너리로 띄우고 `process.execPath`로 대체하지 않는다.
 - 타이밍·동시성에 기대거나 실제로 flaky였던 테스트만 기본 25회와 CPU 부하 5회를 통과한다.
