@@ -113,7 +113,12 @@ type LiveEditor = {
       forEach(fn: (node: { textContent: string; attrs: Record<string, unknown> }) => void): void;
       resolve(pos: number): { index(depth: number): number; parentOffset: number };
     };
-    selection: { empty: boolean; $from: { index(depth: number): number; parentOffset: number } };
+    selection: {
+      empty: boolean;
+      anchor: number;
+      head: number;
+      $from: { index(depth: number): number; parentOffset: number };
+    };
   };
   view: { posAtDOM(node: Node, offset: number): number; hasFocus(): boolean; focus(): void };
 };
@@ -199,7 +204,114 @@ async function placeCaret(page: Page, where: Where): Promise<void> {
   await expect.poll(() => caret(page)).toEqual({ block, offset });
 }
 
-test("native Home survives the pending editor focus repair before ArrowRight", async ({
+for (const repairBeforeKeyup of [false, true]) {
+  test(`native Home survives the pending editor focus repair ${repairBeforeKeyup ? "before" : "after"} the editor keyup handler`, async ({
+    browser,
+    collabApp,
+  }) => {
+    const ctx = await newCollabContext(browser, collabApp.baseUrl);
+    try {
+      const page = await ctx.newPage();
+      await ensureCollabFixture(page);
+      await login(page, member.email, member.password);
+      const doc = await seededDoc(page, "IME native caret focus repair");
+      await page.goto(doc.url);
+      await waitConnected(page);
+      await expectBlocks(page, SEED);
+
+      // Control scheduling of the installed PM focus-repair callback, as in
+      // workspace-wiki-vue-controls. Use real click/keyboard events and no sleeps,
+      // model selection writes, or selectionchange observer replacement.
+      await editorLocator(page).evaluate((element, repairBeforeKeyup) => {
+        const root = element as HTMLElement & { editor: LiveEditor };
+        const snapshot = () => {
+          const native = document.getSelection();
+          if (!native?.anchorNode) throw new Error("native caret fixture has no anchor node");
+          const model = root.editor.state.selection.$from;
+          const browser = root.editor.state.doc.resolve(
+            root.editor.view.posAtDOM(native.anchorNode, native.anchorOffset),
+          );
+          return {
+            model: { block: model.index(0), offset: model.parentOffset },
+            browser: { block: browser.index(0), offset: browser.parentOffset },
+          };
+        };
+        const gate = {
+          captured: false,
+          delivered: false,
+          before: null as ReturnType<typeof snapshot> | null,
+          after: null as ReturnType<typeof snapshot> | null,
+        };
+        Object.assign(window, { __imeFocusRepair: gate });
+        const nativeTimeout = window.setTimeout.bind(window);
+        let focusing = false;
+        let repair: (() => void) | undefined;
+        let timer: number | undefined;
+        root.addEventListener(
+          "focus",
+          () => {
+            focusing = true;
+          },
+          { capture: true, once: true },
+        );
+        root.addEventListener(
+          "focusin",
+          () => {
+            focusing = false;
+          },
+          { once: true },
+        );
+        window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+          // Pinned prosemirror-view schedules this during the root focus event.
+          if (focusing && delay === 20 && typeof callback === "function") {
+            if (repair) throw new Error("multiple editor focus-repair tasks");
+            gate.captured = true;
+            repair = () => {
+              Reflect.apply(callback, undefined, args);
+            };
+            timer = nativeTimeout(() => {}, delay);
+            return timer;
+          }
+          return nativeTimeout(callback, delay, ...args);
+        }) as typeof window.setTimeout;
+        const deliver = (event: KeyboardEvent) => {
+          if (event.key !== "Home" || event.shiftKey) return;
+          window.setTimeout = nativeTimeout;
+          document.removeEventListener("keyup", deliver, repairBeforeKeyup);
+          window.clearTimeout(timer);
+          if (!repair) throw new Error("missing pending editor focus repair");
+          gate.before = snapshot();
+          repair();
+          gate.delivered = true;
+          gate.after = snapshot();
+        };
+        // The real repair task may run on either side of keyup, before selectionchange.
+        document.addEventListener("keyup", deliver, repairBeforeKeyup);
+      }, repairBeforeKeyup);
+      await editorLocator(page).locator(":scope > *").nth(1).click();
+      await expectCaret(page, 1, SEED[1].length);
+      await page.keyboard.press("Home");
+      const gate = await page.evaluate(
+        () => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair,
+      );
+      await test.info().attach("native-home-focus-repair", {
+        body: JSON.stringify(gate),
+        contentType: "application/json",
+      });
+      const expected = { model: { block: 1, offset: 0 }, browser: { block: 1, offset: 0 } };
+      expect(gate).toEqual({ captured: true, delivered: true, before: expected, after: expected });
+      // Deliberately no fixture navigation barrier between native keys.
+      await page.keyboard.press("ArrowRight");
+      await expectCaret(page, 1, 1);
+      await expectBlocks(page, SEED);
+      expect((await modelBlocks(page)).map((node) => node.id)).toEqual([null, null, null]);
+    } finally {
+      await ctx.close();
+    }
+  });
+}
+
+test("Home and End preserve native wrapped-line and Shift selection behavior", async ({
   browser,
   collabApp,
 }) => {
@@ -208,97 +320,79 @@ test("native Home survives the pending editor focus repair before ArrowRight", a
     const page = await ctx.newPage();
     await ensureCollabFixture(page);
     await login(page, member.email, member.password);
-    const doc = await seededDoc(page, "IME native caret focus repair");
+    const doc = await seededDoc(page, "IME native visual line boundaries");
     await page.goto(doc.url);
     await waitConnected(page);
     await expectBlocks(page, SEED);
-
-    // Control scheduling of the installed PM focus-repair callback, as in
-    // workspace-wiki-vue-controls. Use real click/keyboard events and no sleeps,
-    // model selection writes, or selectionchange observer replacement.
-    await editorLocator(page).evaluate((element) => {
-      const root = element as HTMLElement & { editor: LiveEditor };
-      const snapshot = () => {
-        const native = document.getSelection();
-        if (!native?.anchorNode) throw new Error("native caret fixture has no anchor node");
-        const model = root.editor.state.selection.$from;
-        const browser = root.editor.state.doc.resolve(
-          root.editor.view.posAtDOM(native.anchorNode, native.anchorOffset),
-        );
-        return {
-          model: { block: model.index(0), offset: model.parentOffset },
-          browser: { block: browser.index(0), offset: browser.parentOffset },
-        };
-      };
-      const gate = {
-        captured: false,
-        delivered: false,
-        before: null as ReturnType<typeof snapshot> | null,
-        after: null as ReturnType<typeof snapshot> | null,
-      };
-      Object.assign(window, { __imeFocusRepair: gate });
-      const nativeTimeout = window.setTimeout.bind(window);
-      let focusing = false;
-      let repair: (() => void) | undefined;
-      let timer: number | undefined;
-      root.addEventListener(
-        "focus",
-        () => {
-          focusing = true;
-        },
-        { capture: true, once: true },
-      );
-      root.addEventListener(
-        "focusin",
-        () => {
-          focusing = false;
-        },
-        { once: true },
-      );
-      window.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
-        // Pinned prosemirror-view schedules this during the root focus event.
-        if (focusing && delay === 20 && typeof callback === "function") {
-          if (repair) throw new Error("multiple editor focus-repair tasks");
-          gate.captured = true;
-          repair = () => {
-            Reflect.apply(callback, undefined, args);
-          };
-          timer = nativeTimeout(() => {}, delay);
-          return timer;
-        }
-        return nativeTimeout(callback, delay, ...args);
-      }) as typeof window.setTimeout;
-      const deliver = (event: KeyboardEvent) => {
-        if (event.key !== "Home" || event.shiftKey) return;
-        window.setTimeout = nativeTimeout;
-        document.removeEventListener("keyup", deliver);
-        window.clearTimeout(timer);
-        if (!repair) throw new Error("missing pending editor focus repair");
-        gate.before = snapshot();
-        repair();
-        gate.delivered = true;
-        gate.after = snapshot();
-      };
-      // After the product keyup handler, before async selectionchange.
-      document.addEventListener("keyup", deliver);
+    await editorLocator(page).evaluate((root) => {
+      const block = root.children[1] as HTMLElement;
+      const style =
+        "width:40px;font:20px monospace;line-height:30px;white-space:pre-wrap;word-break:break-all;padding:0;border:0;margin:0";
+      block.style.cssText = style;
+      const control = document.createElement("div");
+      control.dataset.testid = "native-line-control";
+      control.contentEditable = "true";
+      control.textContent = block.textContent;
+      control.style.cssText = `${style};position:fixed;top:0;left:0;z-index:2147483647`;
+      document.body.append(control);
     });
-    await editorLocator(page).locator(":scope > *").nth(1).click();
-    await expectCaret(page, 1, SEED[1].length);
-    await page.keyboard.press("Home");
-    const gate = await page.evaluate(
-      () => (window as unknown as { __imeFocusRepair: unknown }).__imeFocusRepair,
-    );
-    await test.info().attach("native-home-focus-repair", {
-      body: JSON.stringify(gate),
-      contentType: "application/json",
-    });
-    const expected = { model: { block: 1, offset: 0 }, browser: { block: 1, offset: 0 } };
-    expect(gate).toEqual({ captured: true, delivered: true, before: expected, after: expected });
-    // Deliberately no fixture navigation barrier between native keys.
-    await page.keyboard.press("ArrowRight");
-    await expectCaret(page, 1, 1);
+    const keys = [
+      "End",
+      "Home",
+      "Shift+End",
+      "Home",
+      "Shift+Home",
+      "End",
+      "Shift+Home",
+      "Shift+End",
+    ];
+    const control = page.getByTestId("native-line-control");
+    const box = await control.boundingBox();
+    if (!box) throw new Error("missing native line control");
+    await control.click({ position: { x: 5, y: box.height - 5 } });
+    const expected: Array<{ anchor: number; head: number }> = [];
+    for (const key of keys) {
+      await page.keyboard.press(key);
+      expected.push(
+        await control.evaluate(() => {
+          const selection = document.getSelection();
+          if (!selection) throw new Error("missing native selection");
+          return { anchor: selection.anchorOffset, head: selection.focusOffset };
+        }),
+      );
+    }
+    expect(expected[0]).toEqual({ anchor: SEED[1].length, head: SEED[1].length });
+    expect(expected[1]!.head).toBeGreaterThan(0);
+    expect(expected[1]!.head).toBeLessThan(SEED[1].length);
+    await control.evaluate((element) => element.remove());
+    const block = editorLocator(page).locator(":scope > *").nth(1);
+    await block.click({ position: { x: 5, y: box.height - 5 } });
+    for (let i = 0; i < keys.length; i += 1) {
+      await page.keyboard.press(keys[i]!);
+      await expect
+        .poll(() =>
+          editorLocator(page).evaluate((element) => {
+            const root = element as HTMLElement & { editor: LiveEditor };
+            const { editor } = root;
+            const native = document.getSelection();
+            if (!native?.anchorNode || !native.focusNode)
+              throw new Error("missing browser selection");
+            const offset = (pos: number) => editor.state.doc.resolve(pos).parentOffset;
+            return {
+              model: {
+                anchor: offset(editor.state.selection.anchor),
+                head: offset(editor.state.selection.head),
+              },
+              browser: {
+                anchor: offset(editor.view.posAtDOM(native.anchorNode, native.anchorOffset)),
+                head: offset(editor.view.posAtDOM(native.focusNode, native.focusOffset)),
+              },
+            };
+          }),
+        )
+        .toEqual({ model: expected[i], browser: expected[i] });
+    }
     await expectBlocks(page, SEED);
-    expect((await modelBlocks(page)).map((node) => node.id)).toEqual([null, null, null]);
   } finally {
     await ctx.close();
   }
