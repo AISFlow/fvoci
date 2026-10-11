@@ -328,7 +328,7 @@ test("Home and End preserve native wrapped-line and Shift selection behavior", a
       const block = root.children[1] as HTMLElement;
       const style =
         "width:40px;font:20px monospace;line-height:30px;white-space:pre-wrap;word-break:break-all;padding:0;border:0;margin:0";
-      block.style.cssText = style;
+      (root as HTMLElement).style.cssText = style;
       const control = document.createElement("div");
       control.dataset.testid = "native-line-control";
       control.contentEditable = "true";
@@ -362,13 +362,21 @@ test("Home and End preserve native wrapped-line and Shift selection behavior", a
       );
     }
     expect(expected[0]).toEqual({ anchor: SEED[1].length, head: SEED[1].length });
-    expect(expected[1]!.head).toBeGreaterThan(0);
-    expect(expected[1]!.head).toBeLessThan(SEED[1].length);
-    await control.evaluate((element) => element.remove());
+    const home = expected[1];
+    if (!home) throw new Error("missing native Home result");
+    expect(home.head).toBeGreaterThan(0);
+    expect(home.head).toBeLessThan(SEED[1].length);
+    await control.evaluate((element) => {
+      element.remove();
+    });
     const block = editorLocator(page).locator(":scope > *").nth(1);
-    await block.click({ position: { x: 5, y: box.height - 5 } });
+    const editorBox = await block.boundingBox();
+    if (!editorBox) throw new Error("missing wrapped editor block");
+    await block.click({ position: { x: 5, y: editorBox.height - 5 } });
     for (let i = 0; i < keys.length; i += 1) {
-      await page.keyboard.press(keys[i]!);
+      const key = keys[i];
+      if (!key) throw new Error("missing native navigation key");
+      await page.keyboard.press(key);
       await expect
         .poll(() =>
           editorLocator(page).evaluate((element) => {
