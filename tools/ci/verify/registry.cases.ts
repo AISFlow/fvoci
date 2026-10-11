@@ -1338,8 +1338,7 @@ function caseList(): MutationCase[] {
   ] as const) {
     add(`rust-python-${name}`, "rust.yml", edit, needle);
   }
-  // Rustup metadata through the prebuilt xtask helper, and python3 only where a
-  // caller still needs it (web.yml).
+  // web.yml: Rustup metadata through the prebuilt xtask helper, and no python3.
   const inJob =
     (job: string, edit: Edit): Edit =>
     (text) => {
