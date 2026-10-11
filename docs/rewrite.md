@@ -80,7 +80,7 @@ Rust/OpenAPI/cookie·CSP/sanitize·upload·같은 Y.Doc/provider/schema·persist
 UCalendar는 날짜 picker이며 독립 event CRUD가 아니다. IME/focus·개인 undo·Escape/Tab/modal/selection과 Calendar date/datetime/null/DST/version 충돌을 유지한다.
 TOTP `totp-rs`, OIDC/JWT `openidconnect`와 SSRF 가드, MCP stdio16MiB cap을 유지하며 rmcp adapter/HTTP transport는 별도 판단이다.
 프로필 감사·철회 중 쓰기 차단·429·엄격 ISO 날짜, 원본 project 문서 그룹404와 Rust 미등록404 표면 차이는 기존 승인된 차이다.
-`outbox-reset`의 skip 진단·이유 기록은 `--recover-outbox`로 대체하지 않는다. 기존 분리 CLI는 Rust 서버 내부 연산·migrate·backup/restore로 대응하며 seed/mailbox/Python oracle는 제품 기능으로 세지 않는다.
+`outbox-reset`의 skip 진단·이유 기록은 `--recover-outbox`로 대체하지 않는다. 기존 분리 CLI는 Rust 서버 내부 연산·migrate·backup/restore로 대응하며 seed/mailbox/oracle는 제품 기능으로 세지 않는다.
 추출 plain text·layout viewer·편집 사본을 구분하며 Office desktop reflow/차트/편집 동등성을 주장하지 않는다.
 
 destination별 source/SHA·변경·전체 라이선스는 [웹 NOTICE](../apps/web/NOTICE.md)와 package 고지가 정본이다.

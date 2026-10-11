@@ -9,7 +9,7 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 
 - 바꾼 경계의 명령이 exit 0이다. 순수 정책, DB, HTTP, 기동·네트워크, 브라우저·배포 중 실제로 바뀐 경계만 고른다.
 - 보고에 검사명, 명령, cwd, SHA, 범위·개수, PASS/FAIL/NOTRUN/MISSING, exit code, 소요, 생략 이유, 남은 위험이 있다. 0개 실행, cargo check, 미실행 DB·브라우저는 통과가 아니다.
-- `.github/workflows/` 또는 `scripts/ci_selection.py`가 바뀌면 `bash scripts/test-ci-selection.sh`가 exit 0이다. 이 명령은 `verify-workflows`와 `python3 -m unittest scripts.test_ci_selection`이다.
+- `.github/workflows/` 또는 `tools/ci/{plan,verify-workflows,gate,argv}.ts`·`tools/ci/{planner,verify,gate}/`가 바뀌면 루트에서 `bun tools/ci/verify-workflows.ts`와 `bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts`가 exit 0이다.
 - 웹 샤드 정책을 바꾸면 `bash scripts/test-web-e2e-groups.sh`가 exit 0이다. 이 명령에 포함된 verify·단위 검사를 별도로 중복 실행하지 않는다.
 - 반복 횟수는 AGENTS.md 손대지 말 것이다.
 - 원격 수락은 그 head의 CI다. 같은 코드·같은 범위의 원격 성공은 재사용하고, 바뀐 부분만 더 본다. 리뷰 판정은 그 CI를 대신하지 않는다.
@@ -24,7 +24,7 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 5. 라이브러리를 바꿀 때는 공식 벡터, 허용·거부 입력, adapter의 보안 설정·오류, 실제 client/DB/UI를 본다. SDK 내부 테스트 전체를 복제하지 않고, SDK가 테스트됐다는 이유로 FVOCI 경합·복구를 빼지 않는다. 차등 비교는 차이 발견용이다. 바이트 일치는 암호 입력, 원본 파일, 실제 프로토콜·소비자, 명시된 계약에만 요구한다.
 6. 웹 정적 명령의 정본은 `web-static` job, 루트 `package.json`, `apps/web/package.json`, `packages/editor/package.json`이다. 명령 목록을 여기에 복제하지 않는다. 정적 검사는 API·unit·브라우저 수락을 대신하지 않는다.
 7. native bundle은 같은 실행 안에서 아키텍처, feature, target, profile, toolchain, native 입력 전체를 hash로 대조할 때만 재사용한다. 경로 일부의 `git diff --quiet`나 디렉터리 존재는 입력 동등성이 아니다. `scripts/web-e2e-run-group.sh`는 `$ROOT/apps/web/dist`를 복사하므로 `ROOT`는 그 작업 트리의 절대 경로다.
-8. CI 플래너의 현재 정본은 `scripts/ci_selection.py`다. 승인된 Rust/TS 이전에서는 호출자·검사 등록·거부 반례·게이트를 함께 전환하고 정본 구현은 하나만 유지한다. PR narrow는 체크아웃 HEAD가 tested merge SHA와 같고 둘째 parent가 event head와 같을 때만 된다. 누적 PR diff와 첫 parent 대비 merge 결과 diff를 합쳐 분류한다. 게이트는 `NEEDS_JSON=${{ toJSON(needs) }}`와 tested SHA에서 plan·job 결과를 읽는다. 제품 job은 plan boolean으로만 skip한다. 새 job은 `WORKFLOW_JOBS`, `WORKFLOW_YAML`, plan 출력, gate `needs`를 함께 갱신한다. 이전 후에는 실제 정본 경로와 검사 명령을 이 지침에도 갱신한다.
+8. CI 플래너의 현재 정본은 `tools/ci/plan.ts`와 `tools/ci/planner/`다. 승인된 Rust/TS 이전에서는 호출자·검사 등록·거부 반례·게이트를 함께 전환하고 정본 구현은 하나만 유지한다. PR narrow는 체크아웃 HEAD가 tested merge SHA와 같고 둘째 parent가 event head와 같을 때만 된다. 누적 PR diff와 첫 parent 대비 merge 결과 diff를 합쳐 분류한다. 게이트는 `NEEDS_JSON=${{ toJSON(needs) }}`와 tested SHA에서 plan·job 결과를 읽는다. 제품 job은 plan boolean으로만 skip한다. 새 job은 `WORKFLOW_JOBS`, `WORKFLOW_YAML`, plan 출력, gate `needs`를 함께 갱신한다. 이전 후에는 실제 정본 경로와 검사 명령을 이 지침에도 갱신한다.
 9. 빌드·artifact 인계 이전은 source/tree, repository, run/attempt, 플랫폼·feature·toolchain·실제 입력의 기존 생산자/소비자 대조를 보존한다. 잘못된 대상·오래된 산출물은 계속 거부해야 한다. 다른 실행의 receipt를 재생성해 누락 근거를 채우거나, 새 구현이 생겼다는 이유로 빌드·검사를 중복 실행하지 않는다. 반복 조건은 AGENTS.md를 따르고 비교한 SHA·환경·의도된 차이를 보고한다.
 
 ## 손대지 말 것
