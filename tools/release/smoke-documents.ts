@@ -1,6 +1,5 @@
 // Document conversion in an installed server, driven over its HTTP API by
-// scripts/release-smoke.sh (and scripts/install-smoke.sh once it switches
-// from scripts/install-smoke-documents.py).
+// scripts/release-smoke.sh and scripts/install-smoke.sh.
 //
 //   bun tools/release/smoke-documents.ts BASE_URL WORKSPACE_ID COOKIE_JAR STATE_FILE create|restart
 //

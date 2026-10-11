@@ -102,6 +102,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
+      # tools/release/smoke-documents.ts parses Office XML with the locked saxes.
+      - name: Prepare locked smoke dependencies
+        run: bun ci
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}

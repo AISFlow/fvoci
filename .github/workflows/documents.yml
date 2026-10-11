@@ -85,6 +85,9 @@ jobs:
         working-directory: crates/document-extract
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
       - name: Restore Cargo downloads
         id: cache_native_extraction_3
@@ -111,12 +114,7 @@ jobs:
           cargo test --locked --offline --all-targets
           cargo test --locked --offline --all-targets --features test-hang
           cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/extract-client-metadata.json"
-          python3 - "$RUNNER_TEMP/extract-client-metadata.json" <<'PYTHON'
-          import json, sys
-          names = {p["name"] for p in json.load(open(sys.argv[1]))["packages"]}
-          forbidden = names & {"rhwp", "cfb", "zip", "flate2", "skia-safe", "skia-bindings"}
-          assert not forbidden, f"native dependencies leaked into process client: {forbidden}"
-          PYTHON
+          bun ../../tools/ci/document-client-deps.ts "$RUNNER_TEMP/extract-client-metadata.json"
       - name: Restore pinned public rhwp source
         id: cache_native_extraction_6
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -162,7 +160,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
