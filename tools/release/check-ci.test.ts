@@ -64,6 +64,23 @@ describe("release gate verdict", () => {
     expect(verdict(GATES, [queued, ...allGreen].join("\n")).bad).toEqual(["web-ci-gate"]);
   });
 
+  test("a completed gate run with no time is refused", () => {
+    const broken = row("web-ci-gate", "completed", "failure", T2);
+    const untimed = row("web-ci-gate", "completed", "success", "");
+    const rest = allGreen.slice(1);
+    for (const [line, runs] of [
+      [2, [broken, untimed, ...rest]],
+      [1, [untimed, ...rest, broken]],
+    ] as const) {
+      expect(() => verdict(GATES, runs.join("\n"))).toThrow(
+        `check run line ${String(line)} is web-ci-gate completed with no time`,
+      );
+    }
+    // Other check runs stay ignored.
+    const other = row("lint", "completed", "success", "");
+    expect(verdict(GATES, [other, ...allGreen].join("\n")).bad).toEqual([]);
+  });
+
   test("a tie between green and not green is not green", () => {
     const tie = row("web-ci-gate", "completed", "failure", T1);
     expect(verdict(GATES, [...allGreen, tie].join("\n")).bad).toEqual(["web-ci-gate"]);
@@ -125,6 +142,22 @@ describe("scripts/release-check-ci.sh", () => {
     const result = run(allGreen.slice(1).join("\n") + "\n");
     expect(result.code).toBe(1);
     expect(result.stderr).toBe("release-check-ci: release commit is not green on: web-ci-gate\n");
+  });
+
+  test("a completed gate run with no time fails in either order", () => {
+    const broken = row("web-ci-gate", "completed", "failure", T2);
+    const untimed = row("web-ci-gate", "completed", "success", "");
+    const rest = allGreen.slice(1);
+    for (const [line, runs] of [
+      [2, [broken, untimed, ...rest]],
+      [1, [untimed, ...rest, broken]],
+    ] as const) {
+      expect(run(runs.join("\n") + "\n")).toEqual({
+        code: 1,
+        stdout: "",
+        stderr: `release-check-ci: check run line ${String(line)} is web-ci-gate completed with no time\n`,
+      });
+    }
   });
 
   test("gh failure, short SHA and missing repository stop before any verdict", () => {

@@ -6,8 +6,9 @@
 //
 // stdin holds one check run per line as `gh api --jq ... | @tsv` writes it:
 // name, status, conclusion ("none" when null) and completed_at (else
-// started_at, else empty). Prints one line per gate; exit 1 when a gate is not
-// green or the input is malformed.
+// started_at, else empty; only a run that has not completed may lack a time).
+// Prints one line per gate; exit 1 when a gate is not green or the input is
+// malformed.
 import { readFileSync } from "node:fs";
 import { WORKFLOWS, gateJobId } from "../ci/planner/registry.ts";
 import { Fail } from "./fail.ts";
@@ -24,7 +25,8 @@ interface Run {
 const green = (run: Run) => run.status === "completed" && run.conclusion === "success";
 
 // -1, 0 or 1 as run a is older than, as old as, or newer than run b. A run with
-// no time has not started yet, so it is newer than any run that has one.
+// no time has not started yet (verdict refuses a completed one), so it is newer
+// than any run that has one.
 function age(a: Run, b: Run): number {
   if (a.at === b.at) return 0;
   if (a.at === "") return 1;
@@ -48,6 +50,10 @@ export function verdict(
     }
     const [name = "", status = "", conclusion = "", at = ""] = fields;
     if (!gates.includes(name)) continue;
+    // Its place among the other runs is unknown, so it could hide a later failure.
+    if (status === "completed" && at === "") {
+      throw new Fail(`check run line ${String(index + 1)} is ${name} completed with no time`);
+    }
     const run = { at, status, conclusion };
     const prior = latest.get(name);
     // Equal times are ambiguous; a run that is not green wins the tie.
