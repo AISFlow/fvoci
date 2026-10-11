@@ -2,11 +2,11 @@
 // setpriv, from a 0755 copy of the runner modules. Linux with sudo only;
 // elsewhere it is skipped and counts as NOTRUN.
 import { expect, test } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { run } from "./test-process.ts";
+import { copyRunnerModules, run } from "./test-process.ts";
 
 const linux = process.platform === "linux";
 
@@ -15,10 +15,7 @@ function asActor(actor: number): Record<string, string> {
   try {
     chmodSync(probe, 0o755);
     const tools = join(probe, "tools/selected-backend-ci");
-    mkdirSync(tools, { recursive: true });
-    for (const name of readdirSync(import.meta.dir))
-      if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
-        copyFileSync(join(import.meta.dir, name), join(tools, name));
+    copyRunnerModules(tools);
     const bun = join(probe, "bun");
     copyFileSync(process.execPath, bun);
     chmodSync(bun, 0o755);

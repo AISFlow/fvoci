@@ -10,7 +10,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -23,7 +22,7 @@ import process from "node:process";
 import { admittedBrowser } from "./admission.ts";
 import { gid, read, uid } from "./io.ts";
 import { prepareBrowser } from "./runtime.ts";
-import { run } from "./test-process.ts";
+import { copyRunnerModules, run } from "./test-process.ts";
 
 const SHA = "a".repeat(40);
 interface Fixture {
@@ -84,10 +83,7 @@ function runAs(
   try {
     chmodSync(probe, 0o755);
     const tools = join(probe, "tools/selected-backend-ci");
-    mkdirSync(tools, { recursive: true });
-    for (const name of readdirSync(import.meta.dir))
-      if (name.endsWith(".ts") && !name.endsWith(".test.ts"))
-        copyFileSync(join(import.meta.dir, name), join(tools, name));
+    copyRunnerModules(tools);
     const bun = join(probe, "bun");
     copyFileSync(process.execPath, bun);
     chmodSync(bun, 0o755);

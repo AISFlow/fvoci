@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { env, read, root, sha } from "../io.ts";
+import { env, failureDigest, read, root, sha } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
 import { loadCurrent, type Current } from "./binding.ts";
@@ -19,7 +19,6 @@ import {
   command,
   emit,
   failureCheckpoint,
-  failureDigest,
   fileSha,
   now,
   readText,
