@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import type { JSONReport } from "@playwright/test/reporter";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -15,6 +15,13 @@ const configs = [
   ["e2e/perf/perf.config.ts", "focused.perf.ts"],
 ] as const;
 
+let fixtureDirectory: string | undefined;
+afterEach(() => {
+  // A test timeout abandons the async body without running its finally block.
+  if (fixtureDirectory) rmSync(fixtureDirectory, { recursive: true, force: true });
+  fixtureDirectory = undefined;
+});
+
 async function runFixture(
   config: string,
   filename: string,
@@ -24,6 +31,7 @@ async function runFixture(
   // Keep package resolution inside this worktree, with a separate testDir and
   // receipts per invocation. No browser, server or external service is needed.
   const directory = mkdtempSync(join(webRoot, ".forbid-only-"));
+  fixtureDirectory = directory;
   const receipt = join(directory, "executed.txt");
   const configPath = join(directory, "fixture.config.ts");
   try {

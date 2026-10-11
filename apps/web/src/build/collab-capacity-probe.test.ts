@@ -6,10 +6,11 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after, afterEach } from "node:test";
 import { spawn } from "bun";
 
 const root = resolve(import.meta.dir, "../../../..");
@@ -24,6 +25,13 @@ for (const utility of ["bash", "dirname", "mkdir", "date", "tee", "awk"]) {
 const evidence = join(root, "target/harness-capacity-count-4");
 mkdirSync(evidence, { recursive: true });
 const fixtures = mkdtempSync(join(evidence, "fixtures-"));
+let fixtureDirectory: string | undefined;
+afterEach(() => {
+  // A test timeout abandons the async body, so cleanup belongs to the hook.
+  if (fixtureDirectory) rmSync(fixtureDirectory, { recursive: true, force: true });
+  fixtureDirectory = undefined;
+});
+after(() => rmSync(fixtures, { recursive: true, force: true }));
 
 function quote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -108,6 +116,7 @@ interface Fixture {
 
 async function runFixture(fixture: Fixture, mode: "preflight" | "probe" = "probe") {
   const directory = mkdtempSync(join(fixtures, "case-"));
+  fixtureDirectory = directory;
   const emptyPath = join(directory, "empty-path");
   mkdirSync(emptyPath);
   const events = join(directory, "events.log");
