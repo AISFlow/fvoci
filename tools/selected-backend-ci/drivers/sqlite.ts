@@ -20,7 +20,16 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
-import { env, isFile, read, root, sha } from "../io.ts";
+import {
+  checkpointPrefix,
+  env,
+  failureDigest,
+  isFile,
+  read,
+  root,
+  sha,
+  type PreparationStep,
+} from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
@@ -34,7 +43,6 @@ import {
   copiedHashes,
   emit,
   failureCheckpoint,
-  failureDigest,
   identityGone,
   inodeOf,
   inputCheck,
@@ -69,42 +77,6 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
-// Public preparation checkpoints: one fixed name per owned preparation step.
-// The runner publishes only `checkpointPrefix + <one of these>`; never a stack
-// frame, path, argv or message.
-export const checkpointPrefix = "tools/selected-backend-ci/drivers/sqlite.ts#";
-export const preparationSteps = [
-  "container-create",
-  "container-start",
-  "runtime-abi",
-  "copy-inputs",
-  "own-inputs",
-  "mode-executables",
-  "runtime-ldd",
-  "runtime-ldd-log",
-  "runtime-ldd-dependencies",
-  "mode-environment",
-  "copy-static",
-  "copied-owned-files",
-  "copied-hashes",
-  "copied-hashes-log",
-  "copied-hashes-match",
-  "network-mode",
-  "network-attachments",
-  "network-attachment-count",
-  "network-attachment-id",
-  "network-driver",
-  "network-driver-log",
-  "network-driver-host",
-] as const;
-export type PreparationStep = (typeof preparationSteps)[number];
-export function publicCheckpoint(value: unknown): string | null {
-  return typeof value === "string" &&
-    value.startsWith(checkpointPrefix) &&
-    (preparationSteps as readonly string[]).includes(value.slice(checkpointPrefix.length))
-    ? value
-    : null;
-}
 const checkpointKeys = ["known_driver_checkpoint", "preparation_command_exit"] as const;
 
 // The I/O this driver owns, replaceable as one boundary in tests.

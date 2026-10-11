@@ -27,6 +27,6 @@ SHA: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  parent: bbbbbbbbbbbbbbbbbbbbbbbbb
 patch-sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc  patch-id: dddddddddddddddddddddddddddddddddddddddd
 판정: rust ACCEPT, ci-web REQUEST_CHANGES, db 없음
 tested-merge: MISSING
-결과: bash scripts/test-ci-selection.sh NOTRUN
+결과: bun tools/ci/verify-workflows.ts NOTRUN, bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts NOTRUN
 비고: 없음
 ```

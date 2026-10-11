@@ -1,6 +1,7 @@
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   openSync,
   readFileSync,
   renameSync,
@@ -25,8 +26,16 @@ import {
   type TiptapNode,
 } from "./workspace-wiki-vue-editor";
 
+// Shared by every test and worker of one run. A CLI run empties the project
+// output directory first; UI and watch mode keep it between runs.
 function runDirectory(): string {
-  return process.env.FVOCI_E2E_RESULT_DIR ?? "/tmp";
+  const override = process.env.FVOCI_E2E_RESULT_DIR;
+  if (override !== undefined) {
+    return override;
+  }
+  const directory = test.info().project.outputDir;
+  mkdirSync(directory, { recursive: true });
+  return directory;
 }
 
 // Clock reading for this worker process. The next run is a new process, so

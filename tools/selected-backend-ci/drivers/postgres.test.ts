@@ -16,13 +16,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { digest, sourceInputText } from "../io.ts";
+import { digest, sourceInputText, wrapperInterruptGrace } from "../io.ts";
 import type { Inputs } from "../types.ts";
 import {
   failureCheckpoint,
   browserPacketKeys,
   knownOnBrowserTest,
-  wrapperInterruptGrace,
   type Command,
 } from "./common.ts";
 import {

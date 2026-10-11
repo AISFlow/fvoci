@@ -3,7 +3,7 @@ import { z } from "zod";
 import { expect, test, type BrowserContext, type Page, type Response } from "@playwright/test";
 import { login } from "./helpers";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
@@ -168,9 +168,8 @@ async function fixture(page: Page, key: string) {
       assets.some((asset) => asset.path.endsWith(".css")),
       "candidate CSS was served",
     ).toBe(true);
-    writeFileSync(
-      `/tmp/fvoci-front272-calendar-served-${key}.json`,
-      JSON.stringify(
+    await test.info().attach(`calendar-served-${key}`, {
+      body: JSON.stringify(
         {
           head: process.env.FVOCI_CALENDAR_VERIFY_HEAD ?? "unbound",
           url: new URL(page.url()).pathname,
@@ -182,7 +181,8 @@ async function fixture(page: Page, key: string) {
         null,
         2,
       ),
-    );
+      contentType: "application/json",
+    });
   }
   return { base, project, task, stored, open };
 }
@@ -200,12 +200,12 @@ test("template day/week/month, mini calendar, keyboard and responsive sidebar co
     ).ok(),
   ).toBe(true);
   await f.open();
-  await page.screenshot({ path: "/tmp/fvoci-front272-calendar-month.png" });
+  await page.screenshot({ path: test.info().outputPath("calendar-month.png") });
   await page.getByTestId("calendar-mini").getByLabel("2027-05-05", { exact: true }).click();
   await page.getByRole("tab", { name: "Week", exact: true }).click();
   const grid = page.getByTestId("calendar-time-grid");
   await expect(grid.getByTestId(`collection-preview-${timed.displayId}`)).toContainText("09:30");
-  await page.screenshot({ path: "/tmp/fvoci-front272-calendar-week.png" });
+  await page.screenshot({ path: test.info().outputPath("calendar-week.png") });
   await grid
     .getByTestId(`collection-preview-${timed.displayId}`)
     .dragTo(grid.locator('[data-calendar-target="2027-05-06"][data-hour="14"]'));

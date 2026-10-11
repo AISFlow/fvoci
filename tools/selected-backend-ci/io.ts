@@ -23,7 +23,6 @@ import process from "node:process";
 
 export type Environment = Record<string, string | undefined>;
 export const root = resolve(import.meta.dir, "../..");
-export const templates = join(root, "scripts/selected-backend-ci");
 export const uid = () => {
   assert.ok(process.getuid);
   return process.getuid();
@@ -58,6 +57,16 @@ export function env(name: string, source: Environment = process.env): string {
 }
 export function digest(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+// Same canonical digest the runner and the lane drivers apply to a recorded
+// failure.
+export function failureDigest(value: unknown): string {
+  const keys = new Set<string>();
+  JSON.stringify(value, (key, child: unknown) => {
+    if (key) keys.add(key);
+    return child;
+  });
+  return digest(JSON.stringify(value, [...keys].sort()));
 }
 export function sha(path: string): string {
   const fd = openSync(path, "r"),
@@ -126,9 +135,54 @@ export function spawnSelectedCommand(
     killSignal: "SIGKILL",
   });
 }
+// Long enough for a nested lane driver to finish its own cleanup and for the
+// wrapper's EXIT trap to docker rm its container. A group ^C starts every
+// nesting level's timer at once, so an outer wrapper is given a longer grace
+// than the wrappers nested inside it, and the runner a longer one than any
+// lane driver (runtime.ts driverInterruptGrace).
+export const wrapperInterruptGrace = 30_000;
+// Re-exec of a lane driver under Bun: the same executable, no .env autoload.
+export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
+// Public preparation checkpoints of the SQLite lane driver: one fixed name per
+// owned preparation step. The runner publishes only `checkpointPrefix + <one of
+// these>`; never a stack frame, path, argv or message.
+export const checkpointPrefix = "tools/selected-backend-ci/drivers/sqlite.ts#";
+export const preparationSteps = [
+  "container-create",
+  "container-start",
+  "runtime-abi",
+  "copy-inputs",
+  "own-inputs",
+  "mode-executables",
+  "runtime-ldd",
+  "runtime-ldd-log",
+  "runtime-ldd-dependencies",
+  "mode-environment",
+  "copy-static",
+  "copied-owned-files",
+  "copied-hashes",
+  "copied-hashes-log",
+  "copied-hashes-match",
+  "network-mode",
+  "network-attachments",
+  "network-attachment-count",
+  "network-attachment-id",
+  "network-driver",
+  "network-driver-log",
+  "network-driver-host",
+] as const;
+export type PreparationStep = (typeof preparationSteps)[number];
+export function publicCheckpoint(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.startsWith(checkpointPrefix) &&
+    (preparationSteps as readonly string[]).includes(value.slice(checkpointPrefix.length))
+    ? value
+    : null;
+}
 export const jsonText = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
-// This byte form is a consumer contract: restart_checkpoint/current_binding hash
-// json.dumps(source_written, indent=2), including ASCII escapes and final LF.
+// This byte form is a consumer contract: the runner's restart grant and
+// drivers/binding.ts hash it, and the drivers write their receipts in it.
+// Two-space indent, ASCII escapes and a final LF.
 export const sourceInputText = (value: unknown) =>
   jsonText(value).replace(
     /[\u007f-\uffff]/g,

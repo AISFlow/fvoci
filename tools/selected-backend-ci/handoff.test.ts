@@ -498,7 +498,7 @@ describe.serial("collaboration build packet", () => {
     const fields = (
       get("handoff-input-current-safe.json") as { fields: Record<string, { sha256: string }> }
     ).fields;
-    // python3 -c 'json.dumps({"한글.ts": "x"}, sort_keys=True, separators=(",", ":"))'
+    // SHA-256 of the Python json.dumps({"한글.ts": "x"}, sort_keys=True, separators=(",", ":")) bytes
     expect(fields.tracked?.sha256).toBe(
       "367d47b24ff50e8c960e1964edea96587de56a2c27e9c76a74b14306d51ea385",
     );

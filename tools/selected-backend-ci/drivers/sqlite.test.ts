@@ -14,20 +14,17 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { root, sha } from "../io.ts";
+import { checkpointPrefix, preparationSteps, publicCheckpoint, root, sha } from "../io.ts";
 import { laneRetirement } from "../runtime.ts";
 import type { Current } from "./binding.ts";
 import { runtimeError } from "./common.ts";
 import type { Child, CommandOptions, Completed, Row } from "./common.ts";
 import {
-  checkpointPrefix,
   expectedMigrations,
   finalize,
   main,
   positiveDockerAbsence,
-  preparationSteps,
   prepareContainer,
-  publicCheckpoint,
   recordFailure,
   retiredIdentities,
   shellExports,

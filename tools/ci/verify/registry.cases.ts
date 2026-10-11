@@ -214,21 +214,53 @@ function caseList(): MutationCase[] {
     swap(WEB_GATE, "          # " + WEB_GATE.trimStart() + "          true\n"),
     "canonical gate invocation",
   );
-  add(
-    "rust-missing-selector-wrapper",
-    "rust.yml",
-    swap("          bash scripts/test-ci-selection.sh\n", ""),
-    "must run scripts/test-ci-selection.sh",
-  );
-  add(
-    "web-duplicate-selector-wrapper",
-    "web.yml",
-    swap(
-      "          bun tools/ci/plan.ts \\\n",
-      "          bash scripts/test-ci-selection.sh\n          bun tools/ci/plan.ts \\\n",
-    ),
-    "must not duplicate scripts/test-ci-selection.sh",
-  );
+  // rust ci-plan runs the selector regression commands itself, before the plan.
+  const VERIFY_WORKFLOWS = "          bun tools/ci/verify-workflows.ts\n";
+  const SELECTOR_TESTS =
+    "          bun test ./tools/ci/planner/ ./tools/ci/gate/ ./tools/ci/verify/ ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts\n";
+  const GITHUB_OUTPUT_ARG = '            --github-output "$GITHUB_OUTPUT"\n';
+  const mustRun = (line: string) =>
+    `rust: ci-plan must run "${line.trim()}" once before plan output`;
+  for (const [name, edit, needle] of [
+    ["missing-verify-workflows", swap(VERIFY_WORKFLOWS, ""), mustRun(VERIFY_WORKFLOWS)],
+    ["missing-selector-tests", swap(SELECTOR_TESTS, ""), mustRun(SELECTOR_TESTS)],
+    [
+      "selector-test-path-dropped",
+      swap(" ./tools/ci/gate/ ./tools/ci/verify/", " ./tools/ci/verify/"),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "selector-test-file-dropped",
+      swap(" ./tools/ci/argv.test.ts ./tools/ci/workflows.test.ts", " ./tools/ci/argv.test.ts"),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "selector-after-plan",
+      (text: string) =>
+        swap(GITHUB_OUTPUT_ARG, GITHUB_OUTPUT_ARG + SELECTOR_TESTS)(swap(SELECTOR_TESTS, "")(text)),
+      mustRun(SELECTOR_TESTS),
+    ],
+    [
+      "duplicate-verify-workflows",
+      swap(VERIFY_WORKFLOWS, VERIFY_WORKFLOWS + VERIFY_WORKFLOWS),
+      mustRun(VERIFY_WORKFLOWS),
+    ],
+    [
+      "wrapper-back",
+      swap(VERIFY_WORKFLOWS + SELECTOR_TESTS, "          bash scripts/test-ci-selection.sh\n"),
+      mustRun(VERIFY_WORKFLOWS),
+    ],
+  ] as const) {
+    add(`rust-selector-${name}`, "rust.yml", edit, needle);
+  }
+  for (const line of [VERIFY_WORKFLOWS, SELECTOR_TESTS]) {
+    add(
+      `web-duplicate-selector-${line.includes("verify-workflows") ? "verify" : "tests"}`,
+      "web.yml",
+      swap("          bun tools/ci/plan.ts \\\n", line + "          bun tools/ci/plan.ts \\\n"),
+      `web: ci-plan must not duplicate "${line.trim()}"`,
+    );
+  }
   for (const workflow of GATED) {
     const file = `${workflow}.yml`;
     const gate = `${workflow}-ci-gate`;
@@ -1147,6 +1179,13 @@ function caseList(): MutationCase[] {
   const XTASK = "xtask/target/debug/xtask";
   const OLD = "python3 scripts/ci_selection.py";
   const NOT_PYTHON = "must run xtask or Bun, not Python";
+  const FAST_SCRIPT_STEP = "      - name: Script unit tests without a database\n";
+  const FAST_SELECTED =
+    "          bun test ./tools/selected-backend-ci/lane-controls.test.ts" +
+    " ./tools/selected-backend-ci/drivers/binding.test.ts ./tools/selected-backend-ci/drivers/common.test.ts" +
+    " ./tools/selected-backend-ci/drivers/restart.test.ts ./tools/selected-backend-ci/drivers/postgres.test.ts" +
+    " ./tools/selected-backend-ci/drivers/install.test.ts\n";
+  const FAST_PINNED = `rust: fast "Script unit tests without a database" must run exactly the pinned script tests`;
   for (const [name, edit, needle] of [
     [
       "build",
@@ -1304,11 +1343,34 @@ function caseList(): MutationCase[] {
       swap("      - run: bun tools/oracle/encryption-keys.ts self-test\n", ""),
       'fast must run "bun tools/oracle/encryption-keys.ts self-test" once',
     ],
+    [
+      "fast-selected-python-back",
+      swap(FAST_SELECTED, "          python3 scripts/selected-backend-ci/test_restart_ledger.py\n"),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "fast-selected-python-added",
+      swap(
+        FAST_SELECTED,
+        FAST_SELECTED +
+          "          python3 scripts/selected-backend-ci/test_current_binding_engine_features.py\n",
+      ),
+      "rust: fast " + NOT_PYTHON,
+    ],
+    [
+      "fast-selected-test-dropped",
+      swap(" ./tools/selected-backend-ci/drivers/restart.test.ts", ""),
+      FAST_PINNED,
+    ],
+    [
+      "fast-selected-tests-masked",
+      swap(FAST_SCRIPT_STEP, FAST_SCRIPT_STEP + "        continue-on-error: true\n"),
+      FAST_PINNED,
+    ],
   ] as const) {
     add(`rust-python-${name}`, "rust.yml", edit, needle);
   }
-  // Rustup metadata through the prebuilt xtask helper, and python3 only where a
-  // caller still needs it (web.yml).
+  // web.yml: Rustup metadata through the prebuilt xtask helper, and no python3.
   const inJob =
     (job: string, edit: Edit): Edit =>
     (text) => {
@@ -1359,6 +1421,9 @@ function caseList(): MutationCase[] {
   const elsewhere = (job: string) =>
     `web: ${job} may prepare Rustup metadata only in its pinned step`;
   const python = (job: string) => `web: ${job} may not install or run python3`;
+  const LANE_JOBS = ["install-on", "postgres-on", "sqlite-on", "postgres-off", "sqlite-off"].map(
+    (lane) => `collaboration-${lane}`,
+  );
   const webCases: [string, string, Edit, string][] = [
     [
       "untimed-python-helper",
@@ -1505,6 +1570,32 @@ function caseList(): MutationCase[] {
       swap("          bun ci\n", "          bun ci\n          python3 -m pip install pyyaml\n"),
       python("web-checks"),
     ],
+    [
+      "checks-python-step",
+      "web-checks",
+      swap(
+        "      - name: Verify normal web e2e shard plan\n",
+        "      - run: python3 scripts/selected-backend-ci/test_off_registration.py\n" +
+          "      - name: Verify normal web e2e shard plan\n",
+      ),
+      python("web-checks"),
+    ],
+    [
+      "checks-python-registration-line",
+      "web-checks",
+      swap(
+        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n",
+        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n" +
+          "          python3 scripts/selected-backend-ci/test_off_registration.py\n",
+      ),
+      python("web-checks"),
+    ],
+    ...["web-checks", ...LANE_JOBS].map((job): [string, string, Edit, string] => [
+      `apt-${job}`,
+      job,
+      swap(APT_NO_PYTHON, APT_PYTHON),
+      python(job),
+    ]),
   ];
   for (const [name, job, edit, needle] of webCases) {
     add(`web-rustup-${name}`, "web.yml", inJob(job, edit), needle);
