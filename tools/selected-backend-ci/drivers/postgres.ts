@@ -34,6 +34,7 @@ import {
   resolved,
   root,
   sha,
+  wrapperInterruptGrace,
 } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
@@ -72,7 +73,6 @@ import {
   trapInterrupts,
   treeHashes,
   waitFor,
-  wrapperInterruptGrace,
   writeJson,
 } from "./common.ts";
 import type { Child, Command, Json, Receipt, Row } from "./common.ts";

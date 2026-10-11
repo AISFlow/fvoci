@@ -13,6 +13,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,6 +52,7 @@ import {
 } from "./io.ts";
 import {
   driverCommand,
+  executeDriver,
   knownOnBrowserTest,
   laneDriver,
   laneRetirement,
@@ -1889,6 +1891,93 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
       exit: 130,
       allRequestedRunsExecuted: false,
       runs: [],
+    });
+  });
+  // B2: a lane driver owns fixture wrappers, so an interrupt waits for it.
+  const driverFixture = join(import.meta.dir, "driver-interrupt.fixture.ts");
+  // The fixture driver's pid, once its log says its SIGINT handler is installed.
+  const driverReady = (log: string) =>
+    new Promise<number>((resolve) => {
+      const check = () => {
+        const match = /^ready ([0-9]+)$/m.exec(readFileSync(log, "utf8"));
+        if (!match) return;
+        watcher.close();
+        resolve(Number(match[1]));
+      };
+      const watcher = watch(log, check);
+      check();
+    });
+  const refusal = async (pending: Promise<number>) => {
+    try {
+      return { exit: await pending };
+    } catch (error) {
+      return { error };
+    }
+  };
+  test("B2 an interrupted lane driver finishes its cleanup before executeDriver returns", async () => {
+    const base = directory(),
+      log = join(base, "driver.log"),
+      marker = join(base, "cleaned");
+    const controller = new AbortController();
+    const pending = executeDriver(
+      [process.execPath, driverFixture, marker],
+      process.env,
+      log,
+      controller.signal,
+    );
+    const pid = await driverReady(log);
+    const reason = new Error("driver interrupt fixture");
+    controller.abort(reason);
+    expect(await refusal(pending)).toEqual({ error: reason });
+    expect(readFileSync(marker, "utf8")).toBe("cleaned\n");
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+  test("B2 a lane driver that ignores SIGINT is SIGKILLed after the grace", async () => {
+    const base = directory(),
+      log = join(base, "driver.log"),
+      marker = join(base, "cleaned");
+    const controller = new AbortController();
+    const pending = executeDriver(
+      [process.execPath, driverFixture, marker, "ignore"],
+      process.env,
+      log,
+      controller.signal,
+      200,
+    );
+    const pid = await driverReady(log);
+    const reason = new Error("driver interrupt fixture");
+    controller.abort(reason);
+    expect(await refusal(pending)).toEqual({ error: reason });
+    expect(existsSync(marker)).toBe(false);
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+  test("B2 an interrupted run records exit130 only after its driver closed the lane", async () => {
+    const { output, boundary } = cohort();
+    const marker = join(directory(), "cleaned");
+    boundary.execute = async (_driver, environment, log, signal) => {
+      const pending = executeDriver(
+        [process.execPath, driverFixture, marker],
+        environment,
+        log,
+        signal,
+      );
+      await driverReady(log);
+      process.emit("SIGINT");
+      return pending;
+    };
+    await withEnvironment(ci, async () => {
+      expect(await run(output, boundary, [uid(), gid()])).toBe(130);
+    });
+    expect(readFileSync(marker, "utf8")).toBe("cleaned\n");
+    expect(read(join(output, "selected-ci-receipt.json"))).toMatchObject({
+      exit: 130,
+      allRequestedRunsExecuted: false,
+      runs: [],
+      launcherFailure: { receiptWrite: "confirmed" },
+    });
+    expect(read(join(output, "selected-launcher-failure.private.json"))).toEqual({
+      type: "InterruptError",
+      message: "selected launcher interrupted",
     });
   });
   test("B3 actual stage CLI kills a SIGINT-resistant child and writes exit130", async () => {

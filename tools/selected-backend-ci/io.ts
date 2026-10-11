@@ -135,6 +135,12 @@ export function spawnSelectedCommand(
     killSignal: "SIGKILL",
   });
 }
+// Long enough for a nested lane driver to finish its own cleanup and for the
+// wrapper's EXIT trap to docker rm its container. A group ^C starts every
+// nesting level's timer at once, so an outer wrapper is given a longer grace
+// than the wrappers nested inside it, and the runner a longer one than any
+// lane driver (runtime.ts driverInterruptGrace).
+export const wrapperInterruptGrace = 30_000;
 // Re-exec of a lane driver under Bun: the same executable, no .env autoload.
 export const bunDriver = (driver: string) => [process.execPath, "--no-env-file", driver];
 // Public preparation checkpoints of the SQLite lane driver: one fixed name per

@@ -1,4 +1,4 @@
-import { deepEquals, spawnSync } from "bun";
+import { deepEquals, spawn, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
@@ -47,9 +47,9 @@ import {
   root,
   sha,
   sourceInputText,
-  spawnSelectedCommand,
   tool,
   uid,
+  wrapperInterruptGrace,
   write,
 } from "./io.ts";
 import type {
@@ -491,18 +491,55 @@ const runBoundary: RunBoundary = {
       chromium_directory_files: inventory(dirname(chromium)),
     };
   },
-  async execute(driver, environment, log, signal) {
-    const fd = openSync(log, "wx");
+  execute(driver, environment, log, signal) {
+    return executeDriver(driverCommand(driver), environment, log, signal);
+  },
+};
+// Outlasts the longest grace a lane driver gives its own fixture wrappers (the
+// PostgreSQL wrapper, 2 x wrapperInterruptGrace) and the cleanup after it.
+export const driverInterruptGrace = 3 * wrapperInterruptGrace;
+// A lane driver owns fixture wrappers whose EXIT traps remove their
+// containers. On an interrupt it is not killed at once, as a stage child is:
+// it gets SIGINT and is waited for, so it closes its lane and writes its
+// receipt before the runner returns. Only a driver still running after
+// `grace` is SIGKILLed. The interrupt is then raised as before (exit 130).
+export async function executeDriver(
+  command: string[],
+  environment: Environment,
+  log: string,
+  signal: AbortSignal,
+  grace = driverInterruptGrace,
+): Promise<number> {
+  signal.throwIfAborted();
+  const fd = openSync(log, "wx");
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const child = spawn(command, {
+      cwd: root,
+      env: environment,
+      stdout: fd,
+      stderr: fd,
+      stdin: "inherit",
+    });
+    const interrupt = () => {
+      child.kill("SIGINT");
+      deadline ??= setTimeout(() => {
+        child.kill("SIGKILL");
+      }, grace);
+    };
+    signal.addEventListener("abort", interrupt, { once: true });
     try {
-      const child = spawnSelectedCommand(driverCommand(driver), environment, fd, fd, signal);
       const exitCode = await child.exited;
       if (signal.aborted) throw signal.reason;
       return observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
     } finally {
-      closeSync(fd);
+      signal.removeEventListener("abort", interrupt);
     }
-  },
-};
+  } finally {
+    clearTimeout(deadline);
+    closeSync(fd);
+  }
+}
 export async function run(
   output: string,
   boundary: RunBoundary = runBoundary,
@@ -573,7 +610,9 @@ export async function run(
     error.name = "InterruptError";
     controller.abort(error);
   };
-  process.once("SIGINT", interrupt);
+  // Not once: the runner now waits for the driver, and a second SIGINT must not
+  // end it before the aggregate receipt is written.
+  process.on("SIGINT", interrupt);
   try {
     for (const [lane, flow] of runs) {
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),

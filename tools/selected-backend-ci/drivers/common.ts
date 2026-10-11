@@ -22,7 +22,15 @@ import { get } from "node:http";
 import { connect } from "node:net";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
-import { files, jsonInteger, observedExit, root, sha, sourceInputText } from "../io.ts";
+import {
+  files,
+  jsonInteger,
+  observedExit,
+  root,
+  sha,
+  sourceInputText,
+  wrapperInterruptGrace,
+} from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
 
@@ -100,11 +108,6 @@ export interface CommandOptions {
   // Milliseconds; defaults to wrapperInterruptGrace.
   interruptGrace?: number;
 }
-// Long enough for a nested lane driver to finish its own cleanup and for the
-// wrapper's EXIT trap to docker rm its container. A group ^C starts every
-// nesting level's timer at once, so an outer wrapper is given a longer grace
-// than the wrappers nested inside it.
-export const wrapperInterruptGrace = 30_000;
 
 // ESRCH and ENOENT: the process or thread has already gone.
 const gone = (error: unknown) =>
