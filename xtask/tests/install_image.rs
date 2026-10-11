@@ -8,6 +8,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_DIR/calls"
@@ -149,6 +158,7 @@ fn refused(out: &Output, needle: &str) {
 
 #[test]
 fn verify_accepts_the_matching_image_and_prints_only_env_lines() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     let out = f.xtask(&["verify", "fvoci-rust-install:test", "sha256:good"], &[]);
@@ -161,6 +171,7 @@ fn verify_accepts_the_matching_image_and_prints_only_env_lines() {
 
 #[test]
 fn verify_refuses_each_mismatch_and_never_builds() {
+    let _serial = serial();
     let f = Fixture::new();
     let good = f.labels();
     for (i, needle) in [
@@ -204,6 +215,7 @@ fn verify_refuses_each_mismatch_and_never_builds() {
 
 #[test]
 fn a_dirty_checkout_is_a_different_tree() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     fs::write(f.repo.join("new-file"), "x").unwrap();
@@ -215,6 +227,7 @@ fn a_dirty_checkout_is_a_different_tree() {
 
 #[test]
 fn unreadable_docker_or_git_fails_closed_and_signal_differs_from_exit() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     refused(
@@ -240,6 +253,7 @@ fn unreadable_docker_or_git_fails_closed_and_signal_differs_from_exit() {
 
 #[test]
 fn the_read_deadline_covers_a_descendant_holding_the_output_pipe() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     // docker exits 0 at once but leaves `sleep 1.2` holding stdout.
@@ -270,6 +284,7 @@ fn the_read_deadline_covers_a_descendant_holding_the_output_pipe() {
 
 #[test]
 fn build_labels_then_verifies() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     let out = f.xtask(&["build", "--tag", "fvoci-rust-install:test"], &[]);
@@ -290,6 +305,7 @@ fn build_labels_then_verifies() {
 
 #[test]
 fn save_then_load_round_trips_and_refuses_a_tampered_or_foreign_hand_off() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     let handoff = f.dir.join("handoff");
@@ -361,6 +377,7 @@ fn save_then_load_round_trips_and_refuses_a_tampered_or_foreign_hand_off() {
 
 #[test]
 fn leftovers_reports_owned_resources_and_fails_closed() {
+    let _serial = serial();
     let f = Fixture::new();
     let out = f.xtask(&["leftovers", "--project", "p1"], &[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -379,6 +396,7 @@ fn leftovers_reports_owned_resources_and_fails_closed() {
 
 #[test]
 fn usage_errors_exit_2() {
+    let _serial = serial();
     let f = Fixture::new();
     for args in [
         &[][..],
@@ -394,6 +412,7 @@ fn usage_errors_exit_2() {
 
 #[test]
 fn acquire_verifies_the_given_image_and_refuses_to_build_in_ci() {
+    let _serial = serial();
     let f = Fixture::new();
     f.good_image();
     let given = [
@@ -437,6 +456,7 @@ fn acquire_verifies_the_given_image_and_refuses_to_build_in_ci() {
 
 #[test]
 fn running_requires_one_container_on_the_verified_image() {
+    let _serial = serial();
     let f = Fixture::new();
     let args = ["running", "p1", "server", "sha256:good"];
     let ok = f.xtask(

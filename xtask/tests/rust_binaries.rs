@@ -8,10 +8,19 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use tar::{Builder, EntryType, Header};
 use xtask::rust_binaries::{product_binaries, run_tests};
 use xtask::rust_binaries_archive::{pack, unpack, MANIFEST};
 use xtask::rust_binaries_cohort::{entry, expectation, Entry};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 const FIRST: &str = "target/db-tests/debug/deps/first";
 
@@ -164,6 +173,7 @@ fn unpack_both(archive: &Path, context: &Value, root: &Path) -> Result<Value, St
 
 #[test]
 fn all_enabled_child_binaries_are_inventoried() {
+    let _serial = serial();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -182,6 +192,7 @@ fn all_enabled_child_binaries_are_inventoried() {
 
 #[test]
 fn roundtrip_and_no_fail_fast_execute_actual_transferred_files() {
+    let _serial = serial();
     let root = temp();
     let (context, entries) = fixture(&root, "exit 7");
     let archive = root.join("postgres.tar");
@@ -204,6 +215,7 @@ fn roundtrip_and_no_fail_fast_execute_actual_transferred_files() {
 
 #[test]
 fn missing_archive_and_source_platform_native_context_refuse_before_writing() {
+    let _serial = serial();
     let root = temp();
     let (context, entries) = fixture(&root, "exit 0");
     let archive = root.join("postgres.tar");
@@ -225,6 +237,7 @@ fn missing_archive_and_source_platform_native_context_refuse_before_writing() {
 
 #[test]
 fn digest_feature_profile_cohort_and_path_corruption_refuse_before_writing() {
+    let _serial = serial();
     for defect in [
         "digest",
         "feature",
@@ -267,6 +280,7 @@ fn digest_feature_profile_cohort_and_path_corruption_refuse_before_writing() {
 
 #[test]
 fn nonregular_unsafe_and_extra_members_refuse_before_writing() {
+    let _serial = serial();
     let cases: Vec<(&str, Raw)> = vec![
         (
             "symlink",
@@ -362,6 +376,7 @@ fn nonregular_unsafe_and_extra_members_refuse_before_writing() {
 
 #[test]
 fn member_paths_outside_target_refuse_before_writing() {
+    let _serial = serial();
     // None is an absolute path under this case's own root, outside target/.
     for path in [
         None,
@@ -395,6 +410,7 @@ fn member_paths_outside_target_refuse_before_writing() {
 
 #[test]
 fn symlinked_destination_parent_refuses() {
+    let _serial = serial();
     let root = temp();
     let (context, entries) = fixture(&root, "exit 0");
     let archive = root.join("postgres.tar");
@@ -409,6 +425,7 @@ fn symlinked_destination_parent_refuses() {
 
 #[test]
 fn producer_rejects_missing_ambiguous_features_and_profiles() {
+    let _serial = serial();
     let root = temp();
     let (_, entries) = fixture(&root, "exit 0");
     let record = entries["first"].record.clone();
@@ -439,6 +456,7 @@ fn record_for_outside(root: &Path) -> Value {
 
 #[test]
 fn run_refuses_changed_executable_unknown_target_and_filters() {
+    let _serial = serial();
     let root = temp();
     let (context, entries) = fixture(&root, "exit 0");
     let manifest = manifest(&context, &entries);
@@ -505,6 +523,7 @@ fn output(command: &mut Command, argv: &[&str]) -> Output {
 
 #[test]
 fn cli_run_propagates_first_failure_without_fail_fast() {
+    let _serial = serial();
     let (root, mut command) = workspace("exit 7");
     let out = output(
         &mut command,
@@ -527,6 +546,7 @@ fn cli_run_propagates_first_failure_without_fail_fast() {
 
 #[test]
 fn cli_run_reports_signal_as_128_plus_n() {
+    let _serial = serial();
     let (root, mut command) = workspace("kill -KILL $$");
     let out = output(
         &mut command,
@@ -556,6 +576,7 @@ fn cli_run_reports_signal_as_128_plus_n() {
 
 #[test]
 fn cli_run_refuses_foreign_source_and_changed_files() {
+    let _serial = serial();
     // A manifest field that is missing never matches an unset variable.
     for key in ["sha", "run_id", "run_attempt", "arch"] {
         let (root, mut command) = workspace("exit 0");
@@ -616,6 +637,7 @@ fn cli_run_refuses_foreign_source_and_changed_files() {
 
 #[test]
 fn cli_usage_errors_exit_2() {
+    let _serial = serial();
     for argv in [
         &[][..],
         &["rebuild", "--directory", "d"],
@@ -640,6 +662,7 @@ fn cli_usage_errors_exit_2() {
 /// new tests.jsonl, and passes Cargo's status (or 128+signal) through.
 #[test]
 fn cli_build_passes_cargo_status_and_never_overwrites() {
+    let _serial = serial();
     for (body, expected) in [("exit 0", 0), ("exit 3", 3), ("kill -TERM $$", 143)] {
         let (root, mut command) = workspace("exit 0");
         let bin = root.join("bin");
@@ -672,6 +695,7 @@ fn cli_build_passes_cargo_status_and_never_overwrites() {
 
 #[test]
 fn cli_refuses_missing_or_malformed_workflow() {
+    let _serial = serial();
     let (root, mut command) = workspace("exit 0");
     fs::write(root.join(".github/workflows/rust.yml"), "jobs: {}\n").unwrap();
     let out = output(
