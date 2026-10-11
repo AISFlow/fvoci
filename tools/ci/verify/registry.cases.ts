@@ -737,6 +737,100 @@ function caseList(): MutationCase[] {
     swap("  documents-ci-gate:\n", "  documents-gate:\n"),
     "documents.yml: required check documents-ci-gate missing",
   );
+  // The documents workflow's Bun native-dependency check (tools/ci/verify/documents.ts).
+  const inNative = (edit: Edit) => within("  native-extraction:\n", "  documents-ci-gate:\n", edit);
+  const depsLine =
+    '          bun ../../tools/ci/document-client-deps.ts "$RUNNER_TEMP/extract-client-metadata.json"\n';
+  const metadataLine =
+    '          cargo metadata --locked --offline --format-version 1 > "$RUNNER_TEMP/extract-client-metadata.json"\n';
+  const thinName = "      - name: Thin process client without native parser dependencies\n";
+  const thinDir = "        working-directory: crates/document-extract-client\n";
+  const rhwpRestore = "      - name: Restore pinned public rhwp source\n";
+  const aptLine =
+    "          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
+  const rustup =
+    "      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy\n";
+  const thinNeedle =
+    "documents.yml: native-extraction must check the process client's cargo metadata";
+  const pythonNeedle = "documents.yml: native-extraction must not run or install Python";
+  const bunNeedle =
+    "documents.yml: native-extraction must install pinned Bun from .bun-version once";
+  const heredoc =
+    "          python3 - \"$RUNNER_TEMP/extract-client-metadata.json\" <<'PYTHON'\n" +
+    "          import json, sys\n" +
+    '          names = {p["name"] for p in json.load(open(sys.argv[1]))["packages"]}\n' +
+    '          forbidden = names & {"rhwp", "cfb", "zip", "flate2", "skia-safe", "skia-bindings"}\n' +
+    '          assert not forbidden, f"native dependencies leaked into process client: {forbidden}"\n' +
+    "          PYTHON\n";
+  for (const [name, edit, needle] of [
+    ["python-heredoc-restored", swap(depsLine, heredoc), pythonNeedle],
+    ["python-heredoc-restored-thin", swap(depsLine, heredoc), thinNeedle],
+    ["python-heredoc-beside-bun", swap(depsLine, depsLine + heredoc), pythonNeedle],
+    [
+      "apt-python3-restored",
+      swap(
+        aptLine,
+        aptLine.replace("no-install-recommends gcc", "no-install-recommends python3 gcc"),
+      ),
+      pythonNeedle,
+    ],
+    [
+      "setup-python-added",
+      swap(rustup, `      - uses: actions/setup-python@${"2".repeat(40)}\n` + rustup),
+      pythonNeedle,
+    ],
+    [
+      "job-shell-python",
+      swap(
+        "        working-directory: crates/document-extract\n    steps:\n",
+        "        working-directory: crates/document-extract\n        shell: python3 {0}\n    steps:\n",
+      ),
+      pythonNeedle,
+    ],
+    ["deps-check-dropped", swap(depsLine, ""), thinNeedle],
+    [
+      "deps-check-before-metadata",
+      swap(metadataLine + depsLine, depsLine + metadataLine),
+      thinNeedle,
+    ],
+    [
+      "deps-check-masked",
+      swap(depsLine, depsLine.replace('.json"\n', '.json" || true\n')),
+      thinNeedle,
+    ],
+    [
+      "deps-check-other-path",
+      swap(depsLine, depsLine.replace("../../tools/ci/", "tools/ci/")),
+      thinNeedle,
+    ],
+    ["thin-client-renamed", swap(thinName, thinName.replace("Thin", "Lean")), thinNeedle],
+    [
+      "thin-client-workdir",
+      swap(thinDir, "        working-directory: crates/document-extract\n"),
+      thinNeedle,
+    ],
+    [
+      "thin-client-continue-on-error",
+      swap(thinDir, thinDir + "        continue-on-error: true\n"),
+      thinNeedle,
+    ],
+    ["thin-client-condition", swap(thinDir, thinDir + "        if: false\n"), thinNeedle],
+    ["setup-bun-dropped", inNative(swap(SETUP_BUN, "")), bunNeedle],
+    ["setup-bun-twice", inNative(swap(SETUP_BUN, SETUP_BUN + SETUP_BUN)), bunNeedle],
+    ["setup-bun-other-pin", inNative(swap(SETUP_BUN_PIN, OTHER_PIN)), bunNeedle],
+    [
+      "setup-bun-after-check",
+      inNative((text) => swap(rhwpRestore, SETUP_BUN + rhwpRestore)(swap(SETUP_BUN, "")(text))),
+      bunNeedle,
+    ],
+    [
+      "setup-bun-before-checkout",
+      inNative((text) => swap(CHECKOUT, SETUP_BUN + CHECKOUT)(swap(SETUP_BUN, "")(text))),
+      bunNeedle,
+    ],
+  ] as const) {
+    add(`documents-${name}`, "documents.yml", edit, needle);
+  }
   const flow =
     '[{"runner":"ubuntu-26.04","pg_major":"18","shard":"a","tests":"--test db_integration"}]';
   for (const [name, line] of [

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { verifyDocumentsWorkflow } from "./verify/documents.ts";
 import { loadContext, type VerifyContext, type WorkflowCheck } from "./verify/load.ts";
 import {
   gatedWorkflowJobs,
@@ -18,6 +19,7 @@ export const CHECKS: readonly WorkflowCheck[] = [
   verifyWorkflowRegistry,
   verifyGateHardening,
   verifyPermissionPins,
+  verifyDocumentsWorkflow,
 ];
 
 export const SLOT_NAMES = ["rust-binary-handoff", "rust-suite-registry", "web-browser"] as const;
