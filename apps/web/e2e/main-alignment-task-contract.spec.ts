@@ -1449,6 +1449,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
     const context = await browser.newContext({ baseURL, storageState: adminAuth });
     const page = await context.newPage();
     let releaseFrame = () => {};
+    let releaseClose = async () => {};
     try {
       const f = await fixture(
         page,
@@ -1466,11 +1467,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       let generation = 0;
       let held = false;
       const admissions: { generation: number; scope: string; delivered: boolean }[] = [];
+      const closes: { generation: number; code: number | undefined }[] = [];
       const requests: { generation: number; id: string }[] = [];
       const acks: { generation: number; id: string }[] = [];
       await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
         const current = ++generation;
         const server = socket.connectToServer();
+        let holdClose = false;
+        let closeFrame: { code: number | undefined; reason: string | undefined } | undefined;
+        server.onClose(async (code, reason) => {
+          closes.push({ generation: current, code });
+          if (holdClose) closeFrame = { code, reason };
+          else await socket.close({ code, reason });
+        });
         socket.onMessage((message) => {
           const frame = decodeHocuspocusFrame(frameBytes(message));
           if (
@@ -1502,6 +1511,16 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             const admission = { generation: current, scope: frame.scope, delivered: false };
             admissions.push(admission);
             if (schedule === "retired-grant" && frame.scope === "read-write") {
+              // Keep the delayed grant observable even if revocation closes its
+              // server connection before the HTTP metadata reaches the page.
+              holdClose = true;
+              releaseClose = async () => {
+                holdClose = false;
+                if (closeFrame) {
+                  await socket.close(closeFrame);
+                  closeFrame = undefined;
+                }
+              };
               held = true;
               releaseFrame = () => {
                 if (!held) return;
@@ -1723,6 +1742,8 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       );
       if (schedule !== "natural") {
         await expect.poll(() => held).toBe(true);
+        const admissionGeneration = generation;
+        await expect(page.locator(".task-detail__archived")).not.toBeVisible();
         expect(await observe()).toMatchObject({
           editable: false,
           dom: "false",
@@ -1741,6 +1762,21 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           200,
         );
         await retired;
+        await expect(page.locator(".task-detail__archived")).toBeVisible();
+        if (schedule === "retired-grant") {
+          // A real sync request forces the revoked connection's authorization
+          // check, so close-before-grant is exercised without relying on timing.
+          await page.evaluate(() => {
+            const owner = window as Window & {
+              taskFreshAdmission?: { provider: HocuspocusProvider };
+            };
+            if (!owner.taskFreshAdmission) throw new Error("Missing actual task admission");
+            owner.taskFreshAdmission.provider.startSync();
+          });
+          await expect
+            .poll(() => closes)
+            .toContainEqual({ generation: admissionGeneration, code: 1008 });
+        }
         releaseFrame();
       }
       await expect.poll(observe).toMatchObject({
@@ -1854,6 +1890,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         ),
       ).toBe(true);
       expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
+      if (schedule === "retired-grant") {
+        await releaseClose();
+        await expect.poll(observe).toMatchObject({
+          ...finalAdmission,
+          authenticationEpoch: expect.any(Number),
+          authenticatedScope: "readonly",
+          scope: "readonly",
+        });
+        expect((await observe()).authenticationEpoch).toBeGreaterThan(
+          finalAdmission.authenticationEpoch,
+        );
+        expect(admissions).toContainEqual({ generation, scope: "readonly", delivered: true });
+      }
       if (schedule === "natural") {
         await editor.click();
         await page.keyboard.type("자연스러운 태스크 재인증 한글");
@@ -1930,11 +1979,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         ).toEqual(originalBody);
       }
       await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
-        body: JSON.stringify({ admissions, frames, state: await observe(), requests, acks }),
+        body: JSON.stringify({
+          admissions,
+          closes,
+          frames,
+          state: await observe(),
+          requests,
+          acks,
+        }),
         contentType: "application/json",
       });
     } finally {
       releaseFrame();
+      await releaseClose();
       await page
         .evaluate(() => {
           const owner = window as Window & { taskFreshAdmission?: { running: boolean } };
