@@ -11,7 +11,7 @@ publish = false
 # zip 8.6.0 is the newest stable release at least two weeks old (2026-04-25);
 # only raw DEFLATE decoding is enabled (no encryption, writers or other codecs).
 [dependencies]
-libc = "=0.2.189"
+libc = "=0.2.190"
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 sha3 = "=0.11.0"
