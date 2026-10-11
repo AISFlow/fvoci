@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { getSchema, type Editor, type MappablePosition } from "@tiptap/core";
+import {
+  Extension,
+  getSchema,
+  isiOS,
+  isMacOS,
+  type Editor,
+  type MappablePosition,
+} from "@tiptap/core";
 import {
   AllSelection,
+  Plugin,
   type EditorState,
   type SelectionBookmark,
   TextSelection,
@@ -563,6 +571,14 @@ const editorExtensions = [
     provider: props.provider,
     user: props.user,
   }),
+  Extension.create({
+    name: "nativeLineBoundary",
+    // Existing keymaps and suggestions keep first refusal.
+    priority: 0,
+    addProseMirrorPlugins() {
+      return [new Plugin({ props: { handleKeyDown: settleNativeLineBoundary } })];
+    },
+  }),
   ...(slots.controls
     ? [
         DragHandle.configure({
@@ -634,11 +650,45 @@ function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent)
   return false;
 }
 
-/* Native navigation changes the DOM selection before selectionchange reaches
- * PM. Its pending focus repair can otherwise restore the previous caret or
- * range in that gap. Record the completed selection at keyup using public APIs;
- * leave composition, cell/node selections and native event handling alone. */
+/* Home/End's native default runs after keydown. A pending PM focus repair can
+ * restore the old selection before keyup or selectionchange. Use the browser's
+ * visual line navigation synchronously and record it in the same handler. */
+function settleNativeLineBoundary(view: EditorView, event: KeyboardEvent): boolean {
+  if (
+    !event.isTrusted ||
+    event.defaultPrevented ||
+    richComposing.value ||
+    // Apple Home/End retain their platform's native scrolling behavior.
+    isMacOS() ||
+    isiOS() ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    (event.key !== "Home" && event.key !== "End") ||
+    !nativeKeyboardSelection(view, event)
+  )
+    return false;
+  const native = view.dom.ownerDocument.getSelection();
+  if (typeof native?.modify !== "function") return false;
+  native.modify(
+    event.shiftKey ? "extend" : "move",
+    event.key === "Home" ? "backward" : "forward",
+    "lineboundary",
+  );
+  const selection = nativeKeyboardSelection(view, event);
+  if (selection) view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+  return true;
+}
+
+/* Other native navigation is recorded at keyup, before a later focus repair. */
 function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): boolean {
+  const selection = nativeKeyboardSelection(view, event);
+  if (selection && !view.state.selection.eq(selection))
+    view.dispatch(view.state.tr.setSelection(selection));
+  return false;
+}
+
+function nativeKeyboardSelection(view: EditorView, event: KeyboardEvent): TextSelection | null {
   if (
     !view.editable ||
     view.composing ||
@@ -656,7 +706,7 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
     ].includes(event.key) ||
     !(view.state.selection instanceof TextSelection)
   )
-    return false;
+    return null;
   const native = view.dom.ownerDocument.getSelection();
   if (
     !native ||
@@ -665,11 +715,11 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
     !view.dom.contains(native.anchorNode) ||
     !view.dom.contains(native.focusNode)
   )
-    return false;
+    return null;
   for (const node of [native.anchorNode, native.focusNode]) {
     const element = node instanceof Element ? node : node.parentElement;
     const leaf = element?.closest('[contenteditable="false"]');
-    if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return false;
+    if (leaf && leaf !== view.dom && view.dom.contains(leaf)) return null;
   }
   const anchor = view.posAtDOM(native.anchorNode, native.anchorOffset);
   const head = view.posAtDOM(native.focusNode, native.focusOffset);
@@ -677,10 +727,8 @@ function settleNativeKeyboardSelection(view: EditorView, event: KeyboardEvent): 
     !view.state.doc.resolve(anchor).parent.isTextblock ||
     !view.state.doc.resolve(head).parent.isTextblock
   )
-    return false;
-  const selection = TextSelection.create(view.state.doc, anchor, head);
-  if (!view.state.selection.eq(selection)) view.dispatch(view.state.tr.setSelection(selection));
-  return false;
+    return null;
+  return TextSelection.create(view.state.doc, anchor, head);
 }
 
 watch(
