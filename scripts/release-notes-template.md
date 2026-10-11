@@ -167,10 +167,10 @@ The following remain unverified or optional for this trial:
   and historical ACKs, data precision and equal-work ON/OFF resource costs.
   Earlier accepted PostgreSQL or scoped SQLite results do not establish
   completion on another backend or the release commit.
-- **Turso/libSQL remote support:** on the #397 merge commit on main, whose
-  code this release changes only in version and notes, the isolated Turso
-  test database passed the read-only `connection` and `inventory` phases and
-  the manual `migration` phase. That phase admitted a blank catalog,
+- **Turso/libSQL remote support:** on the #397 merge commit on main (the
+  release commit adds only the version, these notes and a test-only xtask
+  fix), the isolated Turso test database passed the read-only `connection`
+  and `inventory` phases and the manual `migration` phase. That phase admitted a blank catalog,
   committed steps 1-11, applied step 12 with an invalid insert on the same
   writer and rolled both back with the prefix unchanged, then reconnected,
   resumed through step 12, restarted and closed with zero leases. This is
