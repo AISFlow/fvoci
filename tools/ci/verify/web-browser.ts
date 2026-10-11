@@ -1,5 +1,7 @@
 // web.yml browser budget and the current-run native build handoff: the only
 // admitted cross-job native consumer, bound to this run's producer artifact.
+// The handoff check also pins the native jobs' Rustup metadata preparation
+// and the jobs that may still use python3.
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
@@ -260,5 +262,155 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
 
 export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
   const jobs = webWorkflowJobs(ctx);
-  return jobs === null ? [] : verifyWebBuildHandoffJobs(jobs);
+  if (jobs === null) return [];
+  const workflow = ctx.workflows[WEB_WORKFLOW_FILE];
+  return [
+    ...verifyWebBuildHandoffJobs(jobs),
+    ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
+    ...verifyWebStaticInstallSmokeJobs(jobs),
+  ];
+}
+
+// Rustup component metadata is prepared by the xtask helper, built from its own
+// lockfile on the host (the consumer's target and rustflags overrides cleared,
+// no toolchain auto-install) and run directly. It runs once in every job that
+// captures native build inputs: after the pinned toolchain install and the
+// Cargo download restore, before the SQLite step and every product Cargo
+// command. The helper build itself writes only xtask/target and the Cargo
+// registry; with auto-install off it cannot change the pinned toolchain.
+export const RUSTUP_METADATA_STEP =
+  "Prepare owned pinned Rustup component metadata before input capture";
+export const RUSTUP_METADATA_RUN =
+  "env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \\\n" +
+  "  -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \\\n" +
+  "  RUSTUP_AUTO_INSTALL=0 \\\n" +
+  "  cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
+  'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
+const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
+const TOOLCHAIN_INSTALL = "rustup toolchain install 1.98.1 --profile minimal --component clippy";
+const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
+const TIMED_RUSTUP_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
+
+// The collaboration jobs wrap each run in a ci-step timer named by position.
+function timingPreamble(job: string, position: number): string {
+  const stage = `${job}-step-${String(position).padStart(2, "0")}`;
+  return (
+    "fvoci_timing_started=$SECONDS\n" +
+    `printf 'ci-step stage=${stage} started at=%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"\n` +
+    `trap 'fvoci_timing_exit=$?; printf "ci-step stage=${stage} finished at=%s elapsed_seconds=%s exit=%s\\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - \${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT\n`
+  );
+}
+
+// python3 stays only where a caller still needs it: the selected-backend lane
+// drivers (current-<lane>-driver.py) in the five collaboration lanes, and the
+// pending OFF registration check in web-checks.
+const APT_WITH_PYTHON =
+  "sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8";
+const PYTHON_LINES: Readonly<Record<string, readonly string[]>> = {
+  "web-checks": [APT_WITH_PYTHON, UNIT_REGRESSION_COMMANDS.at(-1) ?? ""],
+  ...Object.fromEntries(WEB_COLLAB_LANES.map((lane) => [lane.name, [APT_WITH_PYTHON]])),
+};
+const PYTHON = /python/i;
+
+const without = (value: unknown, key: string): unknown =>
+  isMapping(value) ? Object.fromEntries(Object.entries(value).filter(([k]) => k !== key)) : value;
+const stepRun = (step: unknown): string => {
+  const run = isMapping(step) ? get(step, "run") : undefined;
+  return typeof run === "string" ? run : "";
+};
+
+export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): string[] {
+  const errors: string[] = [];
+  // Workflow-level env and defaults reach every job.
+  if (PYTHON.test(JSON.stringify(without(workflow, "jobs")))) {
+    errors.push("web: workflow-level settings may not configure python");
+  }
+  const pinned = new Set<unknown>();
+  for (const name of [...UNTIMED_RUSTUP_JOBS, ...TIMED_RUSTUP_JOBS]) {
+    const job = get(jobs, name);
+    const steps = isMapping(job) ? get(job, "steps") : undefined;
+    const list: unknown[] = Array.isArray(steps) ? steps : [];
+    const at = list.flatMap((step, index) =>
+      isMapping(step) && get(step, "name") === RUSTUP_METADATA_STEP ? [index] : [],
+    );
+    const index = at[0];
+    if (at.length !== 1 || index === undefined) {
+      errors.push(`web: ${name} requires exactly one Rustup metadata step`);
+      continue;
+    }
+    const step = list[index] as Mapping;
+    pinned.add(step);
+    const preamble = TIMED_RUSTUP_JOBS.includes(name) ? timingPreamble(name, index + 1) : "";
+    if (
+      !pyEq(Object.keys(step).sort(), ["name", "run"]) ||
+      stepRun(step) !== preamble + RUSTUP_METADATA_RUN
+    ) {
+      errors.push(
+        `web: ${name} Rustup metadata must build and run the locked xtask helper without toolchain auto-install`,
+      );
+    }
+    const install = pySplitlines(stepRun(list[index - 2])).at(-1);
+    const restore = list[index - 1];
+    const sqlite = list[index + 1];
+    if (
+      install !== TOOLCHAIN_INSTALL ||
+      !isMapping(restore) ||
+      get(restore, "name") !== "Restore Cargo downloads" ||
+      !/^actions\/cache(\/restore)?@/.test(String(get(restore, "uses", ""))) ||
+      !pyEq(
+        get(isMapping(get(restore, "with")) ? (get(restore, "with") as Mapping) : {}, "path"),
+        CARGO_DOWNLOADS,
+      ) ||
+      !isMapping(sqlite) ||
+      get(sqlite, "id") !== "sqlite"
+    ) {
+      errors.push(
+        `web: ${name} Rustup metadata must follow the toolchain install and Cargo download restore and precede SQLite preparation`,
+      );
+    }
+  }
+  for (const [name, job] of Object.entries(jobs)) {
+    const steps = isMapping(job) ? get(job, "steps") : undefined;
+    const list: unknown[] = Array.isArray(steps) ? steps : [];
+    if (
+      list.some((step) => !pinned.has(step) && stepRun(step).includes("prepare-rustup-ci-metadata"))
+    ) {
+      errors.push(`web: ${name} may prepare Rustup metadata only in its pinned step`);
+    }
+    const allowed = PYTHON_LINES[name] ?? [];
+    const python =
+      PYTHON.test(JSON.stringify(without(job, "steps"))) ||
+      list.some(
+        (step) =>
+          PYTHON.test(JSON.stringify(without(step, "run"))) ||
+          pySplitlines(stepRun(step)).some(
+            (line) => PYTHON.test(line) && !allowed.includes(line.trim()),
+          ),
+      );
+    if (python)
+      errors.push(`web: ${name} may not install or run python3 beyond its registered callers`);
+  }
+  return errors;
+}
+
+// The install smoke helpers are DB- and Docker-free, so web-static owns their
+// strict types and unit tests.
+const INSTALL_SMOKE_STEP = "Install smoke helper types and unit tests";
+const INSTALL_SMOKE_RUN =
+  "set -euo pipefail\n" +
+  "bun --bun x --no-install tsc -p tools/install-smoke/tsconfig.json\n" +
+  "bun test ./tools/install-smoke/\n";
+
+export function verifyWebStaticInstallSmokeJobs(jobs: Mapping): string[] {
+  const job = get(jobs, "web-static");
+  const steps = isMapping(job) ? get(job, "steps") : undefined;
+  const list: unknown[] = Array.isArray(steps) ? steps : [];
+  const found = list.filter((step) => isMapping(step) && get(step, "name") === INSTALL_SMOKE_STEP);
+  const step = found[0];
+  return found.length === 1 &&
+    isMapping(step) &&
+    pyEq(Object.keys(step).sort(), ["name", "run"]) &&
+    get(step, "run") === INSTALL_SMOKE_RUN
+    ? []
+    : ["web: web-static must type-check and test the install smoke helpers"];
 }
