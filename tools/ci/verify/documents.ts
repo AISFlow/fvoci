@@ -29,7 +29,11 @@ function usesPrefix(step: Mapping, prefix: string): boolean {
   return typeof uses === "string" && uses.startsWith(prefix);
 }
 
-/** No step of any documents job runs, installs or sets up Python. */
+/**
+ * No documents job runs, installs or sets up Python: no shell, run script,
+ * action, job container or service image names it. Scripts a step calls are
+ * not read here.
+ */
 function verifyNoPython(data: Mapping, jobs: Mapping): string[] {
   const errors: string[] = [];
   const workflowShell = get(get(get(data, "defaults"), "run"), "shell");
@@ -37,9 +41,10 @@ function verifyNoPython(data: Mapping, jobs: Mapping): string[] {
     errors.push(`${DOCUMENTS_WORKFLOW_FILE}: must not run or install Python`);
   }
   for (const [jobId, job] of Object.entries(jobs)) {
-    const defaultShell = get(get(get(job, "defaults"), "run"), "shell");
     const values = [
-      defaultShell,
+      get(get(get(job, "defaults"), "run"), "shell"),
+      JSON.stringify(get(job, "container") ?? null),
+      JSON.stringify(get(job, "services") ?? null),
       ...steps(job).flatMap((step) => ["run", "shell", "uses"].map((key) => get(step, key))),
     ];
     if (values.some((value) => typeof value === "string" && PYTHON.test(value))) {

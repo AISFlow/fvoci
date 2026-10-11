@@ -787,6 +787,14 @@ function caseList(): MutationCase[] {
       ),
       pythonNeedle,
     ],
+    [
+      "job-container-python",
+      swap(
+        "        working-directory: crates/document-extract\n    steps:\n",
+        "        working-directory: crates/document-extract\n    container: python:3.13\n    steps:\n",
+      ),
+      pythonNeedle,
+    ],
     ["deps-check-dropped", swap(depsLine, ""), thinNeedle],
     [
       "deps-check-before-metadata",
