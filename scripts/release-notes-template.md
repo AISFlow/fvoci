@@ -1,6 +1,6 @@
 # FVOCI @VERSION@ (trial pre-release)
 
-<!-- notes-for: 0.4.0 -->
+<!-- notes-for: 0.5.0 -->
 
 This is a 0.x trial release. It is not covered by any compatibility promise:
 a later 0.y release may change configuration, data layout or behaviour.
@@ -17,19 +17,27 @@ Installs are never updated automatically.
 
 ## Accepted in this release
 
-FVOCI 0.4.0 is a trial release on top of 0.3.0 (`6f64febc`). The web app is
-now Vue throughout, including the collaborative editor and document viewers;
-the former React application and split React/Vue boot path are removed.
-The server remains Rust, and collaboration continues to use Yrs. This is
-not an engine replacement or a declaration that every external platform has
-been verified.
+FVOCI 0.5.0 is a trial pre-release on top of 0.4.0. It includes the
+personal/team workflow, editor, timer and archive work integrated in
+[#339](https://github.com/@REPOSITORY@/pull/339), and the backend integration
+from [#347](https://github.com/@REPOSITORY@/pull/347). The app remains Vue 3
+with Nuxt UI and Tiptap, the server is Rust, and collaboration uses Yrs.
+This trial does not satisfy the 0.6.0 completion gate in
+[docs/rewrite.md](https://github.com/@REPOSITORY@/blob/@SHA@/docs/rewrite.md).
+In particular, integrating a backend is separate from verifying all user
+flows, recovery and resource costs on that backend.
 
-There is no database migration since 0.3.0 (the newest is still 044), and
-no change to the user Compose file's environment variables. Workspace SSO,
-audit-log viewing and branding still require an enterprise license. Published
-builds trust no license key (`src/license-trust.json` is empty), so these
-licensed features cannot be activated in a published install; audit entries
-are recorded regardless.
+New installations use a twelve-step schema lineage:
+`fvoci-postgres-060` for PostgreSQL and `fvoci-sqlite-060` for local
+SQLite and remote libSQL/Turso. A database from 0.4.0's migration 044 is
+not upgraded in place; see "Moving from 0.4.0" below. PostgreSQL remains
+the documented user Compose installation. Local SQLite and remote
+libSQL/Turso paths are integrated, with the verification limits below.
+
+Workspace SSO, audit-log viewing and branding still require an enterprise
+license. Published builds trust no license key
+(`src/license-trust.json` is empty), so these licensed features cannot be
+activated in a published install; audit entries are recorded regardless.
 
 The accepted feature families remain:
 
@@ -70,76 +78,96 @@ The accepted feature families remain:
   `scripts/restore.sh`) that verify keys, stored files and sealed secrets
   before the server starts.
 
-## Changes since 0.3.0
+## Changes since 0.4.0
 
-- **Vue application and editor.** Authentication, workspace administration,
-  discovery, wiki, task views and document viewers now use the Vue app.
-  Navigation between Gantt and other app pages no longer requires the old
-  React/Vue application switch. The Vue editor includes collaboration,
-  formatting, inline math, attachments, import/export and read-only controls.
-- **Editing and collaboration recovery.** Fixes preserve schema identities,
-  marks and live relative caret endpoints during remote updates; guard
-  composition against unencodable marks; and prevent retired editor,
-  revision and persistence callbacks from affecting a new document or actor.
-  A closed outbound collaboration receiver is handled without losing the
-  final accepted update. These changes do not imply physical IME coverage
-  on every operating system.
-- **Permissions and navigation.** Task metadata permissions are independent
-  of collaborative-body admission, and REST controls refresh after grants
-  and resynchronization. Revoked sessions and transports retire across
-  authentication boundaries. Late task/dependency mutation responses and
-  conflict recovery remain scoped to their original task. Confirmed
-  workspace deletion keeps its intended navigation.
-- **Draft preservation.** Dirty task hierarchy and document-header drafts
-  survive metadata commits and refreshes. Calendar drafts remain open and
-  intact when cached-field refresh fails or metadata loading is retried.
-  Empty task details and rescheduling targets recover without borrowing a
-  different task's state.
-- **Cache and document consistency.** Calendar writes and stream reopening
-  refresh task caches; retained trash caches refresh before document
-  navigation. Markdown export preserves linked whitespace through emphasis.
-- **Verification and development.** Regression coverage now checks actor
-  retirement, exact persistence frames and readback bodies, navigation and
-  draft-retry flows. CI selects relevant checks for pull requests and runs
-  the required gates on the merged main commit. Development uses pinned
-  Bun 1.4.3; importer-specific Zod versions remain isolated. The runtime
-  image contains no JavaScript runtime.
+- **Personal and team work.** Personal input and transfer workflows support
+  COPY and same-ID MOVE into team resources, with captured actor/target
+  checks and durable-save barriers. Task streams are shared at workspace
+  level and refresh authorized caches after missed events or resync.
+- **Editor and revisions.** Rich, block, Markdown and preview modes retain
+  the editor's document/provider identity. Source Apply preserves supported
+  IDs and peer edits; revision comparison and restore are connected to the
+  existing native history. Read-only Zotero data and document links are
+  included without claiming live external Zotero-account verification.
+- **Task time.** The native stopwatch, manual time corrections and history
+  use server-owned intervals, single-running ownership, replay and conflict
+  checks. Stopping a timer keeps the task status. Calendar and task forms
+  preserve dirty drafts when metadata refetch fails.
+- **Current data and archives.** Native archive/import and whole-install
+  recovery work preserves current IDs, history, references, attachments and
+  permissions within the accepted scope. Backend-to-backend archive support
+  and rejection must be checked for the actual source and destination;
+  this is not a compatibility promise for old development schemas.
+- **Backend integration.** Selected-backend services connect PostgreSQL,
+  local SQLite and remote libSQL/Turso operations to authorization,
+  collaboration, attachment cleanup and maintenance. Fresh installation
+  checks the exact ordered lineage and SQL checksums; a foreign, incomplete,
+  changed or newer ledger is refused. These changes do not complete the
+  remaining three-backend UI, commit/ACK, restart and recovery acceptance.
+- **Build and CI.** #344 balances browser shards using observed group costs;
+  #369, #370 and #371 update the harness image, ARM PostgreSQL coverage and
+  nextest availability; #378 limits cache publication to main and registers
+  actionlint runner labels. #382 strengthens XLSX negative controls and
+  #383 isolates browser-test email identities and cursor-wait observations.
+  #374 and #393 clarify repository verification and approval rules. #385
+  updates the locked Jiff dependency.
+- **Harness runtime.** #397 replaces repository-managed Python dev, test,
+  build, CI and release harness dependencies with TypeScript/Bun and Rust
+  xtask, including planner/gate policy and release tooling. Development and
+  harness execution use pinned Bun 1.4.3. The product image contains no
+  JavaScript runtime; browser JavaScript is still part of the web app.
 
-These notes describe changes already merged into the release source. The
-release workflow separately builds and smoke-tests the exact tagged image
-on native amd64 and arm64 before publishing it. A local fixture, a passing
-PR, or a historical image run is not evidence for an untested provider,
-physical device or upgrade path.
+The release workflow separately builds and smoke-tests the exact tagged
+image on native amd64 and arm64 before publishing it. A local fixture,
+a passing PR or a historical image run does not verify an untested
+provider, physical device, backend flow or upgrade path.
 
-## Upgrading from 0.3.0
+## Moving from 0.4.0
 
-1. Back up the running installation using the scripts from its release,
-   and keep a separate private copy of `.env`. For S3, follow "S3 storage
-   backup" in `RUNNING.md`; the local-storage backup script refuses S3.
-2. Download this release's `compose.yml` and `SHA256SUMS` into an empty
-   directory and verify `sha256sum --ignore-missing -c SHA256SUMS`. Replace
-   the installed `compose.yml`, retain `.env` and the existing volumes, then
-   run `docker compose up -d --wait --wait-timeout 900`. No new database
-   migration or environment value is introduced by this release.
-3. Check `docker compose exec fvoci /opt/fvoci/bin/fvoci-server --version`
-   for `@VERSION@` and the source commit, then reload open browser tabs.
-   This documented procedure is not a claim that the published
-   0.3.0-to-0.4.0 image pair has undergone an upgrade/rollback test.
-4. Downgrades, rolling upgrades and two servers sharing one database remain
-   unsupported. Recovery means restoring the pre-upgrade backup with its
-   matching release files and keys; writes made after the backup are lost.
+This version installs into an empty database. The old migration-044
+ledger and retired development lineages are refused without rewriting
+their data. Replacing the image against a 0.4.0 database is not a supported
+in-place upgrade, and there is no verified published 0.4.0-to-0.5.0 migration
+or rollback pair.
 
-For an older installation, read the
-[0.3.0 release notes](https://github.com/@REPOSITORY@/releases/tag/v0.3.0)
-first. In particular, 0.1.x/0.2.0 Compose secret-file settings are refused:
-replace the whole Compose file rather than editing only its image line.
-The `.env` values are container environment and readable by Docker users;
-never paste raw `docker inspect` or `docker compose config` output publicly.
+1. Keep the old installation and its matching release files and keys.
+   Back it up using that release's scripts, with a separate private copy
+   of `.env`; for S3, follow its documented storage-backup procedure.
+2. Install 0.5.0 as a separate Compose project with empty volumes. Never
+   attach the new server to the old database or run two servers against
+   one database.
+3. The current-format native archive is the data-transfer mechanism,
+   subject to source/destination format support and the recovery limits
+   below. Verify export, restore and fresh-client readback for your actual
+   data before retiring the source; old-schema export compatibility is not
+   established by the current-format archive tests.
+4. Recovery means returning to the preserved old installation or restoring
+   its backup with matching release files and keys. Writes made after that
+   backup are not present in it. Do not start the old binary on a database
+   initialized with the new lineage.
+
+For earlier installations, read the
+[0.4.0 release notes](https://github.com/@REPOSITORY@/releases/tag/v0.4.0)
+and the matching version's backup instructions first. Keep `.env` private:
+its values are readable by Docker users; never publish raw
+`docker inspect` or `docker compose config` output.
 
 ## Not verified or optional
 
-The following are existing verification limits, not newly completed work:
+The following remain unverified or optional for this trial:
 
+- **Three-backend completion:** the 0.6.0 gate still requires actual
+  UI → Rust authorization → backend commit → matching ACK → fresh-client
+  readback, restart and separate-install restore across PostgreSQL, local
+  SQLite and remote libSQL/Turso. Remaining flows include logout/revocation,
+  personal/project/member changes, OFF CAS/conflicts/drafts, lost responses
+  and historical ACKs, data precision and equal-work ON/OFF resource costs.
+  Earlier accepted PostgreSQL or scoped SQLite results do not establish
+  completion on another backend or the release commit.
+- **Turso/libSQL remote support:** live verification on the release commit pending.
+  TURSO-RESULT: pending — coordinator to record release-commit live verification.
+- **Zotero:** read-only fixture and archive evidence does not verify access
+  to a real external account with live credentials.
 - **Mail and GitHub app:** SMTP was checked with a local test relay,
   including per-recipient refusals; GitHub integration with a local fake
   API. Actual external SMTP and GitHub App operation remain unverified.
@@ -167,7 +195,7 @@ The following are existing verification limits, not newly completed work:
 - **Capacity and isolation:** no new many-user capacity measurement or
   full default-AppArmor performance claim is made for this release.
 - **Upgrades and platforms:** earlier local-storage and local S3 image
-  upgrade/rollback evidence does not verify the published 0.3.0-to-0.4.0
+  upgrade/rollback evidence does not verify the published 0.4.0-to-0.5.0
   pair, ARM S3, automatic upgrades, Docker Desktop, rootless Docker or Podman.
 - **Release smoke scope:** `/metrics` and `--outbox-reset` are outside the
   smoke. Only its documented setup-based browser subset runs against the
@@ -261,11 +289,18 @@ The following are existing verification limits, not newly completed work:
   `env.example` writes them. With PostgreSQL `log_statement` set to `ddl`
   or `all` (off by default), the app role password that `restore.sh` sets
   reaches the PostgreSQL log.
-- **Upgrades only as documented.** Back up first, then replace
-  `compose.yml` (see below). Rolling upgrades, running two servers against
-  one database, and downgrades are not supported.
-- **ARM64** (linux/arm64) is verified by the CI release smoke on native
-  runners only. No long-running ARM64 install has been exercised.
+- **Installation lineage.** This release needs an empty database; the
+  migration-044 schema from 0.4.0 is refused. Rolling upgrades, two servers
+  sharing one database and downgrades are unsupported. Preserve the source
+  installation and its backup when moving data.
+- **OFF editing and recovery acceptance.** Dirty-draft retirement policy
+  remains unsettled, and a historical receipt can clear the UI conflict
+  state in the recorded client counterexample. Actual HTTP/DB/browser
+  requalification remains open; this is not evidence of server overwrite.
+  SQLite/libSQL logout and password-change/reset paths also retain static
+  PostgreSQL-gate candidates pending actual HTTP/DB verification.
+- **ARM64** (linux/arm64) release smoke runs on native runners. No
+  long-running ARM64 install has been exercised.
 
 ## Install
 
@@ -305,19 +340,17 @@ docker compose down            # remove containers, keep volumes (data and keys)
 and the search index. The keys stay in `.env`; without them, encrypted data
 from a backup cannot be read. Only use it to throw an install away.
 
-## Data, keys and upgrades
+## Data, keys and recovery
 
-- Back up before any upgrade (see `RUNNING.md` at `@SHA@` for backup and
-  restore). Keep the copy of `.env` separate from the database backup.
-- To upgrade, back up, replace `compose.yml` with the one from the new
-  release (check its `SHA256SUMS` in an empty directory first), keep `.env`,
-  and run `docker compose up -d --wait --wait-timeout 900` (a long migration
-  can outlast the default wait; `docker compose logs -f fvoci` shows
-  progress). Compose recreates `fvoci`, so the old server stops before the
-  new container migrates. The `fvoci` container applies database
-  migrations before the server starts; if that fails the server does not
-  start, and it refuses to migrate while another server is still connected.
-- Migrations only move forward. Going back to an older 0.y release means
-  restoring the backup taken before the upgrade.
-- Keep the same Compose project name (the directory name by default), or the
-  new stack starts with empty volumes.
+- Back up with the matching version's instructions in `RUNNING.md`.
+  Keep `.env` separate from the data backup and retain its encryption keys.
+- A 0.4.0 installation needs a separate empty 0.5.0 installation, as
+  described in "Moving from 0.4.0". The new schema lineage is not an
+  in-place upgrade of the old one.
+- Current-format native archives and whole-install backups are different
+  recovery mechanisms. Verify the format, backend and attachment coverage
+  of the mechanism you use; copying only the SQLite main file is not a
+  WAL-consistent backup.
+- Restore backups with matching release files, database lineage and keys.
+  Do not point an older server at the new schema. Keep the old Compose
+  project until the destination's data and access checks are complete.
