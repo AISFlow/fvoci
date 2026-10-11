@@ -52,6 +52,14 @@ export function verifyWorkflows(ctx: VerifyContext, slots: Slots = SLOTS): strin
   return checks.flatMap((check) => check(ctx));
 }
 
+/** Every error the CLI reports for `root` without --partial; plan.ts runs the same. */
+export function verifyRepository(root: string, slots: Slots = SLOTS): string[] {
+  return [
+    ...verifyWorkflows(loadContext(root), slots),
+    ...unfilledSlots(slots).map((name) => `verify-workflows: check slot ${name} is not wired`),
+  ];
+}
+
 const USAGE = "usage: verify-workflows.ts [--repo-root DIR] [--partial]";
 
 type Args = { root: string; partial: boolean };
@@ -81,12 +89,9 @@ export function main(argv: readonly string[], slots: Slots = SLOTS): number {
     process.stderr.write(`${USAGE}\nverify-workflows.ts: error: ${args}\n`);
     return 2;
   }
-  const errors = verifyWorkflows(loadContext(args.root), slots);
-  if (!args.partial) {
-    errors.push(
-      ...unfilledSlots(slots).map((name) => `verify-workflows: check slot ${name} is not wired`),
-    );
-  }
+  const errors = args.partial
+    ? verifyWorkflows(loadContext(args.root), slots)
+    : verifyRepository(args.root, slots);
   for (const error of errors) process.stderr.write(error + "\n");
   return errors.length > 0 ? 1 : 0;
 }

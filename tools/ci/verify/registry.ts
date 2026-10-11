@@ -61,6 +61,13 @@ export const PLAN_JOB_ID = "ci-plan";
 export const PLAN_OUTPUT_KEYS = ["mode", "reason_code", "plan_ok", "plan_json"] as const;
 export const GATE_NEEDS_JSON_EXPR = "${{ toJSON(needs) }}";
 export const GATE_TESTED_SHA_EXPR = "${{ github.sha }}";
+// The only pull_request trigger: the default activity types plus the draft
+// transitions. A draft PR plans PR_DRAFT and fails its gate, so
+// ready_for_review must run the real selection; without it the gate stays red
+// until the next push. Branch or path filters would leave gates pending.
+export const PULL_REQUEST_TRIGGER: Mapping = {
+  types: ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"],
+};
 const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /**
@@ -82,32 +89,73 @@ export function gatedWorkflowJobs(
 
 // The planner and gate invocations every gated workflow must carry. Moving the
 // planner to another runtime changes only this table.
-const REQUIREMENTS_FILE = "scripts/ci_selection_requirements.txt";
 export const PLANNER_COMMANDS = {
-  /** Text the ci-plan steps must contain to install the planner's dependencies. */
-  planSetup: REQUIREMENTS_FILE,
-  planSetupMessage: `must install pinned ${REQUIREMENTS_FILE}`,
   /** Text that marks the plan invocation line. */
-  plan: "scripts/ci_selection.py plan",
-  planMessage: "must invoke ci_selection.py plan",
+  plan: "bun tools/ci/plan.ts",
+  planMessage: "must invoke tools/ci/plan.ts",
   /** The selector regression wrapper: an exact line in rust ci-plan, absent elsewhere. */
   selectorRegression: "scripts/test-ci-selection.sh",
-  /** Gate setup lines, per workflow, before the gate invocation. */
-  gateSetup: {
-    rust:
-      "python3 -m pip install --disable-pip-version-check --user --break-system-packages " +
-      `-r ${REQUIREMENTS_FILE}\n`,
-  } as Readonly<Partial<Record<GatedWorkflow, string>>>,
-  gate: "python3 scripts/ci_selection.py gate",
+  gate: "bun tools/ci/gate.ts",
 } as const;
+
+// plan.ts and gate.ts use Bun builtins only: the pinned Bun is their whole
+// toolchain. Each job has exactly one run step with the canonical text, so no
+// package install or Python can run beside the selector.
+export const SETUP_BUN_STEP: Mapping = {
+  uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+  with: { "bun-version-file": ".bun-version" },
+};
+
+export function canonicalPlanRun(workflow: GatedWorkflow): string {
+  return (
+    "set -euo pipefail\n" +
+    (workflow === "rust" ? `bash ${PLANNER_COMMANDS.selectorRegression}\n` : "") +
+    `${PLANNER_COMMANDS.plan} \\\n` +
+    `  --workflow ${workflow} \\\n` +
+    '  --event-json "$GITHUB_EVENT_PATH" \\\n' +
+    '  --output-plan "$RUNNER_TEMP/ci-selection-plan.json" \\\n' +
+    '  --github-output "$GITHUB_OUTPUT"\n'
+  );
+}
 
 export function canonicalGateRun(workflow: GatedWorkflow): string {
   return (
     "set -euo pipefail\n" +
-    (PLANNER_COMMANDS.gateSetup[workflow] ?? "") +
     `${PLANNER_COMMANDS.gate} --workflow ${workflow} ` +
     '--needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n'
   );
+}
+
+/**
+ * The job checks out, then installs the pinned Bun exactly once with no
+ * condition, before the step at `runAt`.
+ */
+function verifyBunToolchain(
+  workflow: GatedWorkflow,
+  jobId: string,
+  job: Mapping,
+  runAt: number,
+): string[] {
+  const errors: string[] = [];
+  const steps = stepList(job);
+  const setups = steps.flatMap((step, index) =>
+    usesStartsWith(step, ["oven-sh/setup-bun@"]) ? [index] : [],
+  );
+  const checkoutAt = steps.findIndex((step) => usesStartsWith(step, ["actions/checkout@"]));
+  const [setupAt] = setups;
+  if (
+    setups.length !== 1 ||
+    setupAt === undefined ||
+    !deepEqual(steps[setupAt], SETUP_BUN_STEP) ||
+    checkoutAt < 0 ||
+    checkoutAt > setupAt ||
+    (runAt >= 0 && runAt < setupAt)
+  ) {
+    errors.push(
+      `${workflow}: ${jobId} must install pinned Bun from .bun-version once, after checkout and before the selector`,
+    );
+  }
+  return errors;
 }
 
 export function gateJobId(workflow: string): string {
@@ -395,8 +443,19 @@ function verifyPlanJob(workflow: GatedWorkflow, data: Mapping, planJob: Mapping)
   const planRuns = runSteps(planJob)
     .map((step) => get(step, "run") as string)
     .join("\n");
-  if (!planRuns.includes(PLANNER_COMMANDS.planSetup)) {
-    errors.push(`${workflow}: ${PLAN_JOB_ID} ${PLANNER_COMMANDS.planSetupMessage}`);
+  const planAt = stepList(planJob).findIndex((step) => {
+    const run = get(step, "run");
+    return typeof run === "string" && run.includes(PLANNER_COMMANDS.plan);
+  });
+  errors.push(...verifyBunToolchain(workflow, PLAN_JOB_ID, planJob, planAt));
+  const planRunSteps = runSteps(planJob);
+  if (
+    planRunSteps.length !== 1 ||
+    normalizeRunScript(get(planRunSteps[0], "run") as string) !== canonicalPlanRun(workflow)
+  ) {
+    errors.push(
+      `${workflow}: ${PLAN_JOB_ID} must use the canonical plan invocation in its only run step`,
+    );
   }
   if (!planRuns.includes(PLANNER_COMMANDS.plan)) {
     errors.push(`${workflow}: ${PLAN_JOB_ID} ${PLANNER_COMMANDS.planMessage}`);
@@ -460,6 +519,7 @@ function verifyGateJob(workflow: GatedWorkflow, gateJob: Mapping): string[] {
   if (normalizeRunScript(get(step, "run") as string) !== canonicalGateRun(workflow)) {
     errors.push(`${workflow}: ${gate} must use the canonical gate invocation`);
   }
+  errors.push(...verifyBunToolchain(workflow, gate, gateJob, stepList(gateJob).indexOf(step)));
   return errors;
 }
 
@@ -468,8 +528,11 @@ function verifyGatedWorkflow(workflow: GatedWorkflow, data: Mapping): string[] {
   const triggers = triggersOf(data);
   if (!isMapping(triggers) || !has(triggers, "pull_request")) {
     errors.push(`${workflow}: pull_request trigger is required for the stable gate`);
-  } else if (get(triggers, "pull_request") !== null) {
-    errors.push(`${workflow}: pull_request must be unfiltered so required gates always run`);
+  } else if (!deepEqual(get(triggers, "pull_request"), PULL_REQUEST_TRIGGER)) {
+    errors.push(
+      `${workflow}: pull_request must be exactly types: ` +
+        `[${(PULL_REQUEST_TRIGGER.types as string[]).join(", ")}] so required gates always run`,
+    );
   }
   if (!isMapping(triggers) || !has(triggers, "merge_group")) {
     errors.push(`${workflow}: merge_group trigger is required for the stable gate`);
@@ -588,8 +651,8 @@ const SHA_PINNED_USES = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/;
 
 /**
  * Boundaries that keep the required gates honest beyond the planner wiring:
- * the five check names, unfiltered gate triggers, SHA-pinned actions and the
- * plan-owned postgres matrix.
+ * the five check names, gate triggers without path filters, SHA-pinned
+ * actions and the plan-owned postgres matrix.
  */
 export function verifyGateHardening(ctx: VerifyContext): string[] {
   const errors: string[] = [];

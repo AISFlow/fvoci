@@ -50,13 +50,30 @@ export function writeFile(repo: string, rel: string, content = "x\n"): void {
   writeFileSync(join(repo, rel), content);
 }
 
-/** The real workflow files, as the registry step reads them. */
+/** The real workflow files. */
 export function copyWorkflows(dst: string): void {
   const src = join(PLANNER_ROOT, ".github", "workflows");
   mkdirSync(join(dst, ".github", "workflows"), { recursive: true });
   for (const name of readdirSync(src)) {
     if (/\.ya?ml$/.test(name))
       copyFileSync(join(src, name), join(dst, ".github", "workflows", name));
+  }
+}
+
+// Besides the workflows, the files the complete registry check reads.
+const REGISTRY_INPUTS = [
+  "Cargo.toml",
+  "scripts/run-rust-collaboration-ci-tests.sh",
+  "scripts/collab-capacity-probe.sh",
+  "xtask/selected-library-filters.txt",
+];
+
+/** The real workflows and registry inputs, so the plan's registry check passes. */
+export function copyRegistryInputs(dst: string): void {
+  copyWorkflows(dst);
+  for (const rel of REGISTRY_INPUTS) {
+    mkdirSync(dirname(join(dst, rel)), { recursive: true });
+    copyFileSync(join(PLANNER_ROOT, rel), join(dst, rel));
   }
 }
 
@@ -104,7 +121,7 @@ export class PrCheckout {
 
   constructor() {
     git(this.origin.dir, "config", "uploadpack.allowReachableSHA1InWant", "true");
-    copyWorkflows(this.origin.dir);
+    copyRegistryInputs(this.origin.dir);
     this.base = this.origin.commit({ "README.md": "base docs\n" }, "base");
   }
   /** A PR head branched from main. */

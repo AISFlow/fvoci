@@ -35,7 +35,17 @@ const UNIT =
 const UNIT_NEEDLE = "credential-free exact frozen diagnostic unit before secret consumption";
 const CONSUME = "        run: bun --no-env-file tools/turso/guard.ts --consume\n";
 const WEB_GATE =
-  '          python3 scripts/ci_selection.py gate --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n';
+  '          bun tools/ci/gate.ts --workflow web --needs-json "$NEEDS_JSON" --tested-sha "$TESTED_SHA"\n';
+const PLAN_LINE = "          bun tools/ci/plan.ts \\\n";
+const PIP =
+  "          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt\n";
+const CHECKOUT = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n";
+const SETUP_BUN_PIN = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
+const OTHER_PIN = "oven-sh/setup-bun@" + "1".repeat(40);
+const SETUP_BUN =
+  `      - uses: ${SETUP_BUN_PIN} # v2.2.0\n` +
+  "        with:\n" +
+  "          bun-version-file: .bun-version\n";
 const POSTGRES_MATRIX_LINE =
   "      matrix: ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n";
 
@@ -46,12 +56,35 @@ function caseList(): MutationCase[] {
   };
 
   // Gate wiring (RegistryMutationCliTest).
-  add(
-    "pr-path-filter",
-    "web.yml",
-    swap("  pull_request:\n", "  pull_request:\n    paths: ['apps/web/**']\n"),
-    "pull_request must be unfiltered",
-  );
+  const prTypes =
+    "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]\n";
+  const prTrigger: [string, string][] = [
+    ["pr-path-filter", `${prTypes}    paths: ['apps/web/**']\n`],
+    ["pr-paths-ignore", `${prTypes}    paths-ignore: ['docs/**']\n`],
+    ["pr-branch-filter", `${prTypes}    branches: [main]\n`],
+    ["pr-no-types", ""],
+    ["pr-default-types", "    types: [opened, synchronize, reopened]\n"],
+    ["pr-no-converted-to-draft", "    types: [opened, synchronize, reopened, ready_for_review]\n"],
+    [
+      "pr-extra-type",
+      "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]\n",
+    ],
+    [
+      "pr-reordered-types",
+      "    types: [ready_for_review, opened, synchronize, reopened, converted_to_draft]\n",
+    ],
+    ["pr-types-string", "    types: opened\n"],
+  ];
+  for (const [name, replacement] of prTrigger) {
+    for (const file of GATED.map((workflow) => `${workflow}.yml`)) {
+      add(
+        `${name}-${file}`,
+        file,
+        swap(`  pull_request:\n${prTypes}`, `  pull_request:\n${replacement}`),
+        "pull_request must be exactly types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]",
+      );
+    }
+  }
   for (const override of ["ref: attacker-head", "repository: attacker/repo", "fetch-depth: 1"]) {
     add(
       `checkout-${override}`,
@@ -191,11 +224,117 @@ function caseList(): MutationCase[] {
     "web-duplicate-selector-wrapper",
     "web.yml",
     swap(
-      "          python3 scripts/ci_selection.py plan \\\n",
-      "          bash scripts/test-ci-selection.sh\n          python3 scripts/ci_selection.py plan \\\n",
+      "          bun tools/ci/plan.ts \\\n",
+      "          bash scripts/test-ci-selection.sh\n          bun tools/ci/plan.ts \\\n",
     ),
     "must not duplicate scripts/test-ci-selection.sh",
   );
+  for (const workflow of GATED) {
+    const file = `${workflow}.yml`;
+    const gate = `${workflow}-ci-gate`;
+    const inPlan = (edit: Edit): Edit => within("  ci-plan:", "      - id: plan\n", edit);
+    const inGate = (edit: Edit): Edit => within(`  ${gate}:`, null, edit);
+    const planNeedle = "ci-plan must install pinned Bun from .bun-version once";
+    const gateNeedle = `${gate} must install pinned Bun from .bun-version once`;
+    const toolchains: [string, string, string][] = [
+      [
+        "python-plan",
+        "          python3 scripts/ci_selection.py plan \\\n",
+        "must invoke tools/ci/plan.ts",
+      ],
+      [
+        "pip",
+        `${PIP}          bun tools/ci/plan.ts \\\n`,
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "bun-ci",
+        "          bun ci\n          bun tools/ci/plan.ts \\\n",
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "bunx",
+        "          bunx tsx tools/ci/plan.ts \\\n",
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "npm-ci",
+        `          npm ci\n${PLAN_LINE}`,
+        "ci-plan must use the canonical plan invocation",
+      ],
+      ["bun-i", `          bun i\n${PLAN_LINE}`, "ci-plan must use the canonical plan invocation"],
+      [
+        "curl-sh",
+        `          curl -fsSL https://example.invalid/i.sh | sh\n${PLAN_LINE}`,
+        "ci-plan must use the canonical plan invocation",
+      ],
+      [
+        "plan-masked",
+        "          bun tools/ci/plan.ts || true \\\n",
+        "ci-plan must use the canonical plan invocation",
+      ],
+    ];
+    for (const [name, replacement, needle] of toolchains) {
+      add(`${workflow}-plan-${name}`, file, swap(PLAN_LINE, replacement), needle);
+    }
+    add(
+      `${workflow}-plan-extra-run-step`,
+      file,
+      swap("      - id: plan\n", "      - run: python3 -m pip install pyyaml\n      - id: plan\n"),
+      "ci-plan must use the canonical plan invocation in its only run step",
+    );
+    const setups: [string, Edit, Edit][] = [
+      ["missing", swap(SETUP_BUN, ""), swap(SETUP_BUN, "")],
+      ["sha", swap(SETUP_BUN_PIN, OTHER_PIN), swap(SETUP_BUN_PIN, OTHER_PIN)],
+      [
+        "version",
+        swap("bun-version-file: .bun-version", "bun-version: latest"),
+        swap("bun-version-file: .bun-version", "bun-version: latest"),
+      ],
+      [
+        "conditional",
+        swap(SETUP_BUN, SETUP_BUN.replace("        with:", "        if: success()\n        with:")),
+        swap(SETUP_BUN, SETUP_BUN.replace("        with:", "        if: success()\n        with:")),
+      ],
+      ["twice", swap(SETUP_BUN, SETUP_BUN + SETUP_BUN), swap(SETUP_BUN, SETUP_BUN + SETUP_BUN)],
+      [
+        "before-checkout",
+        (text) => {
+          const checkout = text.slice(text.indexOf(CHECKOUT), text.indexOf(SETUP_BUN));
+          return replaceOnce(text, checkout + SETUP_BUN, SETUP_BUN + checkout);
+        },
+        (text) => replaceOnce(text, CHECKOUT + SETUP_BUN, SETUP_BUN + CHECKOUT),
+      ],
+    ];
+    for (const [name, planEdit, gateEdit] of setups) {
+      add(`${workflow}-plan-setup-bun-${name}`, file, inPlan(planEdit), planNeedle);
+      add(`${workflow}-gate-setup-bun-${name}`, file, inGate(gateEdit), gateNeedle);
+    }
+    add(
+      `${workflow}-plan-setup-bun-after-plan`,
+      file,
+      within(
+        "  ci-plan:",
+        "\n\n",
+        (text) => replaceOnce(text, SETUP_BUN, "") + "\n" + SETUP_BUN.trimEnd(),
+      ),
+      planNeedle,
+    );
+    add(
+      `${workflow}-python-gate`,
+      file,
+      inGate(
+        swap("bun tools/ci/gate.ts --workflow", "python3 scripts/ci_selection.py gate --workflow"),
+      ),
+      "canonical gate invocation",
+    );
+    add(
+      `${workflow}-gate-pip`,
+      file,
+      inGate(swap("          bun tools/ci/gate.ts", PIP + "          bun tools/ci/gate.ts")),
+      `${gate} must use the canonical gate invocation`,
+    );
+  }
   for (const workflow of GATED) {
     const file = `${workflow}.yml`;
     add(
