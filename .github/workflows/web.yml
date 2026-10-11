@@ -83,6 +83,11 @@ jobs:
           set -euo pipefail
           (cd apps/web && bun --bun run typecheck)
           (cd packages/editor && bun --bun run typecheck)
+      - name: Install smoke helper types and unit tests
+        run: |
+          set -euo pipefail
+          bun --bun x --no-install tsc -p tools/install-smoke/tsconfig.json
+          bun test ./tools/install-smoke/
 
   # API contract/schema and unit regressions run once per SHA. Native checks
   # keep a separate mandatory 15-minute budget with the same selection condition.
@@ -201,7 +206,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -237,8 +242,6 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -246,6 +249,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -267,7 +277,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -354,8 +364,6 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -363,6 +371,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -384,7 +399,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -467,12 +482,6 @@ jobs:
           printf 'ci-step stage=collaboration-build-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-build-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         id: cache_collaboration_flow_4
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -481,6 +490,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-build-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -505,7 +524,7 @@ jobs:
             *) exit 1 ;;
           esac
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
@@ -614,12 +633,6 @@ jobs:
           printf 'ci-step stage=collaboration-install-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -627,6 +640,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-install-on-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -768,12 +791,6 @@ jobs:
           printf 'ci-step stage=collaboration-postgres-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -781,6 +798,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-postgres-on-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -921,12 +948,6 @@ jobs:
           printf 'ci-step stage=collaboration-sqlite-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -934,6 +955,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-sqlite-on-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -1074,12 +1105,6 @@ jobs:
           printf 'ci-step stage=collaboration-postgres-off-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -1087,6 +1112,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-postgres-off-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -1227,12 +1262,6 @@ jobs:
           printf 'ci-step stage=collaboration-sqlite-off-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           rustup toolchain install 1.98.1 --profile minimal --component clippy
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-04 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-04 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Restore Cargo downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -1240,6 +1269,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare owned pinned Rustup component metadata before input capture
+        run: |
+          fvoci_timing_started=$SECONDS
+          printf 'ci-step stage=collaboration-sqlite-off-step-05 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-05 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+            RUSTUP_AUTO_INSTALL=0 \
+            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
+          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
