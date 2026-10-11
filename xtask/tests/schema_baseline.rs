@@ -8,7 +8,16 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+// A sibling test can fork while an executable is open for writing, inheriting
+// its write FD until exec and causing ETXTBSY even after the writer closes it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const URL: &str = "postgres://postgres:fixture-only@127.0.0.1:5432/postgres";
@@ -169,6 +178,7 @@ fn stderr(output: &Output) -> String {
 
 #[test]
 fn success_retires_only_owned_database_and_role() {
+    let _serial = serial();
     let mut fixture = Fixture::new("");
     let output = fixture.run();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -253,6 +263,7 @@ fn success_retires_only_owned_database_and_role() {
 
 #[test]
 fn count_skip_or_elevated_role_keep_private_evidence_and_retire_owned() {
+    let _serial = serial();
     for defect in ["count", "skip", "elevated"] {
         let mut fixture = Fixture::new(defect);
         let output = fixture.run();
@@ -270,6 +281,7 @@ fn count_skip_or_elevated_role_keep_private_evidence_and_retire_owned() {
 
 #[test]
 fn foreign_inputs_refuse_before_any_identity_or_evidence() {
+    let _serial = serial();
     type Setup = fn(&mut Command, &Path);
     let cases: [(Setup, &str); 9] = [
         (
@@ -346,6 +358,7 @@ fn foreign_inputs_refuse_before_any_identity_or_evidence() {
 
 #[test]
 fn migrator_symlink_resolves_to_a_regular_file() {
+    let _serial = serial();
     let mut fixture = Fixture::new("");
     let link = fixture
         .root
@@ -370,6 +383,7 @@ fn migrator_symlink_resolves_to_a_regular_file() {
 
 #[test]
 fn collision_never_adopts_or_drops() {
+    let _serial = serial();
     let mut fixture = Fixture::new("collision");
     let output = fixture.run();
     assert_eq!(output.status.code(), Some(1));
@@ -386,6 +400,7 @@ fn collision_never_adopts_or_drops() {
 
 #[test]
 fn database_collision_retires_only_the_created_role() {
+    let _serial = serial();
     let mut fixture = Fixture::new("create-database");
     let output = fixture.run();
     assert_eq!(output.status.code(), Some(1));
@@ -397,6 +412,7 @@ fn database_collision_retires_only_the_created_role() {
 
 #[test]
 fn failed_database_drop_still_retires_the_role_and_fails() {
+    let _serial = serial();
     let mut fixture = Fixture::new("drop-database");
     let output = fixture.run();
     assert_eq!(output.status.code(), Some(1));
@@ -409,6 +425,7 @@ fn failed_database_drop_still_retires_the_role_and_fails() {
 
 #[test]
 fn sigint_kills_the_running_child_and_retires_owned_identities() {
+    let _serial = serial();
     // `interrupt`: the migrator itself would sleep 30 s and is killed.
     // `orphan`: the migrator exits but a grandchild holds its output pipes
     // for 30 s; the wait for them ends on the interrupt too.
@@ -434,6 +451,7 @@ fn sigint_kills_the_running_child_and_retires_owned_identities() {
 
 #[test]
 fn arguments_are_usage_errors() {
+    let _serial = serial();
     let mut fixture = Fixture::new("");
     let output = fixture.command.arg("--unknown").output().unwrap();
     assert_eq!(output.status.code(), Some(2));
