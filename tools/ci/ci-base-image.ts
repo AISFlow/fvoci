@@ -395,6 +395,14 @@ export async function scanImage(path: string, inspection: string, arch: string) 
       `layer archive listing failed: ${identity}; ${framing}stderr prefix: ${stderr}`,
     );
     check(!/(^|\/)\.env(?:[.\s]|$)/m.test(names), "environment file found; content withheld");
+    // No consumer of these images runs Python; a dependency that pulls in an
+    // interpreter or its standard library must fail the build.
+    check(
+      !/^(?:\.\/)?(?:usr\/)?(?:local\/)?(?:bin\/python[0-9.]*$|lib\/python[0-9]+\.[0-9]+\/)/m.test(
+        names,
+      ),
+      `Python interpreter found: ${identity}`,
+    );
     const files = await new Bun.Archive(bytes).files();
     for (const [name, file] of files) {
       check(
