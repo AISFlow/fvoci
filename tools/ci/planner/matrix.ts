@@ -128,9 +128,3 @@ export function postgresMatrixJson(
   const include = postgresMatrixInclude(eventName, rows);
   return { json: pyDumps(new Map([["include", include]]), { compact: true }), error: null };
 }
-
-/** Runner labels of the catalog, for the registry's explicit-runner check. */
-export function catalogRunners(job: Mapping): unknown[] {
-  const { rows } = postgresMatrixRows(job);
-  return (rows ?? []).map((row) => row.get("runner"));
-}

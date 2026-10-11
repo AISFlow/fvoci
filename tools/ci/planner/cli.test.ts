@@ -63,6 +63,35 @@ async function cli(
   return { code, stdout, stderr, plan: read("plan.json"), output: read("out.txt") };
 }
 
+/** runPlan with the registry step emptied: the refusals the plan step makes itself. */
+function planWithoutRegistry(
+  repo: string,
+  eventName: string,
+  event: unknown,
+  tested: string,
+): { code: number; stderr: string; plan: boolean } {
+  const dir = tempDir("plan-only");
+  const args: PlanArgs = {
+    workflow: "rust",
+    repoRoot: repo,
+    eventJson: join(dir, "event.json"),
+    outputPlan: join(dir, "plan.json"),
+    githubOutput: join(dir, "out.txt"),
+  };
+  writeFileSync(args.eventJson, JSON.stringify(event));
+  let stderr = "";
+  const code = runPlan(
+    args,
+    {
+      env: { GITHUB_EVENT_NAME: eventName, GITHUB_SHA: tested },
+      stdout: () => {},
+      stderr: (t) => (stderr += t),
+    },
+    () => [],
+  );
+  return { code, stderr, plan: existsSync(args.outputPlan) || existsSync(args.githubOutput ?? "") };
+}
+
 function outputs(text: string): Map<string, string> {
   const out = new Map<string, string>();
   const lines = text.split("\n");
@@ -391,9 +420,18 @@ describe("plan CLI", () => {
         expect(shrunk, eventName).toMatchObject({
           code: 1,
           stderr:
-            "plan: rust: postgres matrix catalog must hold exactly the 12 policy rows (missing 18/ubuntu-26.04/c)\n",
+            "plan: workflow registry validation failed\n" +
+            "rust: PostgreSQL budget requires all twelve A/B/C rows\n" +
+            "rust: PostgreSQL budget must retain equal target coverage on every platform/major pair\n",
           plan: null,
           output: null,
+        });
+        // The plan step refuses the same catalog on its own.
+        expect(planWithoutRegistry(m.work, eventName, event, m.tested), eventName).toEqual({
+          code: 1,
+          stderr:
+            "plan: rust: postgres matrix catalog must hold exactly the 12 policy rows (missing 18/ubuntu-26.04/c)\n",
+          plan: false,
         });
       }
 
@@ -419,9 +457,17 @@ describe("plan CLI", () => {
           code: 1,
           stdout: "",
           stderr:
-            "plan: rust: postgres strategy.matrix must be exactly ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n",
+            "plan: workflow registry validation failed\n" +
+            "rust: postgres strategy must be exactly fail-fast: false and matrix: ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n" +
+            "rust: PostgreSQL budget matrix must be fromJSON(needs.ci-plan.outputs.postgres_matrix) without an empty-array fallback\n",
           plan: null,
           output: null,
+        });
+        expect(planWithoutRegistry(m.work, eventName, event, m.tested), eventName).toEqual({
+          code: 1,
+          stderr:
+            "plan: rust: postgres strategy.matrix must be exactly ${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}\n",
+          plan: false,
         });
       }
     },
@@ -486,6 +532,36 @@ describe("plan CLI", () => {
       "unrecognized arguments: -- x",
     );
   });
+
+  test(
+    "wiring only the complete verifier refuses stops every plan before any output",
+    async () => {
+      const fx = new PrCheckout();
+      const work = fx.clone();
+      const clean = await cli(work, "web", "workflow_dispatch", {}, fx.base);
+      expect({ code: clean.code, stderr: clean.stderr }).toEqual({ code: 0, stderr: "" });
+      expect(clean.plan).not.toBeNull();
+
+      const yml = join(work, ".github/workflows/web.yml");
+      const gateLine = "          bun tools/ci/gate.ts --workflow web ";
+      const text = readFileSync(yml, "utf8");
+      expect(text.split(gateLine)).toHaveLength(2);
+      writeFileSync(yml, text.replace(gateLine, `          echo injected\n${gateLine}`));
+      for (const workflow of WORKFLOWS) {
+        const r = await cli(work, workflow, "workflow_dispatch", {}, fx.base);
+        expect(r, workflow).toEqual({
+          code: 1,
+          stdout: "",
+          stderr:
+            "plan: workflow registry validation failed\n" +
+            "web: web-ci-gate must use the canonical gate invocation\n",
+          plan: null,
+          output: null,
+        });
+      }
+    },
+    TIMEOUT,
+  );
 
   test(
     "the registry step is injected; its errors stop the plan before any output",
