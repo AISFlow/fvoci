@@ -253,6 +253,42 @@ fn row_hash(row: &FamilyRow) -> Result<String, sqlx::Error> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+// Same-transaction preservation witness: never serialize VAPID material.
+// Include every other named column so the initialization exception cannot
+// conceal an unrelated instance_config update, including future columns.
+fn instance_config_witness(
+    row_sha256: &str,
+    columns: &[(String, Cell)],
+) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let id = cell("id")?;
+    let public = cell("vapid_public_key")?;
+    let private = cell("vapid_private_key")?;
+    let stable = columns
+        .iter()
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("vapid_public_key")
+                && !name.eq_ignore_ascii_case("vapid_private_key")
+        })
+        .map(|(name, value)| json!([name, exact(value.clone())]))
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&stable).map_err(|_| refused())?;
+    Ok(json!({
+        "rowSha256": row_sha256,
+        "stableSha256": hex::encode(Sha256::digest(bytes)),
+        "singleton": matches!(id, Cell::Integer(1)),
+        "vapidBothNull": matches!(public, Cell::Null) && matches!(private, Cell::Null),
+        "vapidPublicPresent": matches!(public, Cell::Text(value) if !value.is_empty()),
+        "vapidPrivateSealed": matches!(private, Cell::Text(value) if value.starts_with("enc:v2:") && value.len() > 7),
+    }))
+}
+
 fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let FamilyRow::Remote(remote) = row else {
         return Err(refused());
@@ -608,6 +644,7 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         }
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
+        let mut instance_config = Vec::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             phase = "preservation-read";
@@ -620,6 +657,13 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             for row in &rows {
                 phase = "row-hash";
                 let hash = row_hash(row)?;
+                if *name == "instance_config" {
+                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
+                    let columns = (0..remote.column_count()).map(|i| {
+                        Ok((remote.column_name(i).ok_or_else(refused)?.to_string(), row.cell(i as usize)?))
+                    }).collect::<Result<Vec<_>, sqlx::Error>>()?;
+                    instance_config.push(instance_config_witness(&hash, &columns)?);
+                }
                 phase = "row-allocation";
                 owners.insert(hash.clone(), row_allocation(name, row)?);
                 *hashes.entry(hash).or_default() += 1;
@@ -657,6 +701,7 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
+            "instanceConfig":instance_config,
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
     }.await;
     let result = result.map_err(|original| {
@@ -809,6 +854,44 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_config_witness_binds_other_columns_without_vapid_values() {
+        let mut columns = vec![
+            ("id".into(), Cell::Integer(1)),
+            ("vapid_public_key".into(), Cell::Null),
+            ("vapid_private_key".into(), Cell::Null),
+            ("future_column".into(), Cell::text("preserved")),
+        ];
+        let before = instance_config_witness(&"a".repeat(64), &columns).unwrap();
+        assert_eq!(before["singleton"], true);
+        assert_eq!(before["vapidBothNull"], true);
+        assert_eq!(before["vapidPublicPresent"], false);
+        assert_eq!(before["vapidPrivateSealed"], false);
+        columns[1].1 = Cell::text("PRIVATE_PUBLIC_KEY_CANARY");
+        columns[2].1 = Cell::text("enc:v2:turso-test:PRIVATE_CIPHERTEXT_CANARY");
+        let after = instance_config_witness(&"b".repeat(64), &columns).unwrap();
+        assert_eq!(after["vapidBothNull"], false);
+        assert_eq!(after["vapidPublicPresent"], true);
+        assert_eq!(after["vapidPrivateSealed"], true);
+        assert_eq!(before["stableSha256"], after["stableSha256"]);
+        assert!(!after.to_string().contains("PRIVATE_"));
+        columns[3].1 = Cell::text("changed");
+        let changed = instance_config_witness(&"c".repeat(64), &columns).unwrap();
+        assert_ne!(after["stableSha256"], changed["stableSha256"]);
+        columns[0].1 = Cell::Integer(2);
+        columns[1].1 = Cell::text("");
+        for private in [Cell::Null, Cell::text("plaintext"), Cell::text("enc:v2:")] {
+            columns[2].1 = private;
+            let invalid = instance_config_witness(&"d".repeat(64), &columns).unwrap();
+            assert_eq!(invalid["singleton"], false);
+            assert_eq!(invalid["vapidBothNull"], false);
+            assert_eq!(invalid["vapidPublicPresent"], false);
+            assert_eq!(invalid["vapidPrivateSealed"], false);
+        }
+        columns.remove(2);
+        assert!(instance_config_witness(&"e".repeat(64), &columns).is_err());
+    }
     #[test]
     fn allocation_namespace_and_exact_storage_witnesses() {
         assert!(validate_namespace("tui-0123456789abcdef0123").is_ok());

@@ -31,6 +31,7 @@ import {
   executionMode,
   failureCode,
   get,
+  isRecord,
   list,
   privateRead,
   record,
@@ -217,9 +218,12 @@ export async function executeUi(
         owner,
       });
       const capsule = join(directory, "actor-input.private.json");
+      const actorEnvironment = { ...env };
+      delete actorEnvironment.ENCRYPTION_KEYS;
+      delete actorEnvironment.ENCRYPTION_ACTIVE_KEY_ID;
       steps.write(capsule, {
         manifest,
-        environment: env,
+        environment: actorEnvironment,
         namespace,
         workspaceId: owner !== null ? get(owner, "workspaceId") : null,
       });
@@ -485,6 +489,24 @@ export async function consumeIn(
 ): Promise<void> {
   const manifest = steps.currentBuild();
   require(inputs.ui_source_sha === manifest.sourceInputs.source, "UI_REVIEWED_SOURCE_REQUIRED");
+  let encryptionKeys: string | undefined;
+  if (phase === "ui-ack") {
+    const raw = process.env.FVOCI_TEST_TURSO_ENCRYPTION_KEYS;
+    require(typeof raw === "string" && raw.length > 0, "UI_ENCRYPTION_KEYRING_REQUIRED");
+    let keys: unknown;
+    try {
+      keys = JSON.parse(raw) as unknown;
+    } catch {
+      require(false, "UI_ENCRYPTION_KEYRING_REFUSED");
+    }
+    require(isRecord(keys) &&
+      Object.keys(keys).length === 1 &&
+      Object.hasOwn(keys, "turso-test") &&
+      typeof keys["turso-test"] === "string" &&
+      keys["turso-test"].length === 64 &&
+      /^[a-fA-F0-9]{64}$/.test(keys["turso-test"]), "UI_ENCRYPTION_KEYRING_REFUSED");
+    encryptionKeys = JSON.stringify(keys);
+  }
   const environment: Record<string, string> = {
     FVOCI_LIBSQL_URL: get(process.env, "FVOCI_LIBSQL_URL") as string,
     FVOCI_LIBSQL_AUTH_TOKEN: get(process.env, "FVOCI_LIBSQL_AUTH_TOKEN") as string,
@@ -519,6 +541,8 @@ export async function consumeIn(
     FVOCI_TEST_TURSO_DESTRUCTIVE: "true",
     PASSWORD_PEPPER_KEYS: diagnosticJson({ fixture: token(32) }),
     PASSWORD_PEPPER_ACTIVE_KEY_ID: "fixture",
+    ENCRYPTION_KEYS: encryptionKeys,
+    ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
   });
   const result = await steps.executeUi(scope, manifest, baseline, environment);
   steps.output.out(

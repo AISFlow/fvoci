@@ -75,6 +75,8 @@ export const NATIVE_CAPSULE_KEYS = [
   ...SECRET_ENV_KEYS,
   "PASSWORD_PEPPER_KEYS",
   "PASSWORD_PEPPER_ACTIVE_KEY_ID",
+  "ENCRYPTION_KEYS",
+  "ENCRYPTION_ACTIVE_KEY_ID",
   "FVOCI_E2E_TURSO_NAMESPACE",
   "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
@@ -191,8 +193,8 @@ export function readShellProof(runtime: unknown): string {
   const cmd = Array.isArray(config.Cmd) ? config.Cmd : [];
   require(cmd.includes(QUALIFIED_SHELL), "UI_CANONICAL_SHELL_UNAVAILABLE");
   const environment = Array.isArray(config.Env) ? config.Env : [];
-  require(!environment.some((item) =>
-    String(item).startsWith("FVOCI_LIBSQL_"),
+  require(!environment.some(
+    (item) => String(item).startsWith("FVOCI_LIBSQL_") || String(item).startsWith("ENCRYPTION_"),
   ), "UI_DOCKER_ENV_SECRET_REFUSED");
   return QUALIFIED_SHELL;
 }
@@ -223,6 +225,7 @@ export function capsuleText(environment: Record<string, string>): string {
       !NATIVE_CAPSULE_KEYS.includes(key) &&
       (key.startsWith("FVOCI_LIBSQL_") ||
         key.startsWith("PASSWORD_") ||
+        key.startsWith("ENCRYPTION_") ||
         key.includes("TOKEN") ||
         key.includes("SECRET") ||
         key === "LOCPATH"),
@@ -331,7 +334,9 @@ export function admitPublishedConfig(
     require(at >= 0, "UI_DOCKER_ENV_SECRET_REFUSED");
     keys.push(value.slice(0, at));
   }
-  require(!SECRET_ENV_KEYS.some((key) => keys.includes(key)), "UI_DOCKER_ENV_SECRET_REFUSED");
+  require(!keys.some(
+    (key) => SECRET_ENV_KEYS.includes(key) || key.startsWith("ENCRYPTION_"),
+  ), "UI_DOCKER_ENV_SECRET_REFUSED");
   const published = [...argv.map(String), ...envItems.map(String)];
   for (const value of secretValues)
     require(value &&
@@ -963,13 +968,16 @@ export async function publishContainer(
 ): Promise<[string, Creation, Record_]> {
   const grant = grantFor(kind);
   const secretValues = SECRET_ENV_KEYS.map((key) => get(environment, key) as string);
+  if (environment.ENCRYPTION_KEYS) secretValues.push(environment.ENCRYPTION_KEYS);
   const storage = environment.FVOCI_STORAGE_DIR;
   require(typeof storage === "string" &&
     storage.startsWith("/") &&
     !storage.includes(","), "UI_CURRENT_ARTIFACT_MISSING");
   const prepared: Record<string, string> = {};
-  for (const key of NATIVE_CAPSULE_KEYS)
+  for (const key of NATIVE_CAPSULE_KEYS) {
+    if (binaryName === "fvoci-e2e-fixture" && key.startsWith("ENCRYPTION_")) continue;
     if (Object.hasOwn(environment, key)) prepared[key] = environment[key] as string;
+  }
   prepared.FVOCI_COLLAB_ENGINE = BINARY_DST + "/collab-engine";
   prepared.FVOCI_STATIC_DIR = DIST_DST;
   prepared.FVOCI_STORAGE_DIR = storage;

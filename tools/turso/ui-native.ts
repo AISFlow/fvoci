@@ -259,6 +259,7 @@ const SECRET_BROWSER_KEYS = [
   "DATABASE_URL",
   "DATABASE_APP_URL",
   "PASSWORD_PEPPER_KEYS",
+  "ENCRYPTION_KEYS",
 ];
 
 export async function browser(

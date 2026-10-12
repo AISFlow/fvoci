@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -84,10 +84,16 @@ describe("container shape", () => {
     const environment = {
       FVOCI_LIBSQL_URL: "libsql://invented.invalid",
       FVOCI_LIBSQL_AUTH_TOKEN: "invented'token",
+      ENCRYPTION_KEYS: '{"turso-test":"invented-key"}',
+      ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
     };
     expect(capsuleText(environment)).toContain(
       "FVOCI_LIBSQL_AUTH_TOKEN=" + shellQuote("invented'token"),
     );
+    expect(capsuleText(environment)).toContain(
+      "ENCRYPTION_KEYS=" + shellQuote(environment.ENCRYPTION_KEYS),
+    );
+    expect(capsuleText(environment)).toContain("ENCRYPTION_ACTIVE_KEY_ID=turso-test");
     expect(shellQuote("invented'token")).toBe("'invented'\"'\"'token'");
     expect(shellQuote("")).toBe("''");
     expect(shellQuote("plain/path-1.0")).toBe("plain/path-1.0");
@@ -108,6 +114,11 @@ describe("container shape", () => {
     expect(() => {
       admitPublishedConfig(argv, ["FVOCI_LIBSQL_AUTH_TOKEN=invented"], ["invented"]);
     }).toThrow("UI_DOCKER_ENV_SECRET_REFUSED");
+    for (const key of ["ENCRYPTION_KEYS", "ENCRYPTION_ACTIVE_KEY_ID", "ENCRYPTION_UNLISTED"]) {
+      expect(() => {
+        admitPublishedConfig(argv, [key + "=private"], []);
+      }).toThrow("UI_DOCKER_ENV_SECRET_REFUSED");
+    }
     expect(() => readShellProof({ imageId: QUALIFIED_CANONICAL_IMAGE })).toThrow(
       "UI_CANONICAL_SHELL_UNAVAILABLE",
     );
@@ -140,6 +151,9 @@ describe("container shape", () => {
     const base = { FVOCI_LIBSQL_URL: "u", FVOCI_LIBSQL_AUTH_TOKEN: "t" };
     expect(() => capsuleText({ ...base, LOCPATH: "/x" })).toThrow("UI_LOCPATH_REFUSED");
     expect(() => capsuleText({ ...base, GITHUB_TOKEN: "x" })).toThrow(
+      "UI_DOCKER_ENV_SECRET_REFUSED",
+    );
+    expect(() => capsuleText({ ...base, ENCRYPTION_UNLISTED_KEY: "x" })).toThrow(
       "UI_DOCKER_ENV_SECRET_REFUSED",
     );
     expect(() => capsuleText({ ...base, RUST_LOG: "a\nb" })).toThrow(
@@ -424,6 +438,8 @@ describe("local grant and publish", () => {
         FVOCI_LIBSQL_URL: "libsql://invented.invalid",
         FVOCI_LIBSQL_AUTH_TOKEN: token,
         FVOCI_STORAGE_DIR: "/work/storage",
+        ENCRYPTION_KEYS: "PRIVATE_UNUSED_KEYRING",
+        ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
       },
       { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never,
       "fvoci-e2e-fixture",
@@ -432,6 +448,8 @@ describe("local grant and publish", () => {
       () => grant,
     );
     const blob = calls.flat().join("\n");
+    expect(readFileSync(join(directory, "native-env.sh"), "utf8")).not.toContain("ENCRYPTION_");
+    expect(blob).not.toContain("PRIVATE_UNUSED_KEYRING");
     expect(blob).not.toContain(token);
     expect(JSON.stringify(created.Config.Env)).not.toContain(token);
     expect(blob + "\n").toContain("type=bind,src=/work/storage,dst=/work/storage\n");

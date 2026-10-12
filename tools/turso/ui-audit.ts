@@ -56,6 +56,42 @@ export const BACKGROUND_TABLES = [
 const RELAYS = ["notifications", "mail", "push", "webhooks", "github"];
 
 const same = (a: unknown, b: unknown) => deepEquals(a, b, true);
+
+/** One native witness bound to each complete singleton row fingerprint. */
+function vapidInitialization(before: unknown, after: unknown): boolean {
+  if (!isRecord(before) || !isRecord(after)) return false;
+  const previous = before.instanceConfig,
+    current = after.instanceConfig;
+  if (
+    !Array.isArray(previous) ||
+    previous.length !== 1 ||
+    !Array.isArray(current) ||
+    current.length !== 1
+  )
+    return false;
+  const old: unknown = previous[0],
+    now: unknown = current[0];
+  if (!isRecord(old) || !isRecord(now)) return false;
+  const hash = (value: unknown): value is string =>
+    typeof value === "string" && value.length === 64 && /^[a-f0-9]{64}$/.test(value);
+  return (
+    old.singleton === true &&
+    now.singleton === true &&
+    old.vapidBothNull === true &&
+    old.vapidPublicPresent === false &&
+    old.vapidPrivateSealed === false &&
+    now.vapidBothNull === false &&
+    now.vapidPublicPresent === true &&
+    now.vapidPrivateSealed === true &&
+    hash(old.rowSha256) &&
+    hash(now.rowSha256) &&
+    old.rowSha256 !== now.rowSha256 &&
+    hash(old.stableSha256) &&
+    old.stableSha256 === now.stableSha256 &&
+    same(get(before, "fingerprints", "instance_config"), { [old.rowSha256]: 1 }) &&
+    same(get(after, "fingerprints", "instance_config"), { [now.rowSha256]: 1 })
+  );
+}
 const truthy = (value: unknown) =>
   Array.isArray(value)
     ? value.length > 0
@@ -197,6 +233,7 @@ export function allocatedRows(
   }
   for (const [table, hashes] of Object.entries(record(after, "fingerprints"))) {
     if (AUDITED_COUNTERS.has(table)) continue;
+    if (table === "instance_config" && vapidInitialization(before, after)) continue;
     const previous = record(before, "fingerprints", table);
     for (const [sha, count] of Object.entries(record(hashes))) {
       const old = Object.hasOwn(previous, sha) ? previous[sha] : 0;
@@ -404,6 +441,8 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
   require(same(Object.keys(old).sort(), Object.keys(current).sort()), "UI_CURRENT_TABLES_CHANGED");
   for (const [table, rows] of Object.entries(old)) {
     if (audit !== undefined && AUDITED_COUNTERS.has(table)) continue;
+    if (audit !== undefined && table === "instance_config" && vapidInitialization(before, after))
+      continue;
     const now = record(current, table);
     for (const [sha, count] of Object.entries(record(rows)))
       require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
