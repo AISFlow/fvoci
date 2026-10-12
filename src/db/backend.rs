@@ -355,12 +355,15 @@ impl FamilyTx {
                 .map(|r| r.rows_affected()),
             Self::Remote(tx) => {
                 let args = remote_params(args);
-                tx.run(move |connection| async move {
-                    connection
-                        .execute(statement, args)
-                        .await
-                        .map_err(remote_error)
-                })
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        connection
+                            .execute(statement, args)
+                            .await
+                            .map_err(remote_error)
+                    },
+                )
                 .await
             }
         }
@@ -375,13 +378,16 @@ impl FamilyTx {
         match self {
             Self::Local(tx) => sqlx::raw_sql(sql).execute(&mut *tx.tx).await.map(|_| ()),
             Self::Remote(tx) => {
-                tx.run(move |connection| async move {
-                    connection
-                        .execute_batch(sql)
-                        .await
-                        .map(|_| ())
-                        .map_err(remote_error)
-                })
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        connection
+                            .execute_batch(sql)
+                            .await
+                            .map(|_| ())
+                            .map_err(remote_error)
+                    },
+                )
                 .await
             }
         }
@@ -398,17 +404,20 @@ impl FamilyTx {
                 .map(|rows| rows.into_iter().map(FamilyRow::Local).collect()),
             Self::Remote(tx) => {
                 let args = remote_params(args);
-                tx.run(move |connection| async move {
-                    let mut rows = connection
-                        .query(statement, args)
-                        .await
-                        .map_err(remote_error)?;
-                    let mut result = Vec::new();
-                    while let Some(row) = rows.next().await.map_err(remote_error)? {
-                        result.push(FamilyRow::Remote(row));
-                    }
-                    Ok(result)
-                })
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        let mut rows = connection
+                            .query(statement, args)
+                            .await
+                            .map_err(remote_error)?;
+                        let mut result = Vec::new();
+                        while let Some(row) = rows.next().await.map_err(remote_error)? {
+                            result.push(FamilyRow::Remote(row));
+                        }
+                        Ok(result)
+                    },
+                )
                 .await
             }
         }
@@ -634,25 +643,28 @@ impl RemoteDatabase {
             "PRAGMA foreign_keys=ON; BEGIN;"
         };
         let enabled = tx
-            .run(move |connection| async move {
-                connection
-                    .execute_batch(control)
-                    .await
-                    .map_err(remote_error)?;
-                let mut fk = connection
-                    .query("PRAGMA foreign_keys", ())
-                    .await
-                    .map_err(remote_error)?;
-                let enabled = fk
-                    .next()
-                    .await
-                    .map_err(remote_error)?
-                    .ok_or(sqlx::Error::RowNotFound)?
-                    .get::<i64>(0)
-                    .map_err(remote_error)?;
-                while fk.next().await.map_err(remote_error)?.is_some() {}
-                Ok(enabled)
-            })
+            .run(
+                RemoteOperationKind::Statement,
+                move |connection| async move {
+                    connection
+                        .execute_batch(control)
+                        .await
+                        .map_err(remote_error)?;
+                    let mut fk = connection
+                        .query("PRAGMA foreign_keys", ())
+                        .await
+                        .map_err(remote_error)?;
+                    let enabled = fk
+                        .next()
+                        .await
+                        .map_err(remote_error)?
+                        .ok_or(sqlx::Error::RowNotFound)?
+                        .get::<i64>(0)
+                        .map_err(remote_error)?;
+                    while fk.next().await.map_err(remote_error)?.is_some() {}
+                    Ok(enabled)
+                },
+            )
             .await?;
         if enabled != 1 {
             return Err(sqlx::Error::Protocol(
@@ -771,6 +783,10 @@ enum RemoteOperationOutcome {
     FinishSucceeded,
     Failed,
 }
+enum RemoteOperationKind {
+    Statement,
+    Finish,
+}
 impl RemoteTx {
     // The SDK rotates its baton only after reading a response. Dropping its
     // request future after the server accepted that baton loses the successor.
@@ -779,6 +795,7 @@ impl RemoteTx {
     // shutdown deadline still bounds Backend::close.
     async fn run<R, F>(
         &mut self,
+        kind: RemoteOperationKind,
         operation: impl FnOnce(libsql::Connection) -> F + Send + 'static,
     ) -> Result<R, sqlx::Error>
     where
@@ -787,13 +804,14 @@ impl RemoteTx {
     {
         self.join_pending().await?;
         let connection = self.connection().clone();
-        let finishing = self.finish_started;
         let (send, receive) = tokio::sync::oneshot::channel();
         self.pending = Some(tokio::spawn(async move {
             let result = operation(connection).await;
-            let outcome = match (result.is_ok(), finishing) {
-                (true, true) => RemoteOperationOutcome::FinishSucceeded,
-                (true, false) => RemoteOperationOutcome::OperationSucceeded,
+            let outcome = match (result.is_ok(), kind) {
+                (true, RemoteOperationKind::Finish) => RemoteOperationOutcome::FinishSucceeded,
+                (true, RemoteOperationKind::Statement) => {
+                    RemoteOperationOutcome::OperationSucceeded
+                }
                 (false, _) => RemoteOperationOutcome::Failed,
             };
             let _ = send.send(result);
@@ -829,7 +847,7 @@ impl RemoteTx {
     }
     async fn finish(mut self, control: &'static str) -> Result<(), sqlx::Error> {
         self.finish_started = true;
-        self.run(move |connection| async move {
+        self.run(RemoteOperationKind::Finish, move |connection| async move {
             connection
                 .execute_batch(control)
                 .await
@@ -844,7 +862,7 @@ impl RemoteTx {
     async fn commit_with_cleanup(mut self) -> Result<(), CommitCleanupUnknown> {
         self.finish_started = true;
         if let Err(error) = self
-            .run(|connection| async move {
+            .run(RemoteOperationKind::Finish, |connection| async move {
                 connection
                     .execute_batch("COMMIT")
                     .await
