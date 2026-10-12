@@ -7270,6 +7270,180 @@ mod sqlite_document_ops {
         (rows, events, audits, sequence)
     }
 
+    struct ReferenceCase {
+        reference: String,
+        pointer: &'static str,
+        documents: [Uuid; 2],
+        backlinks: Value,
+        expected: Vec<String>,
+    }
+
+    async fn backlink_uuid_formats_http(
+        app: &axum::Router,
+        workspace: Uuid,
+        cookie: &str,
+    ) -> Vec<ReferenceCase> {
+        let path = format!("/api/v1/workspaces/{workspace}/documents");
+        let config = selected_room_support::test_collab_config(1, 30_000);
+        let seed = fvoci_server::collab::seed::SeedEngine::new(config.engine_bin, config.limits);
+        let mut cases = Vec::new();
+        for node_type in ["mention", "embed"] {
+            for format in ["canonical", "uppercase", "compact"] {
+                let mut ids = Vec::new();
+                for title in ["Target", "Referring"] {
+                    let (status, created, _, _) = json_request(
+                        app.clone(),
+                        "POST",
+                        &path,
+                        Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":title})),
+                        Some(cookie),
+                        &[],
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::CREATED, "{created}");
+                    ids.push(Uuid::parse_str(created["id"].as_str().unwrap()).unwrap());
+                }
+                let (target, source) = (ids[0], ids[1]);
+                let reference = match format {
+                    "uppercase" => target.to_string().to_uppercase(),
+                    "compact" => target.simple().to_string(),
+                    _ => target.to_string(),
+                };
+                let (content, pointer) = if node_type == "mention" {
+                    (
+                        json!({"type":"doc","content":[{"type":"paragraph","attrs":{"id":"probe"},"content":[{"type":"mention","attrs":{"entity":"document","id":reference,"label":"Target"}}]}]}),
+                        "/content/0/content/0/attrs/id",
+                    )
+                } else {
+                    (
+                        json!({"type":"doc","content":[{"type":"embed","attrs":{"id":"probe","entity":"document","ref":reference}}]}),
+                        "/content/0/attrs/ref",
+                    )
+                };
+                let update = seed.tiptap_to_yjs_update(&content).await.unwrap();
+                let (status, saved, _, _) = json_request(
+                    app.clone(),
+                    "PUT",
+                    &format!("{path}/{source}/body/versioned"),
+                    Some(json!({"commandId":Uuid::now_v7(),"expectedTailSeq":"0","updateV1":collab_engine::b64::encode(&update)})),
+                    Some(cookie),
+                    &[],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{node_type}/{format}: {saved}");
+                let (status, copied, _, _) = json_request(
+                    app.clone(),
+                    "POST",
+                    &format!("{path}/{source}/duplicate"),
+                    Some(json!({"includeChildren":false})),
+                    Some(cookie),
+                    &[],
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{copied}");
+                let copy = Uuid::parse_str(copied["id"].as_str().unwrap()).unwrap();
+                assert_ne!(copy, source);
+                let (status, backlinks, _, _) = json_request(
+                    app.clone(),
+                    "GET",
+                    &format!("{path}/{target}/backlinks"),
+                    None,
+                    Some(cookie),
+                    &[],
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{backlinks}");
+                cases.push(ReferenceCase {
+                    reference,
+                    pointer,
+                    documents: [source, copy],
+                    backlinks,
+                    expected: if format == "compact" {
+                        vec![]
+                    } else {
+                        vec![source.to_string(), copy.to_string()]
+                    },
+                });
+            }
+        }
+        cases
+    }
+
+    fn assert_uuid_backlinks(cases: &[ReferenceCase]) {
+        for case in cases {
+            let actual: Vec<_> = case.backlinks["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["from"]["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(
+                actual, case.expected,
+                "{} {}: {}",
+                case.pointer, case.reference, case.backlinks
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_backlink_uuid_formats_http_save_duplicate_and_readback() {
+        let f = Fixture::new().await;
+        let cases = backlink_uuid_formats_http(&f.app, f.workspace, &f.cookie).await;
+        let observer = pool::connect_sqlite_app(&f.directory.join("app.db"), 1)
+            .await
+            .unwrap();
+        for case in &cases {
+            for document in case.documents {
+                let stored: String =
+                    sqlx::query_scalar("SELECT content_json FROM documents WHERE id=?1")
+                        .bind(document.as_bytes().as_slice())
+                        .fetch_one(&observer)
+                        .await
+                        .unwrap();
+                let stored: Value = serde_json::from_str(&stored).unwrap();
+                assert_eq!(stored.pointer(case.pointer), Some(&json!(case.reference)));
+            }
+        }
+        observer.close().await;
+        f.finish().await;
+        assert_uuid_backlinks(&cases);
+    }
+
+    #[tokio::test]
+    async fn postgres_backlink_uuid_formats_http_save_duplicate_and_readback() {
+        let harness = TestDb::bootstrap().await;
+        let (_, cookie, _, workspace) = setup_session(&harness).await;
+        let mut state = app_state(&harness.app_url).await;
+        state.realtime_mode = fvoci_server::config::RealtimeMode::Off;
+        state.native_engine = fvoci_server::collab::CollabConfig::from_env();
+        let storage = state.storage.clone();
+        let app = document_app(state);
+        let cases = backlink_uuid_formats_http(&app, workspace, &cookie).await;
+        let observer = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&harness.admin_url)
+            .await
+            .unwrap();
+        for case in &cases {
+            for document in case.documents {
+                let stored: Value =
+                    sqlx::query_scalar("SELECT content_json FROM fvoci.documents WHERE id=$1")
+                        .bind(document)
+                        .fetch_one(&observer)
+                        .await
+                        .unwrap();
+                assert_eq!(stored.pointer(case.pointer), Some(&json!(case.reference)));
+            }
+        }
+        observer.close().await;
+        drop(app);
+        if let fvoci_server::attachments::ObjectStorage::Local(local) = storage {
+            std::fs::remove_dir_all(local.root()).unwrap();
+        }
+        harness.cleanup().await;
+        assert_uuid_backlinks(&cases);
+    }
+
     #[tokio::test]
     async fn sqlite_flat_document_metadata_http_commit_and_denials() {
         for project_scope in [false, true] {

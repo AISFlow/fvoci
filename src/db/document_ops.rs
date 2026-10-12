@@ -555,6 +555,8 @@ pub async fn list_document_backlinks_backend(
         if let Err(e) = op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, scope, ProjectPermission::View).await? {
             return Ok(Err(e));
         }
+        // Match the PG JSONPath's anchored, case-insensitive hyphenated UUID.
+        let target_reference = document_id.hyphenated().to_string();
         let mut items = Vec::new();
         for task in [false, true] {
             let mut after = None;
@@ -581,7 +583,7 @@ SELECT d.id,d.title,d.project_id,d.number,p.key,d.content_json FROM documents d 
                         continue;
                     }
                     let content = row.cell(5)?.value()?;
-                    if !crate::collab::derived_body::extract_internal_refs(&content).iter().any(|r| r.kind == crate::collab::derived_body::InternalRefKind::Document && Uuid::parse_str(&r.id).ok() == Some(document_id)) {
+                    if !crate::collab::derived_body::extract_internal_refs(&content).iter().any(|r| r.kind == crate::collab::derived_body::InternalRefKind::Document && r.id.eq_ignore_ascii_case(&target_reference)) {
                         continue;
                     }
                     let project = row.cell(2)?.optional(Cell::id)?;
@@ -1666,6 +1668,27 @@ INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'document-sd
         let links = list_document_backlinks_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, document.id).await.unwrap().unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].id, copy.id);
+        for (reference, expected) in [
+            (document.id.to_string().to_uppercase(), 1),
+            (document.id.simple().to_string(), 0),
+            (document.id.to_string(), 1),
+        ] {
+            let mut content = json.clone();
+            content["content"][0]["content"][0]["attrs"]["id"] = json!(reference);
+            let mut tx = db.begin_write().await.unwrap();
+            let mut op = tx.operation();
+            op.set_tenant(workspace).await.unwrap();
+            let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+            family.execute("UPDATE documents SET content_json=?3 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace), Cell::uuid(copy.id), Cell::json(&content).unwrap()]).await.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+            let read = authorize_document_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, copy.id, ProjectPermission::View).await.unwrap().unwrap();
+            assert_eq!(read.content_json, content);
+            let links = list_document_backlinks_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, document.id).await.unwrap().unwrap();
+            assert_eq!(links.len(), expected, "reference={reference}");
+            if expected == 1 {
+                assert_eq!(links[0].id, copy.id);
+            }
+        }
         let tags = crate::db::document_tags::list_document_tags_backend(&fresh, workspace, &tag_actor, copy.id, crate::db::document_tags::Affiliation::Wiki).await.unwrap().unwrap();
         assert_eq!(tags[0].id, tag.id);
         assert_eq!(crate::db::document_tags::update_tag_backend(&fresh, workspace, &tag_actor, tag.id, Some("SDK renamed"), None).await.unwrap().unwrap().name, "SDK renamed");
