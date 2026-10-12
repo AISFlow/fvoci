@@ -660,6 +660,8 @@ function caseList(): MutationCase[] {
   const bunCache = `            printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP"\n`;
   const browserCache = `            printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP"\n`;
   const exported = '          } >> "$GITHUB_ENV"\n';
+  const uiKeyring =
+    "          FVOCI_TEST_TURSO_ENCRYPTION_KEYS: ${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}\n";
   const ui: [string, string][] = [
     ["    needs: admission\n", "    needs: []\n"],
     ["github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"],
@@ -713,6 +715,7 @@ function caseList(): MutationCase[] {
     ["${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"],
     ["${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"],
     [CONSUME, "        run: bun --no-env-file tools/turso/ui.ts --actor\n"],
+    [uiKeyring, ""],
   ];
   ui.forEach(([old, replacement], index) => {
     add(
@@ -722,6 +725,28 @@ function caseList(): MutationCase[] {
       "fixed private Turso UI job and current source baseline consumer",
     );
   });
+  for (const [name, marker, replacement] of [
+    [
+      "job",
+      "      FVOCI_BUILD_SHA: ${{ github.sha }}\n",
+      "      FVOCI_BUILD_SHA: ${{ github.sha }}\n" + uiKeyring.slice(4),
+    ],
+    [
+      "step",
+      "      - name: Credential-free current native UI cohort and freeze\n",
+      "      - name: Credential-free current native UI cohort and freeze\n        env:\n" +
+        uiKeyring,
+    ],
+  ] as const) {
+    add(
+      "turso-ui-keyring-wrong-" + name,
+      "turso-test.yml",
+      within("  turso-ui:\n", null, (text) =>
+        replaceOnce(replaceOnce(text, uiKeyring, ""), marker, replacement),
+      ),
+      "fixed private Turso UI job and current source baseline consumer",
+    );
+  }
   add(
     "turso-ui-extra-step",
     "turso-test.yml",

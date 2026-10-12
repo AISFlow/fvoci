@@ -21,6 +21,7 @@ import { recheckPhysical, type Manifest } from "./ui-record.ts";
 
 let directory: string;
 const saved = { ...process.env };
+const encryptionKeys = JSON.stringify({ "turso-test": "ab".repeat(32) });
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "fvoci-ui-flow-"));
   delete process.env.FVOCI_SELECTED_EXECUTION_MODE;
@@ -70,12 +71,15 @@ describe("consumer flow", () => {
           modes.push(mode);
           return Promise.resolve(mode === "owner" ? owner : before());
         },
-        start: () =>
-          Promise.resolve({
+        start: (_scope, _manifest, environment) => {
+          expect(environment.ENCRYPTION_KEYS).toBe(encryptionKeys);
+          expect(environment.ENCRYPTION_ACTIVE_KEY_ID).toBe("turso-test");
+          return Promise.resolve({
             server: { child: exitedChild(0, "", 123) },
             base: "http://127.0.0.1:12345",
             log: fault === "log" ? 987654 : openSync(join(root, "server.private.log"), "w", 0o600),
-          }),
+          });
+        },
         stop: () =>
           Promise.resolve({ serverExit: 0, portClosed: true, recordedIdentitiesRetired: true }),
         browser: () => Promise.reject(new UiError("UI_ACTUAL_BROWSER_FAILED")),
@@ -101,12 +105,19 @@ describe("consumer flow", () => {
             scope,
             manifest,
             before(),
-            { FVOCI_LIBSQL_URL: "libsql://invented.invalid" },
+            {
+              FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+              ENCRYPTION_KEYS: encryptionKeys,
+              ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+            },
             steps,
           ),
         ),
       ).toBe("UI_ACTUAL_BROWSER_FAILED");
       expect(modes).toEqual(fault === "closure" ? ["owner"] : ["owner", "baseline"]);
+      const actorInput = privateRead(join(root, "on/actor-input.private.json")) as Record_;
+      expect(actorInput.environment).not.toHaveProperty("ENCRYPTION_KEYS");
+      expect(actorInput.environment).not.toHaveProperty("ENCRYPTION_ACTIVE_KEY_ID");
       expect(existsSync(join(root, "preservation.private.json"))).toBe(fault !== "closure");
       if (fault === "receipt") {
         expect(output.all).toContain("UI_ACTUAL_BROWSER_FAILED");
@@ -133,7 +144,7 @@ describe("consumer flow", () => {
     );
   });
 
-  test("an identical dataset on a changed target is refused before mutation and the VAPID keyring stays absent", async () => {
+  test("an identical dataset on a changed target is refused before mutation and the fixed keyring reaches only ui-ack", async () => {
     const baseline = { rows: 1, setupNeeded: false };
     const manifest = { sourceInputs: { source: "a".repeat(40) } } as unknown as Manifest;
     const target = "libsql://pure-original.invalid";
@@ -150,6 +161,11 @@ describe("consumer flow", () => {
       Object.assign(process.env, {
         FVOCI_LIBSQL_URL: endpoint,
         FVOCI_LIBSQL_AUTH_TOKEN: "invented",
+        FVOCI_TEST_TURSO_ENCRYPTION_KEYS: JSON.stringify(
+          JSON.parse(encryptionKeys) as unknown,
+          null,
+          2,
+        ),
       });
       const seen: Record<string, string>[] = [];
       const output = new Captured();
@@ -167,8 +183,9 @@ describe("consumer flow", () => {
       });
       if (accepted) {
         await run;
-        expect(seen[0]).not.toHaveProperty("ENCRYPTION_KEYS");
-        expect(seen[0]).not.toHaveProperty("ENCRYPTION_ACTIVE_KEY_ID");
+        expect(must(seen[0]).ENCRYPTION_KEYS).toBe(encryptionKeys);
+        expect(must(seen[0]).ENCRYPTION_ACTIVE_KEY_ID).toBe("turso-test");
+        expect(seen[0]).not.toHaveProperty("FVOCI_TEST_TURSO_ENCRYPTION_KEYS");
         expect(must(seen[0]).FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE).toBe("true");
         expect(
           Object.keys(JSON.parse(must(must(seen[0]).PASSWORD_PEPPER_KEYS)) as Record_),
@@ -176,6 +193,8 @@ describe("consumer flow", () => {
         expect(output.stdout).toEqual([
           "TURSO_UI_ACK_PASS on=1 restart=1 off=8 retries=0 ignored=0 restore=NOTRUN precision=NOTRUN cost=NOTRUN",
         ]);
+        expect(output.all).not.toContain(encryptionKeys);
+        expect(output.all).not.toContain(digest(encryptionKeys));
       } else {
         expect(await failureOf(run)).toContain("UI_CURRENT_TARGET_BINDING_REQUIRED");
         expect(seen).toEqual([]);
@@ -184,10 +203,72 @@ describe("consumer flow", () => {
     }
   });
 
+  test.each([
+    ["missing", undefined, "UI_ENCRYPTION_KEYRING_REQUIRED"],
+    ["empty", "", "UI_ENCRYPTION_KEYRING_REQUIRED"],
+    ["invalid JSON", "PRIVATE_INVALID_JSON", "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["null", "null", "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["array", "[]", "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["no key", "{}", "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["wrong id", JSON.stringify({ fixture: "ab".repeat(32) }), "UI_ENCRYPTION_KEYRING_REFUSED"],
+    [
+      "extra id",
+      JSON.stringify({ "turso-test": "ab".repeat(32), extra: "cd".repeat(32) }),
+      "UI_ENCRYPTION_KEYRING_REFUSED",
+    ],
+    ["non-string", '{"turso-test":64}', "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["short", JSON.stringify({ "turso-test": "a".repeat(63) }), "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["long", JSON.stringify({ "turso-test": "a".repeat(65) }), "UI_ENCRYPTION_KEYRING_REFUSED"],
+    ["non-hex", JSON.stringify({ "turso-test": "z".repeat(64) }), "UI_ENCRYPTION_KEYRING_REFUSED"],
+    [
+      "trailing newline",
+      JSON.stringify({ "turso-test": "ab".repeat(32) + "\n" }),
+      "UI_ENCRYPTION_KEYRING_REFUSED",
+    ],
+  ] as const)(
+    "ui-ack refuses %s keyring before any fixture or mutation",
+    async (_label, value, code) => {
+      delete process.env.FVOCI_TEST_TURSO_ENCRYPTION_KEYS;
+      if (value !== undefined) process.env.FVOCI_TEST_TURSO_ENCRYPTION_KEYS = value;
+      const output = new Captured();
+      const { scope } = fakeScope();
+      const calls: string[] = [];
+      const failure = await failureOf(
+        consumeIn(
+          scope,
+          "ui-ack",
+          { ui_source_sha: "a".repeat(40) },
+          {
+            currentBuild: () =>
+              ({ sourceInputs: { source: "a".repeat(40) } }) as unknown as Manifest,
+            fixture: () => {
+              calls.push("fixture");
+              return Promise.reject(new Error("unexpected"));
+            },
+            executeUi: () => {
+              calls.push("execute");
+              return Promise.reject(new Error("unexpected"));
+            },
+            write: () => {
+              calls.push("write");
+            },
+            root: () => directory,
+            output,
+          },
+        ),
+      );
+      expect(failure).toBe(code);
+      expect(calls).toEqual([]);
+      expect(output.stdout).toEqual([]);
+      expect(output.stderr).toEqual([]);
+    },
+  );
+
   test("the baseline phase prints the dataset and target binding only", async () => {
     Object.assign(process.env, {
       FVOCI_LIBSQL_URL: "libsql://pure.invalid",
       FVOCI_LIBSQL_AUTH_TOKEN: "PRIVATE_TOKEN",
+      FVOCI_TEST_TURSO_ENCRYPTION_KEYS: encryptionKeys,
     });
     const baseline = {
       rows: 3,
@@ -200,7 +281,18 @@ describe("consumer flow", () => {
     const { scope } = fakeScope();
     const steps = {
       currentBuild: () => ({ sourceInputs: { source: "a".repeat(40) } }) as unknown as Manifest,
-      fixture: () => Promise.resolve(baseline),
+      fixture: (
+        _scope: unknown,
+        _manifest: unknown,
+        _mode: unknown,
+        environment: Record<string, string>,
+      ) => {
+        expect(Object.keys(environment).sort()).toEqual([
+          "FVOCI_LIBSQL_AUTH_TOKEN",
+          "FVOCI_LIBSQL_URL",
+        ]);
+        return Promise.resolve(baseline);
+      },
       executeUi: () => Promise.reject(new Error("unexpected")),
       write,
       root: () => directory,
@@ -220,6 +312,8 @@ describe("consumer flow", () => {
         " rows=3 setup_needed=true startup_admissible=true",
     ]);
     expect(output.all).not.toContain("PRIVATE_TOKEN");
+    expect(output.all).not.toContain(encryptionKeys);
+    expect(output.all).not.toContain(digest(encryptionKeys));
     expect(privateRead(join(directory, "baseline.private.json"))).toEqual(baseline);
   });
 

@@ -356,7 +356,8 @@ function secretReferences(value: unknown, workflowName: string): void {
           secretName === "GITHUB_TOKEN" ||
             (workflowName === "turso-test" &&
               (secretName === "FVOCI_TEST_TURSO_DATABASE_URL" ||
-                secretName === "FVOCI_TEST_TURSO_AUTH_TOKEN")),
+                secretName === "FVOCI_TEST_TURSO_AUTH_TOKEN" ||
+                secretName === "FVOCI_TEST_TURSO_ENCRYPTION_KEYS")),
           "secret context must use an approved workflow/name pair",
         );
       }
@@ -785,8 +786,21 @@ test("secret names remain fixed for property and index access in the Turso workf
   workflow.env = {
     URL: "${{ secrets['FVOCI_TEST_TURSO_DATABASE_URL'] }}",
     TOKEN: "${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}",
+    KEYRING: "${{ secrets['FVOCI_TEST_TURSO_ENCRYPTION_KEYS'] }}",
   };
   securityPolicy(workflow, "turso-test");
+  workflow.env.KEYRING = "${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}";
+  securityPolicy(workflow, "turso-test");
+  for (const expression of [
+    "${{ secrets.NEW_ENCRYPTION_KEYS }}",
+    "${{ secrets['NEW_ENCRYPTION_KEYS'] }}",
+  ]) {
+    workflow.env.KEYRING = expression;
+    expect(() => {
+      securityPolicy(workflow, "turso-test");
+    }).toThrow("approved workflow/name pair");
+  }
+  workflow.env.KEYRING = "${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}";
   workflow.env.TOKEN = "${{ secrets.NEW_SECRET }}";
   expect(() => {
     securityPolicy(workflow, "turso-test");

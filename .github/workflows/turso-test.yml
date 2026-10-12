@@ -163,6 +163,7 @@ jobs:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}
           FVOCI_LIBSQL_AUTH_TOKEN: ${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}
+          FVOCI_TEST_TURSO_ENCRYPTION_KEYS: ${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}
           FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: ${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}
         run: bun --no-env-file tools/turso/guard.ts --consume
 

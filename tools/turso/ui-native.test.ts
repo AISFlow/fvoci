@@ -215,7 +215,13 @@ describe("native fixture", () => {
       scope,
       fixtureManifest,
       "observe",
-      { FVOCI_LIBSQL_URL: "u", FVOCI_LIBSQL_AUTH_TOKEN: "t", FVOCI_BIND: "x" },
+      {
+        FVOCI_LIBSQL_URL: "u",
+        FVOCI_LIBSQL_AUTH_TOKEN: "t",
+        FVOCI_BIND: "x",
+        ENCRYPTION_KEYS: "PRIVATE_KEYRING",
+        ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+      },
       { workspaceId: "w", documentIds: ["d"] },
     );
     expect(value).toEqual(ok);
@@ -284,6 +290,7 @@ function browserInputs(): BrowserInputs {
     GITHUB_TOKEN: "PRIVATE_GITHUB_TOKEN",
     DATABASE_URL: "PRIVATE_DATABASE",
     PASSWORD_PEPPER_KEYS: "PRIVATE_PEPPER",
+    ENCRYPTION_KEYS: "PRIVATE_KEYRING",
   });
   return { workspace, cli, pkg, physical, manifest, run };
 }
@@ -406,6 +413,7 @@ describe("browser", () => {
       "DATABASE_URL",
       "DATABASE_APP_URL",
       "PASSWORD_PEPPER_KEYS",
+      "ENCRYPTION_KEYS",
     ]) {
       const inputs = browserInputs();
       const { scope, calls } = fakeScope({ spawn: () => exitedChild(0) });

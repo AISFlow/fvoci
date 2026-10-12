@@ -130,7 +130,146 @@ function counterRecords(): [Record_, Record_, Audit] {
 }
 const ops = (value: Record_) => value.operations as Record<string, unknown[][]>;
 
+function vapidRecords(): [Record_, Record_, Audit] {
+  const [before, after, audit] = counterRecords();
+  const stableSha256 = "7".repeat(64);
+  before.instanceConfig = [
+    {
+      rowSha256: "5".repeat(64),
+      stableSha256,
+      singleton: true,
+      vapidBothNull: true,
+      vapidPublicPresent: false,
+      vapidPrivateSealed: false,
+    },
+  ];
+  after.instanceConfig = [
+    {
+      rowSha256: "6".repeat(64),
+      stableSha256,
+      singleton: true,
+      vapidBothNull: false,
+      vapidPublicPresent: true,
+      vapidPrivateSealed: true,
+    },
+  ];
+  (before.fingerprints as Record_).instance_config = { ["5".repeat(64)]: 1 };
+  (after.fingerprints as Record_).instance_config = { ["6".repeat(64)]: 1 };
+  return [before, after, audit];
+}
+const vapidWitness = (value: Record_) => (value.instanceConfig as Record_[])[0] as Record_;
+
 describe("preservation audit", () => {
+  test("only the singleton null-to-sealed VAPID initialization is preserved", () => {
+    const [before, after, audit] = vapidRecords();
+    assertPreserved(before, after, audit);
+    expect(() => {
+      assertPreserved(before, after);
+    }).toThrow("UI_PREEXISTING_ROW_CHANGED");
+    const initialized = clone(after);
+    (before.fingerprints as Record_).instance_config = clone(
+      (after.fingerprints as Record_).instance_config,
+    );
+    before.instanceConfig = clone(initialized.instanceConfig);
+    assertPreserved(before, initialized, audit);
+  });
+
+  test.each([
+    [
+      "existing public key",
+      (b: Record_) => {
+        vapidWitness(b).vapidBothNull = false;
+        vapidWitness(b).vapidPublicPresent = true;
+      },
+    ],
+    [
+      "existing private key",
+      (b: Record_) => {
+        vapidWitness(b).vapidBothNull = false;
+        vapidWitness(b).vapidPrivateSealed = true;
+      },
+    ],
+    [
+      "missing public key",
+      (_b: Record_, a: Record_) => {
+        vapidWitness(a).vapidPublicPresent = false;
+      },
+    ],
+    [
+      "unsealed private key",
+      (_b: Record_, a: Record_) => {
+        vapidWitness(a).vapidPrivateSealed = false;
+      },
+    ],
+    [
+      "other column changed",
+      (_b: Record_, a: Record_) => {
+        vapidWitness(a).stableSha256 = "8".repeat(64);
+      },
+    ],
+    [
+      "wrong old singleton id",
+      (b: Record_) => {
+        vapidWitness(b).singleton = false;
+      },
+    ],
+    [
+      "wrong new singleton id",
+      (_b: Record_, a: Record_) => {
+        vapidWitness(a).singleton = false;
+      },
+    ],
+    [
+      "extra old row",
+      (b: Record_) => {
+        (b.instanceConfig as unknown[]).push(clone(vapidWitness(b)));
+      },
+    ],
+    [
+      "extra new row",
+      (_b: Record_, a: Record_) => {
+        (a.instanceConfig as unknown[]).push(clone(vapidWitness(a)));
+      },
+    ],
+    [
+      "missing proof",
+      (b: Record_) => {
+        delete b.instanceConfig;
+      },
+    ],
+    [
+      "unbound old row",
+      (b: Record_) => {
+        vapidWitness(b).rowSha256 = "8".repeat(64);
+      },
+    ],
+    [
+      "unbound new row",
+      (_b: Record_, a: Record_) => {
+        vapidWitness(a).rowSha256 = "8".repeat(64);
+      },
+    ],
+    [
+      "duplicate fingerprint",
+      (_b: Record_, a: Record_) => {
+        (a.fingerprints as Record_).instance_config = { ["6".repeat(64)]: 2 };
+      },
+    ],
+    [
+      "other singleton",
+      (b: Record_, a: Record_) => {
+        (b.fingerprints as Record_).instance_settings = { ["8".repeat(64)]: 1 };
+        (a.fingerprints as Record_).instance_settings = { ["9".repeat(64)]: 1 };
+      },
+    ],
+  ] as const)("VAPID exception refuses %s", (_label, mutate) => {
+    const [before, after, audit] = vapidRecords();
+    mutate(before, after);
+    expect(() => {
+      assertPreserved(before, after, audit);
+    }).toThrow("UI_PREEXISTING_ROW_CHANGED");
+  });
+
   test("preexisting exact rows and ledger cannot be relaxed to counts", () => {
     const original = {
       ledger: [["integer", "9007199254740993"]],
