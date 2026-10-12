@@ -625,6 +625,7 @@ describe("reset receipt", () => {
       "\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 100 filtered out; finished in 0.00s\n";
     for (const fields of [
       "primary=RESET_SCHEMA_REFUSED rollback=RETURNED_OK commit=NOT_STARTED blank=NOT_RUN steps=0 close=OK drain=LOCAL_OK leases=ZERO",
+      "primary=RESET_FIXTURE_REFUSED rollback=RETURNED_OK commit=NOT_STARTED blank=NOT_RUN steps=0 close=OK drain=LOCAL_OK leases=ZERO",
       "primary=RESET_DDL_FAILED rollback=UNCONFIRMED commit=NOT_STARTED blank=NOT_RUN steps=23 close=FAILED drain=UNCONFIRMED leases=ZERO",
       "primary=COMMIT_UNCONFIRMED rollback=NOT_STARTED commit=UNCONFIRMED blank=NOT_RUN steps=126 close=FAILED drain=UNCONFIRMED leases=ZERO",
       "primary=RESET_FRESH_BLANK_FAILED rollback=NOT_STARTED commit=RETURNED_OK blank=FAILED steps=126 close=OK drain=LOCAL_OK leases=ZERO",

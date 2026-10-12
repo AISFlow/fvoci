@@ -75,13 +75,43 @@ folding and no trailing-dot, port, or userinfo stripping:
 Case variants, a trailing dot, a port, userinfo, a subdomain,
 `fvoci-prod…turso.io`, and any other region are refused before connect. The
 allowlist is that literal, not an Environment variable or dispatch input.
-Before any DROP, reset sums `count(*)` over the PREFIX11 user-data tables:
+For PREFIX11, before any DROP, reset sums `count(*)` over the user-data tables:
 every reset `DROP TABLE` target except the ledger `schema_migrations`, the
 infrastructure singletons `instance_settings_meta`, `event_sequence`,
 `collab_fence_counter`, and `instance_config`, and step-12
 `maintenance_job_claims` (not part of PREFIX11). A non-zero sum refuses and
-drops nothing. No raw SDK/test error body, URL, header,
-token, environment dump or credential-bearing trace is printed or uploaded.
+drops nothing. For current12, reset instead requires exactly the migration
+consumer's retained structural fixture, checked on the same reserved writer:
+
+- The complete ledger and catalog match the compiled current12 lineage and
+  per-step hashes. Every table in that verified catalog is accounted for by
+  the literal drop plan; a newly compiled table without a reset plan refuses.
+- Exactly one workspace has slug `turso-migration`, name
+  `Turso populated011 literal`, settings `{}`, kind `team`, no deletion,
+  document number zero and auto-join domains `[]`. Its ID has UUIDv7 version
+  and RFC4122 variant bits. The embedded millisecond time is no later than the
+  first ledger receipt: the consumer chooses its UUID before migrations.
+  `created_at` equals `updated_at` and lies between the step11 and step12
+  receipts. There is no lower bound on UUID time; the remaining literal fields,
+  catalog, empty tables and seeds carry the structural identification.
+- Every other user-data table is empty. Infrastructure is exactly settings
+  revision zero, event sequence zero, fence counter17 and null VAPID keys,
+  each under singleton ID1. Claim keys are exactly1–9, owner/expiry null,
+  generation7 for key8 and zero for every other key.
+
+Any other current12 data or a failed fixture query refuses with
+`RESET_FIXTURE_REFUSED`, before any DROP. This is structural fixture matching,
+not proof of which process originally wrote matching data. UI ACK data,
+another workspace and any extra user row are retained by refusal. Unsupported
+or altered schemas still return `RESET_SCHEMA_REFUSED`. All admission and DDL
+share the original transaction. Only a confirmed commit permits the fresh
+connection's complete blank-catalog check; an uncertain commit stops without
+an alternate observer or retry.
+
+Manual phase `reset` keeps both destructive gates and the exact selected test
+`db::turso_test::turso_primary_disposable_prefix11_reset`; its historical name
+also covers the admitted current12 fixture. No raw SDK/test error body, URL,
+header, token, environment dump or credential-bearing trace is printed or uploaded.
 
 Default phase `connection` requires `destructive=false` and makes no schema/data
 mutation even if ALLOW_DESTRUCTIVE is missing or true. It explicitly executes
@@ -165,6 +195,34 @@ Only confirmed commits advance; remote uncertain commit/rollback stops without
 fresh-observer reconciliation or blind retry. Successful close is product owner
 drain/zero active leases, not an unexposed server Close ACK. The uniquely
 identified test workspace and current schema remain retained for the lead's inspection.
+
+Local reset controls use the pinned official sqld binary selected through
+`FVOCI_TEST_SQLD`; the existing fixture verifies its digest and owns each
+temporary database and daemon. With the maintained native SQLite inputs
+prepared, run the automatic controls from the repository root:
+
+```sh
+cargo fmt --check
+cargo test --locked --offline --features db-tests --lib db::turso_test
+```
+
+To explicitly select only the loopback reset controls, set the local fixture
+binary and disk-backed `TMPDIR`, then run:
+
+```sh
+FVOCI_TEST_TURSO_MIGRATION_SELECTED=1 \
+FVOCI_TEST_TURSO_PHASE=migration \
+FVOCI_TEST_TURSO_DESTRUCTIVE=true \
+FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=true \
+cargo test --locked --offline --features db-tests --lib \
+  db::turso_test::reset_policy_tests::reset_ -- --ignored --test-threads=1
+```
+
+These controls need no Turso credentials and do not select the remote reset
+consumer. They cover PREFIX11 preservation/reset, current12 fixture reset,
+fixture counterexamples with unchanged persisted rows/catalog, and a lost
+commit reply without a fresh blank observer. Loopback sqld is separate from
+the pinned local SQLite engine and actual Turso acceptance.
 
 Other phases (`crud`, `transactions`, `persistence`, `restore`) remain
 **NOT IMPLEMENTED** and refuse before credential consumption. `ui-ack` is an
