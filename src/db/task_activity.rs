@@ -476,6 +476,232 @@ pub async fn list_task_activity(
     }))
 }
 
+pub async fn list_task_activity_backend(
+    backend: &crate::db::backend::Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    task: Uuid,
+    query: ActivityListQuery,
+) -> Result<Result<TaskActivityListPage, TaskActivityDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTx, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return list_task_activity(pool, workspace, actor, credential, task, query).await;
+    }
+    if !(1..=100).contains(&query.limit) {
+        return Ok(Err(TaskActivityDbError::InvalidInput));
+    }
+    let scope = activity_scope(workspace, task, query.filter);
+    let after = match query.cursor.as_deref() {
+        Some(raw) => match decode_activity_cursor(raw, &scope) {
+            Ok(cursor) => Some(cursor),
+            Err(_) => return Ok(Err(TaskActivityDbError::InvalidCursor)),
+        },
+        None => None,
+    };
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if crate::db::task_ops::family_time_capability(family, workspace, task, actor, credential)
+            .await?
+            .is_err()
+        {
+            return Ok(Err(TaskActivityDbError::NotFound));
+        }
+        let positions=family.query("SELECT id,kind FROM (SELECT id,'change' AS kind,created_at FROM task_activity WHERE workspace_id=?1 AND task_id=?2 AND ?4 UNION ALL SELECT id,'comment' AS kind,created_at FROM comments WHERE workspace_id=?1 AND task_id=?2 AND ?5) WHERE ?6 IS NULL OR (created_at,id,kind)<(?6,?7,?8) ORDER BY created_at DESC,id DESC,kind DESC LIMIT ?3",&[Cell::uuid(workspace),Cell::uuid(task),Cell::Integer(i64::from(query.limit)+1),Cell::Integer(i64::from(query.filter!=ActivityFilter::Comments)),Cell::Integer(i64::from(query.filter!=ActivityFilter::Changes)),after.as_ref().map(|c|Cell::instant(c.at)).transpose()?.unwrap_or(Cell::Null),Cell::optional_uuid(after.as_ref().map(|c|c.id)),Cell::optional_text(after.as_ref().map(|c|c.item_type.as_str()))]).await?;
+
+        let has_more = positions.len() > query.limit as usize;
+        let mut changes = HashMap::new();
+        let mut comments = HashMap::new();
+        let mut people_ids = HashSet::new();
+        let mut ordered = Vec::new();
+        for position in positions.iter().take(query.limit as usize) {
+            let id = position.cell(0)?.id()?;
+            let kind = position.cell(1)?.string()?;
+            if kind == "change" {
+                let rows=family.query("SELECT id,actor_user_id,channel,kind,changes,created_at FROM task_activity WHERE workspace_id=?1 AND task_id=?2 AND id=?3",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(id)]).await?;
+                let r = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+
+                let activity = TaskActivityRow {
+                    id,
+                    actor_user_id: r.cell(1)?.optional(Cell::id)?,
+                    channel: r.cell(2)?.string()?,
+                    kind: r.cell(3)?.string()?,
+                    changes: r.cell(4)?.value()?,
+                    created_at: r.cell(5)?.datetime()?,
+                };
+                people_ids.extend(activity.actor_user_id);
+
+                for change in activity.changes.as_array().into_iter().flatten() {
+                    if change.get("field").and_then(Value::as_str) == Some("assigneeIds") {
+                        for key in ["from", "to"] {
+                            for item in change
+                                .get(key)
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .take(50)
+                            {
+                                people_ids.extend(
+                                    item.get("id")
+                                        .and_then(Value::as_str)
+                                        .and_then(|s| Uuid::parse_str(s).ok()),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                changes.insert(id, activity);
+            } else {
+                let comment = family_activity_comment(family, workspace, task, id)
+                    .await?
+                    .ok_or(sqlx::Error::RowNotFound)?;
+                people_ids.insert(comment.created_by);
+                comments.insert(id, comment);
+            }
+
+            ordered.push((id, kind));
+        }
+        let mut parents = HashMap::new();
+        for parent in comments
+            .values()
+            .filter_map(|c| c.parent_id)
+            .collect::<HashSet<_>>()
+        {
+            if let Some(comment) = family_activity_comment(family, workspace, task, parent).await? {
+                people_ids.insert(comment.created_by);
+                parents.insert(parent, comment);
+            }
+        }
+
+        let mut people = HashMap::new();
+        for id in people_ids {
+            let rows=family.query("SELECT u.given_name,u.family_name FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=?1 AND u.id=?2 AND u.deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(id)]).await?;
+            if let Some(row) = rows.first() {
+                let given = row.cell(0)?.string()?;
+                let surname = row.cell(1)?.optional(Cell::string)?;
+                let name = match surname {
+                    Some(s) if !s.is_empty() => format!("{given} {s}"),
+                    _ => given,
+                };
+                people.insert(id, ActivityActorOutput { id, name });
+            }
+        }
+
+        let mut items = Vec::new();
+        for (id, kind) in ordered {
+            if kind == "change" {
+                let activity = changes.remove(&id).ok_or(sqlx::Error::RowNotFound)?;
+                let mut enriched = Vec::new();
+                for change in activity.changes.as_array().into_iter().flatten() {
+                    let Some(obj) = change.as_object() else {
+                        continue;
+                    };
+                    let field = obj.get("field").and_then(Value::as_str).unwrap_or("");
+                    let mut map = obj.clone();
+                    for key in ["from", "to"] {
+                        let value = obj.get(key).cloned().unwrap_or(Value::Null);
+                        let value = if let Some(values) = value.as_array() {
+                            let mapped=values.iter().take(50).map(|item|if field!="assigneeIds"{item.clone()}
+    else{json!({"id":item.get("id").cloned().unwrap_or(Value::Null),"label":item.get("id").and_then(Value::as_str).and_then(|s|Uuid::parse_str(s).ok()).and_then(|id|people.get(&id)).map(|p|p.name.clone())}
+    )}
+    ).collect::<Vec<_>>();
+                            json!({"items":mapped,"totalCount":values.len()}
+                            )
+                        } else if field == "parentId" {
+                            if let Some(parent) = value
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .and_then(|s| Uuid::parse_str(s).ok())
+                            {
+                                let rows=family.query("SELECT project_id,title FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(parent)]).await?;
+                                let title = if let Some(row) = rows.first() {
+                                    if OperationTx::SqliteFamily(&mut *family)
+                                        .project_permission_by_id(workspace, actor, row.cell(0)?.id()?)
+                                        .await?
+                                        .is_some_and(|p| p.at_least(ProjectPermission::View))
+                                    {
+                                        Some(row.cell(1)?.string()?)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                json!({"id":parent.to_string(),"label":title}
+                                )
+                            } else {
+                                value
+                            }
+                        } else {
+                            value
+                        };
+                        map.insert(key.into(), value);
+                    }
+                    enriched.push(Value::Object(map));
+                }
+
+                items.push(TaskActivityOutputItem::Change(TaskActivityChangeOutput {
+                    id,
+                    created_at: activity.created_at,
+                    actor: actor_output(activity.actor_user_id, &people),
+                    channel: activity.channel,
+                    kind: activity.kind,
+                    changes: enriched,
+                }));
+            } else {
+                let comment = comments.remove(&id).ok_or(sqlx::Error::RowNotFound)?;
+                let parent = comment.parent_id.and_then(|id| parents.get(&id)).map(|p| {
+                    TaskActivityCommentParentOutput {
+                        id: p.id,
+                        body: p.body.chars().take(200).collect(),
+                        actor: actor_output(Some(p.created_by), &people),
+                    }
+                });
+                items.push(TaskActivityOutputItem::Comment(TaskActivityCommentOutput {
+                    actor: actor_output(Some(comment.created_by), &people),
+                    comment,
+                    parent,
+                }));
+            }
+        }
+
+        Ok(Ok(TaskActivityListPage {
+            items,
+            has_more,
+            scope,
+        }))
+    }.await;
+    // Reads release the original snapshot on all paths, retaining cleanup failures.
+    if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(e) => Some(Box::new(e)),
+            Ok(Err(e)) => Some(Box::new(ActivityReadRefusal(e))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+#[derive(Debug, thiserror::Error)]
+#[error("task activity refused: {0:?}")]
+struct ActivityReadRefusal(TaskActivityDbError);
+async fn family_activity_comment(
+    tx: &mut crate::db::backend::FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    id: Uuid,
+) -> Result<Option<CommentRow>, sqlx::Error> {
+    use crate::db::codec::Cell;
+    tx.query("SELECT id,workspace_id,document_id,task_id,parent_id,created_by,body,resolved_at,reactions,created_at,updated_at FROM comments WHERE workspace_id=?1 AND task_id=?2 AND id=?3",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(id)]).await?.first().map(|r|Ok(CommentRow{id:r.cell(0)?.id()?,workspace_id:r.cell(1)?.id()?,document_id:r.cell(2)?.optional(Cell::id)?,task_id:r.cell(3)?.optional(Cell::id)?,parent_id:r.cell(4)?.optional(Cell::id)?,created_by:r.cell(5)?.id()?,body:r.cell(6)?.string()?,resolved_at:r.cell(7)?.optional(Cell::datetime)?,reactions:r.cell(8)?.value()?,created_at:r.cell(9)?.datetime()?,updated_at:r.cell(10)?.datetime()?})).transpose()
+}
+
 struct TaskActivityRow {
     id: Uuid,
     actor_user_id: Option<Uuid>,

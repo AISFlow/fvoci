@@ -226,6 +226,146 @@ pub async fn get_project_task_layout(
     })))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn get_project_task_layout_backend(
+    backend: &crate::db::backend::Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    layout: &ParsedTaskLayoutQuery,
+    query: &ParsedTaskListQuery,
+) -> Result<Result<GanttLayoutOutput, ProjectDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTx, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return get_project_task_layout(pool, workspace, project, actor, credential, layout, query)
+            .await;
+    }
+    let range = month_range(layout.year, layout.month, layout.week_starts_on)
+        .ok_or(sqlx::Error::RowNotFound)?;
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let page = match crate::db::tasks::family_layout_tasks(
+            family, workspace, project, actor, credential, query,
+        )
+        .await?
+        {
+            Ok(page) => page,
+            Err(e) => return Ok(Err(e)),
+        };
+        let permission = OperationTx::SqliteFamily(&mut *family)
+            .project_permission_by_id(workspace, actor, project)
+            .await?
+            .unwrap_or(ProjectPermission::None);
+        let status = family
+            .query(
+                "SELECT status FROM projects WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(project)],
+            )
+            .await?;
+        let can_edit =
+            permission.at_least(ProjectPermission::Edit) && status[0].cell(0)?.string()? != "archived";
+        let truncated = page.items.len() > 500;
+        let items = page.items.into_iter().take(500).collect::<Vec<_>>();
+        let ids = items
+            .iter()
+            .map(|i| i.meta.id)
+            .collect::<std::collections::HashSet<_>>();
+        let rows=family.query("SELECT d.blocker_id,d.blocked_id,d.type,d.lag_days FROM task_dependencies d JOIN tasks a ON a.workspace_id=d.workspace_id AND a.id=d.blocker_id JOIN tasks b ON b.workspace_id=d.workspace_id AND b.id=d.blocked_id WHERE d.workspace_id=?1 AND a.project_id=?2 AND b.project_id=?2",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+
+        let mut links = Vec::new();
+        for row in rows {
+            let blocker_id = row.cell(0)?.id()?;
+            let blocked_id = row.cell(1)?.id()?;
+            if !ids.contains(&blocker_id) || !ids.contains(&blocked_id) {
+                continue;
+            }
+            let Some(link_type) = LinkType::parse(&row.cell(2)?.string()?) else {
+                continue;
+            };
+            links.push(GanttLinkInput {
+                blocker_id,
+                blocked_id,
+                link_type,
+                lag_days: row.cell(3)?.int32()?,
+            });
+        }
+
+        let holidays = crate::db::tasks::family_holidays(family, workspace)
+            .await?
+            .into_iter()
+            .map(|d| d.to_string())
+            .collect();
+        let tasks = items
+            .iter()
+            .map(|i| {
+                let item = &i.meta;
+                GanttTaskInput {
+                    id: item.id,
+                    title: item.title.clone(),
+                    start: item.start_date.map(|d| d.to_string()),
+                    due: finish_date(item.due_date, item.due_at).map(|d| d.to_string()),
+                    milestone: false,
+                }
+            })
+            .collect();
+
+        let mut item_meta = Vec::new();
+        for i in &items {
+            let item = &i.meta;
+            let due = finish_date(item.due_date, item.due_at);
+            let start = item
+                .start_date
+                .map(|d| d.to_string())
+                .or_else(|| due.map(|d| d.to_string()))
+                .unwrap_or_default();
+            let end = due.map(|d| d.to_string()).unwrap_or_else(|| start.clone());
+
+            item_meta.push(GanttLayoutItemOutput {
+                id: item.id.to_string(),
+                title: item.title.clone(),
+                number: item.number,
+                status_id: item.status_id.to_string(),
+                priority: item.priority.clone(),
+                assignee_ids: crate::db::tasks::family_task_ref_ids(family, workspace, item.id, true)
+                    .await?
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect(),
+                start_date: item.start_date.map(|d| d.to_string()),
+                due_date: item.due_date.map(|d| d.to_string()),
+                due_at: item
+                    .due_at
+                    .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                start,
+                end,
+                milestone: false,
+                inferred: ScheduleInference::None,
+            });
+        }
+        Ok(Ok(prepare_gantt(PrepareInput {
+            tasks,
+            links,
+            holidays,
+            scale_start: range.0,
+            scale_end: range.1,
+            zoom: layout.zoom,
+            px_per_day: layout.px_per_day,
+            lane_height: layout.lane_height,
+            pack: layout.pack,
+            max_lanes: layout.max_lanes,
+            truncated,
+            item_meta,
+            can_edit,
+        })))
+    }.await;
+    crate::db::tasks::finish_task_operation(tx, result).await
+}
+
 struct DepRow {
     blocker_id: Uuid,
     blocked_id: Uuid,
