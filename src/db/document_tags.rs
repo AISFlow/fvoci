@@ -458,7 +458,7 @@ fn family_tag_row(row: &FamilyRow) -> Result<TagRow, sqlx::Error> {
 #[error("tag write refused: {0:?}")]
 struct TagWriteRefusal(TagDbError);
 
-async fn finish_tag_write(tx: DbTx, result: TagResult<TagRow>) -> TagResult<TagRow> {
+async fn finish_tag_write<T>(tx: DbTx, result: TagResult<T>) -> TagResult<T> {
     match result {
         Ok(Ok(tag)) => {
             tx.commit_with_cleanup()
@@ -559,6 +559,61 @@ pub async fn update_tag(
     Ok(Ok(tag))
 }
 
+pub async fn update_tag_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    tag_id: Uuid,
+    name: Option<&str>,
+    color: Option<&str>,
+) -> TagResult<TagRow> {
+    if let Backend::Postgres(pool) = backend {
+        return update_tag(pool, workspace_id, actor, tag_id, name, color).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        let role = match tag_write_member(&mut op, workspace_id, actor).await? {
+            Ok(role) => role,
+            Err(err) => return Ok(Err(err)),
+        };
+        if !at_least(role, WorkspaceRole::Admin) {
+            return Ok(Err(TagDbError::Forbidden));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let rows = family
+            .query(
+                r#"
+SELECT id,workspace_id,name,color,created_at,updated_at FROM document_tags WHERE workspace_id=?1 AND id=?2
+"#,
+                &[Cell::uuid(workspace_id), Cell::uuid(tag_id)],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(TagDbError::NotFound));
+        };
+        let current = family_tag_row(row)?;
+        if let Some(name) = name {
+            if name.to_lowercase() != current.name.to_lowercase() && family_tag_name_taken(family, workspace_id, name).await? {
+                return Ok(Err(TagDbError::Conflict));
+            }
+        }
+        let rows = family
+            .query(
+                r#"
+UPDATE document_tags SET name=coalesce(?3,name),color=coalesce(?4,color),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 RETURNING id,workspace_id,name,color,created_at,updated_at
+"#,
+                &[Cell::uuid(workspace_id), Cell::uuid(tag_id), Cell::optional_text(name), Cell::optional_text(color)],
+            )
+            .await?;
+        let tag = family_tag_row(rows.first().ok_or(sqlx::Error::RowNotFound)?)?;
+        op.append_audit(AuditAppend { id: Uuid::now_v7(), workspace_id: Some(workspace_id), actor_user_id: Some(actor.user_id), verb: "document_tag.updated".into(), target_type: Some("document_tag".into()), target_id: Some(tag_id), payload: json!({"name":tag.name,"color":tag.color}), ip: actor.client_ip.map(|ip| ip.to_string()) }).await?;
+        Ok(Ok(tag))
+    }
+    .await;
+    finish_tag_write(tx, result).await
+}
+
 pub async fn delete_tag(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -593,6 +648,55 @@ pub async fn delete_tag(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn delete_tag_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    tag_id: Uuid,
+) -> TagResult<()> {
+    if let Backend::Postgres(pool) = backend {
+        return delete_tag(pool, workspace_id, actor, tag_id).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        let role = match tag_write_member(&mut op, workspace_id, actor).await? {
+            Ok(role) => role,
+            Err(e) => return Ok(Err(e)),
+        };
+        if !at_least(role, WorkspaceRole::Admin) {
+            return Ok(Err(TagDbError::Forbidden));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        let rows = family
+            .query(
+                "DELETE FROM document_tags WHERE workspace_id=?1 AND id=?2 RETURNING name",
+                &[Cell::uuid(workspace_id), Cell::uuid(tag_id)],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(TagDbError::NotFound));
+        };
+        let name = row.cell(0)?.string()?;
+        op.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace_id),
+            actor_user_id: Some(actor.user_id),
+            verb: "document_tag.deleted".into(),
+            target_type: Some("document_tag".into()),
+            target_id: Some(tag_id),
+            payload: json!({"name":name}),
+            ip: actor.client_ip.map(|ip| ip.to_string()),
+        })
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_tag_write(tx, result).await
 }
 
 async fn require_document(
@@ -882,6 +986,55 @@ pub async fn unassign_tag(
     }
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn unassign_tag_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    document_id: Uuid,
+    affiliation: Affiliation,
+    tag_id: Uuid,
+) -> TagResult<()> {
+    if let Backend::Postgres(pool) = backend {
+        return unassign_tag(pool, workspace_id, actor, document_id, affiliation, tag_id).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        if let Err(e) = tag_write_member(&mut op, workspace_id, actor).await? {
+            return Ok(Err(e));
+        }
+        op.lock_tree(workspace_id).await?;
+        let Some(document) = op.document_row(workspace_id, document_id).await? else {
+            return Ok(Err(TagDbError::NotFound));
+        };
+        let (permission, archived) = if let Some(project) = document.8 { op.share_lock_project_permission(workspace_id, actor.user_id, project).await?.unwrap_or((crate::projects::ProjectPermission::None, false)) } else { (op.document_permission(workspace_id, actor.user_id, document_id, true).await?, false) };
+        if !permission.at_least(crate::projects::ProjectPermission::View) {
+            return Ok(Err(TagDbError::NotFound));
+        }
+        if !permission.at_least(crate::projects::ProjectPermission::Edit) {
+            return Ok(Err(TagDbError::Forbidden));
+        }
+        if archived {
+            return Ok(Err(TagDbError::ProjectArchived));
+        }
+        if document.8
+            != match affiliation {
+                Affiliation::Wiki => None,
+                Affiliation::Project(id) => Some(id),
+            }
+        {
+            return Ok(Err(TagDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        if family.execute("DELETE FROM document_tag_assignments WHERE workspace_id=?1 AND document_id=?2 AND tag_id=?3", &[Cell::uuid(workspace_id), Cell::uuid(document_id), Cell::uuid(tag_id)]).await? == 0 {
+            return Ok(Err(TagDbError::NotFound));
+        }
+        Ok(Ok(()))
+    }
+    .await;
+    finish_tag_write(tx, result).await
 }
 
 /// Tree `?tag=` filter: ids of documents carrying the tag.

@@ -181,7 +181,7 @@ pub async fn authorize_document_backend(
 }
 
 impl OperationTx<'_, '_> {
-    async fn authorize_document_current_scope(
+    pub(crate) async fn authorize_document_current_scope(
         &mut self,
         target: (Uuid, Uuid),
         actor: Uuid,
@@ -326,6 +326,48 @@ pub async fn list_project_ancestors(
             },
         )
         .collect()))
+}
+
+pub async fn list_project_ancestors_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    document_id: Uuid,
+) -> Result<Result<Vec<AncestorCrumb>, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_project_ancestors(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            document_id,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        let meta = match op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, DocumentScope::Project(project_id), ProjectPermission::View).await? {
+            Ok(meta) => meta,
+            Err(e) => return Ok(Err(e)),
+        };
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        let rows = family
+            .query(
+                r#"
+SELECT id,title,icon,path,project_id,number FROM documents WHERE workspace_id=?1 AND id<>?2 AND substr(?3,1,length(path)+1)=path||'.' ORDER BY length(path)-length(replace(path,'.',''))
+"#,
+                &[Cell::uuid(workspace_id), Cell::uuid(document_id), Cell::text(meta.path)],
+            )
+            .await?;
+        Ok(Ok(rows.iter().map(|row| Ok(AncestorCrumb { id: row.cell(0)?.id()?, title: row.cell(1)?.string()?, icon: row.cell(2)?.optional(Cell::string)?, path: row.cell(3)?.string()?, project_id: row.cell(4)?.optional(Cell::id)?, number: row.cell(5)?.int32()? })).collect::<Result<Vec<_>, sqlx::Error>>()?))
+    }
+    .await;
+    finish_document_operation(tx, result).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,6 +527,142 @@ pub async fn list_document_backlinks(
     // Source orders by the reference row id; the referencing item id is ours.
     items.sort_by_key(|item| item.id);
     Ok(Ok(items))
+}
+
+pub async fn list_document_backlinks_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    scope: DocumentScope,
+    document_id: Uuid,
+) -> Result<Result<Vec<Backlink>, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_document_backlinks(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            scope,
+            document_id,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if let Err(e) = op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, scope, ProjectPermission::View).await? {
+            return Ok(Err(e));
+        }
+        let mut items = Vec::new();
+        for task in [false, true] {
+            let mut after = None;
+            loop {
+                let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+                let rows = family
+                    .query(
+                        if task {
+                            r#"
+SELECT t.id,t.title,t.project_id,t.number,p.key,t.content_json FROM tasks t LEFT JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.deleted_at IS NULL AND (?2 IS NULL OR t.id>?2) ORDER BY t.id LIMIT 128
+"#
+                        } else {
+                            r#"
+SELECT d.id,d.title,d.project_id,d.number,p.key,d.content_json FROM documents d LEFT JOIN projects p ON p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND (?2 IS NULL OR d.id>?2) ORDER BY d.id LIMIT 128
+"#
+                        },
+                        &[Cell::uuid(workspace_id), Cell::optional_uuid(after)],
+                    )
+                    .await?;
+                for row in &rows {
+                    let id = row.cell(0)?.id()?;
+                    after = Some(id);
+                    if !task && id == document_id {
+                        continue;
+                    }
+                    let content = row.cell(5)?.value()?;
+                    if !crate::collab::derived_body::extract_internal_refs(&content).iter().any(|r| r.kind == crate::collab::derived_body::InternalRefKind::Document && Uuid::parse_str(&r.id).ok() == Some(document_id)) {
+                        continue;
+                    }
+                    let project = row.cell(2)?.optional(Cell::id)?;
+                    if !family_can_view_document(&mut op, workspace_id, actor_user_id, id, project).await? {
+                        continue;
+                    }
+                    let key = row.cell(4)?.optional(Cell::string)?;
+                    let number = row.cell(3)?.int32()?;
+                    items.push(Backlink {
+                        kind: if task { BacklinkKind::Task } else { BacklinkKind::Document },
+                        id,
+                        title: row.cell(1)?.string()?,
+                        display_id: match project {
+                            None => Some(format_display_id("WIKI", number)),
+                            Some(_) => key.map(|key| format_display_id(&key, number)),
+                        },
+                    });
+                }
+                if rows.len() < 128 {
+                    break;
+                }
+            }
+        }
+        items.sort_by_key(|item| item.id);
+        Ok(Ok(items))
+    }
+    .await;
+    finish_document_operation(tx, result).await
+}
+
+async fn family_can_view_document(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    document: Uuid,
+    project: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    Ok(match project {
+        None => op
+            .document_permission(workspace, actor, document, true)
+            .await?
+            .at_least(ProjectPermission::View),
+        Some(project) => op
+            .project_permission_by_id(workspace, actor, project)
+            .await?
+            .is_some_and(|p| p.at_least(ProjectPermission::View)),
+    })
+}
+
+async fn family_source_body(
+    family: &mut crate::db::backend::FamilyTx,
+    workspace: Uuid,
+    document: Uuid,
+) -> Result<Option<SourceBody>, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    let rows=family.query("SELECT ds.state,ds.encoding,u.payload FROM document_states ds LEFT JOIN document_collab_updates u ON u.workspace_id=ds.workspace_id AND u.document_id=ds.document_id AND u.seq>ds.snapshot_cutoff_seq AND u.seq<=ds.tail_seq WHERE ds.workspace_id=?1 AND ds.document_id=?2 ORDER BY u.seq", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    if let Some(row) = rows.first() {
+        if row.cell(1)?.integer()? != i64::from(COLLAB_STATE_ENCODING_V1) {
+            return Ok(None);
+        }
+        return Ok(Some(SourceBody::Collab {
+            snapshot: row.cell(0)?.bytes()?,
+            tail: rows
+                .iter()
+                .filter_map(|r| match r.cell(2).and_then(|c| c.optional(Cell::bytes)) {
+                    Ok(None) => None,
+                    Ok(Some(bytes)) => Some(Ok(bytes)),
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }));
+    }
+    family
+        .query(
+            "SELECT content_json FROM documents WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace), Cell::uuid(document)],
+        )
+        .await?
+        .first()
+        .map(|row| Ok(SourceBody::Json(row.cell(0)?.value()?)))
+        .transpose()
 }
 
 async fn can_view_project(
@@ -711,6 +889,69 @@ pub async fn load_duplicate_sources(
     }
     tx.commit().await?;
     Ok(Ok(sources))
+}
+
+pub async fn load_duplicate_sources_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    scope: DocumentScope,
+    document_id: Uuid,
+    include_children: bool,
+) -> Result<Result<Vec<DuplicateSource>, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return load_duplicate_sources(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            scope,
+            document_id,
+            include_children,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if let Err(e) = op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, scope, ProjectPermission::Edit).await? {
+            return Ok(Err(e));
+        }
+        let mut sources = Vec::new();
+        let mut stack = vec![(document_id, None)];
+        while let Some((id, parent)) = stack.pop() {
+            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+            let Some(body) = family_source_body(family, workspace_id, id).await? else {
+                if parent.is_none() {
+                    return Ok(Err(DocumentDbError::NotFound));
+                }
+                continue;
+            };
+            sources.push(DuplicateSource { id, parent_in_copy: parent, body });
+            if !include_children {
+                break;
+            }
+            let rows = family
+                .query(
+                    r#"
+SELECT id,project_id FROM documents WHERE workspace_id=?1 AND parent_id=?2 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY,id
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(id)],
+                )
+                .await?;
+            for row in rows.iter().rev() {
+                let kid = row.cell(0)?.id()?;
+                if family_can_view_document(&mut op, workspace_id, actor_user_id, kid, row.cell(1)?.optional(Cell::id)?).await? {
+                    stack.push((kid, Some(id)));
+                }
+            }
+        }
+        Ok(Ok(sources))
+    }
+    .await;
+    finish_document_operation(tx, result).await
 }
 
 type CopyRow = (
@@ -1058,6 +1299,188 @@ pub async fn commit_duplicate(
     Ok(Ok(meta))
 }
 
+pub async fn commit_duplicate_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    scope: DocumentScope,
+    title_override: Option<&str>,
+    sources: &[DuplicateSource],
+    bodies: &[DuplicateBody],
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return commit_duplicate(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            scope,
+            title_override,
+            sources,
+            bodies,
+            client_ip,
+        )
+        .await;
+    }
+    let Some(root) = sources.first() else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    let body_of: HashMap<_, _> = bodies.iter().map(|b| (b.source_id, b)).collect();
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        op.lock_membership_users(&[actor_user_id]).await?;
+        if !op.recheck_session(actor_user_id, session_id).await? {
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+        op.lock_tree(workspace_id).await?;
+        if let Err(e) = op.authorize_document_current_scope((workspace_id, root.id), actor_user_id, session_id, scope, ProjectPermission::Edit).await? {
+            return Ok(Err(e));
+        }
+        if scope.project_id().is_none() && !crate::db::documents::wiki_can_edit(op.membership_role(workspace_id, actor_user_id, true).await?) {
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+        let mut copied: HashMap<Uuid, (Uuid, String)> = HashMap::new();
+        let mut root_copy = None;
+        for source in sources {
+            let Some(body) = body_of.get(&source.id) else {
+                continue;
+            };
+            let Some(current) = op.document_row(workspace_id, source.id).await? else {
+                if source.parent_in_copy.is_none() {
+                    return Ok(Err(DocumentDbError::NotFound));
+                }
+                continue;
+            };
+            if current.8 != scope.project_id() {
+                if source.parent_in_copy.is_none() {
+                    return Ok(Err(DocumentDbError::NotFound));
+                }
+                continue;
+            }
+            let (parent, title, sort, parent_path) = match source.parent_in_copy {
+                None => {
+                    if scope.project_id().is_some() && current.6.is_none() {
+                        return Ok(Err(DocumentDbError::AffiliationMismatch));
+                    }
+                    let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+                    let next = family
+                        .query(
+                            r#"
+SELECT sort_key FROM documents WHERE workspace_id=?1 AND parent_id IS ?2 AND deleted_at IS NULL AND sort_key COLLATE BINARY>?3 ORDER BY sort_key COLLATE BINARY LIMIT 1
+"#,
+                            &[Cell::uuid(workspace_id), Cell::optional_uuid(current.6), Cell::text(&current.7)],
+                        )
+                        .await?;
+                    let next = next.first().map(|r| r.cell(0)?.string()).transpose()?;
+                    let Ok(sort) = between(Some(&current.7), next.as_deref()) else {
+                        return Ok(Err(DocumentDbError::InvalidSortKey));
+                    };
+                    let path = match current.6 {
+                        None => None,
+                        Some(parent) => {
+                            let Some((_, path, _)) = op.wiki_parent(workspace_id, parent).await? else {
+                                return Ok(Err(DocumentDbError::NotFound));
+                            };
+                            Some(path)
+                        }
+                    };
+                    (current.6, title_override.map(str::to_string).unwrap_or_else(|| duplicate_title(&current.2)), sort, path)
+                }
+                Some(source_parent) => {
+                    let Some((parent, path)) = copied.get(&source_parent).cloned() else {
+                        continue;
+                    };
+                    if !family_can_view_document(&mut op, workspace_id, actor_user_id, source.id, current.8).await? {
+                        continue;
+                    }
+                    let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+                    let rows = family
+                        .query(
+                            r#"
+SELECT sort_key FROM documents WHERE workspace_id=?1 AND parent_id=?2 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY DESC LIMIT 1
+"#,
+                            &[Cell::uuid(workspace_id), Cell::uuid(parent)],
+                        )
+                        .await?;
+                    let last = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
+                    let Ok(sort) = between(last.as_deref(), None) else {
+                        return Ok(Err(DocumentDbError::InvalidSortKey));
+                    };
+                    (Some(parent), current.2, sort, Some(path))
+                }
+            };
+            let id = Uuid::now_v7();
+            let path = parent_path.map_or_else(|| to_path_label(id), |path| format!("{path}.{}", to_path_label(id)));
+            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+            let number = if let Some(project) = current.8 {
+                family
+                    .query(
+                        r#"
+UPDATE projects SET next_number=next_number+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND next_number<2147483647 RETURNING next_number-1
+"#,
+                        &[Cell::uuid(workspace_id), Cell::uuid(project)],
+                    )
+                    .await?
+            } else {
+                family
+                    .query(
+                        r#"
+UPDATE workspaces SET next_document_number=next_document_number+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND deleted_at IS NULL AND next_document_number<2147483647 RETURNING next_document_number
+"#,
+                        &[Cell::uuid(workspace_id)],
+                    )
+                    .await?
+            };
+            let number = number.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()?;
+            family
+                .execute(
+                    r#"
+INSERT INTO documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,text,chosung,created_by,kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'draft',?10,?11,?12,?13,?14,'doc')
+"#,
+                    &[Cell::uuid(id), Cell::uuid(workspace_id), Cell::text(&title), Cell::optional_text(current.4.as_deref()), Cell::text(&path), Cell::optional_uuid(parent), Cell::text(sort), Cell::optional_uuid(current.8), Cell::Integer(i64::from(number)), Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)), Cell::json(&body.content_json)?, Cell::text(&body.text), Cell::text(&body.chosung), Cell::uuid(actor_user_id)],
+                )
+                .await?;
+            family
+                .execute(
+                    r#"
+INSERT INTO document_states(workspace_id,document_id,state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq) VALUES(?1,?2,?3,?4,0,0,0)
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(id), Cell::Blob(body.seed.clone()), Cell::Integer(i64::from(COLLAB_STATE_ENCODING_V1))],
+                )
+                .await?;
+            family
+                .execute(
+                    r#"
+INSERT INTO document_tag_assignments(workspace_id,document_id,tag_id) SELECT workspace_id,?3,tag_id FROM document_tag_assignments WHERE workspace_id=?1 AND document_id=?2
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(source.id), Cell::uuid(id)],
+                )
+                .await?;
+            op.record_document_event_and_audit(workspace_id, actor_user_id, "document.created", id, json!({"documentId":id.to_string(),"parentId":parent.map(|id|id.to_string()),"title":title,"projectId":current.8.map(|id|id.to_string()),"duplicatedFrom":source.id.to_string()}), client_ip).await?;
+            copied.insert(source.id, (id, path));
+            if source.parent_in_copy.is_none() {
+                root_copy = Some(id);
+            }
+        }
+        let Some(root_copy) = root_copy else {
+            return Ok(Err(DocumentDbError::NotFound));
+        };
+        let result = op.authorize_document_current_scope((workspace_id, root_copy), actor_user_id, session_id, scope, ProjectPermission::View).await?;
+        Ok(result.map(|mut meta| {
+            if meta.display_id.is_none() {
+                meta.display_id = Some(format_display_id("WIKI", meta.number));
+            }
+            meta
+        }))
+    }
+    .await;
+    finish_document_operation(tx, result).await
+}
+
 /// Source `workspaceIdForDocument`: the actor's workspace holding the document
 /// (trashed included; the per-route checks decide visibility) and its project.
 pub async fn locate_document(
@@ -1090,6 +1513,80 @@ pub async fn locate_document(
     Ok(None)
 }
 
+pub async fn locate_document_backend(
+    backend: &Backend,
+    actor_user_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<(Uuid, Option<Uuid>)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return locate_document(pool, actor_user_id, document_id).await;
+    }
+    let mut workspaces =
+        crate::db::workspace::list_workspaces_for_user_backend(backend, actor_user_id).await?;
+    workspaces.sort_by_key(|workspace| workspace.id);
+    for workspace in workspaces {
+        let mut tx = backend.begin_read().await?;
+        let result = async {
+            let mut op = tx.operation();
+            op.set_tenant(workspace.id).await?;
+            let OperationTx::SqliteFamily(family) = op else {
+                unreachable!()
+            };
+            family
+                .query(
+                    "SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2",
+                    &[Cell::uuid(workspace.id), Cell::uuid(document_id)],
+                )
+                .await?
+                .first()
+                .map(|r| r.cell(0)?.optional(Cell::id))
+                .transpose()
+        }
+        .await;
+        tx.rollback().await?;
+        if let Some(project) = result? {
+            return Ok(Some((workspace.id, project)));
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("document operation refused: {0:?}")]
+struct DocumentOperationRefusal(DocumentDbError);
+
+pub(crate) async fn finish_document_operation<T>(
+    tx: crate::db::backend::DbTx,
+    result: Result<Result<T, DocumentDbError>, sqlx::Error>,
+) -> Result<Result<T, DocumentDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(value))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(DocumentOperationRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1107,5 +1604,93 @@ mod tests {
         assert_eq!(duplicate_title("회의록"), "회의록 (복사)");
         let long = "가".repeat(300);
         assert_eq!(duplicate_title(&long), long);
+    }
+}
+
+/// Explicit SDK control; this fixture is selected separately from CI cohorts.
+#[cfg(all(test, feature = "db-tests"))]
+mod document_port_sdk_tests {
+    use super::*;
+    use crate::db::backend::{DbTx, RemoteDatabase};
+    use futures_util::FutureExt;
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn official_sqld_document_duplicate_backlinks_tags_and_revocation() {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-document-sdk-{}", Uuid::now_v7()));
+        let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+            .await
+            .unwrap();
+        let db = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::new(2).unwrap(),
+        )));
+        let body = std::panic::AssertUnwindSafe(async {
+        crate::db::migrate::initialize_family_backend_for_test(&db).await.unwrap();
+        let workspace = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let credential = Uuid::now_v7();
+        let mut tx = db.begin_write().await.unwrap();
+        let DbTx::SqliteFamily(family) = &mut tx else { unreachable!() };
+        family.replace_system_context(true);
+        family.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'document-sdk@example.invalid','Owner')", &[Cell::uuid(actor)]).await.unwrap();
+        family.execute("INSERT INTO workspaces(id,slug,name) VALUES(?1,'document-sdk','Documents')", &[Cell::uuid(workspace)]).await.unwrap();
+        family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(workspace), Cell::uuid(actor)]).await.unwrap();
+        family
+            .execute(
+                r#"
+INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'document-sdk-synthetic',(unixepoch()+3600)*1000000)
+"#,
+                &[Cell::uuid(credential), Cell::uuid(actor)],
+            )
+            .await
+            .unwrap();
+        tx.commit_with_cleanup().await.unwrap();
+        let document = crate::db::documents::create_wiki_document_command_backend(&db, workspace, actor, credential, Uuid::now_v7(), crate::db::documents::CreateDocumentInput { parent_id: None, title: "SDK original", icon: None }, None).await.unwrap().unwrap();
+        let tag_actor = crate::db::collections::Actor { user_id: actor, credential_id: credential, client_ip: None };
+        let tag = crate::db::document_tags::create_tag_backend(&db, workspace, &tag_actor, "SDK tag", "red").await.unwrap().unwrap();
+        crate::db::document_tags::assign_tag_backend(&db, workspace, &tag_actor, document.id, crate::db::document_tags::Affiliation::Wiki, tag.id).await.unwrap().unwrap();
+        let sources = load_duplicate_sources_backend(&db, workspace, actor, credential, DocumentScope::Wiki, document.id, false).await.unwrap().unwrap();
+        let json = json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"mention","attrs":{"entity":"document","id":document.id.to_string()}}]}]});
+        let engine = crate::collab::CollabConfig::from_env().expect("native seed helper required");
+        let seed = crate::collab::seed::SeedEngine::new(engine.engine_bin, engine.limits).tiptap_to_yjs_update(&json).await.unwrap();
+        let bodies = vec![DuplicateBody { source_id: document.id, content_json: json.clone(), text: String::new(), chosung: String::new(), seed }];
+        let copy = commit_duplicate_backend(&db, workspace, actor, credential, DocumentScope::Wiki, None, &sources, &bodies, None).await.unwrap().unwrap();
+        let fresh = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(driver.database().await.unwrap(), std::num::NonZeroU32::new(1).unwrap())));
+        let read = authorize_document_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, copy.id, ProjectPermission::View).await.unwrap().unwrap();
+        assert_eq!(read.content_json, json);
+        assert_ne!(copy.id, document.id);
+        let links = list_document_backlinks_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, document.id).await.unwrap().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, copy.id);
+        let tags = crate::db::document_tags::list_document_tags_backend(&fresh, workspace, &tag_actor, copy.id, crate::db::document_tags::Affiliation::Wiki).await.unwrap().unwrap();
+        assert_eq!(tags[0].id, tag.id);
+        assert_eq!(crate::db::document_tags::update_tag_backend(&fresh, workspace, &tag_actor, tag.id, Some("SDK renamed"), None).await.unwrap().unwrap().name, "SDK renamed");
+        crate::db::document_tags::unassign_tag_backend(&fresh, workspace, &tag_actor, copy.id, crate::db::document_tags::Affiliation::Wiki, tag.id).await.unwrap().unwrap();
+        crate::db::document_tags::delete_tag_backend(&fresh, workspace, &tag_actor, tag.id).await.unwrap().unwrap();
+        assert!(matches!(load_duplicate_sources_backend(&fresh, Uuid::now_v7(), actor, credential, DocumentScope::Wiki, document.id, false).await.unwrap(), Err(DocumentDbError::NotFound)));
+        let mut tx = db.begin_write().await.unwrap();
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await.unwrap();
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        family.execute("UPDATE sessions SET revoked_at=unixepoch()*1000000 WHERE id=?1", &[Cell::uuid(credential)]).await.unwrap();
+        tx.commit_with_cleanup().await.unwrap();
+        assert!(matches!(commit_duplicate_backend(&fresh, workspace, actor, credential, DocumentScope::Wiki, None, &sources, &bodies, None).await.unwrap(), Err(DocumentDbError::Forbidden)));
+        fresh.close().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+        let close = db.close().await;
+        let finish = driver.finish().await;
+        if let Err(primary) = body {
+            eprintln!("document SDK cleanup close={close:?} fixture={finish:?}");
+            std::panic::resume_unwind(primary);
+        }
+        close.unwrap();
+        assert!(finish.unwrap().sqld_reaped);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

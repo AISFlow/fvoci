@@ -26,7 +26,7 @@ use crate::attachments::{PreviewParse, PREVIEW_BUSY_RETRY_AFTER_SECS};
 use crate::attachments::{StorageError, TransferMode};
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::db::attachments::{
-    attachment_edit_context, attachment_parent_backend as attachment_parent,
+    attachment_edit_context_backend, attachment_parent_backend as attachment_parent,
     authorize_upload_part_backend as authorize_upload_part,
     commit_upload_part_backend as commit_upload_part, complete_upload_backend as complete_upload,
     create_upload_backend as create_upload, delete_attachment_backend as delete_attachment,
@@ -113,11 +113,15 @@ pub(crate) fn attachment_output(att: &AttachmentRow) -> AttachmentOutput {
 }
 
 fn validate_create_upload(body: &CreateAttachmentUploadBody) -> Result<(), AppError> {
-    if body.name.is_empty() || utf16_len(&body.name) > 255 || body.size_bytes <= 0 {
+    if body.name.is_empty()
+        || body.name.contains('\0')
+        || utf16_len(&body.name) > 255
+        || body.size_bytes <= 0
+    {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     if let Some(mime) = &body.declared_mime {
-        if utf16_len(mime) > 255 {
+        if mime.contains('\0') || utf16_len(mime) > 255 {
             return Err(AppError::from_code(ProblemCode::InvalidInput));
         }
     }
@@ -551,13 +555,8 @@ async fn get_edit_context(
 ) -> Result<Json<AttachmentEditContextOutput>, AppError> {
     let auth = require_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     require_target_scope(&state, &auth, workspace_id, attachment_id, false).await?;
-    let ctx = attachment_edit_context(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/attachments.rs")
-            .map_err(internal)?,
+    let ctx = attachment_edit_context_backend(
+        &state.auth.db.pool,
         workspace_id,
         attachment_id,
         auth.user_id,
@@ -1203,16 +1202,11 @@ async fn get_preview_html(
     .await
     .map_err(internal)?
     .map_err(map_attachment_error)?;
-    let mode = crate::settings::attachment_preview_mode(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/attachments.rs")
-            .map_err(internal)?,
-    )
-    .await
-    .map_err(internal)?;
+    let mode = crate::settings::current_values_backend(&state.auth.db.pool, &state.branding_name)
+        .await
+        .map_err(internal)?
+        .attachment_preview
+        .mode;
     if !preview_html_allowed(&att.name, &att.mime, &mode) {
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
@@ -1222,13 +1216,8 @@ async fn get_preview_html(
             ProblemCode::PreviewNotAvailable,
         )
     };
-    let text = crate::db::attachments::attachment_extract_text(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/attachments.rs")
-            .map_err(internal)?,
+    let text = crate::db::attachments::attachment_extract_text_backend(
+        &state.auth.db.pool,
         workspace_id,
         attachment_id,
     )

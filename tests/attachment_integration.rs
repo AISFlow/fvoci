@@ -149,12 +149,23 @@ async fn apply_grants(pool: &PgPool, role_name: &str) {
 
 async fn app_state_with_storage(app_url: &str, storage_root: PathBuf) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    app_state_with_backend(
+        fvoci_server::db::backend::Backend::Postgres(pool),
+        storage_root,
+    )
+    .await
+}
+
+async fn app_state_with_backend(
+    backend: fvoci_server::db::backend::Backend,
+    storage_root: PathBuf,
+) -> AppState {
     std::fs::create_dir_all(&storage_root).expect("storage root");
     AppState {
         realtime_mode: fvoci_server::config::RealtimeMode::On,
         native_engine: None,
         auth: Arc::new(AuthService {
-            db: Db::new(pool),
+            db: Db::from_backend(backend),
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
@@ -3295,4 +3306,147 @@ async fn proxy_read_timeout_answers_524_without_publishing() {
     edge_task.abort();
     origin_task.abort();
     harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_port_attachment_bytes_edit_preview_current_auth_and_tenant() {
+    use fvoci_server::db::backend::Backend;
+    let directory = std::env::temp_dir().join(format!("fvoci-port-attachments-{}", Uuid::now_v7()));
+    std::fs::create_dir(&directory).unwrap();
+    let database = directory.join("app.db");
+    migrate::run_sqlite_migrations(&database).await.unwrap();
+    let admission = migrate::SqliteAdmission::server(&database).unwrap();
+    let sqlite = pool::connect_sqlite_app(&database, 4).await.unwrap();
+    let state =
+        app_state_with_backend(Backend::Sqlite(sqlite.clone()), directory.join("objects")).await;
+    let app = app_router(state);
+    let(status,setup,cookie)=json_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"admin@example.test","password":"supersecret1","givenName":"Admin","workspaceSlug":"docs","workspaceName":"Docs"})),None).await;
+    assert_eq!(status, StatusCode::CREATED, "{setup}");
+    let cookie = extract_session_cookie(cookie.as_ref().unwrap());
+    let workspace = Uuid::parse_str(setup["workspaceId"].as_str().unwrap()).unwrap();
+    let document = create_document(&app, &cookie, workspace).await;
+    let bytes = b"Literal HWP bytes for download and preview <script>";
+    let uploaded = upload_bytes(
+        &app,
+        &cookie,
+        workspace,
+        &document,
+        "literal.hwp",
+        bytes,
+        Some("application/x-hwp"),
+    )
+    .await;
+    let id = Uuid::parse_str(&uploaded.attachment_id).unwrap();
+    let resource = format!("/api/v1/workspaces/{workspace}/attachments/{id}");
+    let (status, context, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{resource}/edit-context"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{context}");
+    assert_eq!(context["editable"], true);
+    let (status, download, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{resource}/download"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(download, bytes);
+    sqlx::query("UPDATE attachments SET extract_text='<script>literal 😀</script>' WHERE id=?1")
+        .bind(id.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO instance_settings(key,value) VALUES('attachmentPreview','{\"mode\":\"server\"}')")
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let (status, preview, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{resource}/preview-html"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&preview)
+    );
+    let preview = String::from_utf8(preview).unwrap();
+    assert!(preview.contains("&lt;script&gt;literal 😀&lt;/script&gt;"));
+    let observer = pool::connect_sqlite_app(&database, 1).await.unwrap();
+    let row: (String, String) =
+        sqlx::query_as("SELECT status,extract_text FROM attachments WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&observer)
+            .await
+            .unwrap();
+    assert_eq!(row, ("stored".into(), "<script>literal 😀</script>".into()));
+    let (status, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/workspaces/{}/attachments/{id}/edit-context",
+            Uuid::now_v7()
+        ),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{workspace}/documents/{document}/uploads"),
+        Some(json!({"name":"bad\u{0000}name","sizeBytes":1})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let before:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM attachments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)").fetch_one(&observer).await.unwrap();
+    sqlx::query("DELETE FROM memberships WHERE workspace_id=?1")
+        .bind(workspace.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let (status, _, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{resource}/edit-context"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = request(
+        app.clone(),
+        "GET",
+        &format!("{resource}/download"),
+        None,
+        None,
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let after:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM attachments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)").fetch_one(&observer).await.unwrap();
+    assert_eq!(before, after);
+    observer.close().await;
+    sqlite.close().await;
+    drop(app);
+    drop(admission);
+    std::fs::remove_dir_all(directory).unwrap();
 }
