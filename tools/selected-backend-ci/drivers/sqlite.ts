@@ -558,7 +558,8 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
       join(root, "node_modules/playwright/cli.js"),
       restoreSpec,
     );
-    restoreArgs[restoreArgs.indexOf("--config") + 1] = "playwright.config.ts";
+    restoreArgs[restoreArgs.indexOf("--config") + 1] =
+      "e2e-pending/revision-restore-playwright.config.ts";
     const restoreReport = join(run, "restore-playwright-result.private.json");
     const restoreResult = await seam.command(restoreArgs, {
       log: join(run, "restore-browser.log"),

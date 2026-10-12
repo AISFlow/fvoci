@@ -11,7 +11,7 @@ import {
   newCollabContext,
   openEditor,
   persistBody,
-} from "../e2e-pending/collab-helpers";
+} from "./collab-helpers";
 
 type Schema = components["schemas"];
 

@@ -38,7 +38,12 @@ export default defineConfig({
   // Both normal-startup specs are mandatory in the selected companion. Pending
   // specs own their startup and cannot supply either allocated normal server.
   testIgnore:
-    selectedBackend === undefined ? /workspace-(wiki|off)-selected-backend\.spec\.ts/ : [],
+    selectedBackend === undefined
+      ? [
+          /workspace-(wiki|off)-selected-backend\.spec\.ts/,
+          /v060-sqlite-revision-restore\.spec\.ts/,
+        ]
+      : [],
   metadata: {
     selectedBackend: selectedBackend ?? null,
     selectedFlow: selectedBackend ? selectedFlow : null,

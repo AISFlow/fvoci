@@ -35,10 +35,10 @@ const isTrue = (value: unknown) => value === true;
 const wikiSpec = "apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts";
 const offSpec = "apps/web/e2e-pending/workspace-off-selected-backend.spec.ts";
 const offSpecSha256 = "3345890f670f6462a6b14931a335de49b62b3c8355bdeece699d030b2869cff7";
-export const restoreSpec = "e2e/v060-sqlite-revision-restore.spec.ts";
+export const restoreSpec = "e2e-pending/v060-sqlite-revision-restore.spec.ts";
 export const restoreBrowserTitle =
   "SQLite ON revision restore: matching ACK, immutable history and fresh client readback";
-const restoreSpecSha256 = "717d7032a69912507917eb5d7fb94be926b37a59585d1af9864cf1bf73ce9147";
+const restoreSpecSha256 = "20af5a56e6540465bcf8bfdfaaf2db96759244a484cc937441f805afd99fd1f3";
 
 export type Lane = "install" | "postgres" | "sqlite";
 export interface Manifest {
