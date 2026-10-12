@@ -51,6 +51,8 @@ const contracts = {
     "web-native-checks": "select_web_checks",
     "workspace-browser-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
+    "collaboration-main-build": "select_collaboration_main_build",
+    "collaboration-test-build": "select_collaboration_test_build",
     "collaboration-build": "select_collaboration_build",
     "collaboration-install-on": "select_collaboration_install_on",
     "collaboration-postgres-on": "select_collaboration_postgres_on",
@@ -847,7 +849,7 @@ for (const path of ["target", "crates/collab-engine/target"])
         (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
       );
     const ordinary = save("workspace-browser-build"),
-      selected = save("collaboration-build");
+      selected = save(path === "target" ? "collaboration-test-build" : "collaboration-build");
     assert.ok(ordinary.with && selected.with);
     ordinary.with.key = selected.with.key;
     expect(() => {
