@@ -2119,6 +2119,108 @@ async fn reset_user_data_total(family: &mut FamilyTx) -> Result<i64, &'static st
     }
 }
 
+/// The preceding full schema comparator binds this catalog to the compiled
+/// current12 registry. Enumerate every table, and fail closed if the literal
+/// drop plan does not cover that registry exactly (including future tables).
+fn reset_current_user_data_sql(tables: &[String]) -> Result<String, &'static str> {
+    // SQLite identifiers compare without ASCII case. The pinned SDK renders
+    // the keyword table `GROUPS` in uppercase; its full catalog spelling was
+    // already checked by the exact SDK-rendered schema comparator above.
+    let planned: std::collections::BTreeSet<String> = RESET_DROP_STATEMENTS
+        .iter()
+        .filter_map(|statement| {
+            statement
+                .strip_prefix("DROP TABLE IF EXISTS \"")?
+                .strip_suffix("\";")
+        })
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let observed: std::collections::BTreeSet<String> = tables
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    if planned != observed || observed.len() != tables.len() {
+        return Err("RESET_FIXTURE_REFUSED");
+    }
+    let counts: Vec<String> = tables
+        .iter()
+        .filter(|name| !RESET_INFRASTRUCTURE_TABLES.contains(&name.as_str()))
+        .map(|name| format!("(SELECT count(*) FROM \"{name}\")"))
+        .collect();
+    Ok(format!("SELECT {}", counts.join("+")))
+}
+
+async fn reset_current_fixture_admitted(
+    family: &mut FamilyTx,
+    snapshot: &super::migrate::TursoTestSchemaSnapshot,
+) -> Result<(), &'static str> {
+    let matches = async {
+        let tables = family.query(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name", &[]
+        ).await?.iter().map(|row| row.cell(0)?.string()).collect::<Result<Vec<_>, sqlx::Error>>()?;
+        let Ok(sql) = reset_current_user_data_sql(&tables) else { return Ok(false); };
+        // FamilyTx accepts static reviewed SQL. The catalog was verified against
+        // the compiled registry, so this one process-lifetime query cannot vary
+        // by target; no input table name can enter it without that full gate.
+        static USER_ROWS_SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let totals = family.query(USER_ROWS_SQL.get_or_init(|| sql).as_str(), &[]).await?;
+        if totals.len() != 1 || totals[0].cell(0)? != Cell::Integer(1) { return Ok(false); }
+        let rows = family.query(
+            "SELECT id,slug,name,settings,kind,created_at,updated_at,deleted_at,next_document_number,auto_join_domains FROM workspaces", &[]
+        ).await?;
+        let [row] = rows.as_slice() else { return Ok(false); };
+        let workspace = row.cell(0)?.id()?;
+        if workspace.get_version_num() != 7 || workspace.get_variant() != uuid::Variant::RFC4122 {
+            return Ok(false);
+        }
+        let Some(timestamp) = workspace.get_timestamp() else { return Ok(false); };
+        let (seconds, nanos) = timestamp.to_unix();
+        let uuid_millis = u128::from(seconds) * 1000 + u128::from(nanos / 1_000_000);
+        if snapshot.receipts.len() != 12 { return Ok(false); }
+        let first_receipt = snapshot.receipts[0].3;
+        let created_at = row.cell(5)?.integer()?;
+        // The unchanged consumer chooses its UUID before step01, then inserts
+        // the workspace after step11 and before step12. UUID time has no lower
+        // bound: all remaining identity/default/seed cells must match exactly.
+        if first_receipt < 0 || uuid_millis > (first_receipt / 1000) as u128
+            || created_at < snapshot.receipts[10].3 || created_at > snapshot.receipts[11].3
+            || row.cell(6)? != Cell::Integer(created_at)
+            || row.cell(1)? != Cell::text("turso-migration")
+            || row.cell(2)? != Cell::text("Turso populated011 literal")
+            || row.cell(3)? != Cell::text("{}")
+            || row.cell(4)? != Cell::text("team")
+            || row.cell(7)? != Cell::Null
+            || row.cell(8)? != Cell::Integer(0)
+            || row.cell(9)? != Cell::text("[]")
+        { return Ok(false); }
+        let infrastructure = family.query(
+            "SELECT (SELECT count(*) FROM instance_settings_meta),(SELECT count(*) FROM instance_settings_meta WHERE id=1 AND revision=0),(SELECT count(*) FROM event_sequence),(SELECT count(*) FROM event_sequence WHERE id=1 AND last_seq=0),(SELECT count(*) FROM collab_fence_counter),(SELECT count(*) FROM collab_fence_counter WHERE id=1 AND next_fence=17),(SELECT count(*) FROM instance_config),(SELECT count(*) FROM instance_config WHERE id=1 AND vapid_public_key IS NULL AND vapid_private_key IS NULL)", &[]
+        ).await?;
+        if infrastructure.len() != 1 { return Ok(false); }
+        for column in 0..8 {
+            if infrastructure[0].cell(column)? != Cell::Integer(1) { return Ok(false); }
+        }
+        let claims = family.query(
+            "SELECT job_key,generation,owner_token,expires_at FROM maintenance_job_claims ORDER BY job_key", &[]
+        ).await?;
+        if claims.len() != 9 { return Ok(false); }
+        for (index, row) in claims.iter().enumerate() {
+            let key = index as i64 + 1;
+            if row.cell(0)? != Cell::Integer(key)
+                || row.cell(1)? != Cell::Integer(if key == 8 { 7 } else { 0 })
+                || row.cell(2)? != Cell::Null || row.cell(3)? != Cell::Null
+            { return Ok(false); }
+        }
+        Ok::<bool, sqlx::Error>(true)
+    }.await;
+    match matches {
+        Ok(true) => Ok(()),
+        // Query/decode failures also withhold admission; never reflect an SDK
+        // error or data cell through the reset receipt.
+        Ok(false) | Err(_) => Err("RESET_FIXTURE_REFUSED"),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ResetOutcome {
     primary: &'static str,
@@ -2155,15 +2257,31 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
             return Err("CURRENT_LINEAGE_CHANGED");
         }
         let family = remote_family(&mut tx)?;
-        // Bound to the actually observed designated PREFIX11. Full ledger and
-        // catalog validation is BEFORE any drop, on this same writer stream.
-        super::migrate::turso_test_schema_in_writer(family, 11)
+        let ledger = family
+            .query("SELECT count(*) FROM schema_migrations", &[])
             .await
             .map_err(|_| "RESET_SCHEMA_REFUSED")?;
-        // User-data totals are read on this writer before any drop. Non-zero
-        // refuses with steps still 0; infrastructure singletons are not counted.
-        let user_rows = reset_user_data_total(family).await?;
-        reset_user_data_admitted(user_rows)?;
+        let [row] = ledger.as_slice() else {
+            return Err("RESET_SCHEMA_REFUSED");
+        };
+        let schema_steps = match row.cell(0).map_err(|_| "RESET_SCHEMA_REFUSED")? {
+            Cell::Integer(11) => 11,
+            Cell::Integer(12) => 12,
+            _ => return Err("RESET_SCHEMA_REFUSED"),
+        };
+        // Counting chooses only the comparator's expected lineage length.
+        // Full ledger/catalog validation and every data check run BEFORE any
+        // drop on this original writer, never on an alternate observer.
+        let snapshot = super::migrate::turso_test_schema_in_writer(family, schema_steps)
+            .await
+            .map_err(|_| "RESET_SCHEMA_REFUSED")?;
+        if schema_steps == 11 {
+            // Preserve the original PREFIX11 empty-user-data contract.
+            let user_rows = reset_user_data_total(family).await?;
+            reset_user_data_admitted(user_rows)?;
+        } else {
+            reset_current_fixture_admitted(family, &snapshot).await?;
+        }
         for statement in RESET_DROP_STATEMENTS {
             family
                 .execute(statement, &[])
@@ -2224,7 +2342,7 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
 }
 
 #[tokio::test]
-#[ignore = "manual trusted-ref explicitly authorized disposable PREFIX11 reset only"]
+#[ignore = "manual trusted-ref explicitly authorized disposable PREFIX11/current12 fixture reset only"]
 async fn turso_primary_disposable_prefix11_reset() -> Result<(), &'static str> {
     let args: Vec<String> = std::env::args().collect();
     reset_selection(|name| std::env::var(name).ok(), &args)?;
@@ -2711,6 +2829,160 @@ mod reset_policy_tests {
             assert!(!request.contains("SELECT") && !request.contains("ROLLBACK"));
         }
         finish_fixture(driver, root).await;
+    }
+
+    async fn current_reset_fixture() -> (
+        crate::db::libsql_finish_fixture::LibsqlFinishFixture,
+        std::path::PathBuf,
+        Backend,
+    ) {
+        // The consumer generates its ID before the first migration receipt.
+        let workspace = uuid::Uuid::now_v7();
+        let (driver, root, backend) = protocol_fixture().await;
+        super::super::migrate::turso_test_apply_prefix(&backend, 11)
+            .await
+            .unwrap();
+        migration_populate(&backend, workspace).await.unwrap();
+        super::super::migrate::turso_test_apply_prefix(&backend, 12)
+            .await
+            .unwrap();
+        migration_advance_generation(&backend).await.unwrap();
+        migration_preserved_data(&backend, workspace, 12, 7)
+            .await
+            .unwrap();
+        (driver, root, backend)
+    }
+
+    // Raw catalog, ledger and all nonempty fixture/negative-control rows. This
+    // observer uses a fresh stream and also preserves the generated ID/times.
+    async fn current_reset_state(backend: &Backend) -> Vec<Vec<Vec<Cell>>> {
+        let mut tx = backend.begin_write().await.unwrap();
+        let family = remote_family(&mut tx).unwrap();
+        let mut state = Vec::new();
+        for (sql, columns) in [
+            ("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name", 4),
+            ("SELECT version,lineage,sql_sha256,applied_at FROM schema_migrations ORDER BY version", 4),
+            ("SELECT id,slug,name,settings,kind,created_at,updated_at,deleted_at,next_document_number,auto_join_domains FROM workspaces ORDER BY id", 10),
+            ("SELECT id,revision FROM instance_settings_meta ORDER BY id", 2),
+            ("SELECT id,last_seq FROM event_sequence ORDER BY id", 2),
+            ("SELECT id,next_fence FROM collab_fence_counter ORDER BY id", 2),
+            ("SELECT id,vapid_public_key,vapid_private_key FROM instance_config ORDER BY id", 3),
+            ("SELECT job_key,generation,owner_token,expires_at FROM maintenance_job_claims ORDER BY job_key", 4),
+            ("SELECT key,value,updated_at FROM instance_settings ORDER BY key", 3),
+            ("SELECT id,workspace_id,name,created_at,updated_at FROM groups ORDER BY id", 5),
+        ] {
+            state.push(family.query(sql, &[]).await.unwrap().iter().map(|row| {
+                (0..columns).map(|column| row.cell(column).unwrap()).collect()
+            }).collect());
+        }
+        tx.rollback().await.unwrap();
+        state
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_current12_fixture_commits_and_fresh_connection_is_blank() {
+        let (driver, root, backend) = current_reset_fixture().await;
+        let outcome = reset_transaction(&backend).await;
+        let blank = migration_snapshot(&backend, 0).await;
+        close_migration_owner(&backend).await.unwrap();
+        finish_fixture(driver, root).await;
+        assert_eq!(
+            outcome,
+            ResetOutcome {
+                primary: "OK",
+                rollback: "NOT_STARTED",
+                commit: "RETURNED_OK",
+                blank: "CONFIRMED",
+                steps: 126,
+            }
+        );
+        assert!(blank.unwrap().receipts.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_current12_counterexamples_refuse_without_effect() {
+        let cases = [
+            ("extra user row", "INSERT INTO instance_settings(key,value) VALUES('ResetExtra','true')", "RESET_FIXTURE_REFUSED"),
+            ("extra keyword-table row", "INSERT INTO groups(id,workspace_id,name) SELECT X'00000000000070008000000000000002',id,'Retained group' FROM workspaces", "RESET_FIXTURE_REFUSED"),
+            ("extra workspace", "INSERT INTO workspaces(id,slug,name) VALUES(X'00000000000070008000000000000001','other-workspace','User data')", "RESET_FIXTURE_REFUSED"),
+            ("foreign workspace", "UPDATE workspaces SET slug='user-workspace',name='User data'", "RESET_FIXTURE_REFUSED"),
+            ("wrong slug", "UPDATE workspaces SET slug='other-migration'", "RESET_FIXTURE_REFUSED"),
+            ("wrong name", "UPDATE workspaces SET name='User data'", "RESET_FIXTURE_REFUSED"),
+            ("settings", "UPDATE workspaces SET settings='{\"kept\":true}'", "RESET_FIXTURE_REFUSED"),
+            ("kind", "UPDATE workspaces SET kind='personal'", "RESET_FIXTURE_REFUSED"),
+            ("document number", "UPDATE workspaces SET next_document_number=1", "RESET_FIXTURE_REFUSED"),
+            ("join domains", "UPDATE workspaces SET auto_join_domains='[\"example.org\"]'", "RESET_FIXTURE_REFUSED"),
+            ("deleted workspace", "UPDATE workspaces SET deleted_at=created_at", "RESET_FIXTURE_REFUSED"),
+            ("UUID version", "UPDATE workspaces SET id=X'00000000000040008000000000000000'", "RESET_FIXTURE_REFUSED"),
+            ("UUID variant", "UPDATE workspaces SET id=X'00000000000070000000000000000000'", "RESET_FIXTURE_REFUSED"),
+            ("UUID after first receipt", "UPDATE workspaces SET id=X'ffffffffffff70008000000000000000'", "RESET_FIXTURE_REFUSED"),
+            ("updated timestamp", "UPDATE workspaces SET updated_at=created_at+1000", "RESET_FIXTURE_REFUSED"),
+            ("created before step11", "UPDATE workspaces SET created_at=(SELECT applied_at-1000 FROM schema_migrations WHERE version=11),updated_at=(SELECT applied_at-1000 FROM schema_migrations WHERE version=11)", "RESET_FIXTURE_REFUSED"),
+            ("created after step12", "UPDATE workspaces SET created_at=(SELECT applied_at+1000 FROM schema_migrations WHERE version=12),updated_at=(SELECT applied_at+1000 FROM schema_migrations WHERE version=12)", "RESET_FIXTURE_REFUSED"),
+            ("settings revision", "UPDATE instance_settings_meta SET revision=1", "RESET_FIXTURE_REFUSED"),
+            ("event sequence", "UPDATE event_sequence SET last_seq=1", "RESET_FIXTURE_REFUSED"),
+            ("fence counter", "UPDATE collab_fence_counter SET next_fence=18", "RESET_FIXTURE_REFUSED"),
+            ("public config", "UPDATE instance_config SET vapid_public_key='retained-user-key'", "RESET_FIXTURE_REFUSED"),
+            ("private config", "UPDATE instance_config SET vapid_private_key='enc:v2:retained-user-key'", "RESET_FIXTURE_REFUSED"),
+            ("missing claim key", "DELETE FROM maintenance_job_claims WHERE job_key=9", "RESET_FIXTURE_REFUSED"),
+            ("key8 generation", "UPDATE maintenance_job_claims SET generation=6 WHERE job_key=8", "RESET_FIXTURE_REFUSED"),
+            ("other generation", "UPDATE maintenance_job_claims SET generation=1 WHERE job_key=1", "RESET_FIXTURE_REFUSED"),
+            ("claimed job", "UPDATE maintenance_job_claims SET owner_token=X'00000000000070008000000000000000',expires_at=1 WHERE job_key=8", "RESET_FIXTURE_REFUSED"),
+            ("ledger hash", "UPDATE schema_migrations SET sql_sha256='0000000000000000000000000000000000000000000000000000000000000000' WHERE version=1", "RESET_SCHEMA_REFUSED"),
+            ("ledger lineage", "UPDATE schema_migrations SET lineage='foreign-lineage' WHERE version=1", "RESET_SCHEMA_REFUSED"),
+            ("ledger gap", "DELETE FROM schema_migrations WHERE version=6", "RESET_SCHEMA_REFUSED"),
+        ];
+        for (label, mutation, expected) in cases {
+            let (driver, root, backend) = current_reset_fixture().await;
+            let lineage_before = if label == "ledger lineage" {
+                Some(current_reset_state(&backend).await)
+            } else {
+                None
+            };
+            let mut tx = backend.begin_write().await.unwrap();
+            let mutation_result = remote_family(&mut tx).unwrap().execute(mutation, &[]).await;
+            if let Some(before) = lineage_before {
+                // The compiled ledger CHECK itself refuses foreign lineage.
+                // Keep the real SDK parser and constraints enabled.
+                let rejected = mutation_result
+                    .as_ref()
+                    .err()
+                    .is_some_and(primary_only_hrana_constraint);
+                let rollback = tx.rollback().await;
+                let after = current_reset_state(&backend).await;
+                close_migration_owner(&backend).await.unwrap();
+                finish_fixture(driver, root).await;
+                assert!(
+                    rejected,
+                    "foreign lineage must receive the typed CHECK rejection"
+                );
+                assert!(rollback.is_ok());
+                assert_eq!(before, after);
+                continue;
+            }
+            mutation_result.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+            let before = current_reset_state(&backend).await;
+            let outcome = reset_transaction(&backend).await;
+            let after = current_reset_state(&backend).await;
+            close_migration_owner(&backend).await.unwrap();
+            finish_fixture(driver, root).await;
+            // Reap this owned daemon before any red/green assertion.
+            assert!(before == after, "{label}: persisted catalog/rows changed");
+            assert_eq!(
+                outcome,
+                ResetOutcome {
+                    primary: expected,
+                    rollback: "RETURNED_OK",
+                    commit: "NOT_STARTED",
+                    blank: "NOT_RUN",
+                    steps: 0,
+                },
+                "{label}"
+            );
+        }
     }
 
     // Diagnostic categories never participate in the original FK acceptance.

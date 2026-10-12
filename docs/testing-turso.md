@@ -1,7 +1,11 @@
 # Isolated Turso primary connection and migration consumers
 
-The source consumers are prepared; Rust compilation and actual Turso execution are
-**NOT RUN**. Independent review and a separately allocated execution are still required.
+This document describes the current source boundaries and isolated test consumers.
+The acceptance record for Rust compilation and actual Turso execution is the
+[current checkpoint in PR #347](https://github.com/AISFlow/fvoci/pull/347)
+(`<!-- fvoci-current-checkpoint -->`) and [#331](https://github.com/AISFlow/fvoci/issues/331).
+Local checks and historical executions do not establish acceptance for a new head;
+independent review and separately allocated remote execution remain required.
 The integrator (통합) may publish the reviewed fixed source to the single hardcoded branch
 `fvoci/v060-turso-verified-connection` under the same review and approval
 rules as the PR branch in AGENTS.md. Its push bootstrap runs **only pure
@@ -11,12 +15,9 @@ same-repo reviewed branch, checking exact github.sha. Manual dispatch of
 `ui-baseline` or `ui-ack` also admits the #347 branch
 `fvoci/v060-product-integration-20261005`. No free-form checkout input, PR,
 fork, pull_request_target or other ref is allowed. GitHub documents the default-
-branch requirement for manual dispatch. The designated reviewed branch was
-actually dispatched in [run37312388258](https://github.com/AISFlow/fvoci/actions/runs/37312388258)
-at `04d36b34d1a79e7499f87a31646492eea1a1bbfd` and completed the non-destructive
-connection probe. That historical execution proves this branch consumer path,
-not current migration or this candidate. The evidence keeper (증거기록) must record each new exact
-checkout and API acceptance/rejection without an arbitrary-ref/merge fallback.
+branch requirement for manual dispatch. The evidence keeper (증거기록) records
+each exact checkout and API acceptance/rejection in the acceptance record,
+without an arbitrary-ref/merge fallback.
 [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
 Use the user-designated isolated test database. The dedicated Environment is
@@ -74,13 +75,43 @@ folding and no trailing-dot, port, or userinfo stripping:
 Case variants, a trailing dot, a port, userinfo, a subdomain,
 `fvoci-prod…turso.io`, and any other region are refused before connect. The
 allowlist is that literal, not an Environment variable or dispatch input.
-Before any DROP, reset sums `count(*)` over the PREFIX11 user-data tables:
+For PREFIX11, before any DROP, reset sums `count(*)` over the user-data tables:
 every reset `DROP TABLE` target except the ledger `schema_migrations`, the
 infrastructure singletons `instance_settings_meta`, `event_sequence`,
 `collab_fence_counter`, and `instance_config`, and step-12
 `maintenance_job_claims` (not part of PREFIX11). A non-zero sum refuses and
-drops nothing. No raw SDK/test error body, URL, header,
-token, environment dump or credential-bearing trace is printed or uploaded.
+drops nothing. For current12, reset instead requires exactly the migration
+consumer's retained structural fixture, checked on the same reserved writer:
+
+- The complete ledger and catalog match the compiled current12 lineage and
+  per-step hashes. Every table in that verified catalog is accounted for by
+  the literal drop plan; a newly compiled table without a reset plan refuses.
+- Exactly one workspace has slug `turso-migration`, name
+  `Turso populated011 literal`, settings `{}`, kind `team`, no deletion,
+  document number zero and auto-join domains `[]`. Its ID has UUIDv7 version
+  and RFC4122 variant bits. The embedded millisecond time is no later than the
+  first ledger receipt: the consumer chooses its UUID before migrations.
+  `created_at` equals `updated_at` and lies between the step11 and step12
+  receipts. There is no lower bound on UUID time; the remaining literal fields,
+  catalog, empty tables and seeds carry the structural identification.
+- Every other user-data table is empty. Infrastructure is exactly settings
+  revision zero, event sequence zero, fence counter17 and null VAPID keys,
+  each under singleton ID1. Claim keys are exactly1–9, owner/expiry null,
+  generation7 for key8 and zero for every other key.
+
+Any other current12 data or a failed fixture query refuses with
+`RESET_FIXTURE_REFUSED`, before any DROP. This is structural fixture matching,
+not proof of which process originally wrote matching data. UI ACK data,
+another workspace and any extra user row are retained by refusal. Unsupported
+or altered schemas still return `RESET_SCHEMA_REFUSED`. All admission and DDL
+share the original transaction. Only a confirmed commit permits the fresh
+connection's complete blank-catalog check; an uncertain commit stops without
+an alternate observer or retry.
+
+Manual phase `reset` keeps both destructive gates and the exact selected test
+`db::turso_test::turso_primary_disposable_prefix11_reset`; its historical name
+also covers the admitted current12 fixture. No raw SDK/test error body, URL,
+header, token, environment dump or credential-bearing trace is printed or uploaded.
 
 Default phase `connection` requires `destructive=false` and makes no schema/data
 mutation even if ALLOW_DESTRUCTIVE is missing or true. It explicitly executes
@@ -118,11 +149,16 @@ plus the strict prefix/FK-rollback/current/restart/close/lease receipt. It uses
 the same source/ELF/native-input frozen qualification and credential filtering
 as connection; fake fixture receipt tests are not remote runtime evidence.
 
-This first migration slice is **not normal remote installation/startup support**.
-Normal server and `fvoci-migrate` remote refusal remain unchanged. The ignored
-manual consumer calls the maintained compiled SQLite registry and per-step
-migration owner through cfg(test, db-tests) Fable-owned helpers. Initial exact
-blank catalog admission occurs before DDL; unexpected/foreign/populated/current
+Normal remote preparation in `src/prepare.rs` and the `libsql-remote` branch
+of `fvoci-migrate` call `run_remote_migrations`: they install an exact blank
+database, resume an exact prefix of the compiled lineage, and leave current12
+unchanged. Other catalogs or ledgers refuse without automatic reset. Normal
+server startup calls `connect_remote_app`, which requires the exact current
+schema and performs no migration or repair. These product paths are distinct
+from the ignored manual migration consumer, which calls the maintained compiled
+SQLite registry and per-step migration owner through cfg(test, db-tests) helpers.
+For that consumer, exact blank catalog admission occurs before DDL;
+unexpected/foreign/populated/current
 targets refuse, without automatic reset, service deletion or schema overwrite.
 The secret URL remains the designated target, not an invented host/DB-ID proof.
 The lead may separately prepare/reset the disposable test DB only with the
@@ -143,9 +179,9 @@ public numeric787; generic19/text mentions, transport and arbitrary/nested boxed
 errors cannot satisfy the FK oracle. Original manifests/dependencies/features,
 transport and parser files are unchanged. Upstream accessor-absence compile
 control fails with E0599; the patched remote,tls library's five accessor controls
-passed at ROOT353d. That is SDK-only evidence, not actual Turso migration or a
-compile result for this wrapper composition. Provenance and full MIT notice are
-in `vendor/libsql-0.9.30/`; see the pinned
+passed in their isolated SDK check. That is SDK-only evidence, not actual Turso
+migration or a compile result for a new wrapper composition. Provenance and full
+MIT notice are in `vendor/libsql-0.9.30/`; see the pinned
 [SDK error variants](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/errors.rs)
 and [module visibility](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/lib.rs).
 
@@ -160,14 +196,42 @@ fresh-observer reconciliation or blind retry. Successful close is product owner
 drain/zero active leases, not an unexposed server Close ACK. The uniquely
 identified test workspace and current schema remain retained for the lead's inspection.
 
+Local reset controls use the pinned official sqld binary selected through
+`FVOCI_TEST_SQLD`; the existing fixture verifies its digest and owns each
+temporary database and daemon. With the maintained native SQLite inputs
+prepared, run the automatic controls from the repository root:
+
+```sh
+cargo fmt --check
+cargo test --locked --offline --features db-tests --lib db::turso_test
+```
+
+To explicitly select only the loopback reset controls, set the local fixture
+binary and disk-backed `TMPDIR`, then run:
+
+```sh
+FVOCI_TEST_TURSO_MIGRATION_SELECTED=1 \
+FVOCI_TEST_TURSO_PHASE=migration \
+FVOCI_TEST_TURSO_DESTRUCTIVE=true \
+FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE=true \
+cargo test --locked --offline --features db-tests --lib \
+  db::turso_test::reset_policy_tests::reset_ -- --ignored --test-threads=1
+```
+
+These controls need no Turso credentials and do not select the remote reset
+consumer. They cover PREFIX11 preservation/reset, current12 fixture reset,
+fixture counterexamples with unchanged persisted rows/catalog, and a lost
+commit reply without a fresh blank observer. Loopback sqld is separate from
+the pinned local SQLite engine and actual Turso acceptance.
+
 Other phases (`crud`, `transactions`, `persistence`, `restore`) remain
 **NOT IMPLEMENTED** and refuse before credential consumption. `ui-ack` is an
 allowed dispatch input, with `ui-baseline`, on main, the reviewed branch, or
 `fvoci/v060-product-integration-20261005`. Current tenant
 CRUD/authorization, request/version replay, real concurrent/cancel/uncertain
-finish, normal remote setup, backup/restore, real UI persist ACK and fresh-client
-history remain required separate product acceptance. Local SQLite or loopback
-SDK results cannot be labeled actual Turso PASS. Constant per-database
+finish, remote setup/startup behavior, backup/restore, real UI persist ACK and
+fresh-client history require their own product acceptance in the checkpoint.
+Local SQLite or loopback SDK results cannot be labeled actual Turso PASS. Constant per-database
 concurrency remains `cancel-in-progress:false`; no service resource reset,
 provider/account/secret/policy/permission change is made by the worker.
 

@@ -2463,9 +2463,9 @@ mod baseline_prefix_resume_tests {
 // schema, a parser, a lease framework or an in-place upgrade path: the remote
 // backend installs the 0.6 baseline into an empty database, or resumes an
 // interrupted install that is an exact prefix of the compiled lineage. The
-// three production refusals (server startup, migrator binary, preparation)
-// stay in place until the wiring is independently reviewed; this module only
-// offers the replacement.
+// preparation and migrator binary call `run_remote_migrations`; server startup
+// calls `connect_remote_app`, which admits only the exact current schema and
+// performs no migration or repair.
 //
 // Honest limits (G1/G2 of the contract): libSQL remote has no file lock and no
 // advisory lock. The process-local admission semaphore and lease accounting
