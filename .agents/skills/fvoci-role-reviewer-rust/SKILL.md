@@ -9,7 +9,7 @@ disable-model-invocation: true
 - 범위는 DB가 아닌 Rust, `xtask`, 설치·probe shell, `vendor/` 바이트 비교다. `src/db/**`는 `fvoci-role-reviewer-db`다. 주 리뷰어·교차·양쪽 트리·결과 이름은 AGENTS.md다.
 - 출력에 SHA, parent, `git diff --binary --full-index <parent> <SHA> | sha256sum`, 같은 diff의 `git patch-id --stable` 첫 필드, blocking / non-blocking, PASS/FAIL/NOTRUN/MISSING이 있다.
 - Rust 소스·빌드 입력을 바꾸면 해당 workspace의 `cargo fmt --check`와 `cargo clippy --all-targets -- -D warnings`가 exit 0이다. 문서만 바뀌면 `fvoci-fast-verify`로 관련 문서·계약 검사를 고르고 전체 제품 빌드를 추가하지 않는다. `xtask` 변경은 depth 1 checkout에서 `cargo test`가 루트와 `xtask/` 둘 다 PASS다.
-- 의존성 변경에는 이유, 라이선스, lock diff가 있고 `cargo tree -d`에 새 중복이 없다. 바뀐 crate를 해석하는 레포의 모든 `Cargo.lock`(루트, `xtask/`, `compat/`, `crates/*/`)을 대조한다. exact pin이 바뀌었는데 한 lock이 옛 버전에 남으면, 그 workspace의 `cargo fetch --locked`가 실패한다. Python→TS/Rust 이전은 이 리뷰어가 만든 반례로 본다.
+- 의존성 변경에는 이유, 라이선스, lock diff가 있고 `cargo tree -d`에 새 중복이 없다. `git ls-files '*Cargo.lock'`의 lock 가운데 바뀐 manifest를 직접 또는 path 의존성으로 쓰는 workspace의 lock이 그 manifest와 맞는지 대조한다. 어긋난 lock이 있으면 그 workspace의 `cargo fetch --locked`가 실패한다. workspace끼리 버전이 다른 것 자체는 실패가 아니다. Python→TS/Rust 이전은 이 리뷰어가 만든 반례로 본다.
 
 ## 기본 절차
 

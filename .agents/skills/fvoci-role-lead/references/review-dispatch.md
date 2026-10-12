@@ -17,14 +17,10 @@
 리드는 사용자에게 묻지 않고 diff에서 필요한 리뷰어를 정해 띄운다. 묻는 것은 리뷰어를 띄울 방법이 없을 때와, AGENTS.md가 메인테이너 말을 요구할 때뿐이다.
 
 1. `git diff --name-only <base> <head>`로 바뀐 경로를 얻는다.
-2. 경로마다 담당 역할을 정한다. 역할의 범위는 각 리뷰어 스킬이 정본이다.
-   - `fvoci-role-reviewer-ci-web`: `.github/workflows/`, `tools/ci/`, 게이트, `apps/web/`, `packages/`
-   - `fvoci-role-reviewer-rust`: DB가 아닌 Rust, `xtask/`, 설치·probe shell, `vendor/`, `Cargo.toml`·`Cargo.lock`
-   - `fvoci-role-reviewer-db`: `src/db/`, `migrations/`, 그리고 경로와 관계없이 인증·인가·세션·앱 역할 계약
-3. 필요한 역할의 합집합을 띄운다. 리뷰 수와 주·교차는 AGENTS.md "허용 범위"를 따른다.
+2. 경로마다 담당 역할을 정한다. 각 `fvoci-role-reviewer-*` 스킬의 "범위" 문장과 대조한다. 그 범위를 여기에 다시 적지 않는다.
+3. 필요한 역할의 합집합을 띄운다. 리뷰 수, 주·교차, 기본 리뷰어는 AGENTS.md "허용 범위"를 따른다. 이 절은 그 수나 기본 리뷰어를 줄이지 않는다.
    - 합집합이 AGENTS.md가 요구하는 수보다 적으면, 위험이 다음으로 큰 경계의 역할을 교차 리뷰어로 더한다.
-   - AGENTS.md·`.agents/`처럼 특정 역할이 없는 경로는, AGENTS.md가 정한 기본 리뷰어를 쓴다.
-   - 문서만 바뀌었으면 그 문서가 설명하는 경계의 역할 하나를 띄운다.
+   - 어느 리뷰어 범위에도 맞지 않는 경로(AGENTS.md, `.agents/` 등)는 AGENTS.md가 정한 기본 리뷰어를 쓴다. 문서만 바뀌어도 같다.
 4. 주 리뷰어가 정해져 있지 않으면, 가장 위험한 변경을 맡는 역할을 주로 둔다. 위험은 저장·인가, 게이트·workflow, 그 밖의 순으로 본다.
 5. 한 역할에서 리뷰어는 한 명이다. 같은 diff에 같은 검사를 하는 리뷰어를 둘 이상 두지 않는다.
 6. 배정 결과를 보고에 적는다: 경로별 역할, 주·교차, 리뷰어 수의 근거가 된 AGENTS.md 항목.
@@ -35,7 +31,7 @@
 1. 대상을 고정한다. `git fetch origin` 뒤 `git rev-parse <ref>^{commit}`으로 40자 SHA를 얻는다.
 2. `git worktree add --detach <상위>/rv-<리뷰id> <SHA>`로 리뷰 worktree를 만든다. HEAD가 그 SHA와 같고 `git status --porcelain`이 비어 있는지 확인한다.
 3. 프롬프트를 쓴다. 해당 `fvoci-role-reviewer-*` 스킬과 아래 항목을 담는다. 리뷰어 셸에 없는 값(경로, lock, 하한)은 변수로 남기지 말고 실제 값을 펼쳐 넣는다.
-4. 리뷰어를 그 worktree에서 시작한다. 사용자가 볼 수 있는 방식이 있으면 그 방식을 쓴다. 숨은 실행밖에 없으면 그렇다고 보고한다. 읽기 전용 권한을 실제로 강제할 수 없으면 제한했다고 주장하지 않는다.
+4. 리뷰어를 그 worktree에서 시작한다. 사용자가 볼 수 있는 방식이 있으면 그 방식을 쓴다. Orca IDE에서는 `orca.md`를 따른다. 숨은 실행밖에 없으면 그렇다고 보고한다. 읽기 전용 권한을 실제로 강제할 수 없으면 제한했다고 주장하지 않는다.
 
 ## 프롬프트 항목
 
@@ -73,8 +69,8 @@ cargo build·test·clippy, docker build·compose, Playwright, 반복 실행은 �
 
 ## 놓치기 쉬운 반례
 
-- **diff 밖의 소비처.** 한 crate의 exact pin이 바뀌었는데 같은 crate를 해석하는 다른 `Cargo.lock`이 옛 버전에 남아 있으면, 그 workspace의 `cargo fetch --locked`가 실패한다. 바뀐 lock만 보면 이 실패를 놓친다.
-- **uid 차이.** "다른 uid"를 1001로 고정한 테스트는 로컬(uid 1000)에서는 통과하지만, 러너(uid 1001)에서는 매번 실패한다.
+- **diff 밖의 소비처.** path 의존성으로 바뀐 exact pin을 물려받는 다른 workspace는 자기 `Cargo.lock`이 옛 버전에 남아 있으면 manifest와 어긋나고, 그 workspace의 `cargo fetch --locked`가 실패한다. 바뀐 lock만 보면 이 실패를 놓친다.
+- **uid 차이.** "다른 uid"를 1001로 고정한 테스트는 로컬 uid가 1001이 아니면 통과하지만, GitHub 러너(uid 1001)에서는 매번 실패한다.
 - **tmpfs TMPDIR.** tmpfs에서는 inode 번호가 재사용되지 않는다. 그래서 TMPDIR가 tmpfs면 inode 재사용에 기대는 결함이 로컬에서 숨는다.
 
 ## 출력
