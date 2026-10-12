@@ -20,7 +20,9 @@ use crate::api::task_timer::{
 };
 use crate::api::tasks_dto::{TaskProjectOutput, TaskProjectPickerResponse};
 use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
-use crate::db::task_origins::{origin_request_hash, task_projects, TASK_ORIGIN_ANCHOR_MAX_CHARS};
+use crate::db::task_origins::{
+    origin_request_hash, task_projects_backend as task_projects, TASK_ORIGIN_ANCHOR_MAX_CHARS,
+};
 use crate::db::task_timer::{self, TimerDbError};
 use crate::db::tasks::CreateTaskInput;
 use crate::error::{AppError, ProblemCode};
@@ -87,7 +89,7 @@ async fn plan_targets(
         auth.credential_id,
     )?;
     let picker = task_projects(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+        &app.auth.db.pool,
         workspace,
         auth.user_id,
         auth.credential_id,
@@ -159,8 +161,8 @@ async fn create_plan_task(
         body.anchor.as_deref(),
         &semantic,
     );
-    task_timer::create_plan_task(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::create_plan_task_backend(
+        &app.auth.db.pool,
         workspace,
         document,
         auth.user_id,
@@ -202,8 +204,8 @@ async fn set_estimate(
         Some(workspace),
     )
     .await?;
-    task_timer::set_estimate(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::set_estimate_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -251,8 +253,8 @@ async fn state(
         auth.user_id,
         auth.credential_id,
     )?;
-    task_timer::task_state(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::task_state_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -281,8 +283,8 @@ async fn command(
         Some(workspace),
     )
     .await?;
-    task_timer::command(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::command_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -309,15 +311,11 @@ async fn owner(
         auth.user_id,
         auth.credential_id,
     )?;
-    task_timer::owner_state(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
-        auth.user_id,
-        auth.credential_id,
-    )
-    .await
-    .map_err(internal)?
-    .map(Json)
-    .map_err(error)
+    task_timer::owner_state_backend(&app.auth.db.pool, auth.user_id, auth.credential_id)
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(error)
 }
 
 async fn cleanup(
@@ -329,16 +327,11 @@ async fn cleanup(
     check_origin(&headers, &app.public_origin)?;
     let Json(body) = body.map_err(AppError::from)?;
     let auth = require_request_auth(&app, &headers, &jar, Access::Session, None).await?;
-    task_timer::cleanup(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
-        auth.user_id,
-        auth.credential_id,
-        &body,
-    )
-    .await
-    .map_err(internal)?
-    .map(Json)
-    .map_err(error)
+    task_timer::cleanup_backend(&app.auth.db.pool, auth.user_id, auth.credential_id, &body)
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(error)
 }
 
 pub(crate) fn captured_context(
@@ -374,8 +367,8 @@ async fn history(
         auth.user_id,
         auth.credential_id,
     )?;
-    task_timer::history(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::history_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -409,8 +402,8 @@ async fn summary(
         auth.user_id,
         auth.credential_id,
     )?;
-    task_timer::summary(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::summary_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -439,8 +432,8 @@ async fn create_manual(
         Some(workspace),
     )
     .await?;
-    task_timer::create_manual(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::create_manual_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         auth.user_id,
@@ -469,8 +462,8 @@ async fn correct(
         Some(workspace),
     )
     .await?;
-    task_timer::correct(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
+    task_timer::correct_backend(
+        &app.auth.db.pool,
         workspace,
         task,
         id,
@@ -492,14 +485,9 @@ async fn release_legacy(
     check_origin(&headers, &app.public_origin)?;
     let Json(body) = body.map_err(AppError::from)?;
     let auth = require_request_auth(&app, &headers, &jar, Access::Session, None).await?;
-    task_timer::release_legacy(
-        app.auth.db.pool.postgres("task timer").map_err(internal)?,
-        auth.user_id,
-        auth.credential_id,
-        &body,
-    )
-    .await
-    .map_err(internal)?
-    .map(Json)
-    .map_err(error)
+    task_timer::release_legacy_backend(&app.auth.db.pool, auth.user_id, auth.credential_id, &body)
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(error)
 }

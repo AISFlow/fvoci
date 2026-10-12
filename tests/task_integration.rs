@@ -588,6 +588,25 @@ async fn task_create_recurrence_round_trips_on_get() {
 }
 
 #[tokio::test]
+async fn task_create_rejects_nul_title() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = project["id"].as_str().unwrap();
+    let (status, problem) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "a\0b"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(problem["code"], "invalid_input");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn task_create_rejects_explicit_null_optional_fields() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
@@ -6465,3 +6484,1090 @@ async fn task_list_and_layout_unknown_time_zone_falls_back_to_utc() {
 
 #[path = "task_integration/workspace_task_stream.rs"]
 mod workspace_task_stream;
+
+mod sqlite_task_port {
+    use super::*;
+    use chrono::Utc;
+    use fvoci_server::auth::{password::Keyring, service::SetupInstanceInput, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use serde_json::Value;
+    use std::{path::PathBuf, sync::Arc};
+    fn state(auth: Arc<AuthService>, storage_root: PathBuf) -> AppState {
+        AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::Off,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI isolated auth proof".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_task_create_http_readback_and_refusals() {
+        let root = std::env::temp_dir().join(format!("task-port-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("tasks.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+        let backend = Backend::Sqlite(sqlite.clone());
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(backend.clone()),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (actor, _, token) = auth
+            .setup_instance(
+                "Synthetic-Task-2026!".into(),
+                SetupInstanceInput {
+                    email: "task@example.invalid".into(),
+                    given_name: "Task".into(),
+                    family_name: None,
+                    workspace_slug: "task-port".into(),
+                    workspace_name: "Task port".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let live = auth.session_user(&token).await.unwrap().unwrap();
+        let credential = Uuid::parse_str(&live.session_id).unwrap();
+        let workspace: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='task-port'")
+                .fetch_one(&sqlite)
+                .await
+                .unwrap();
+        let workspace = Uuid::from_slice(&workspace).unwrap();
+        let project = fvoci_server::db::projects::create_project_backend(
+            &backend,
+            workspace,
+            actor,
+            credential,
+            fvoci_server::db::projects::CreateProjectInput {
+                key: "TASK",
+                name: "Tasks",
+                visibility: "workspace",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let app = fvoci_server::http::router(state(auth, root.join("storage")), None);
+        let cookie = token;
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{workspace}/projects/{}/tasks",
+                project.id
+            ),
+            Some(json!({"title":"개인 task"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let task = created["id"].as_str().unwrap();
+        let (status, detail) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/workspaces/{workspace}/tasks/{task}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["id"], created["id"]);
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?1")
+            .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(title, "개인 task");
+        let other_workspace = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'other-task-tenant','Other task tenant')").bind(other_workspace.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(other_workspace.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        // A real authenticated viewer exercises the product's Edit fence.
+        let viewer = Uuid::now_v7();
+        let viewer_session = Uuid::now_v7();
+        let viewer_token = "synthetic-task-viewer-token";
+        sqlx::query(
+            "INSERT INTO users(id,email,given_name) VALUES(?1,'viewer@task.invalid','Viewer')",
+        )
+        .bind(viewer.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'guest')")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.id.as_bytes().as_slice()).bind(viewer.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4)")
+            .bind(viewer_session.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .bind(fvoci_server::auth::token::hash_token(viewer_token))
+            .bind(Utc::now().timestamp_micros() + 3_600_000_000i64)
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let project_path = format!("/api/v1/workspaces/{workspace}/projects/{}", project.id);
+        let task_path = format!("/api/v1/workspaces/{workspace}/tasks/{task}");
+        let f = Flow {
+            app: app.clone(),
+            pool: fresh.clone(),
+            cookie: cookie.clone(),
+            viewer: viewer_token.into(),
+            viewer_id: viewer,
+            viewer_credential: viewer_session,
+            workspace,
+            other_workspace,
+        };
+        f.refuse(
+            "POST",
+            &format!("{project_path}/tasks"),
+            json!({"title":"refused"}),
+        )
+        .await;
+        // SQLx PostgreSQL stores submicrosecond dueAt with its 2000 epoch
+        // truncation; match both sides of that epoch through the real route.
+        for (submitted, stored) in [
+            (
+                "2026-10-12T01:02:03.123456789Z",
+                "2026-10-12T01:02:03.123456Z",
+            ),
+            (
+                "1999-12-31T23:59:59.123456789Z",
+                "1999-12-31T23:59:59.123457Z",
+            ),
+        ] {
+            f.write(
+                "PATCH",
+                &task_path,
+                json!({"dueAt": submitted}),
+                StatusCode::OK,
+            )
+            .await;
+            let actual: i64 = sqlx::query_scalar("SELECT due_at FROM tasks WHERE id=?1")
+                .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            assert_eq!(
+                actual,
+                chrono::DateTime::parse_from_rfc3339(stored)
+                    .unwrap()
+                    .timestamp_micros()
+            );
+        }
+        f.write("PATCH", &task_path, json!({"dueAt": null}), StatusCode::OK)
+            .await;
+        // Valid leading zero aliases follow PostgreSQL numeric::text while
+        // retaining the submitted decimal scale.
+        for (submitted, stored) in [("00045.5000", "45.5000"), ("0000.000000", "0.000000")] {
+            let output = f
+                .write(
+                    "PATCH",
+                    &task_path,
+                    json!({"estimate":submitted}),
+                    StatusCode::OK,
+                )
+                .await;
+            assert_eq!(output["estimate"], json!(stored));
+            let actual: String = sqlx::query_scalar("SELECT estimate FROM tasks WHERE id=?1")
+                .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            assert_eq!(actual, stored);
+        }
+        f.write(
+            "PATCH",
+            &task_path,
+            json!({"estimate":null}),
+            StatusCode::OK,
+        )
+        .await;
+        let label = f
+            .write(
+                "POST",
+                &format!("{project_path}/labels"),
+                json!({"name":"계획","color":"violet"}),
+                StatusCode::CREATED,
+            )
+            .await;
+        let label_path = format!("{project_path}/labels/{}", label["id"].as_str().unwrap());
+        f.write(
+            "PATCH",
+            &label_path,
+            json!({"name":"reading"}),
+            StatusCode::OK,
+        )
+        .await;
+        // Flow reads through `fresh`, a connection pool separate from the
+        // backend writer. Compare all task/label values, project next_number,
+        // and event/audit counts after each rejected write.
+        for (method, path, body) in [
+            (
+                "POST",
+                format!("{project_path}/tasks"),
+                json!({"title": "a\0b"}),
+            ),
+            (
+                "PATCH",
+                task_path.clone(),
+                json!({"title": "a\0b", "priority": "urgent"}),
+            ),
+            (
+                "POST",
+                format!("{project_path}/labels"),
+                json!({"name": "a\0b", "color": "violet"}),
+            ),
+            (
+                "PATCH",
+                label_path.clone(),
+                json!({"name": "a\0b", "color": "red"}),
+            ),
+        ] {
+            let before = f.snapshot().await;
+            let (status, problem) =
+                json_request(app.clone(), method, &path, Some(body), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{method} {path}: {problem}"
+            );
+            assert_eq!(problem["code"], "invalid_input");
+            assert_eq!(before, f.snapshot().await, "NUL {method} {path}");
+            f.read(&format!("{project_path}/tasks/parents?childType=subtask"))
+                .await;
+            f.read(&format!("{project_path}/labels")).await;
+        }
+        let milestone = f
+            .write(
+                "POST",
+                &format!("{project_path}/milestones"),
+                json!({"name":"이번 주","dueDate":"2026-10-15"}),
+                StatusCode::CREATED,
+            )
+            .await;
+        let milestone_path = format!(
+            "{project_path}/milestones/{}",
+            milestone["id"].as_str().unwrap()
+        );
+        f.write(
+            "PATCH",
+            &milestone_path,
+            json!({"name":"이번 달"}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write("PATCH",&task_path,json!({"title":"read chapter","labelIds":[label["id"]],"milestoneId":milestone["id"],"assigneeIds":[actor],"startDate":"2026-10-12","dueDate":"2026-10-13"}),StatusCode::OK).await;
+        let before = f.snapshot().await;
+        let (status, body) = json_request(
+            app.clone(),
+            "PATCH",
+            &task_path,
+            Some(json!({"title":"must roll back","labelIds":[Uuid::now_v7()]})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(
+            before,
+            f.snapshot().await,
+            "partial patch and events must roll back"
+        );
+        let second = f
+            .write(
+                "POST",
+                &format!("{project_path}/tasks"),
+                json!({"title":"followup","startDate":"2026-10-14","dueDate":"2026-10-15"}),
+                StatusCode::CREATED,
+            )
+            .await;
+        f.write(
+            "POST",
+            &format!("{task_path}/dependencies"),
+            json!({"blockedId":second["id"],"type":"FS","lagDays":0}),
+            StatusCode::OK,
+        )
+        .await;
+        let dependencies = f.read(&format!("{project_path}/dependencies")).await;
+        assert_eq!(dependencies["items"].as_array().unwrap().len(), 1);
+        f.write(
+            "DELETE",
+            &format!(
+                "{task_path}/dependencies/{}",
+                second["id"].as_str().unwrap()
+            ),
+            json!({}),
+            StatusCode::OK,
+        )
+        .await;
+        let workflow: Vec<u8> = sqlx::query_scalar("SELECT id FROM workflows WHERE project_id=?1")
+            .bind(project.id.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        let workflow = Uuid::from_slice(&workflow).unwrap();
+        let status_path = format!("/api/v1/workspaces/{workspace}/workflows/{workflow}/statuses");
+        let custom = f
+            .write(
+                "POST",
+                &status_path,
+                json!({"name":"reading","category":"in_progress","wipLimit":1}),
+                StatusCode::CREATED,
+            )
+            .await;
+        let custom_path = format!("{status_path}/{}", custom["id"].as_str().unwrap());
+        f.write(
+            "PATCH",
+            &custom_path,
+            json!({"name":"reading now"}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write(
+            "POST",
+            &format!("{task_path}/move"),
+            json!({"statusId":custom["id"]}),
+            StatusCode::OK,
+        )
+        .await;
+        let before = f.snapshot().await;
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{workspace}/tasks/{}/move",
+                second["id"].as_str().unwrap()
+            ),
+            Some(json!({"statusId":custom["id"]})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(before, f.snapshot().await, "WIP refusal must be atomic");
+        let done: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM statuses WHERE project_id=?1 AND category='done' LIMIT 1",
+        )
+        .bind(project.id.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        let done = Uuid::from_slice(&done).unwrap();
+        f.write(
+            "POST",
+            &format!("{task_path}/move"),
+            json!({"statusId":done}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write("DELETE", &custom_path, json!({}), StatusCode::OK)
+            .await;
+        let recurring=f.write("POST",&format!("{project_path}/tasks"),json!({"title":"daily reading","startDate":"2026-10-12","dueDate":"2026-10-13","recurrence":{"kind":"daily"}}),StatusCode::CREATED).await;
+        let recurring_path = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}",
+            recurring["id"].as_str().unwrap()
+        );
+        f.write(
+            "PATCH",
+            &recurring_path,
+            json!({"labelIds":[label["id"]],"assigneeIds":[actor]}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write(
+            "POST",
+            &format!("{recurring_path}/move"),
+            json!({"statusId":done}),
+            StatusCode::OK,
+        )
+        .await;
+        type RecurrenceRow = (Vec<u8>, Option<String>, Option<String>, Option<String>);
+        let copies:Vec<RecurrenceRow>=sqlx::query_as("SELECT id,start_date,due_date,recurrence FROM tasks WHERE workspace_id=?1 AND title='daily reading' ORDER BY number").bind(workspace.as_bytes().as_slice()).fetch_all(&fresh).await.unwrap();
+        assert_eq!(copies.len(), 2);
+        assert!(copies[0].3.is_none());
+        assert_eq!(copies[1].1.as_deref(), Some("2026-10-13"));
+        assert_eq!(copies[1].2.as_deref(), Some("2026-10-14"));
+        let refs:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM task_labels WHERE task_id=?1),(SELECT count(*) FROM task_assignees WHERE task_id=?1)").bind(&copies[1].0).fetch_one(&fresh).await.unwrap();
+        assert_eq!(refs, (1, 1));
+        f.write(
+            "PATCH",
+            &recurring_path,
+            json!({"archived":true}),
+            StatusCode::OK,
+        )
+        .await;
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "PATCH",
+            &recurring_path,
+            Some(json!({"title":"refused archived edit"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        f.write(
+            "PATCH",
+            &recurring_path,
+            json!({"archived":false}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write("POST",&format!("{task_path}/time-entries"),json!({"startedAt":"2026-10-12T01:00:00Z","endedAt":"2026-10-12T01:01:00Z","note":"study"}),StatusCode::CREATED).await;
+        assert_eq!(
+            f.read(&format!("{task_path}/time-entries/rollup")).await["totalSeconds"],
+            60
+        );
+        let cloned = f
+            .write(
+                "POST",
+                &format!("{task_path}/clone"),
+                json!({}),
+                StatusCode::OK,
+            )
+            .await;
+        let clone_path = format!(
+            "/api/v1/workspaces/{workspace}/tasks/{}",
+            cloned["id"].as_str().unwrap()
+        );
+        assert!(f.read(&clone_path).await["title"]
+            .as_str()
+            .unwrap()
+            .contains("read chapter"));
+        f.write(
+            "POST",
+            &format!("{clone_path}/trash"),
+            json!({}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write(
+            "POST",
+            &format!("{clone_path}/restore"),
+            json!({}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write("DELETE", &clone_path, json!({}), StatusCode::OK)
+            .await;
+        // Explicit idempotency and version guards keep timer effects singular.
+        let timer = format!("{task_path}/timer");
+        let timer_body = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null});
+        // Captured intent IDs are session specific, so denial uses matching viewer IDs.
+        let mut denied_timer = timer_body.clone();
+        denied_timer["expectedActorId"] = json!(viewer);
+        denied_timer["expectedSessionId"] = json!(viewer_session);
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            &timer,
+            Some(denied_timer),
+            Some(viewer_token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        let ((s, run), (second_status, concurrent_replay)) = tokio::join!(
+            json_request(
+                app.clone(),
+                "POST",
+                &timer,
+                Some(timer_body.clone()),
+                Some(&cookie)
+            ),
+            json_request(
+                app.clone(),
+                "POST",
+                &timer,
+                Some(timer_body.clone()),
+                Some(&cookie)
+            ),
+        );
+        assert_eq!(s, StatusCode::OK, "{run}");
+        assert_eq!(second_status, StatusCode::OK, "{concurrent_replay}");
+        assert_eq!(
+            run, concurrent_replay,
+            "concurrent request ids commit one timer run"
+        );
+        let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM task_timer_runs")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(runs, 1);
+        let before = f.snapshot().await;
+        let (s, replay) =
+            json_request(app.clone(), "POST", &timer, Some(timer_body), Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK, "{replay}");
+        assert_eq!(run, replay);
+        assert_eq!(before, f.snapshot().await);
+        for (op, version) in [("pause", 1), ("resume", 2), ("stop", 3)] {
+            let (s,b)=json_request(app.clone(),"POST",&timer,Some(json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"operation":op,"expectedVersion":version,"runId":run["runId"]})),Some(&cookie)).await;
+            assert_eq!(s, StatusCode::OK, "{op}: {b}");
+            assert_eq!(b["version"], version + 1);
+        }
+        let current = f.read(&timer).await;
+        let estimate = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"expected":current["estimate"],"minutes":45,"reason":"study plan"});
+        f.refuse("POST", &format!("{timer}/estimate"), estimate.clone())
+            .await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{timer}/estimate"),
+            Some(estimate.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(f.read(&timer).await["estimate"]["unit"], "minutes");
+        let before = f.snapshot().await;
+        let mut stale = estimate;
+        stale["requestId"] = json!(Uuid::now_v7());
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{timer}/estimate"),
+            Some(stale),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        let manual = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"startedAt":"2026-10-12T02:00:00Z","endedAt":"2026-10-12T02:05:00Z","note":"manual","reason":"forgot timer"});
+        f.refuse("POST", &format!("{timer}/history"), manual.clone())
+            .await;
+        let (s, m) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{timer}/history"),
+            Some(manual),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{m}");
+        let record = &m["record"];
+        let correction = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":record["revision"],"expectedNote":record["note"],"expectedStartedAt":record["startedAt"],"expectedEndedAt":record["endedAt"],"startedAt":"2026-10-12T02:00:00Z","endedAt":"2026-10-12T02:04:00Z","note":"corrected","reason":"break"});
+        f.refuse(
+            "POST",
+            &format!("{timer}/records/{}/correct", record["id"].as_str().unwrap()),
+            correction.clone(),
+        )
+        .await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{timer}/records/{}/correct", record["id"].as_str().unwrap()),
+            Some(correction.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let before = f.snapshot().await;
+        let mut stale = correction;
+        stale["requestId"] = json!(Uuid::now_v7());
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{timer}/records/{}/correct", record["id"].as_str().unwrap()),
+            Some(stale),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        assert!(f
+            .read(&format!("{timer}/history?from=2026-10-12&to=2026-10-12"))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["note"] == "corrected"));
+        assert!(
+            f.read(&format!("{timer}/summary?from=2026-10-12&to=2026-10-12"))
+                .await["totalMilliseconds"]
+                .as_i64()
+                .unwrap()
+                >= 300_000
+        );
+        for route in [
+            format!("{project_path}/tasks"),
+            format!("{project_path}/tasks/parents?q=read&childType=subtask"),
+            format!("{project_path}/task-layout?year=2026&month=10"),
+            format!("/api/v1/workspaces/{workspace}/tasks"),
+            format!("/api/v1/workspaces/{workspace}/statuses"),
+            format!("/api/v1/workspaces/{workspace}/labels"),
+            format!("{task_path}/activity"),
+            format!("{task_path}/backlinks"),
+            format!("{task_path}/time-entries"),
+            format!("/api/v1/tasks/{task}"),
+            "/api/v1/me/task-timer".into(),
+        ] {
+            f.read(&route).await;
+        }
+        let (s,cleanup_run)=json_request(app.clone(),"POST",&timer,Some(json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&cookie)).await;
+        assert_eq!(s, StatusCode::OK, "{cleanup_run}");
+        // Cleanup remains self scoped after current project access is revoked.
+        sqlx::query("UPDATE project_members SET role='lead' WHERE project_id=?1 AND user_id=?2")
+            .bind(project.id.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_members WHERE project_id=?1 AND user_id=?2")
+            .bind(project.id.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET visibility='private',created_by=?2 WHERE id=?1")
+            .bind(project.id.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let before = f.snapshot().await;
+        for route in [
+            task_path.clone(),
+            format!("{task_path}/activity"),
+            format!("{task_path}/backlinks"),
+            format!("{task_path}/time-entries"),
+            format!("{project_path}/tasks"),
+            format!("{project_path}/task-layout?year=2026&month=10"),
+            format!("{project_path}/tasks/parents?q=read&childType=subtask"),
+        ] {
+            let (s, b) = json_request(app.clone(), "GET", &route, None, Some(&cookie)).await;
+            assert_eq!(s, StatusCode::NOT_FOUND, "revoked project read: {b}");
+        }
+        assert_eq!(before, f.snapshot().await);
+        let hidden = f.read("/api/v1/me/task-timer").await;
+        assert_eq!(hidden["runId"], cleanup_run["runId"]);
+        assert!(hidden["visibleRun"].is_null());
+        let cleanup = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"runId":cleanup_run["runId"],"expectedVersion":1});
+        let mut other_owner = cleanup.clone();
+        other_owner["expectedActorId"] = json!(viewer);
+        other_owner["expectedSessionId"] = json!(viewer_session);
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(other_owner),
+            Some(viewer_token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(cleanup),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET visibility='workspace',created_by=?2 WHERE id=?1")
+            .bind(project.id.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.id.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("UPDATE project_members SET role='viewer' WHERE project_id=?1 AND user_id=?2")
+            .bind(project.id.as_bytes().as_slice())
+            .bind(viewer.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let legacy = f
+            .write(
+                "POST",
+                &format!("{task_path}/time-entries"),
+                json!({"startedAt":"2026-10-12T03:00:00Z","note":"legacy open"}),
+                StatusCode::CREATED,
+            )
+            .await;
+        assert!(f.read("/api/v1/me/task-timer").await["legacyOpen"]
+            .as_bool()
+            .unwrap());
+        let release = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"timeEntryId":legacy["id"]});
+        let mut other_owner = release.clone();
+        other_owner["expectedActorId"] = json!(viewer);
+        other_owner["expectedSessionId"] = json!(viewer_session);
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/legacy-release",
+            Some(other_owner),
+            Some(viewer_token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/legacy-release",
+            Some(release),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(!f.read("/api/v1/me/task-timer").await["legacyOpen"]
+            .as_bool()
+            .unwrap());
+        let open: Option<i64> = sqlx::query_scalar("SELECT ended_at FROM time_entries WHERE id=?1")
+            .bind(
+                Uuid::parse_str(legacy["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert!(open.is_none(), "release never guesses an end");
+        let document = Uuid::now_v7();
+        sqlx::query("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,?3,'study material',?4,'a',500,'published',2,?5,'{\"type\":\"doc\"}')").bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(project.id.as_bytes().as_slice()).bind(document.simple().to_string()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        let plan_path =
+            format!("/api/v1/workspaces/{workspace}/documents/{document}/study-plan/task");
+        f.read(&plan_path).await;
+        let plan = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"projectId":project.id,"selfAssign":false,"minutes":20,"task":{"title":"study linked task"}});
+        f.refuse("POST", &plan_path, plan.clone()).await;
+        let (s, p) = json_request(
+            app.clone(),
+            "POST",
+            &plan_path,
+            Some(plan.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        let before = f.snapshot().await;
+        let (s, replay) = json_request(
+            app.clone(),
+            "POST",
+            &plan_path,
+            Some(plan.clone()),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{replay}");
+        assert_eq!(p, replay);
+        assert_eq!(before, f.snapshot().await);
+        let mut stale = plan;
+        stale["requestId"] = json!(Uuid::now_v7());
+        stale["expectedSessionId"] = json!(Uuid::now_v7());
+        let (s, b) =
+            json_request(app.clone(), "POST", &plan_path, Some(stale), Some(&cookie)).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(
+            before,
+            f.snapshot().await,
+            "stale plan rolls back numbering, origin, task and estimate"
+        );
+        let planned = f
+            .read(&format!(
+                "/api/v1/workspaces/{workspace}/tasks/{}/timer",
+                p["taskId"].as_str().unwrap()
+            ))
+            .await;
+        assert_eq!(planned["estimate"]["value"], "20");
+        f.write(
+            "PATCH",
+            &format!("/api/v1/tasks/{task}"),
+            json!({"priority":"high"}),
+            StatusCode::OK,
+        )
+        .await;
+        f.write("DELETE", &label_path, json!({}), StatusCode::OK)
+            .await;
+        f.write("DELETE", &milestone_path, json!({}), StatusCode::OK)
+            .await;
+        assert!(f.read(&task_path).await["milestoneId"].is_null());
+        let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?1")
+            .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(title, "read chapter");
+        let personal = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'task-personal','Personal tasks','personal')").bind(personal.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(personal.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET personal_workspace_id=?1 WHERE id=?2")
+            .bind(personal.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let personal_flow = Flow {
+            app: app.clone(),
+            pool: fresh.clone(),
+            cookie: cookie.clone(),
+            viewer: viewer_token.into(),
+            viewer_id: viewer,
+            viewer_credential: viewer_session,
+            workspace: personal,
+            other_workspace,
+        };
+        let input = json!({"requestId":Uuid::now_v7(),"intent":"task","title":"책 읽기"});
+        let input_path = format!("/api/v1/workspaces/{personal}/personal-input");
+        let personal_task = personal_flow
+            .write("POST", &input_path, input.clone(), StatusCode::CREATED)
+            .await;
+        let (s, replayed) =
+            json_request(app.clone(), "POST", &input_path, Some(input), Some(&cookie)).await;
+        assert_eq!(s, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["replayed"], true);
+        assert_eq!(personal_task["taskId"], replayed["taskId"]);
+        let personal_task_path = format!(
+            "/api/v1/workspaces/{personal}/tasks/{}",
+            personal_task["taskId"].as_str().unwrap()
+        );
+        assert!(personal_flow.read(&personal_task_path).await["assigneeIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(actor)));
+        personal_flow
+            .write(
+                "PATCH",
+                &personal_task_path,
+                json!({"title":"책 읽기 완료 준비"}),
+                StatusCode::OK,
+            )
+            .await;
+        let personal_plan_path = format!(
+            "/api/v1/workspaces/{personal}/documents/{}/study-plan/task",
+            personal_task["documentId"].as_str().unwrap()
+        );
+        let personal_plan = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"projectId":personal_task["projectId"],"selfAssign":true,"minutes":10,"task":{"title":"다음 장 읽기"}});
+        let (s, planned) = json_request(
+            app.clone(),
+            "POST",
+            &personal_plan_path,
+            Some(personal_plan),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{planned}");
+        let detail = personal_flow
+            .read(&format!(
+                "/api/v1/workspaces/{personal}/tasks/{}",
+                planned["taskId"].as_str().unwrap()
+            ))
+            .await;
+        assert!(detail["assigneeIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(actor)));
+        let persisted: String =
+            sqlx::query_scalar("SELECT title FROM tasks WHERE workspace_id=?1 AND id=?2")
+                .bind(personal.as_bytes().as_slice())
+                .bind(
+                    Uuid::parse_str(personal_task["taskId"].as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(persisted, "책 읽기 완료 준비");
+        fresh.close().await;
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    struct Flow {
+        app: axum::Router,
+        pool: sqlx::SqlitePool,
+        cookie: String,
+        viewer: String,
+        viewer_id: Uuid,
+        viewer_credential: Uuid,
+        workspace: Uuid,
+        other_workspace: Uuid,
+    }
+    impl Flow {
+        async fn snapshot(&self) -> Vec<String> {
+            let mut result = Vec::new();
+            // Compare values, including updates that leave row counts unchanged.
+            for (table, columns) in [
+                ("projects", "id,next_number"),
+                ("tasks", "id,workspace_id,project_id,number,title,type,priority,status_id,sort_key,start_date,due_date,due_at,estimate,estimate_unit,parent_id,milestone_id,recurrence,deleted_at,archived_at,schema_version,content_json,version,created_by,created_at,updated_at,text,chosung"),
+                ("labels", "id,workspace_id,project_id,name,color,created_at,updated_at"),
+                ("milestones", "id,workspace_id,project_id,name,due_date,sort_key,created_at,updated_at"),
+                ("statuses", "id,workspace_id,project_id,workflow_id,name,category,sort_key,wip_limit,created_at,updated_at"),
+                ("task_assignees", "workspace_id,task_id,user_id"),
+                ("task_labels", "workspace_id,task_id,label_id"),
+                ("task_dependencies", "workspace_id,blocker_id,blocked_id,type,lag_days"),
+                ("time_entries", "id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note"),
+                ("task_timer_runs", "id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note"),
+                ("task_timer_segments", "id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id"),
+                ("task_timer_legacy_open", "time_entry_id,user_id,workspace_id,task_id"),
+                ("task_timer_commands", "user_id,request_id,request_hash,run_id,result,created_at,restored_from_archive"),
+            ] {
+                let values = columns.split(',').map(|name| format!("quote({name})")).collect::<Vec<_>>().join(",");
+                let sql = format!("SELECT coalesce(json_group_array(json_array({values})),'[]') FROM (SELECT * FROM {table} ORDER BY {columns})");
+                result.push(sqlx::query_scalar(&sql).fetch_one(&self.pool).await.unwrap());
+            }
+            result.push(sqlx::query_scalar("SELECT json_array((SELECT count(*) FROM task_activity),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_timer_audit))").fetch_one(&self.pool).await.unwrap());
+            result
+        }
+        async fn refuse(&self, method: &str, path: &str, body: Value) {
+            let before = self.snapshot().await;
+            let mut viewer_body = body.clone();
+            if viewer_body.get("expectedActorId").is_some() {
+                viewer_body["expectedActorId"] = json!(self.viewer_id);
+                viewer_body["expectedSessionId"] = json!(self.viewer_credential);
+            }
+            let (s, b) = json_request(
+                self.app.clone(),
+                method,
+                path,
+                Some(viewer_body),
+                Some(&self.viewer),
+            )
+            .await;
+            assert!(
+                s == StatusCode::FORBIDDEN || s == StatusCode::NOT_FOUND,
+                "viewer {method} {path}: {s} {b}"
+            );
+            assert_eq!(before, self.snapshot().await, "viewer {method} {path}");
+            if path.contains(&self.workspace.to_string()) {
+                let other = path.replace(
+                    &self.workspace.to_string(),
+                    &self.other_workspace.to_string(),
+                );
+                let (s, b) = json_request(
+                    self.app.clone(),
+                    method,
+                    &other,
+                    Some(body),
+                    Some(&self.cookie),
+                )
+                .await;
+                assert_eq!(s, StatusCode::NOT_FOUND, "tenant {method} {path}: {b}");
+                assert_eq!(before, self.snapshot().await);
+            }
+        }
+        async fn write(
+            &self,
+            method: &str,
+            path: &str,
+            body: Value,
+            expected: StatusCode,
+        ) -> Value {
+            self.refuse(method, path, body.clone()).await;
+            let (s, b) = json_request(
+                self.app.clone(),
+                method,
+                path,
+                Some(body),
+                Some(&self.cookie),
+            )
+            .await;
+            assert_eq!(s, expected, "{method} {path}: {b}");
+            b
+        }
+        async fn read(&self, path: &str) -> Value {
+            let (s, b) =
+                json_request(self.app.clone(), "GET", path, None, Some(&self.cookie)).await;
+            assert_eq!(s, StatusCode::OK, "GET {path}: {b}");
+            if path.contains(&self.workspace.to_string()) {
+                let other = path.replace(
+                    &self.workspace.to_string(),
+                    &self.other_workspace.to_string(),
+                );
+                let (s, b) =
+                    json_request(self.app.clone(), "GET", &other, None, Some(&self.cookie)).await;
+                let root = format!("/api/v1/workspaces/{}", self.workspace);
+                if [
+                    format!("{root}/tasks"),
+                    format!("{root}/labels"),
+                    format!("{root}/statuses"),
+                ]
+                .contains(&path.to_string())
+                {
+                    assert_eq!(s, StatusCode::OK, "other tenant list: {b}");
+                    assert!(
+                        b["items"].as_array().unwrap().is_empty(),
+                        "other tenant exposes no origin rows"
+                    );
+                } else {
+                    assert_eq!(s, StatusCode::NOT_FOUND, "GET tenant {path}: {b}");
+                }
+            }
+            b
+        }
+    }
+}
