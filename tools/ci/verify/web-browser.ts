@@ -5,7 +5,8 @@
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
-import { gatedWorkflowJobs } from "./registry.ts";
+import { get as safeGet } from "./load.ts";
+import { CACHE_PIN, gatedWorkflowJobs } from "./registry.ts";
 import { readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
@@ -68,6 +69,120 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
 const UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
+
+export const COLLABORATION_PREPARATION_JOBS = [
+  "collaboration-main-build",
+  "collaboration-test-build",
+] as const;
+export function collaborationTargetKey(phase: "main" | "tests"): string {
+  return (
+    `v1-web-selected-${phase}-ubuntu-26.04-` +
+    "${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-" +
+    "${{ steps.sqlite.outputs.cache_identity }}"
+  );
+}
+export const COLLABORATION_PREPARATION_RUNS = {
+  "collaboration-main-build":
+    "cargo build --locked --offline --features db-tests,api-schema \\\n" +
+    "  --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture\n",
+  "collaboration-test-build":
+    "cargo test --locked --offline --features db-tests,api-schema --lib --no-run\n" +
+    "cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run\n",
+};
+
+// These are unqualified Cargo caches, never selected-backend packets. The
+// original producer still executes every compiler stage and verifies its full
+// physical inputs before publishing any current-source executable.
+export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
+  const errors: string[] = [];
+  const require = (ok: boolean, message: string) => {
+    if (!ok) errors.push("web: collaboration preparation " + message);
+  };
+  const list = (name: string): Mapping[] => {
+    const value = safeGet(safeGet(jobs, name), "steps");
+    return Array.isArray(value) ? value.flatMap((step) => (isMapping(step) ? [step] : [])) : [];
+  };
+  for (const [index, name] of COLLABORATION_PREPARATION_JOBS.entries()) {
+    const job = safeGet(jobs, name);
+    require(isMapping(job), `${name} must exist`);
+    require(pyEq(
+      safeGet(job, "needs"),
+      index === 0 ? "ci-plan" : ["ci-plan", "collaboration-main-build"],
+    ), "ordered preparation dependencies");
+    const steps = list(name);
+    const compiles = steps.filter((step) => safeGet(step, "name") === "Compile native preparation");
+    const compile = compiles[0];
+    require(compiles.length === 1 &&
+      compile !== undefined &&
+      unmasked(compile) &&
+      pyEq(Object.keys(compile).sort(), ["name", "run"]) &&
+      safeGet(compile, "run") ===
+        "set -euo pipefail\n" +
+          COLLABORATION_PREPARATION_RUNS[name], "complete unmasked compiler commands");
+    const phase = index === 0 ? "main" : "tests";
+    const saves = steps.filter(
+      (step) => safeGet(step, "name") === "Save current native preparation",
+    );
+    const save = saves[0];
+    require(saves.length === 1 &&
+      save !== undefined &&
+      unmasked(save) &&
+      steps.indexOf(save) > steps.indexOf(compile as Mapping) &&
+      safeGet(save, "uses") === "actions/cache/save@" + CACHE_PIN &&
+      pyEq(safeGet(save, "with"), {
+        path: "target",
+        key: collaborationTargetKey(phase),
+      }), "save only successful current-run target cache");
+    require(!steps.some((step) =>
+      usesPrefix(step, "actions/upload-artifact@"),
+    ), "preparation cannot publish qualified packets");
+  }
+  for (const [name, phase] of [
+    ["collaboration-test-build", "main"],
+    ["collaboration-build", "tests"],
+  ] as const) {
+    const steps = list(name);
+    const restores = steps.filter(
+      (step) => safeGet(step, "name") === "Restore current native preparation",
+    );
+    const restore = restores[0];
+    const compileAt = steps.findIndex(
+      (step) =>
+        safeGet(step, "name") === "Compile native preparation" || safeGet(step, "id") === "prepare",
+    );
+    require(restores.length === 1 &&
+      restore !== undefined &&
+      unmasked(restore) &&
+      steps.indexOf(restore) < compileAt &&
+      safeGet(restore, "id") === "current_native_cache" &&
+      safeGet(restore, "uses") === "actions/cache/restore@" + CACHE_PIN &&
+      pyEq(safeGet(restore, "with"), {
+        path: "target",
+        key: collaborationTargetKey(phase),
+        "fail-on-cache-miss": true,
+      }), "exact source/run/attempt/SQLite cache restore before compilation");
+    const checks = steps.filter(
+      (step) => safeGet(step, "name") === "Require exact current native preparation",
+    );
+    const check = checks[0];
+    require(checks.length === 1 &&
+      check !== undefined &&
+      unmasked(check) &&
+      steps.indexOf(check) > steps.indexOf(restore as Mapping) &&
+      steps.indexOf(check) < compileAt &&
+      pyEq(safeGet(check, "env"), {
+        CACHE_HIT: "${{ steps.current_native_cache.outputs.cache-hit }}",
+      }) &&
+      safeGet(check, "run") ===
+        'test "$CACHE_HIT" = true', "cache miss or prefix match must fail closed");
+    require(steps.filter(
+      (step) =>
+        usesPrefix(step, "actions/cache") && safeGet(safeGet(step, "with"), "path") === "target",
+    ).length ===
+      (name === "collaboration-test-build" ? 2 : 1), "no alternate target restore or save");
+  }
+  return errors;
+}
 
 type Lane = {
   name: string;
@@ -153,7 +268,10 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
   };
 
   const producer = jobOf("collaboration-build");
-  require(get(producer, "needs") === "ci-plan", "producer needs ci-plan");
+  require(pyEq(get(producer, "needs"), [
+    "ci-plan",
+    ...COLLABORATION_PREPARATION_JOBS,
+  ]), "producer needs ci-plan and successful preparation");
   const lanes = WEB_COLLAB_LANES.map((lane) => ({ lane, job: jobOf(lane.name) }));
   for (const { lane, job } of lanes) {
     require(pyEq(get(job, "needs"), lane.needs), "consumer needs successful registered producer");
@@ -161,6 +279,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
   const stepsByJob = new Map<string, Mapping[]>();
   for (const [name, job] of [
     ["collaboration-build", producer] as const,
+    ...COLLABORATION_PREPARATION_JOBS.map((name) => [name, jobOf(name)] as const),
     ...lanes.map(({ lane, job }) => [lane.name, job] as const),
   ]) {
     require(get(job, "runs-on") === "ubuntu-26.04" &&
@@ -256,7 +375,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
       });
     require(!borrowsTarget, "consumer cannot borrow target cache");
   }
-  return errors;
+  return [...errors, ...verifyCollaborationPreparationJobs(jobs)];
 }
 
 export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
@@ -288,7 +407,11 @@ export const RUSTUP_METADATA_RUN =
 const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
 const TOOLCHAIN_INSTALL = "rustup toolchain install 1.98.1 --profile minimal --component clippy";
 const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
-const TIMED_RUSTUP_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
+const TIMED_RUSTUP_JOBS = [
+  ...COLLABORATION_PREPARATION_JOBS,
+  "collaboration-build",
+  ...WEB_COLLAB_LANES.map((lane) => lane.name),
+];
 
 // The collaboration jobs wrap each run in a ci-step timer named by position.
 function timingPreamble(job: string, position: number): string {
