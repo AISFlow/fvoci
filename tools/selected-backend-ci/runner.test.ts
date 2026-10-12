@@ -152,6 +152,9 @@ function receipt(lane: Lane, flow: Flow, exit = 0): DriverReceipt {
           recorded_process_identities_retired: true,
           current_schema_server_restart: { restartBrowserExit: 0 },
           actual_browser_tests: flow === "off" ? 8 : 1,
+          ...(lane === "sqlite" && flow === "on"
+            ? { sqlite_restore_browser: { exit: 0, actual_tests: 1, skipped: 0, retries: 0 } }
+            : {}),
           retries: 0,
         }),
   };

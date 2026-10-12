@@ -35,6 +35,10 @@ const isTrue = (value: unknown) => value === true;
 const wikiSpec = "apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts";
 const offSpec = "apps/web/e2e-pending/workspace-off-selected-backend.spec.ts";
 const offSpecSha256 = "3345890f670f6462a6b14931a335de49b62b3c8355bdeece699d030b2869cff7";
+export const restoreSpec = "e2e/v060-sqlite-revision-restore.spec.ts";
+export const restoreBrowserTitle =
+  "SQLite ON revision restore: matching ACK, immutable history and fresh client readback";
+const restoreSpecSha256 = "717d7032a69912507917eb5d7fb94be926b37a59585d1af9864cf1bf73ce9147";
 
 export type Lane = "install" | "postgres" | "sqlite";
 export interface Manifest {
@@ -180,6 +184,38 @@ export function validateOffReport(report: unknown, backend: string): string[] {
     "all eight registered cases must pass once in declared order",
   );
   return cases;
+}
+
+export function validateRestoreReport(report: unknown): void {
+  assert.ok(sha(join(root, "apps/web", restoreSpec)) === restoreSpecSha256);
+  const r = report as {
+    config: { workers: number };
+    errors: unknown;
+    stats: Record<string, unknown>;
+    suites: OffSuite[];
+  };
+  assert.ok(jsonInteger(r.config, "workers") && r.config.workers === 1 && deepEquals(r.errors, []));
+  assert.ok(r.stats.expected === 1);
+  assert.ok(["unexpected", "flaky", "skipped"].every((key) => r.stats[key] === 0));
+  const cases: OffCase[] = [];
+  const visit = (suites: OffSuite[]) => {
+    for (const suite of suites) {
+      cases.push(...(suite.specs ?? []));
+      visit(suite.suites ?? []);
+    }
+  };
+  visit(r.suites);
+  assert.ok(cases.length === 1);
+  const item = cases[0];
+  assert.ok(item && basename(item.file) === basename(restoreSpec) && item.ok === true);
+  assert.ok(item.title === restoreBrowserTitle);
+  assert.ok(item.tests.length === 1);
+  const test = item.tests[0];
+  assert.ok(test && test.expectedStatus === "passed" && test.results.length === 1);
+  const result = test.results[0];
+  assert.ok(
+    result && result.status === "passed" && result.retry === 0 && deepEquals(result.errors, []),
+  );
 }
 
 const git = async (...args: string[]) =>

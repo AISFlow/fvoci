@@ -226,6 +226,15 @@ export function laneRetirement(
         assert.ok(
           receipt.actual_browser_tests === (flow === "off" ? 8 : 1) && receipt.retries === 0,
         );
+        if (lane === "sqlite" && flow === "on")
+          assert.ok(
+            deepEquals(receipt.sqlite_restore_browser, {
+              exit: 0,
+              actual_tests: 1,
+              skipped: 0,
+              retries: 0,
+            }),
+          );
       }
     }
     facts.qualified = true;

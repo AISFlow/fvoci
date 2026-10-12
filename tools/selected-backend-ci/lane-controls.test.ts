@@ -653,6 +653,9 @@ function cohort() {
               recorded_process_identities_retired: true,
               current_schema_server_restart: { restartBrowserExit: 0 },
               actual_browser_tests: grant.flow === "off" ? 8 : 1,
+              ...(grant.lane === "sqlite" && grant.flow === "on"
+                ? { sqlite_restore_browser: { exit: 0, actual_tests: 1, skipped: 0, retries: 0 } }
+                : {}),
               retries: 0,
             }),
       });
