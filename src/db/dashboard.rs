@@ -133,6 +133,71 @@ pub(crate) async fn user_time_zone(pool: &PgPool, user_id: Uuid) -> Result<Strin
         .unwrap_or_else(|| "UTC".to_string()))
 }
 
+pub async fn user_time_zone_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+) -> Result<String, sqlx::Error> {
+    use super::backend::{Backend, DbTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return user_time_zone(pool, user_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!("family timezone read");
+    };
+    let rows = family
+        .query(
+            "SELECT timezone FROM users WHERE id=?1",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    let zone = rows.first().map(|row| row.cell(0)?.string()).transpose()?;
+    tx.rollback().await?;
+    Ok(zone
+        .filter(|name| jiff_tzdb::get(name).is_some_and(|(known, _)| known == *name))
+        .unwrap_or_else(|| "UTC".into()))
+}
+
+#[cfg(test)]
+mod backend_timezone_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_backend_reads_zone_and_falls_back_for_unknown_users_and_zones() {
+        let root = std::env::temp_dir().join(format!("fvoci-timezone-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("timezone.sqlite");
+        crate::db::migrate::run_sqlite_migrations(&path)
+            .await
+            .unwrap();
+        let pool = crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let backend = super::super::backend::Backend::Sqlite(pool.clone());
+        let user = Uuid::now_v7();
+        assert_eq!(user_time_zone_backend(&backend, user).await.unwrap(), "UTC");
+        sqlx::query("INSERT INTO users (id,email,given_name,timezone) VALUES (?1,'timezone@example.invalid','Synthetic','Asia/Seoul')")
+            .bind(user.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        let fresh = crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let fresh_backend = super::super::backend::Backend::Sqlite(fresh.clone());
+        assert_eq!(
+            user_time_zone_backend(&fresh_backend, user).await.unwrap(),
+            "Asia/Seoul"
+        );
+        sqlx::query("UPDATE users SET timezone='Unknown/Zone' WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            user_time_zone_backend(&fresh_backend, user).await.unwrap(),
+            "UTC"
+        );
+        fresh.close().await;
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Current membership role and live workspace under the tenant context.
 async fn live_member_role(
     tx: &mut Transaction<'_, Postgres>,
