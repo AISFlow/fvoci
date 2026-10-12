@@ -18,10 +18,13 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function verdict(report: unknown, status = 0, mode = "flows") {
+function verdict(report: unknown, status = 0, mode = "flows", log?: string) {
   const file = join(dir, "out", `playwright-${mode}.json`);
   if (report === undefined) rmSync(file, { force: true });
   else writeFileSync(file, JSON.stringify(report));
+  const logFile = join(dir, "out", `${mode}.log`);
+  if (log === undefined) rmSync(logFile, { force: true });
+  else writeFileSync(logFile, log);
   const child = Bun.spawnSync(
     [
       "bash",
@@ -53,6 +56,12 @@ ${summary}`,
 const stats = (expected: unknown, skipped = 0) => ({
   stats: { expected, unexpected: 0, flaky: 0, skipped },
 });
+const ssoTest = "keycloak_workspace_sso_with_a_test_entitlement";
+const cargoPass = `running 1 test
+test ${ssoTest} ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.01s
+`;
 
 describe("Keycloak runner group verdict from reporter fixtures", () => {
   test("a zero-exit all-skipped group fails", () => {
@@ -78,10 +87,54 @@ describe("Keycloak runner group verdict from reporter fixtures", () => {
     }
   });
 
-  test("workspace SSO keeps its Rust result path", () => {
-    writeFileSync(join(dir, "out", "workspace-sso.log"), "test result: ok. 1 passed; 0 failed\n");
-    const result = verdict(undefined, 0, "workspace-sso");
+  test("positive passes cannot hide failed, flaky or interrupted browser tests", () => {
+    for (const key of ["unexpected", "flaky", "interrupted"]) {
+      for (const value of [1, -1, 0.5, "0", null]) {
+        expect(verdict({ stats: { ...stats(1).stats, [key]: value } }).code).toBe(1);
+      }
+    }
+    expect(verdict({ ...stats(1), errors: [{ message: "interrupted" }] }).code).toBe(1);
+    expect(verdict({ ...stats(1), errors: [] }).code).toBe(0);
+    for (const status of ["interrupted", "timedOut"]) {
+      expect(
+        verdict({
+          ...stats(1, 1),
+          suites: [{ suites: [{ specs: [{ tests: [{ results: [{ status }] }] }] }] }],
+        }).code,
+      ).toBe(1);
+    }
+    for (const key of ["unexpected", "flaky", "skipped"]) {
+      const incomplete: Record<string, unknown> = { ...stats(1).stats };
+      delete incomplete[key];
+      expect(verdict({ stats: incomplete }).code).toBe(1);
+    }
+  });
+
+  test("workspace SSO requires the selected Rust test to pass", () => {
+    const result = verdict(undefined, 0, "workspace-sso", cargoPass);
     expect(result.code).toBe(0);
     expect(result.stderr).toContain("test result: ok. 1 passed; 0 failed");
+    expect(verdict(undefined, 0, "workspace-sso", cargoPass.replaceAll("\n", "\r\n")).code).toBe(0);
+    expect(verdict(undefined, 7, "workspace-sso", cargoPass).code).toBe(1);
+  });
+
+  test("zero-exit Rust groups reject zero tests, wrong filters, failures and absent summaries", () => {
+    for (const log of [
+      undefined,
+      "",
+      "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s\n",
+      cargoPass.replace(ssoTest, "unrelated_test"),
+      cargoPass.replace("running 1 test", "running 2 tests"),
+      cargoPass.replace("0 failed", "1 failed"),
+      cargoPass.replace("0 ignored", "1 ignored"),
+      cargoPass.replace("0 measured", "1 measured"),
+      cargoPass.replace("ok. 1 passed", "FAILED. 0 passed"),
+      cargoPass.replace(" ... ok", " ... ignored"),
+      cargoPass.split("test result:")[0],
+      cargoPass.slice(cargoPass.indexOf("test result:")),
+      `${cargoPass}${cargoPass}`,
+    ]) {
+      expect(verdict(undefined, 0, "workspace-sso", log).code).toBe(1);
+    }
   });
 });

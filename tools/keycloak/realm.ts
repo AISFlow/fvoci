@@ -478,9 +478,65 @@ function pyStr(value: unknown): string {
 
 /** An opt-in browser group must execute at least one passing test. */
 export function requirePassedGroup(report: unknown): void {
-  const passed = get(get(report, "stats"), "expected");
+  const stats = get(report, "stats");
+  const passed = get(stats, "expected");
   if (typeof passed !== "number" || !Number.isSafeInteger(passed) || passed <= 0) {
     throw new HelperError("Playwright group has no positive passed test count");
+  }
+  // Retries are disabled by the caller; a flaky pass must still fail this gate.
+  for (const key of ["unexpected", "flaky"]) {
+    if (get(stats, key) !== 0) throw new HelperError("Playwright group has abnormal test counts");
+  }
+  const skipped = get(stats, "skipped");
+  if (typeof skipped !== "number" || !Number.isSafeInteger(skipped) || skipped < 0) {
+    throw new HelperError("Playwright group has an invalid skipped test count");
+  }
+  // Accept an explicit interruption count only when zero, if a reporter adds one.
+  const interrupted = get(stats, "interrupted");
+  if (Object.hasOwn(stats as Json, "interrupted") && interrupted !== 0) {
+    throw new HelperError("Playwright group was interrupted");
+  }
+  const errors = get(report, "errors");
+  if (Object.hasOwn(report as Json, "errors") && (!Array.isArray(errors) || errors.length !== 0)) {
+    throw new HelperError("Playwright group has runner errors");
+  }
+  // Playwright counts interrupted results as skipped, so stats alone cannot
+  // distinguish them from the intentional skips for the other Keycloak modes.
+  const pending: unknown[] = [report];
+  for (let index = 0; index < pending.length; index++) {
+    const entry = pending[index];
+    const status = get(entry, "status");
+    if (status === "interrupted" || status === "timedOut") {
+      throw new HelperError("Playwright group has interrupted or timed-out tests");
+    }
+    for (const key of ["suites", "specs", "tests", "results"]) {
+      const children = get(entry, key);
+      if (Array.isArray(children)) pending.push(...children);
+    }
+  }
+}
+
+/** Require exactly the selected ignored Cargo test, with a complete successful libtest result. */
+export function requirePassedCargoGroup(log: string, testName: string): void {
+  const lines = log.split(/\r\n|\r|\n/);
+  const counts = lines.flatMap((line) => /^running ([0-9]+) tests?$/.exec(line)?.[1] ?? []);
+  const tests = lines.filter(
+    (line) => line.startsWith("test ") && !line.startsWith("test result:"),
+  );
+  const results = lines.filter((line) => line.startsWith("test result:"));
+  if (counts.length !== 1 || counts[0] !== "1") {
+    throw new HelperError("Cargo group must run exactly one selected test");
+  }
+  if (tests.length !== 1 || tests[0] !== `test ${testName} ... ok`) {
+    throw new HelperError("Cargo group must pass the exact selected test");
+  }
+  if (
+    results.length !== 1 ||
+    !/^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+(?:\.[0-9]+)?s$/.test(
+      results[0] ?? "",
+    )
+  ) {
+    throw new HelperError("Cargo group lacks a complete passing summary");
   }
 }
 
