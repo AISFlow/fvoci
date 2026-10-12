@@ -308,7 +308,7 @@ async fn contract(remote: bool, case: Case) {
         assert!(preview["currentContentJson"].to_string().contains("후속편집한글"));
         let tail: i64 = preview["currentTailSeq"].as_str().unwrap().parse().unwrap();
         let input = json!({"correlationId":Uuid::now_v7(),"expectedTailSeq":tail.to_string()});
-        let concurrent_peer_edit = engine_fixture("text.v1");
+        let concurrent_peer_edit = engine_fixture("korean_emoji_base.v1");
         let before_cas = witness(&f).await;
         let (bad, _) = request(addr, reqwest::Method::POST, &path, &token, Some(json!({"correlationId":Uuid::now_v7(),"expectedTailSeq":(tail-1).to_string()}))).await;
         assert_eq!(bad, reqwest::StatusCode::CONFLICT);
@@ -333,7 +333,7 @@ async fn contract(remote: bool, case: Case) {
                 let revoked = witness(&f).await;
                 proceed.send(()).unwrap();
                 let (status, body) = work.await.unwrap();
-                assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+                assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
                 assert_eq!(body["code"], "restore_rejected");
                 assert_eq!(witness(&f).await, revoked, "revocation before apply leaves every restore effect absent");
                 return None;
@@ -482,7 +482,10 @@ async fn sqlite_native_archive_separate_database_preserves_restored_history() {
     let dst = server(&destination).await;
     let result = std::panic::AssertUnwindSafe(async {
         let (token, workspace, _) = setup(src.addr, true).await;
-        let (dest_token, dest_workspace, _) = setup(dst.addr, false).await;
+        let (dest_token, _, _) = setup(dst.addr, false).await;
+        let (status, dest_personal) = request(dst.addr, reqwest::Method::POST, "/api/v1/me/personal-workspace", &dest_token, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{dest_personal}");
+        let dest_workspace = dest_personal["id"].as_str().unwrap().to_string();
         let (_, actor) = request(src.addr, reqwest::Method::GET, "/api/v1/auth/me", &token, None).await;
         let actor_id = Uuid::parse_str(actor["userId"].as_str().unwrap()).unwrap();
         let credential = Uuid::parse_str(actor["sessionId"].as_str().unwrap()).unwrap();
@@ -515,7 +518,7 @@ async fn sqlite_native_archive_separate_database_preserves_restored_history() {
         let content = json!({"type":"doc","content":[
             {"type":"paragraph","attrs":{"id":"retained-archive-block"},"content":[{"type":"text","text":"반출 전에 복원한 본문 🧪"}]},
             {"type":"paragraph","attrs":{"id":"retained-reference"},"content":[{"type":"mention","attrs":{"entity":"document","id":reference,"label":"아카이브 참조"}}]},
-            {"type":"attachment","attrs":{"id":attachment,"name":"자료.txt","mime":"text/plain","size":file_bytes.len()}}
+            {"type":"attachment","attrs":{"id":attachment,"name":"자료.txt","image":false}}
         ]});
         let body_path = format!("{project_base}/documents/{doc}");
         let (status, write) = request(src.addr, reqwest::Method::PUT, &format!("{body_path}/body"), &token, Some(json!({"contentJson":content}))).await;
@@ -571,6 +574,23 @@ async fn sqlite_native_archive_separate_database_preserves_restored_history() {
         let (status, history) = request(dst.addr, reqwest::Method::GET, &format!("{dest_base}/revisions"), &dest_token, None).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{history}");
         assert_eq!(history["items"].as_array().unwrap().len(), archive.graph.revisions.iter().filter(|r|r.target_id==doc).count());
+        for original in archive.graph.revisions.iter().filter(|r| r.target_id == doc) {
+            let (status, detail) = request(dst.addr, reqwest::Method::GET, &format!("{dest_base}/revisions/{}", original.id), &dest_token, None).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{detail}");
+            assert_eq!(detail["id"], original.id.to_string());
+            assert_eq!(detail["contentJson"], original.content_json);
+            assert_eq!(detail["reason"], original.reason);
+            assert_eq!(detail["restoredFromId"], json!(original.restored_from_id));
+            assert_eq!(detail["createdBy"], json!(original.created_by.map(|_| dest_actor_id)));
+            assert_eq!(detail["ySnapshot"], native::encode(&archive.bytes(&original.snapshot_entry).unwrap()));
+            assert_eq!(chrono::DateTime::parse_from_rfc3339(detail["createdAt"].as_str().unwrap()).unwrap(), chrono::DateTime::parse_from_rfc3339(&original.created_at).unwrap());
+            let metadata = destination.sql(&format!("SELECT json_object('text',text,'encoding',encoding,'correlation',hex(restore_correlation_id),'base',restore_base_tail_seq,'committed',restore_committed_tail_seq) FROM revisions WHERE id=X'{}'", original.id.simple())).await;
+            assert_eq!(metadata["text"], original.text);
+            assert_eq!(metadata["encoding"], original.encoding);
+            assert_eq!(metadata["correlation"], original.restore_correlation_id.map(|id| id.simple().to_string().to_uppercase()).unwrap_or_default());
+            assert_eq!(metadata["base"], json!(original.restore_base_tail_seq));
+            assert_eq!(metadata["committed"], json!(original.restore_committed_tail_seq));
+        }
         let (status, detail) = request(dst.addr, reqwest::Method::GET, &format!("{dest_base}/revisions/{restore_uuid}"), &dest_token, None).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{detail}");
         assert_eq!(detail["restoredFromId"], revision["id"]);
@@ -628,6 +648,10 @@ async fn sqlite_native_archive_separate_database_preserves_restored_history() {
             )
             .await;
             assert_eq!(status, reqwest::StatusCode::OK, "{detail}");
+            assert_eq!(detail["id"], attachment.to_string());
+            assert_eq!(detail["name"], "자료.txt");
+            assert_eq!(detail["mime"], "text/plain");
+            assert_eq!(detail["sizeBytes"], bytes.len());
         })
         .catch_unwind()
         .await;
