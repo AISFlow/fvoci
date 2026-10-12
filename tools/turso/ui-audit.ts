@@ -57,6 +57,13 @@ const RELAYS = ["notifications", "mail", "push", "webhooks", "github"];
 
 const same = (a: unknown, b: unknown) => deepEquals(a, b, true);
 
+/** Persist barrier request IDs and append operation IDs are independent. */
+export function nativeReceiptsRetained(before: unknown[], after: unknown[]): boolean {
+  return (
+    before.length >= 2 && before.every((receipt) => after.some((fresh) => same(receipt, fresh)))
+  );
+}
+
 /** One native witness bound to each complete singleton row fingerprint. */
 function vapidInitialization(before: unknown, after: unknown): boolean {
   if (!isRecord(before) || !isRecord(after)) return false;
@@ -105,6 +112,7 @@ export interface Audit {
   namespaces: string[];
   actors: Record<string, string>;
   workspaces: Record<string, string>;
+  documents?: Record<string, string>;
   servers: Record_[];
   targetSha256: string;
   serverStarts: number;
@@ -174,6 +182,38 @@ const ids = (rows: unknown[]) => new Set(rows.map((row) => get(row, 0, 1)));
 const setEquals = (a: Set<unknown>, b: Set<unknown>) =>
   a.size === b.size && [...a].every((item) => b.has(item));
 
+// The native witness binds the exact producer tuple/payload to the whole row
+// fingerprint. An exception still needs the actor or document allocated by
+// this UI run; unknown globals and system writes remain refused.
+function witnessedEventOperation(refs: unknown, audit: Audit): unknown[] | null {
+  if (!isRecord(refs) || !isRecord(refs.eventWitness)) return null;
+  const witness = refs.eventWitness;
+  const spaces = list(refs, "workspaces"),
+    people = list(refs, "actors");
+  const target = witness.target;
+  if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
+  const sequence = witness.sequence;
+  if (integer(sequence) <= 0n) return null;
+  if (
+    witness.class === "actor-login" &&
+    spaces.length === 0 &&
+    people.length === 1 &&
+    people[0] === target &&
+    Object.hasOwn(audit.actors, target)
+  )
+    return [sequence, ["null"], ["blob", target]];
+  if (
+    witness.class === "document-projection" &&
+    spaces.length === 1 &&
+    people.length === 0 &&
+    typeof spaces[0] === "string" &&
+    Object.hasOwn(audit.workspaces, spaces[0]) &&
+    audit.documents?.[target] === spaces[0]
+  )
+    return [sequence, ["blob", spaces[0]], ["null"]];
+  return null;
+}
+
 export function allocatedRows(
   before: unknown,
   after: unknown,
@@ -224,10 +264,11 @@ export function allocatedRows(
     if (!Object.hasOwn(beforeEvents, sha)) {
       const spaces = list(refs, "workspaces"),
         people = list(refs, "actors");
-      require(spaces.length > 0 &&
+      require((spaces.length > 0 &&
         subset(spaces, workspaces) &&
         people.length > 0 &&
-        subset(people, actors), "UI_FOREIGN_EVENT");
+        subset(people, actors)) ||
+        witnessedEventOperation(refs, audit) !== null, "UI_FOREIGN_EVENT");
       events.add(get(refs, "self") as string);
     }
   }
@@ -382,13 +423,22 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
     addedEvents.map((row) => integer(get(row, 0))),
     expectedEvents,
   ), "UI_EVENT_COUNTER_UNEXPLAINED");
+  const witnessed = new Set(
+    Object.entries(record(after, "allocations", "events"))
+      .filter(([hash]) => !Object.hasOwn(record(before, "fingerprints", "events"), hash))
+      .flatMap(([, refs]) => {
+        const row = witnessedEventOperation(refs, audit);
+        return row === null ? [] : [canonical(row)];
+      }),
+  );
   for (const row of addedEvents)
-    require(Array.isArray(row) &&
+    require((Array.isArray(row) &&
       row.length === 3 &&
       get(row, 1, 0) === "blob" &&
       workspaces.has(get(row, 1, 1) as string) &&
       get(row, 2, 0) === "blob" &&
-      actors.has(get(row, 2, 1) as string), "UI_FOREIGN_EVENT");
+      actors.has(get(row, 2, 1) as string)) ||
+      witnessed.has(canonical(row)), "UI_FOREIGN_EVENT");
   const firstFence = singleton(get(b, "collab_fence_counter")),
     lastFence = singleton(get(a, "collab_fence_counter"));
   require(firstFence <= lastFence && lastFence <= firstFence + 10000n, "UI_FENCE_COUNTER_RESET");

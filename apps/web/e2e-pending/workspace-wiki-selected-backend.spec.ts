@@ -518,6 +518,7 @@ test("selected normal main: Vue setup, stable wiki create, native persist, manua
             firstAck,
             finalAck,
             persisted,
+            persistedText: extractText(persisted.contentJson).normalize("NFC"),
             revision: saved,
             canonicalEmojiOracleControls: oracleControls,
             nativeHistoryOracleControls: nativeControls,

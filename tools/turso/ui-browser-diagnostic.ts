@@ -18,11 +18,13 @@ const categoryOf = (message: string, status?: unknown): string =>
       ? "assertion"
       : apiStep(message) === "browserType.launch"
         ? "browser-launch"
-        : /^SyntaxError:/.test(message)
-          ? "syntax"
-          : status === "interrupted"
-            ? "interrupted"
-            : "other";
+        : /^(?:Error: )?No tests found(?:\.|$)/.test(message)
+          ? "no-tests"
+          : /^SyntaxError:/.test(message)
+            ? "syntax"
+            : status === "interrupted"
+              ? "interrupted"
+              : "other";
 
 export function browserFailureDiagnostic(
   report: unknown,

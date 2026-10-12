@@ -17,6 +17,7 @@ import { BACKGROUND_TABLES } from "./ui-audit.ts";
 import { privateRead, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { consumeIn, executeUi, memberWrapper, type FlowSteps } from "./ui-flow.ts";
+import { registeredTitles } from "./ui-native.ts";
 import { recheckPhysical, type Manifest } from "./ui-record.ts";
 
 let directory: string;
@@ -82,7 +83,15 @@ describe("consumer flow", () => {
         },
         stop: () =>
           Promise.resolve({ serverExit: 0, portClosed: true, recordedIdentitiesRetired: true }),
-        browser: () => Promise.reject(new UiError("UI_ACTUAL_BROWSER_FAILED")),
+        browser: (_scope, _manifest, _directory, _environment, spec, grep) => {
+          const selected = new RegExp(must(grep));
+          // Playwright greps the full title, including the spec filename.
+          expect(selected.test(spec + " " + must(registeredTitles(spec, "on")[0]))).toBe(true);
+          expect(selected.test(spec + " selected normal main restart: persisted readback")).toBe(
+            false,
+          );
+          return Promise.reject(new UiError("UI_ACTUAL_BROWSER_FAILED"));
+        },
         serverIdentity: () => ({ pid: 123, startTicks: "200" }),
         maintenanceReceipts: () => ({
           identity: { pid: 123, startTicks: "200" },

@@ -222,6 +222,7 @@ describe("native fixture", () => {
         FVOCI_BIND: "x",
         ENCRYPTION_KEYS: "PRIVATE_KEYRING",
         ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+        SSL_CERT_FILE: "/owned/test-ca.pem",
       },
       { workspaceId: "w", documentIds: ["d"] },
     );
@@ -234,8 +235,10 @@ describe("native fixture", () => {
         "FVOCI_LIBSQL_AUTH_TOKEN",
         "FVOCI_LIBSQL_URL",
         "PATH",
+        "SSL_CERT_FILE",
       ].sort(),
     );
+    expect(seen.SSL_CERT_FILE).toBe("/owned/test-ca.pem");
   });
 
   test("a successful native helper with an unconfirmed drain is refused", async () => {
@@ -334,6 +337,17 @@ describe("browser", () => {
       globalErrors: 0,
       globalErrorCategories: [],
     });
+    const noTests = browserFailureDiagnostic(
+      {
+        suites: [],
+        errors: [{ message: "Error: No tests found. PRIVATE_COLLECTION_DETAIL" }],
+      },
+      ON,
+      "on",
+      source,
+    );
+    expect(noTests.browserFailure).toMatchObject({ globalErrorCategories: ["no-tests"] });
+    expect(JSON.stringify(noTests)).not.toContain("PRIVATE_");
   });
 
   test("a failed browser publishes only registered titles, fixed classes, stages and HTTP status", async () => {
@@ -415,9 +429,9 @@ describe("browser", () => {
 
   test("the direct CLI keeps arguments, environment, wait and ownership", async () => {
     for (const [spec, grep] of [
-      [ON, "^selected normal main:"],
+      [ON, "selected normal main:"],
       [OFF, undefined],
-      [ON, "^selected normal main restart:"],
+      [ON, "selected normal main restart:"],
     ] as const) {
       const inputs = browserInputs();
       const { scope, calls } = fakeScope({ spawn: () => exitedChild(0) });

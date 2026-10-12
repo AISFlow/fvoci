@@ -51,6 +51,10 @@ const FIXTURE_KEYS = [
   "FVOCI_E2E_TURSO_NAMESPACE",
   "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
+  // The member actor starts with a deliberately minimal environment. Retain
+  // the caller's admitted TLS trust file/directory from its private capsule.
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ];
 const nativeCode = /^(?:TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED)$/;
 
@@ -352,7 +356,7 @@ export async function browser(
             browserFailureDiagnostic(
               failedReport,
               spec,
-              spec === OFF ? "off" : grep === "^selected normal main restart:" ? "restart" : "on",
+              spec === OFF ? "off" : grep === "selected normal main restart:" ? "restart" : "on",
               source,
             ),
           ),
