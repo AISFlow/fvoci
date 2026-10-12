@@ -511,7 +511,7 @@ export function requirePassedGroup(report: unknown): void {
     }
     for (const key of ["suites", "specs", "tests", "results"]) {
       const children = get(entry, key);
-      if (Array.isArray(children)) pending.push(...children);
+      if (Array.isArray(children)) pending.push(...(children as unknown[]));
     }
   }
 }

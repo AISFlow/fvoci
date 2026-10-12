@@ -104,8 +104,9 @@ describe("Keycloak runner group verdict from reporter fixtures", () => {
       ).toBe(1);
     }
     for (const key of ["unexpected", "flaky", "skipped"]) {
-      const incomplete: Record<string, unknown> = { ...stats(1).stats };
-      delete incomplete[key];
+      const incomplete = Object.fromEntries(
+        Object.entries(stats(1).stats).filter(([name]) => name !== key),
+      );
       expect(verdict({ stats: incomplete }).code).toBe(1);
     }
   });
