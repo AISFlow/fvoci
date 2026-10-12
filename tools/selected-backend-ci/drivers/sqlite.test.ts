@@ -281,6 +281,44 @@ const lastLine = (fixture: World) =>
   JSON.parse(fixture.emitted.at(-1) as string) as Record<string, unknown>;
 
 describe("selected sqlite driver body", () => {
+  test("restore config uses the allocated output directory and one exact spec", async () => {
+    const run = directory();
+    const childEnv: Record<string, string | undefined> = {
+      ...process.env,
+      CI: "true",
+      FVOCI_E2E_SELECTED_BACKEND: "sqlite",
+      FVOCI_E2E_SELECTED_FLOW: "on",
+      FVOCI_E2E_RESULT_DIR: run,
+    };
+    delete childEnv.JEST_WORKER_ID;
+    delete childEnv.FVOCI_E2E_PENDING;
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--eval",
+        'import config from "./apps/web/e2e-pending/revision-restore-playwright.config.ts"; ' +
+          "console.log(JSON.stringify({testDir:config.testDir,testMatch:config.testMatch," +
+          "outputDir:config.outputDir,trace:config.use?.trace,workers:config.workers,retries:config.retries}));",
+      ],
+      { cwd: root, env: childEnv, stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exit).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      testDir: ".",
+      testMatch: "**/v060-sqlite-revision-restore.spec.ts",
+      outputDir: join(run, "playwright-output"),
+      trace: "retain-on-failure",
+      workers: 1,
+      retries: 0,
+    });
+  });
   test("selected restore is absent from normal workspace browser discovery", () => {
     expect(
       discoverGroups()
@@ -386,6 +424,81 @@ describe("selected sqlite driver body", () => {
       true,
     );
     expect(fixture.calls.some((args) => args[1] === "rm")).toBe(true);
+  });
+
+  test("restore output EACCES is public-safe even before JSON reporting starts", async () => {
+    const fixture = world("on", {
+      command: (args) =>
+        args.includes(restoreSpec)
+          ? {
+              returncode: 1,
+              stdout: `EACCES: permission denied, mkdir '/${PRIVATE}/test-results'\n`,
+              stderr: "",
+            }
+          : undefined,
+    });
+    expect(await runMain(fixture)).toBe(1);
+    const receipt = receiptOf(fixture.run);
+    expect(receipt).toMatchObject({
+      browser_exit: 0,
+      observed_failed_exit: 1,
+      restore_browser_exit: 1,
+      restore_failure_code: "PLAYWRIGHT_OUTPUT_EACCES",
+      browser_report_state: "report-missing",
+      known_browser_checkpoint: null,
+      cleanup_errors: [],
+      owned_container_absent: true,
+    });
+    expect(receipt.current_schema_server_restart).toBeUndefined();
+    const log = join(fixture.run, "restore-browser.log");
+    expect(receipt.original_body_log_sha256).toBe(sha(log));
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    expect(lastLine(fixture)).toMatchObject({
+      restore_failure_code: "PLAYWRIGHT_OUTPUT_EACCES",
+      restore_browser_exit: 1,
+      browser_report_state: "report-missing",
+    });
+    expect(fixture.emitted.join("")).not.toContain(PRIVATE);
+  });
+
+  test("a restore assertion keeps its exit, private report and public source location", async () => {
+    const fixture = world("on", {
+      command(args) {
+        if (!args.includes(restoreSpec)) return undefined;
+        const report = restoreReport();
+        const spec = report.suites[0]?.specs[0];
+        if (!spec) throw new Error("missing restore case");
+        spec.ok = false;
+        const result = spec.tests[0]?.results[0];
+        if (!result) throw new Error("missing restore result");
+        Object.assign(result, {
+          status: "failed",
+          errorLocation: { file: restoreSpec, line: 83 },
+          error: { message: PRIVATE, stack: PRIVATE },
+        });
+        writeFileSync(
+          join(fixture.run, "restore-playwright-result.private.json"),
+          JSON.stringify(report),
+        );
+        return { returncode: 7, stdout: PRIVATE, stderr: "" };
+      },
+    });
+    expect(await runMain(fixture)).toBe(7);
+    const report = join(fixture.run, "restore-playwright-result.private.json");
+    expect(statSync(report).mode & 0o777).toBe(0o600);
+    expect(receiptOf(fixture.run)).toMatchObject({
+      browser_exit: 0,
+      restore_browser_exit: 7,
+      sqlite_restore_report_sha256: sha(report),
+      browser_report_state: "matched",
+      known_browser_test: restoreBrowserTitle,
+      known_browser_status: "failed",
+      known_browser_checkpoint: restoreSpec + ":83",
+      observed_failed_exit: 7,
+      cleanup_errors: [],
+    });
+    expect(lastLine(fixture).known_browser_checkpoint).toBe(restoreSpec + ":83");
+    expect(fixture.emitted.join("")).not.toContain(PRIVATE);
   });
 
   test("a refused grant creates no run root and no container", async () => {

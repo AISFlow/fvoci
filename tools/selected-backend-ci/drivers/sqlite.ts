@@ -42,6 +42,7 @@ import {
 import {
   actor,
   assertNoEnvFile,
+  browserPacketKeys,
   checkInterrupt,
   cleanupAttempt,
   cleanupScope,
@@ -52,6 +53,7 @@ import {
   identityGone,
   inodeOf,
   inputCheck,
+  knownBrowserCheckpoint,
   now,
   ownedRows,
   portClosed,
@@ -83,7 +85,11 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
-const checkpointKeys = ["known_driver_checkpoint", "preparation_command_exit"] as const;
+const checkpointKeys = [
+  "known_driver_checkpoint",
+  "preparation_command_exit",
+  ...browserPacketKeys,
+] as const;
 
 // The I/O this driver owns, replaceable as one boundary in tests.
 export interface Seam extends RestartSeam {
@@ -263,6 +269,9 @@ const summaryKeys = [
   "final_exit_code",
   "actual_browser_tests",
   "browser_exit",
+  "restore_browser_exit",
+  "restore_failure_code",
+  ...browserPacketKeys,
   "owned_container_absent",
   "owned_loopback_port_closed",
   "recorded_process_identities_retired",
@@ -306,6 +315,43 @@ export function recordFailure(
     bodyLog,
     extraKeys: checkpointKeys,
   });
+}
+
+// Report only fixed codes and the allowlisted reporter location. Bootstrap
+// failures can precede JSON reporting; never publish their raw log or path.
+export function recordRestoreFailure(
+  state: State,
+  code: number,
+  log: string,
+  report: string,
+): void {
+  const receipt = state.receipt;
+  Object.assign(receipt, {
+    restore_browser_exit: code,
+    restore_failure_code: "SELECTED_RESTORE_BROWSER_FAILED",
+    known_browser_test: null,
+    known_browser_status: null,
+    known_browser_checkpoint: null,
+    browser_report_state: "report-missing",
+  });
+  try {
+    chmodSync(log, 0o600);
+    if (/\bEACCES: permission denied, mkdir\b/.test(readText(log)))
+      receipt.restore_failure_code = "PLAYWRIGHT_OUTPUT_EACCES";
+  } catch (error) {
+    secondary(receipt, "restore-log-diagnostic-failed", error);
+  }
+  if (existsSync(report)) {
+    try {
+      chmodSync(report, 0o600);
+      receipt.sqlite_restore_report_sha256 = sha(report);
+      Object.assign(receipt, knownBrowserCheckpoint(read(report), "sqlite-restore"));
+    } catch (error) {
+      receipt.browser_report_state = "report-unreadable";
+      secondary(receipt, "restore-report-diagnostic-failed", error);
+    }
+  }
+  recordFailure(state, code, undefined, log);
 }
 
 export async function prepareContainer(state: State, seam: Seam): Promise<void> {
@@ -569,7 +615,7 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     });
     state.code = restoreResult.returncode;
     if (state.code !== 0) {
-      recordFailure(state, state.code, undefined, join(run, "restore-browser.log"));
+      recordRestoreFailure(state, state.code, join(run, "restore-browser.log"), restoreReport);
       return;
     }
     chmodSync(restoreReport, 0o600);
