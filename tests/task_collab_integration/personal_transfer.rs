@@ -3189,6 +3189,21 @@ mod sqlite_family {
             .tiptap_to_yjs_update(&serde_json::from_str(&content).unwrap())
             .await
             .unwrap();
+        let cfg = fvoci_server::collab::CollabConfig::from_env().unwrap();
+        let revision_seed = seed.clone();
+        let captured = tokio::task::spawn_blocking(move || {
+            fvoci_server::collab::revision::capture_revision_offline(
+                cfg.engine_bin,
+                cfg.limits,
+                revision_seed,
+                vec![],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let revision_snapshot = captured.y_snapshot;
+        let revision_content = captured.content_json.to_string();
         sqlx::query(r#"INSERT INTO document_states(workspace_id,document_id,state,encoding) VALUES(?1,?2,?3,1)"#).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(&seed).execute(&sqlite).await.unwrap();
         let op = Uuid::now_v7();
         let revision = Uuid::now_v7();
@@ -3204,7 +3219,7 @@ mod sqlite_family {
         sqlx::query("INSERT INTO document_collab_op_receipts(workspace_id,document_id,op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES(?1,?2,?3,1,?4,?5,?6)")
             .bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(op.as_bytes().as_slice()).bind(seed.len() as i64).bind(digest.as_slice()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
         sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_by) VALUES(?1,?2,'document',?3,?4,?5,'','manual',?6)")
-            .bind(revision.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(&seed).bind(&content).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+            .bind(revision.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(&revision_snapshot).bind(&revision_content).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
         let attachment = Uuid::now_v7();
         let key = Uuid::now_v7().to_string();
         let payload = b"private-transfer-file";
@@ -3229,8 +3244,23 @@ mod sqlite_family {
             .bind(alien.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
         let mut foreign = select("move");
         foreign["destinationWorkspaceId"] = json!(alien);
-        let denied = post(&app, &preview_path, foreign, &token).await;
+        let denied = post(&app, &preview_path, foreign.clone(), &token).await;
         assert_eq!(denied.0, StatusCode::NOT_FOUND, "{}", denied.1);
+        let denied = post(
+            &app,
+            &transfer_path,
+            json!({"requestId":Uuid::now_v7(),"selection":foreign,"previewDigest":"a".repeat(64),"confirmed":true}),
+            &token,
+        )
+        .await;
+        assert_eq!(denied.0, StatusCode::NOT_FOUND, "{}", denied.1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM personal_transfer_commands")
+                .fetch_one(&sqlite)
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
                 .fetch_one(&sqlite)
@@ -3269,7 +3299,7 @@ mod sqlite_family {
         let replay = post(&app, &transfer_path, command.clone(), &token).await;
         assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
         assert_eq!(replay.1["replayed"], true);
-        let mut changed = command;
+        let mut changed = command.clone();
         changed["previewDigest"] = json!("a".repeat(64));
         let conflict = post(&app, &transfer_path, changed, &token).await;
         assert_eq!(conflict.0, StatusCode::CONFLICT);
@@ -3330,7 +3360,14 @@ mod sqlite_family {
         .fetch_one(&fresh)
         .await
         .unwrap();
-        assert_eq!(retained, (team.as_bytes().to_vec(), seed.clone(), content));
+        assert_eq!(
+            retained,
+            (
+                team.as_bytes().to_vec(),
+                revision_snapshot,
+                revision_content
+            )
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM personal_transfer_commands")
                 .fetch_one(&fresh)
@@ -3360,6 +3397,50 @@ mod sqlite_family {
                 .await
                 .unwrap(),
             payload
+        );
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET revoked_at=unixepoch()*1000000 WHERE id=?1")
+            .bind(session.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        let refused = fvoci_server::db::personal_transfer::transfer_personal_item_backend(
+            &auth.db.pool,
+            source,
+            actor,
+            session,
+            &serde_json::from_value(command.clone()).unwrap(),
+            None,
+            "web",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            refused,
+            Err(fvoci_server::db::personal_transfer::PersonalTransferDbError::Forbidden)
+        ));
+        assert_eq!(
+            post(&app, &transfer_path, command, &token).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            events
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM personal_transfer_commands")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            2
         );
         fresh.close().await;
         drop(app);
