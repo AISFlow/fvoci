@@ -67,6 +67,10 @@ function fixture(
     hasFocus: () => true,
     dom: { contains: () => true, ownerDocument: { getSelection: () => native } },
     posAtDOM: (_node: unknown, offset: number) => offset,
+    focus() {
+      native.anchorOffset = state.selection.anchor;
+      native.focusOffset = state.selection.head;
+    },
     dispatch(tr: Transaction) {
       dispatches++;
       scrolled = tr.scrolledIntoView;
@@ -116,6 +120,8 @@ for (const key of ["Home", "End"]) {
       assert.equal(selection.anchor, shiftKey ? 10 : selection.head);
       assert.equal(dispatches, 1);
       assert.equal(scrolled, true);
+      assert.equal(f.native.anchorOffset, selection.anchor);
+      assert.equal(f.native.focusOffset, selection.head);
       assert.equal(f.view.state.doc, before, "navigation never changes document content");
     });
   }
@@ -126,6 +132,15 @@ await test("Shift document navigation preserves the current native anchor when P
   assert.equal(f.run({ shiftKey: true }), true);
   assert.equal(f.result().selection.anchor, 8);
   assert.equal(f.result().selection.head, 1);
+});
+
+await test("an unchanged model boundary still restores a native caret that moved before selectionchange", () => {
+  const f = fixture();
+  f.view.dispatch(f.view.state.tr.setSelection(TextSelection.create(f.view.state.doc, 1)));
+  assert.equal(f.native.focusOffset, 10);
+  assert.equal(f.run(), true);
+  assert.equal(f.result().selection.head, 1);
+  assert.equal(f.native.focusOffset, 1);
 });
 
 await test("document boundaries find text inside nested lists beyond leading and trailing atoms", () => {

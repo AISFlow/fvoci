@@ -84,7 +84,9 @@ test("Ctrl document boundaries settle before keyup and pending focus repair", as
         const deliver = repair;
         // Hold selectionchange until the repair has run: this is the ordering
         // that loses the native caret, independent of browser task scheduling.
-        const holdSelectionChange = (event: Event) => event.stopImmediatePropagation();
+        const holdSelectionChange = (event: Event) => {
+          event.stopImmediatePropagation();
+        };
         document.addEventListener("selectionchange", holdSelectionChange, true);
         Object.assign(window, {
           __fvociDocumentBoundaryRepair: () => {
