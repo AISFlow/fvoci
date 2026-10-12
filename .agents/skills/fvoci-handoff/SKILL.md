@@ -19,9 +19,10 @@ description: "커밋을 제출·검토·통합하거나 작업을 재개·정리
   - 머지 큐를 쓰면 큐 head를 게시하고, `merge_group` checkout SHA는 그 main 커밋 SHA와 같다.
   - 순서: 조건 확인 → gh 계정 `fvoci`로 Ready 전환 → `gh pr merge` 직전에 base와 게시한 head 재확인 → `gh pr merge --merge --match-head-commit <게시한 SHA>`. squash·rebase는 쓰지 않는다. 만든 merge commit의 부모는 `[확인한 main, 게시한 head]`다. SHA가 아니라 부모로 본다. 이 병합의 Ready 전환과 그 `Closes #N` 이슈 종료는 이 조건에 포함된다.
 - Turso dispatch는 그 head의 나머지 필수 CI가 PASS한 뒤, 정확한 40자 SHA로 한 번이다. run의 `head_sha`가 요청 SHA와 다르면 결과는 MISSING이다.
-- 병합 담당자는 실제 main merge SHA와 그 SHA의 CI를 끝까지 확인하고 결과를 기록한다. main push에서만 실행되는 이미지 publication도 해당 실행 결과로 확인한다. 병합 전 PASS를 병합 후 PASS나 제품 릴리스 완료로 대신하지 않는다.
+- 병합 담당자는 실제 main merge SHA와 그 SHA의 CI를 끝까지 확인하고 결과를 기록한다. main push에서만 실행되는 이미지 publication도 해당 실행 결과로 확인한다. 병합 전 PASS를 병합 후 PASS나 제품 릴리스 완료로 대신하지 않는다. 다음 main 병합과 태그는 그 main merge SHA의 CI가 끝나고 결과를 확인한 뒤에 한다.
 - 브랜치 삭제는 각 브랜치가 적은 커밋을 여전히 가리키는지와 main 포함을 다시 확인한 뒤, 삭제한 목록을 남긴다. GitHub ruleset 변경은 AGENTS.md의 명시 승인과 검토 조건을 따르고 변경 전후 JSON을 기록한다. 기록이나 hash만으로 변경 권한을 대신하지 않는다.
 - 재개할 때 원격 브랜치, PR head, CI를 다시 조회한다. 로컬 작업 트리에만 있는 커밋은 수락 근거가 아니다.
+- PR·이슈의 생성, 본문 수정, 종료는 실행한 뒤 다시 조회해 반영됐는지 확인한다. `gh` 명령이 exit 0이어도 반영되지 않을 수 있다. `gh pr edit`·`gh issue create`·`gh pr close`가 Projects (classic) 오류로 실패하면 같은 작업을 REST API(`gh api`)로 한다.
 
 ## 기본 절차
 
