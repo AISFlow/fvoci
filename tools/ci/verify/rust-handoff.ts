@@ -28,11 +28,11 @@ import {
   sqlitePrefixCacheSteps,
 } from "./rust-sqlite.ts";
 
-// [label, directory, cache identity, step id] of the fast job's qualified target caches.
+// [job, label, directory, cache identity, step id] of the independent fast caches.
 const RUST_FAST_CACHES = [
-  ["server", "target/default", "fast-default-test", "default_cache"],
-  ["clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"],
-  ["SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"],
+  ["fast", "server", "target/default", "fast-default-test", "default_cache"],
+  ["fast", "clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"],
+  ["fast-sqlite", "SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"],
 ] as const;
 const SAFE_CARGO_DOWNLOAD = {
   path: "~/.cargo/registry\n~/.cargo/git\n",
@@ -64,21 +64,23 @@ const BINARY_CONSUMERS = [
   ["collaboration", "helper"],
 ] as const;
 
-export function rustFastCacheSteps(): Mapping[] {
-  return RUST_FAST_CACHES.flatMap(([label, directory, identity, id]) => [
-    {
-      name: "Restore " + label + " build outputs",
-      id,
-      uses: "actions/cache/restore@" + CACHE_PIN,
-      with: { path: directory, key: buildCacheKey(identity) },
-    },
-    {
-      name: "Save " + label + " build outputs after validation",
-      if: `steps.${id}.outputs.cache-hit != 'true'`,
-      uses: "actions/cache/save@" + CACHE_PIN,
-      with: { path: directory, key: "${{ steps." + id + ".outputs.cache-primary-key }}" },
-    },
-  ]);
+export function rustFastCacheSteps(job = "fast"): Mapping[] {
+  return RUST_FAST_CACHES.filter(([owner]) => owner === job).flatMap(
+    ([, label, directory, identity, id]) => [
+      {
+        name: "Restore " + label + " build outputs",
+        id,
+        uses: "actions/cache/restore@" + CACHE_PIN,
+        with: { path: directory, key: buildCacheKey(identity) },
+      },
+      {
+        name: "Save " + label + " build outputs after validation",
+        if: `steps.${id}.outputs.cache-hit != 'true'`,
+        uses: "actions/cache/save@" + CACHE_PIN,
+        with: { path: directory, key: "${{ steps." + id + ".outputs.cache-primary-key }}" },
+      },
+    ],
+  );
 }
 
 const isCacheStep = (step: Mapping) => str(step, "uses").startsWith("actions/cache");
@@ -94,31 +96,36 @@ export function verifyRustBinaryHandoff(jobs: Mapping): string[] {
     if (!condition) errors.push("rust: " + message);
   };
   const consumerPrefix = sqlitePrefixCacheSteps();
-  const fastSteps = steps(jobs.fast);
-  const expected = rustFastCacheSteps();
-  const expectedNames = new Set(expected.map((step) => step.name));
-  const actual = fastSteps.filter((step) => expectedNames.has(step.name as string));
-  require(actual.length === expected.length &&
-    expected.every((step) =>
-      contains(actual, step),
-    ), "fast server cache must retain exact pinned restore/save pairs and complete inputs");
-  for (const step of fastSteps) {
-    if (isCacheStep(step) && !contains(expected, step) && !contains(consumerPrefix, step)) {
-      require(Object.keys(step).every((key) => ["name", "uses", "with"].includes(key)) &&
-        same(
-          field(step, "with"),
-          SAFE_CARGO_DOWNLOAD,
-        ), "only the exact qualified target restore/save and safe Cargo downloads are allowed");
+  for (const job of ["fast", "fast-sqlite"]) {
+    const fastSteps = steps(jobs[job]);
+    const expected = rustFastCacheSteps(job);
+    const expectedNames = new Set(expected.map((step) => step.name));
+    const actual = fastSteps.filter((step) => expectedNames.has(step.name as string));
+    require(actual.length === expected.length &&
+      expected.every((step) =>
+        contains(actual, step),
+      ), `${job} server cache must retain exact pinned restore/save pairs and complete inputs`);
+    for (const step of fastSteps) {
+      if (isCacheStep(step) && !contains(expected, step) && !contains(consumerPrefix, step)) {
+        require(Object.keys(step).every((key) => ["name", "uses", "with"].includes(key)) &&
+          same(
+            field(step, "with"),
+            SAFE_CARGO_DOWNLOAD,
+          ), "only the exact qualified target restore/save and safe Cargo downloads are allowed");
+      }
     }
-  }
-  const lastTest = fastSteps.reduce(
-    (last, step, index) => (str(step, "run").includes("cargo test") ? index : last),
-    -1,
-  );
-  for (const save of expected.filter((_, index) => index % 2 === 1)) {
-    if (contains(fastSteps, save)) {
-      require(indexOfSame(fastSteps, save) >
-        lastTest, "fast cache saves must follow all validation");
+    const lastTest = fastSteps.reduce(
+      (last, step, index) =>
+        str(step, "run").includes("cargo ") || str(step, "run").includes(" selected-library ")
+          ? index
+          : last,
+      -1,
+    );
+    for (const save of expected.filter((_, index) => index % 2 === 1)) {
+      if (contains(fastSteps, save)) {
+        require(indexOfSame(fastSteps, save) >
+          lastTest, `${job} cache saves must follow all validation`);
+      }
     }
   }
   const nativeCache = steps(jobs["native-arm64"]).filter(

@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 type Step = {
+  name?: string;
   id?: string;
   uses?: string;
   run?: string;
@@ -40,6 +41,7 @@ const root = resolve(import.meta.dir, "../..");
 const contracts = {
   rust: {
     fast: "select_fast",
+    "fast-sqlite": "select_fast_sqlite",
     "native-arm64": "select_native_arm64",
     "postgres-build": "select_postgres",
     postgres: "select_postgres",
@@ -78,6 +80,24 @@ function load(name: string): Workflow {
   // Repository YAML is the fixture; Bun owns parsing. This is not a YAML schema validator.
   return parsed as Workflow;
 }
+
+test("Rust SQLite controls have an independent budget without duplicating the default build", () => {
+  const rust = load("rust");
+  const fast = job(rust, "fast");
+  const sqlite = job(rust, "fast-sqlite");
+  assert.deepEqual(needs(sqlite), ["ci-plan"]);
+  assert.ok(needs(job(rust, "rust-ci-gate")).includes("fast-sqlite"));
+  assert.equal(sqlite.if, "needs.ci-plan.outputs.select_fast_sqlite == 'true'");
+  assert.equal(
+    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (54 exact tests)")
+      .run,
+    "xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
+  );
+  assert.ok(!fast.steps.some((step) => step.run?.includes(" selected-library ")));
+  oneStep(fast, (step) => step.run === "cargo test --locked --offline --lib --bin fvoci-server");
+  oneStep(fast, (step) => step.run === "cargo test --locked --offline --test markdown_process");
+  assert.ok(!sqlite.steps.some((step) => step.env?.CARGO_TARGET_DIR === "target/default"));
+});
 
 function job(workflow: Workflow, id: string): Job {
   const value = workflow.jobs[id];
