@@ -9686,10 +9686,14 @@ mod task_patch_instant_tests {
             );
             let mut original = sqlx::postgres::PgArgumentBuffer::default();
             let mut normalized = sqlx::postgres::PgArgumentBuffer::default();
-            <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(&input, &mut original)
-                .unwrap();
-            <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(&stored, &mut normalized)
-                .unwrap();
+            let _ =
+                <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(&input, &mut original)
+                    .unwrap();
+            let _ = <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(
+                &stored,
+                &mut normalized,
+            )
+            .unwrap();
             assert_eq!(original.as_slice(), normalized.as_slice());
         }
     }
