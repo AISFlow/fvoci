@@ -1,7 +1,11 @@
 # Isolated Turso primary connection and migration consumers
 
-The source consumers are prepared; Rust compilation and actual Turso execution are
-**NOT RUN**. Independent review and a separately allocated execution are still required.
+This document describes the current source boundaries and isolated test consumers.
+The acceptance record for Rust compilation and actual Turso execution is the
+[current checkpoint in PR #347](https://github.com/AISFlow/fvoci/pull/347)
+(`<!-- fvoci-current-checkpoint -->`) and [#331](https://github.com/AISFlow/fvoci/issues/331).
+Local checks and historical executions do not establish acceptance for a new head;
+independent review and separately allocated remote execution remain required.
 The integrator (통합) may publish the reviewed fixed source to the single hardcoded branch
 `fvoci/v060-turso-verified-connection` under the same review and approval
 rules as the PR branch in AGENTS.md. Its push bootstrap runs **only pure
@@ -11,12 +15,9 @@ same-repo reviewed branch, checking exact github.sha. Manual dispatch of
 `ui-baseline` or `ui-ack` also admits the #347 branch
 `fvoci/v060-product-integration-20261005`. No free-form checkout input, PR,
 fork, pull_request_target or other ref is allowed. GitHub documents the default-
-branch requirement for manual dispatch. The designated reviewed branch was
-actually dispatched in [run37312388258](https://github.com/AISFlow/fvoci/actions/runs/37312388258)
-at `04d36b34d1a79e7499f87a31646492eea1a1bbfd` and completed the non-destructive
-connection probe. That historical execution proves this branch consumer path,
-not current migration or this candidate. The evidence keeper (증거기록) must record each new exact
-checkout and API acceptance/rejection without an arbitrary-ref/merge fallback.
+branch requirement for manual dispatch. The evidence keeper (증거기록) records
+each exact checkout and API acceptance/rejection in the acceptance record,
+without an arbitrary-ref/merge fallback.
 [GitHub manual dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
 
 Use the user-designated isolated test database. The dedicated Environment is
@@ -118,11 +119,16 @@ plus the strict prefix/FK-rollback/current/restart/close/lease receipt. It uses
 the same source/ELF/native-input frozen qualification and credential filtering
 as connection; fake fixture receipt tests are not remote runtime evidence.
 
-This first migration slice is **not normal remote installation/startup support**.
-Normal server and `fvoci-migrate` remote refusal remain unchanged. The ignored
-manual consumer calls the maintained compiled SQLite registry and per-step
-migration owner through cfg(test, db-tests) Fable-owned helpers. Initial exact
-blank catalog admission occurs before DDL; unexpected/foreign/populated/current
+Normal remote preparation in `src/prepare.rs` and the `libsql-remote` branch
+of `fvoci-migrate` call `run_remote_migrations`: they install an exact blank
+database, resume an exact prefix of the compiled lineage, and leave current12
+unchanged. Other catalogs or ledgers refuse without automatic reset. Normal
+server startup calls `connect_remote_app`, which requires the exact current
+schema and performs no migration or repair. These product paths are distinct
+from the ignored manual migration consumer, which calls the maintained compiled
+SQLite registry and per-step migration owner through cfg(test, db-tests) helpers.
+For that consumer, exact blank catalog admission occurs before DDL;
+unexpected/foreign/populated/current
 targets refuse, without automatic reset, service deletion or schema overwrite.
 The secret URL remains the designated target, not an invented host/DB-ID proof.
 The lead may separately prepare/reset the disposable test DB only with the
@@ -143,9 +149,9 @@ public numeric787; generic19/text mentions, transport and arbitrary/nested boxed
 errors cannot satisfy the FK oracle. Original manifests/dependencies/features,
 transport and parser files are unchanged. Upstream accessor-absence compile
 control fails with E0599; the patched remote,tls library's five accessor controls
-passed at ROOT353d. That is SDK-only evidence, not actual Turso migration or a
-compile result for this wrapper composition. Provenance and full MIT notice are
-in `vendor/libsql-0.9.30/`; see the pinned
+passed in their isolated SDK check. That is SDK-only evidence, not actual Turso
+migration or a compile result for a new wrapper composition. Provenance and full
+MIT notice are in `vendor/libsql-0.9.30/`; see the pinned
 [SDK error variants](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/errors.rs)
 and [module visibility](https://github.com/tursodatabase/libsql/blob/0653c5788d77ef16a97c56ff3e9fdc11717a72d9/libsql/src/lib.rs).
 
@@ -165,9 +171,9 @@ Other phases (`crud`, `transactions`, `persistence`, `restore`) remain
 allowed dispatch input, with `ui-baseline`, on main, the reviewed branch, or
 `fvoci/v060-product-integration-20261005`. Current tenant
 CRUD/authorization, request/version replay, real concurrent/cancel/uncertain
-finish, normal remote setup, backup/restore, real UI persist ACK and fresh-client
-history remain required separate product acceptance. Local SQLite or loopback
-SDK results cannot be labeled actual Turso PASS. Constant per-database
+finish, remote setup/startup behavior, backup/restore, real UI persist ACK and
+fresh-client history require their own product acceptance in the checkpoint.
+Local SQLite or loopback SDK results cannot be labeled actual Turso PASS. Constant per-database
 concurrency remains `cancel-in-progress:false`; no service resource reset,
 provider/account/secret/policy/permission change is made by the worker.
 
