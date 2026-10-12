@@ -6679,6 +6679,32 @@ mod sqlite_task_port {
         }
         f.write("PATCH", &task_path, json!({"dueAt": null}), StatusCode::OK)
             .await;
+        // Valid leading zero aliases follow PostgreSQL numeric::text while
+        // retaining the submitted decimal scale.
+        for (submitted, stored) in [("00045.5000", "45.5000"), ("0000.000000", "0.000000")] {
+            let output = f
+                .write(
+                    "PATCH",
+                    &task_path,
+                    json!({"estimate":submitted}),
+                    StatusCode::OK,
+                )
+                .await;
+            assert_eq!(output["estimate"], json!(stored));
+            let actual: String = sqlx::query_scalar("SELECT estimate FROM tasks WHERE id=?1")
+                .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            assert_eq!(actual, stored);
+        }
+        f.write(
+            "PATCH",
+            &task_path,
+            json!({"estimate":null}),
+            StatusCode::OK,
+        )
+        .await;
         let label = f
             .write(
                 "POST",

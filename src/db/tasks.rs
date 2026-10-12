@@ -5340,7 +5340,7 @@ pub async fn patch_task_meta_backend(
         if meta_changed {
             let start = next.start_date.map(|d| d.to_string());
             let due = next.due_date.map(|d| d.to_string());
-            family.execute("UPDATE tasks SET title=?3,type=?4,priority=?5,start_date=?6,due_date=?7,due_at=?8,estimate=?9,parent_id=?10,milestone_id=?11,recurrence=?12,archived_at=?13,estimate_unit=CASE WHEN ?14 THEN NULL ELSE estimate_unit END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::text(&next.title),Cell::text(&next.task_type),Cell::text(&next.priority),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),next.due_at.map(family_pg_bound_instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_text(next.estimate.as_deref()),Cell::optional_uuid(next.parent_id),Cell::optional_uuid(next.milestone_id),next.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),next.archived_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::Integer(i64::from(input.estimate!=crate::tasks::patch::FieldUpdate::Unchanged))]).await?;
+            family.execute("UPDATE tasks SET title=?3,type=?4,priority=?5,start_date=?6,due_date=?7,due_at=?8,estimate=?9,parent_id=?10,milestone_id=?11,recurrence=?12,archived_at=?13,estimate_unit=CASE WHEN ?14 THEN NULL ELSE estimate_unit END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::text(&next.title),Cell::text(&next.task_type),Cell::text(&next.priority),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),next.due_at.map(family_pg_bound_instant).transpose()?.unwrap_or(Cell::Null),family_patch_estimate_cell(&input.estimate, &next.estimate)?,Cell::optional_uuid(next.parent_id),Cell::optional_uuid(next.milestone_id),next.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),next.archived_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::Integer(i64::from(input.estimate!=crate::tasks::patch::FieldUpdate::Unchanged))]).await?;
         }
         if status_changed {
             family_task_change(family,TaskChangeRecord {workspace_id:workspace,actor_user_id:actor,verb:"task.updated",target_type:"task",target_id:task,payload:json!({"taskId":task.to_string(),"projectId":next.project_id.to_string(),"from":before.status_id.to_string(),"to":next.status_id.to_string()}
@@ -9628,6 +9628,20 @@ pub(crate) fn family_sort_names<T>(
     match failure {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+// PostgreSQL numeric::text canonicalizes the integer part and keeps scale.
+// Only a submitted estimate is adapted; other metadata edits retain its bytes.
+fn family_patch_estimate_cell(
+    input: &crate::tasks::patch::FieldUpdate<String>,
+    current: &Option<String>,
+) -> Result<Cell, sqlx::Error> {
+    match input {
+        crate::tasks::patch::FieldUpdate::Set(value) => {
+            Ok(Cell::text(decimal_value(value)?.to_plain_string()))
+        }
+        _ => Ok(Cell::optional_text(current.as_deref())),
     }
 }
 
