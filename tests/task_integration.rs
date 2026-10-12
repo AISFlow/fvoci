@@ -588,6 +588,25 @@ async fn task_create_recurrence_round_trips_on_get() {
 }
 
 #[tokio::test]
+async fn task_create_rejects_nul_title() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "LAB", "workspace").await;
+    let project_id = project["id"].as_str().unwrap();
+    let (status, problem) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{workspace_id}/projects/{project_id}/tasks"),
+        Some(json!({"title": "a\0b"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(problem["code"], "invalid_input");
+    harness.cleanup().await;
+}
+
+#[tokio::test]
 async fn task_create_rejects_explicit_null_optional_fields() {
     let harness = TestDb::bootstrap().await;
     let (app, cookie, _, workspace_id) = setup_session(&harness).await;
@@ -6721,6 +6740,45 @@ mod sqlite_task_port {
             StatusCode::OK,
         )
         .await;
+        // Flow reads through `fresh`, a connection pool separate from the
+        // backend writer. Compare all task/label values, project next_number,
+        // and event/audit counts after each rejected write.
+        for (method, path, body) in [
+            (
+                "POST",
+                format!("{project_path}/tasks"),
+                json!({"title": "a\0b"}),
+            ),
+            (
+                "PATCH",
+                task_path.clone(),
+                json!({"title": "a\0b", "priority": "urgent"}),
+            ),
+            (
+                "POST",
+                format!("{project_path}/labels"),
+                json!({"name": "a\0b", "color": "violet"}),
+            ),
+            (
+                "PATCH",
+                label_path.clone(),
+                json!({"name": "a\0b", "color": "red"}),
+            ),
+        ] {
+            let before = f.snapshot().await;
+            let (status, problem) =
+                json_request(app.clone(), method, &path, Some(body), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{method} {path}: {problem}"
+            );
+            assert_eq!(problem["code"], "invalid_input");
+            assert_eq!(before, f.snapshot().await, "NUL {method} {path}");
+            f.read(&format!("{project_path}/tasks/parents?childType=subtask"))
+                .await;
+            f.read(&format!("{project_path}/labels")).await;
+        }
         let milestone = f
             .write(
                 "POST",

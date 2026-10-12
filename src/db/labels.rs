@@ -29,7 +29,7 @@ pub struct LabelRow {
 
 pub fn label_name_is_valid(name: &str) -> bool {
     let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= LABEL_NAME_MAX
+    !trimmed.is_empty() && !name.contains('\0') && trimmed.chars().count() <= LABEL_NAME_MAX
 }
 
 pub fn label_color_is_valid(color: &str) -> bool {
