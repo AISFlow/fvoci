@@ -901,7 +901,7 @@ fn parse_duplicate_input(bytes: &[u8]) -> Result<(Option<String>, bool), Documen
         None => None,
         Some(title) => {
             let trimmed = title.trim();
-            if !crate::db::documents::title_is_valid(trimmed) {
+            if trimmed.contains('\0') || !crate::db::documents::title_is_valid(trimmed) {
                 return Err(AppError::from_code(ProblemCode::InvalidInput).into());
             }
             Some(trimmed.to_string())

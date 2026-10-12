@@ -6919,6 +6919,46 @@ mod sqlite_document_ops {
         f.finish().await;
     }
     #[tokio::test]
+    async fn sqlite_port_document_duplicate_nul_title_is_invalid_without_effects() {
+        let f = Fixture::new().await;
+        let document = f.create("NUL copy source", None).await;
+        let counts = "SELECT (SELECT count(*) FROM documents),
+            (SELECT count(*) FROM document_states),(SELECT count(*) FROM events),
+            (SELECT count(*) FROM audit_log),next_document_number
+            FROM workspaces WHERE id=?1";
+        let before: (i64, i64, i64, i64, i64) = sqlx::query_as(counts)
+            .bind(f.workspace.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let (status, body, _, _) = json_request(
+            f.app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{}/documents/{document}/duplicate",
+                f.workspace
+            ),
+            Some(json!({"title":"bad\u{0}title"})),
+            Some(&f.cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "invalid_input");
+        let observer = pool::connect_sqlite_app(&f.directory.join("app.db"), 1)
+            .await
+            .unwrap();
+        let after: (i64, i64, i64, i64, i64) = sqlx::query_as(counts)
+            .bind(f.workspace.as_bytes().as_slice())
+            .fetch_one(&observer)
+            .await
+            .unwrap();
+        assert_eq!(before, after, "invalid title leaves no durable effects");
+        observer.close().await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
     async fn sqlite_port_document_http_duplicate_and_off_body_cas_readback() {
         let f = Fixture::new().await;
         let root = f.create("HTTP copy", None).await;
