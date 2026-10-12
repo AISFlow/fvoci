@@ -5893,7 +5893,7 @@ mod sqlite_logout_regression {
             super::peer(234),
         )
         .await;
-        assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+        assert_eq!(replay.status, StatusCode::UNAUTHORIZED);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT json_array_length(recovery_hashes) FROM user_mfa WHERE user_id=?1"
@@ -5924,7 +5924,7 @@ mod sqlite_logout_regression {
         )
         .await;
         let pending_token = pending.json["mfaToken"].as_str().unwrap();
-        for expected in [StatusCode::BAD_REQUEST, StatusCode::TOO_MANY_REQUESTS] {
+        for expected in [StatusCode::UNAUTHORIZED, StatusCode::TOO_MANY_REQUESTS] {
             let limited = super::call(
                 &app,
                 "POST",
