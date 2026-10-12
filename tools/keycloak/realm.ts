@@ -476,8 +476,16 @@ function pyStr(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-/** An opt-in browser group must execute at least one passing test. */
-export function requirePassedGroup(report: unknown): void {
+// Single-project, retries: 0 contract of oidc-keycloak-flow.spec.ts. Adding or
+// removing a spec changes the reporter tree and must fail until this is updated.
+const BROWSER_MODE_COUNTS = { flows: 8, failures: 7, "wrong-secret": 1 } as const;
+type BrowserMode = keyof typeof BROWSER_MODE_COUNTS;
+const isBrowserMode = (value: unknown): value is BrowserMode =>
+  typeof value === "string" && Object.hasOwn(BROWSER_MODE_COUNTS, value);
+
+/** Require every selected test to pass and only the other modes to be skipped. */
+export function requirePassedGroup(report: unknown, mode: string): void {
+  if (!isBrowserMode(mode)) throw new HelperError("unknown Playwright group mode");
   const stats = get(report, "stats");
   const passed = get(stats, "expected");
   if (typeof passed !== "number" || !Number.isSafeInteger(passed) || passed <= 0) {
@@ -513,6 +521,78 @@ export function requirePassedGroup(report: unknown): void {
       const children = get(entry, key);
       if (Array.isArray(children)) pending.push(...(children as unknown[]));
     }
+  }
+
+  const suites = get(report, "suites");
+  if (!Array.isArray(suites) || suites.length === 0) {
+    throw new HelperError("Playwright group has no suite results");
+  }
+  const suiteQueue: unknown[] = [...(suites as unknown[])];
+  let actualPassed = 0;
+  const actualSkipped = { flows: 0, failures: 0, "wrong-secret": 0 };
+  for (let index = 0; index < suiteQueue.length; index++) {
+    const suite = suiteQueue[index];
+    const children = get(suite, "suites");
+    if (Object.hasOwn(suite as Json, "suites")) {
+      if (!Array.isArray(children)) throw new HelperError("invalid Playwright suite results");
+      suiteQueue.push(...(children as unknown[]));
+    }
+    const specs = get(suite, "specs");
+    if (!Array.isArray(specs)) throw new HelperError("missing Playwright spec results");
+    for (const spec of specs as unknown[]) {
+      const tests = get(spec, "tests");
+      if (get(spec, "ok") !== true || !Array.isArray(tests) || tests.length !== 1) {
+        throw new HelperError("Playwright spec must have one successful project test");
+      }
+      const item: unknown = tests[0];
+      const results = get(item, "results");
+      const annotations = get(item, "annotations");
+      if (!Array.isArray(results) || results.length === 0 || !Array.isArray(annotations)) {
+        throw new HelperError("Playwright test lacks results or annotations");
+      }
+      const skips = (annotations as unknown[]).filter((a) => get(a, "type") === "skip");
+      if ((annotations as unknown[]).some((a) => get(a, "type") === "fixme")) {
+        throw new HelperError("Playwright group contains fixme tests");
+      }
+      if (get(item, "expectedStatus") === "skipped") {
+        const description = skips.length === 1 ? get(skips[0], "description") : null;
+        const skippedMode =
+          typeof description === "string"
+            ? /^FVOCI_KC_E2E_MODE=(flows|failures|wrong-secret)$/.exec(description)?.[1]
+            : undefined;
+        if (
+          !isBrowserMode(skippedMode) ||
+          skippedMode === mode ||
+          get(item, "status") !== "skipped" ||
+          !(results as unknown[]).every((result) => get(result, "status") === "skipped")
+        ) {
+          throw new HelperError("Playwright skip must belong only to another mode");
+        }
+        actualSkipped[skippedMode]++;
+      } else {
+        if (
+          get(item, "expectedStatus") !== "passed" ||
+          get(item, "status") !== "expected" ||
+          skips.length !== 0 ||
+          results.length !== 1 ||
+          get(results[0], "status") !== "passed"
+        ) {
+          throw new HelperError("Playwright selected test did not pass exactly once");
+        }
+        actualPassed++;
+      }
+    }
+  }
+  const totalSkipped = Object.values(actualSkipped).reduce((sum, count) => sum + count, 0);
+  if (
+    actualPassed !== BROWSER_MODE_COUNTS[mode] ||
+    passed !== actualPassed ||
+    skipped !== totalSkipped ||
+    Object.entries(BROWSER_MODE_COUNTS).some(
+      ([group, count]) => actualSkipped[group as BrowserMode] !== (group === mode ? 0 : count),
+    )
+  ) {
+    throw new HelperError("Playwright group composition differs from the selected spec mode");
   }
 }
 

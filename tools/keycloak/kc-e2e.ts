@@ -51,7 +51,7 @@ const USAGE = `usage: kc-e2e.ts <command> [<args>]
            --repo-digests=<json> --compose-project=<name> --published=<host:port>
            --issuer=<url>               toolchain and image versions (JSON)
   summary <playwright.json> <log>       one group's result line
-  check-group <playwright.json>         require passing tests without abnormal counts
+  check-group <playwright.json> <mode>  require complete passing tests and other-mode skips
   check-cargo-group <log> <test-name>   require the exact selected Rust test to pass`;
 
 /** Creates `path` (never overwrites) with `mode` and writes `text`; errors name it by `label`. */
@@ -326,8 +326,8 @@ async function main(argv: string[]): Promise<void> {
     versions(args);
   } else if (command === "summary" && two) {
     out(`${summary(args[0] as string, args[1] as string)}\n`);
-  } else if (command === "check-group" && args.length === 1) {
-    requirePassedGroup(loadJson(args[0] as string, "the Playwright report"));
+  } else if (command === "check-group" && two) {
+    requirePassedGroup(loadJson(args[0] as string, "the Playwright report"), args[1] as string);
   } else if (command === "check-cargo-group" && two) {
     requirePassedCargoGroup(readText(args[0] as string, "the Cargo log"), args[1] as string);
   } else {
