@@ -1394,3 +1394,518 @@ async fn invitation_accept_is_bounded_per_ip_before_per_token() {
     assert_eq!(random_accept(peer_n(4)).await, StatusCode::NOT_FOUND);
     harness.cleanup().await;
 }
+
+#[path = "support/project_harness.rs"]
+#[allow(dead_code)]
+mod project_harness;
+
+mod sqlite_port {
+    use super::*;
+    use fvoci_server::auth::password::Keyring;
+    use fvoci_server::auth::AuthService;
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{router, state::AppState};
+    use std::sync::Arc;
+    struct Fixture {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        pool: sqlx::SqlitePool,
+        backend: Backend,
+        app: axum::Router,
+        cookie: String,
+        ws: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+    }
+    impl Fixture {
+        async fn start() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("fvoci-membership-port-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("db.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let backend = Backend::Sqlite(sqlite.clone());
+            let auth=Arc::new(AuthService{db:Db::from_backend(backend.clone()),password_keys:Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()});
+            let state = AppState {
+                realtime_mode: fvoci_server::config::RealtimeMode::Off,
+                native_engine: None,
+                auth,
+                branding_name: "FVOCI".into(),
+                public_origin: "http://localhost".into(),
+                cookie_secure: false,
+                rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+                upload: fvoci_server::attachments::UploadLimits {
+                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                    ),
+                },
+                collab: None,
+                meili: None,
+                search_embedder: None,
+                streams: AppState::fresh_streams(),
+                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+                quota: Default::default(),
+                markdown: None,
+                import_wake: None,
+                import_extractor_available: false,
+                preview_extract: None,
+            };
+
+            let app = router(state, None);
+            let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let cookie = headers
+                .get(axum::http::header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let ws = Uuid::from_slice(&bytes).unwrap();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM users WHERE email='owner@example.invalid'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let actor = Uuid::from_slice(&bytes).unwrap();
+            let bytes: Vec<u8> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id=?1")
+                .bind(actor.as_bytes().as_slice())
+                .fetch_one(&sqlite)
+                .await
+                .unwrap();
+            let credential = Uuid::from_slice(&bytes).unwrap();
+            Self {
+                root,
+                path,
+                pool: sqlite,
+                backend,
+                app,
+                cookie,
+                ws,
+                actor,
+                credential,
+            }
+        }
+        async fn member(&self, role: &str) -> (Uuid, String, Uuid) {
+            let user = Uuid::now_v7();
+            let session = Uuid::now_v7();
+            let token = fvoci_server::auth::token::new_token();
+            sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Peer')")
+                .bind(user.as_bytes().as_slice())
+                .bind(format!("{user}@example.invalid"))
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+                .bind(self.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .bind(role)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(session.as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(token.hash).execute(&self.pool).await.unwrap();
+            (user, token.token, session)
+        }
+        async fn call(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+            cookie: &str,
+        ) -> (StatusCode, Value) {
+            project_harness::json_request(self.app.clone(), method, path, body, Some(cookie)).await
+        }
+        async fn owner(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            self.call(method, path, body, &self.cookie).await
+        }
+        async fn foreign(&self) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Foreign')")
+                .bind(id.as_bytes().as_slice())
+                .bind(id.simple().to_string())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            id
+        }
+        async fn count(&self, table: &str) -> i64 {
+            let fresh = pool::connect_sqlite_app(&self.path, 1).await.unwrap();
+            let n = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            fresh.close().await;
+            n
+        }
+        async fn close(self) {
+            self.backend.close().await.unwrap();
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_invitation_acceptance_is_atomic_one_use_and_current() {
+        let f = Fixture::start().await;
+        let (guest, cookie, _) = f.member("guest").await;
+        let foreign = f.foreign().await;
+        let path = format!("/api/v1/workspaces/{}/invitations", f.ws);
+        let invite = json!({"email":"new@example.invalid","role":"member"});
+        let before = f.count("events").await;
+        assert_eq!(
+            f.call("POST", &path, Some(invite.clone()), &cookie).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            f.owner(
+                "POST",
+                &format!("/api/v1/workspaces/{foreign}/invitations"),
+                Some(invite.clone())
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.count("invitations").await, 0);
+        assert_eq!(f.count("events").await, before);
+        let (s, created) = f.owner("POST", &path, Some(invite)).await;
+        assert_eq!(s, StatusCode::CREATED, "{created}");
+        let token = created["acceptUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let preview = format!("/api/v1/invitations/{token}");
+        let (s, p) = f.owner("GET", &preview, None).await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        assert_eq!(p["role"], "member");
+        let accept = format!("{preview}/accept");
+        let body = json!({"email":"new@example.invalid","givenName":"Invited","password":"Synthetic-Invite-2026!"});
+        sqlx::query("CREATE TRIGGER reject_invite_audit BEFORE INSERT ON audit_log WHEN NEW.verb='invitation.accepted' BEGIN SELECT RAISE(ABORT,'test invite rollback'); END").execute(&f.pool).await.unwrap();
+        let before_users = f.count("users").await;
+        assert_eq!(
+            f.owner("POST", &accept, Some(body.clone())).await.0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(f.count("users").await, before_users);
+        sqlx::query("DROP TRIGGER reject_invite_audit")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (s, accepted) = f.owner("POST", &accept, Some(body.clone())).await;
+        assert_eq!(s, StatusCode::OK, "{accepted}");
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM invitations WHERE accepted_at IS NOT NULL"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        fresh.close().await;
+        let before = f.count("events").await;
+        assert_eq!(
+            f.owner("POST", &accept, Some(body)).await.0,
+            StatusCode::GONE
+        );
+        assert_eq!(f.count("events").await, before);
+        // An already existing account must prove its password and retain its role.
+        let existing_email = format!("{guest}@example.invalid");
+        let (s, created) = f
+            .owner(
+                "POST",
+                &path,
+                Some(json!({"email":existing_email,"role":"admin"})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let token = created["acceptUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let (s, _) = f
+            .owner(
+                "POST",
+                &format!("/api/v1/invitations/{token}/accept"),
+                Some(json!({"password":"wrong-password-2026"})),
+            )
+            .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // Inviter demotion removes pending links and prevents later acceptance.
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.ws.as_bytes().as_slice())
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.owner("GET", &format!("/api/v1/invitations/{token}"), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn sqlite_concurrent_invitation_accept_has_one_winner_and_rotates_pepper() {
+        use fvoci_server::auth::password::{hash_password, verify_password};
+        use fvoci_server::db::invitations::{
+            accept_invitation_backend, create_invitation_backend, AcceptInvitationRequest,
+            InvitationDbError,
+        };
+        use fvoci_server::db::workspace::WorkspaceRole;
+        let f = Fixture::start().await;
+        let (user, _, _) = f.member("guest").await;
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.ws.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut keys = Keyring {
+            active_id: "old".into(),
+            keys: std::collections::HashMap::from([
+                ("old".into(), vec![0xaa; 32]),
+                ("new".into(), vec![0xbb; 32]),
+            ]),
+        };
+        let password = "Synthetic-Invite-Rotation-2026!";
+        let stored = hash_password(password, &keys).await.unwrap();
+        sqlx::query("UPDATE users SET password_hash=?2 WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .bind(&stored)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        keys.active_id = "new".into();
+        let email = format!("{user}@example.invalid");
+        let license = fvoci_server::license::from_env();
+        let invite = create_invitation_backend(
+            &f.backend,
+            f.ws,
+            f.actor,
+            f.credential,
+            &email,
+            WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let defaults =
+            fvoci_server::settings::catalog::SettingsValues::defaults("FVOCI").defaults_user;
+        let request = || AcceptInvitationRequest {
+            email: None,
+            given_name: None,
+            family_name: None,
+            password: Some(password),
+            client_ip: None,
+            consents: &[],
+            defaults: &defaults,
+        };
+        // Both independent preflights complete before either writer can accept.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let gate = |_: String| {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                Ok(())
+            }
+        };
+        let (a, b) = tokio::join!(
+            accept_invitation_backend(
+                &f.backend,
+                &license,
+                &keys,
+                &invite.accept_path_token,
+                request(),
+                gate
+            ),
+            accept_invitation_backend(
+                &f.backend,
+                &license,
+                &keys,
+                &invite.accept_path_token,
+                request(),
+                gate
+            )
+        );
+        let results = [a.unwrap(), b.unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(InvitationDbError::AlreadyAccepted)))
+                .count(),
+            1
+        );
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM invitations WHERE accepted_at IS NOT NULL"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE verb='invitation.accepted'"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        let role: String =
+            sqlx::query_scalar("SELECT role FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(role, "member");
+        let rotated: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_ne!(rotated, stored);
+        let verified = verify_password(Some(&rotated), password, &keys).await;
+        assert!(verified.ok && !verified.needs_pepper_rotation);
+        fresh.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_invitation_commits_link_and_rechecks_issuer() {
+        use fvoci_server::db::invitations::{
+            accept_invitation_with_identity_backend, create_invitation_backend,
+            IdentityAcceptRequest, InvitationDbError,
+        };
+        use fvoci_server::db::workspace::WorkspaceRole;
+        let f = Fixture::start().await;
+        let defaults =
+            fvoci_server::settings::catalog::SettingsValues::defaults("FVOCI").defaults_user;
+        let invite = create_invitation_backend(
+            &f.backend,
+            f.ws,
+            f.actor,
+            f.credential,
+            "identity@example.invalid",
+            WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let hash = hash_token(&invite.accept_path_token);
+        let request = || IdentityAcceptRequest {
+            token_hash: &hash,
+            provider: "generic",
+            subject: "synthetic-subject",
+            issuer: "https://idp.example.invalid",
+            link_email: Some("identity@example.invalid"),
+            given_name: Some("Identity"),
+            client_ip: None,
+            consents: &[],
+            defaults: &defaults,
+        };
+        let user = accept_invitation_with_identity_backend(
+            &f.backend,
+            &fvoci_server::license::absent(),
+            request(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(f.count("identity_links").await, 1);
+        assert!(matches!(
+            accept_invitation_with_identity_backend(
+                &f.backend,
+                &fvoci_server::license::absent(),
+                request()
+            )
+            .await
+            .unwrap(),
+            Err(InvitationDbError::AlreadyAccepted)
+        ));
+        let next = create_invitation_backend(
+            &f.backend,
+            f.ws,
+            f.actor,
+            f.credential,
+            "identity@example.invalid",
+            WorkspaceRole::Admin,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let next_hash = hash_token(&next.accept_path_token);
+        let before = f.count("events").await;
+        let mut next_request = request();
+        next_request.token_hash = &next_hash;
+        next_request.issuer = "https://other.example.invalid";
+        assert!(matches!(
+            accept_invitation_with_identity_backend(
+                &f.backend,
+                &fvoci_server::license::absent(),
+                next_request
+            )
+            .await
+            .unwrap(),
+            Err(InvitationDbError::Unauthorized)
+        ));
+        assert_eq!(f.count("events").await, before);
+        let mut next_request = request();
+        next_request.token_hash = &next_hash;
+        assert_eq!(
+            accept_invitation_with_identity_backend(
+                &f.backend,
+                &fvoci_server::license::absent(),
+                next_request
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            user
+        );
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        let role: String =
+            sqlx::query_scalar("SELECT role FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(role, "member");
+        fresh.close().await;
+        f.close().await;
+    }
+}

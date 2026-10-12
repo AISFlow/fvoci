@@ -1002,6 +1002,87 @@ pub async fn update_workspace_meta(
     Ok(Ok(WorkspaceMeta { id, name, slug }))
 }
 
+pub async fn update_workspace_meta_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    name: &str,
+    ip: Option<&str>,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_workspace_meta(pool, ws, actor, credential, name, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        let Some(kind) = family_workspace_kind(&mut op, ws).await? else {
+            return Ok(Err(WorkspaceDbError::NotFound));
+        };
+        if !op
+            .membership_role(ws, actor, true)
+            .await?
+            .is_some_and(|r| r.at_least(WorkspaceRole::Admin))
+        {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        if kind == "personal" {
+            return Ok(Err(WorkspaceDbError::PersonalImmutable));
+        }
+        let (from_name, slug) = {
+            let OperationTx::SqliteFamily(f) = &mut op else {
+                unreachable!()
+            };
+            let rows = f
+                .query(
+                    "SELECT name,slug FROM workspaces WHERE id=?1",
+                    &[Cell::uuid(ws)],
+                )
+                .await?;
+            let r = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+            let v = (r.cell(0)?.string()?, r.cell(1)?.string()?);
+            f.execute(
+                "UPDATE workspaces SET name=?2,updated_at=?3 WHERE id=?1",
+                &[
+                    Cell::uuid(ws),
+                    Cell::text(name),
+                    Cell::instant(crate::db::identity::stored_now())?,
+                ],
+            )
+            .await?;
+            v
+        };
+        family_workspace_change(
+            &mut op,
+            WorkspaceChangeRecord {
+                workspace_id: ws,
+                actor_user_id: actor,
+                verb: "workspace.name_updated",
+                target_type: "workspace",
+                target_id: ws,
+                payload: json!({
+                "workspaceId":ws.to_string(),
+                "name":name,
+                "fromName":from_name
+                }),
+                client_ip: ip,
+            },
+        )
+        .await?;
+        Ok(Ok(WorkspaceMeta {
+            id: ws,
+            name: name.into(),
+            slug,
+        }))
+    }
+    .await;
+    finish_workspace(tx, result).await
+}
+
 pub async fn create_workspace_as_instance_admin(
     pool: &PgPool,
     license: &crate::license::Entitlements,
@@ -1085,6 +1166,71 @@ pub async fn create_workspace_as_instance_admin(
     .await?;
     tx.commit().await?;
     Ok(Ok(WorkspaceMeta { id, name, slug }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_workspace_as_instance_admin_backend(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    actor: Uuid,
+    credential: Uuid,
+    name: &str,
+    slug: &str,
+    ip: Option<&str>,
+) -> Result<Result<WorkspaceMeta, WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_workspace_as_instance_admin(
+            pool, license, actor, credential, name, slug, ip,
+        )
+        .await;
+    }
+    let ws = Uuid::now_v7();
+    let mut tx = backend.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        op.acquire_admission_lock().await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            if f.query("SELECT 1 FROM users WHERE id=?1 AND is_instance_admin=1 AND deleted_at IS NULL AND suspended_at IS NULL", &[Cell::uuid(actor)]).await?.is_empty() {
+                return Ok(Err(WorkspaceDbError::Forbidden));
+            }
+        }
+        if let Err(e) = op.require_new_instance_billable_user(Some(actor), license).await? {
+            return Ok(Err(quota_error(e)));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            let n = f.execute("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,?3) ON CONFLICT(slug) DO NOTHING", &[Cell::uuid(ws), Cell::text(slug), Cell::text(name)]).await?;
+            if n == 0 {
+                return Ok(Err(WorkspaceDbError::SlugTaken));
+            }
+            f.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(ws), Cell::uuid(actor)]).await?;
+        }
+        family_workspace_change(
+            &mut op,
+            WorkspaceChangeRecord {
+                workspace_id: ws,
+                actor_user_id: actor,
+                verb: "workspace.created",
+                target_type: "workspace",
+                target_id: ws,
+                payload: json!({
+                "workspaceId":ws.to_string(),
+                "ownerId":actor.to_string(),
+                "name":name,
+                "slug":slug
+                }),
+                client_ip: ip,
+            },
+        )
+        .await?;
+        Ok(Ok(WorkspaceMeta { id: ws, name: name.into(), slug: slug.into() }))
+    }.await;
+    finish_workspace(tx, result).await
 }
 
 /// Bootstrap under the selected backend's actual admission writer. A failed
@@ -1398,7 +1544,18 @@ pub async fn set_member_role(
     next_role: WorkspaceRole,
     client_ip: Option<&str>,
 ) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
-    let pool = db.pool.postgres("workspace.member_role")?;
+    let Backend::Postgres(pool) = &db.pool else {
+        return set_member_role_backend(
+            db,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+            next_role,
+            client_ip,
+        )
+        .await;
+    };
     let license = &db.license;
     let mut tx = pool.begin().await?;
     acquire_admission_lock(&mut tx).await?;
@@ -1524,6 +1681,91 @@ pub async fn set_member_role(
     tx.commit().await?;
     let member = fetch_member(pool, workspace_id, target_user_id).await?;
     Ok(member.ok_or(WorkspaceDbError::NotFound))
+}
+
+async fn set_member_role_backend(
+    db: &crate::db::Db,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    target: Uuid,
+    next: WorkspaceRole,
+    ip: Option<&str>,
+) -> Result<Result<MemberRow, WorkspaceDbError>, sqlx::Error> {
+    let mut tx = db.pool.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        op.acquire_admission_lock().await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        let Some(kind) = family_workspace_kind(&mut op, ws).await? else {
+            return Ok(Err(WorkspaceDbError::NotFound));
+        };
+        let actor_role = match op.membership_role(ws, actor, true).await? {
+            Some(r) if r.at_least(WorkspaceRole::Admin) => r,
+            _ => return Ok(Err(WorkspaceDbError::Forbidden)),
+        };
+        if kind == "personal" {
+            return Ok(Err(WorkspaceDbError::PersonalImmutable));
+        }
+        if actor == target {
+            return Ok(Err(WorkspaceDbError::SelfChange));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            if f.query("SELECT 1 FROM users WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(target)]).await?.is_empty() {
+                return Ok(Err(WorkspaceDbError::NotFound));
+            }
+        }
+        let Some(old) = op.membership_role(ws, target, true).await? else {
+            return Ok(Err(WorkspaceDbError::NotFound));
+        };
+        if !actor_role.at_least(old) || !actor_role.at_least(next) {
+            return Ok(Err(WorkspaceDbError::RoleCap));
+        }
+        if old == WorkspaceRole::Owner && next != old {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            let rows = f.query("SELECT count(*) FROM memberships WHERE workspace_id=?1 AND role='owner'", &[Cell::uuid(ws)]).await?;
+            if rows[0].cell(0)?.integer()? <= 1 {
+                return Ok(Err(WorkspaceDbError::LastOwner));
+            }
+        }
+        if old != next {
+            if next != WorkspaceRole::Guest {
+                if let Err(e) = op.require_new_instance_billable_user(Some(target), &db.license).await? {
+                    return Ok(Err(quota_error(e)));
+                }
+            }
+            {
+                let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+                f.execute("UPDATE memberships SET role=?3,updated_at=?4 WHERE workspace_id=?1 AND user_id=?2", &[Cell::uuid(ws), Cell::uuid(target), Cell::text(next.as_str()), Cell::instant(crate::db::identity::stored_now())?]).await?;
+            }
+            let roles = [WorkspaceRole::Owner, WorkspaceRole::Admin, WorkspaceRole::Member, WorkspaceRole::Guest].into_iter().filter(|r| !next.at_least(WorkspaceRole::Admin) || !next.at_least(*r)).collect::<Vec<_>>();
+            let revoked = op.remove_pending_by_inviter(ws, target, &roles).await?;
+            family_workspace_change(
+                &mut op,
+                WorkspaceChangeRecord {
+                    workspace_id: ws,
+                    actor_user_id: actor,
+                    verb: "workspace_member.role_changed",
+                    target_type: "workspace_member",
+                    target_id: target,
+                    payload: json!({
+                    "userId":target.to_string(),
+                    "fromRole":old.as_str(),
+                    "role":next.as_str(),
+                    "revokedInvitations":revoked
+                    }),
+                    client_ip: ip,
+                },
+            )
+            .await?;
+        }
+        Ok(Ok(family_workspace_member(&mut op, ws, target).await?))
+    }.await;
+    finish_workspace(tx, result).await
 }
 
 /// Selected membership removal holds the actual writer through authority,
@@ -2031,6 +2273,94 @@ pub async fn trash_workspace(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn trash_workspace_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    slug: &str,
+    ip: Option<&str>,
+) -> Result<Result<(), WorkspaceDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return trash_workspace(pool, ws, actor, credential, slug, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        op.acquire_admission_lock().await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        if !op
+            .membership_role(ws, actor, true)
+            .await?
+            .is_some_and(|r| r == WorkspaceRole::Owner)
+        {
+            return Ok(Err(WorkspaceDbError::Forbidden));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else {
+                unreachable!()
+            };
+            let rows = f
+                .query(
+                    "SELECT slug,kind FROM workspaces WHERE id=?1 AND deleted_at IS NULL",
+                    &[Cell::uuid(ws)],
+                )
+                .await?;
+            let Some(r) = rows.first() else {
+                return Ok(Err(WorkspaceDbError::NotFound));
+            };
+            if r.cell(1)?.string()? == "personal" {
+                return Ok(Err(WorkspaceDbError::PersonalImmutable));
+            }
+            if r.cell(0)?.string()? != slug {
+                return Ok(Err(WorkspaceDbError::InvalidInput));
+            }
+            f.execute(
+                "DELETE FROM invitations WHERE workspace_id=?1",
+                &[Cell::uuid(ws)],
+            )
+            .await?;
+            f.execute(
+                "DELETE FROM api_tokens WHERE workspace_id=?1",
+                &[Cell::uuid(ws)],
+            )
+            .await?;
+            f.execute(
+                "DELETE FROM memberships WHERE workspace_id=?1",
+                &[Cell::uuid(ws)],
+            )
+            .await?;
+            f.execute(
+                "UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1",
+                &[
+                    Cell::uuid(ws),
+                    Cell::instant(crate::db::identity::stored_now())?,
+                ],
+            )
+            .await?;
+        }
+        family_workspace_change(
+            &mut op,
+            WorkspaceChangeRecord {
+                workspace_id: ws,
+                actor_user_id: actor,
+                verb: "workspace.deleted",
+                target_type: "workspace",
+                target_id: ws,
+                payload: json!({}),
+                client_ip: ip,
+            },
+        )
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_workspace(tx, result).await
 }
 
 #[derive(Debug, Clone)]
@@ -3428,4 +3758,85 @@ pub(crate) mod selected_personal_workspace_tests {
             );
         }
     }
+}
+
+async fn finish_workspace<T>(
+    tx: super::backend::DbTx,
+    result: Result<Result<T, WorkspaceDbError>, sqlx::Error>,
+) -> Result<Result<T, WorkspaceDbError>, sqlx::Error> {
+    if matches!(&result, Ok(Ok(_))) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    } else if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(e) => Some(Box::new(e)),
+            Ok(Err(e)) => Some(Box::new(MemberReadRefusal(e))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(super::backend::rollback_cleanup_unknown(original, cleanup));
+    }
+    result
+}
+async fn family_workspace_kind(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let OperationTx::SqliteFamily(f) = op else {
+        unreachable!()
+    };
+    f.require_tenant(ws)?;
+    f.query(
+        "SELECT kind FROM workspaces WHERE id=?1 AND deleted_at IS NULL",
+        &[Cell::uuid(ws)],
+    )
+    .await?
+    .first()
+    .map(|r| r.cell(0)?.string())
+    .transpose()
+}
+async fn family_workspace_member(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    user: Uuid,
+) -> Result<MemberRow, sqlx::Error> {
+    let OperationTx::SqliteFamily(f) = op else {
+        unreachable!()
+    };
+    let rows=f.query("SELECT u.id,u.email,u.given_name,u.family_name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=?1 AND m.user_id=?2 AND u.deleted_at IS NULL",&[Cell::uuid(ws),Cell::uuid(user)]).await?;
+    let r = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+    Ok(MemberRow {
+        user_id: r.cell(0)?.id()?,
+        email: r.cell(1)?.string()?,
+        given_name: r.cell(2)?.string()?,
+        family_name: r.cell(3)?.optional(Cell::string)?,
+        role: WorkspaceRole::parse(&r.cell(4)?.string()?)
+            .ok_or_else(|| sqlx::Error::Protocol("invalid workspace role".into()))?,
+    })
+}
+async fn family_workspace_change(
+    op: &mut OperationTx<'_, '_>,
+    record: WorkspaceChangeRecord<'_>,
+) -> Result<(), sqlx::Error> {
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(record.workspace_id),
+        actor_user_id: Some(record.actor_user_id),
+        verb: record.verb.into(),
+        target_type: Some(record.target_type.into()),
+        target_id: Some(record.target_id),
+        payload: record.payload.clone(),
+    })
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(record.workspace_id),
+        actor_user_id: Some(record.actor_user_id),
+        verb: record.verb.into(),
+        target_type: Some(record.target_type.into()),
+        target_id: Some(record.target_id),
+        payload: record.payload,
+        ip: record.client_ip.map(str::to_string),
+    })
+    .await
 }
