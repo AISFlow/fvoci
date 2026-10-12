@@ -7138,6 +7138,20 @@ mod sqlite_task_port {
             .as_bool()
             .unwrap());
         let release = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"timeEntryId":legacy["id"]});
+        let mut other_owner = release.clone();
+        other_owner["expectedActorId"] = json!(viewer);
+        other_owner["expectedSessionId"] = json!(viewer_session);
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/legacy-release",
+            Some(other_owner),
+            Some(viewer_token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
         let (s, b) = json_request(
             app.clone(),
             "POST",
