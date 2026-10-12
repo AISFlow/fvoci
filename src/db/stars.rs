@@ -617,53 +617,6 @@ pub async fn list_recent_backend(
     finish_star(tx, result, false).await
 }
 
-#[cfg(test)]
-mod selected_star_read_finish_tests {
-    use super::*;
-    #[test]
-    fn star_read_cleanup_retains_refusal_and_driver_without_returning_rows() {
-        for domain in [true, false] {
-            let result = if domain {
-                Ok(Err(StarDbError::Forbidden))
-            } else {
-                Err(sqlx::Error::Protocol("original star SQL fault".into()))
-            };
-            let error = star_read_after_rollback(
-                result,
-                Err(sqlx::Error::Protocol(
-                    "synthetic returned cleanup failure".into(),
-                )),
-            )
-            .unwrap_err();
-            let sqlx::Error::AnyDriverError(source) = error else {
-                panic!("typed cleanup receipt required")
-            };
-            let receipt = source
-                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
-                .unwrap();
-            let original = receipt.original.as_ref().unwrap();
-            if domain {
-                assert!(matches!(
-                    original.downcast_ref::<StarReadRefusal>().unwrap().0,
-                    StarDbError::Forbidden
-                ));
-            } else {
-                assert!(
-                    matches!(original.downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original star SQL fault")
-                );
-            }
-        }
-        assert!(star_read_after_rollback(
-            Ok(Ok(Vec::new())),
-            Err(sqlx::Error::Protocol(
-                "synthetic returned cleanup failure".into()
-            ))
-        )
-        .is_err());
-        // Propagation only: does not claim remote failure/settlement execution.
-    }
-}
-
 async fn finish_star<T>(
     tx: DbTx,
     result: Result<Result<T, StarDbError>, sqlx::Error>,
@@ -722,4 +675,51 @@ async fn family_star_visible(
             .document_permission(ws, actor, id, true)
             .await?
             .at_least(ProjectPermission::View))
+}
+
+#[cfg(test)]
+mod selected_star_read_finish_tests {
+    use super::*;
+    #[test]
+    fn star_read_cleanup_retains_refusal_and_driver_without_returning_rows() {
+        for domain in [true, false] {
+            let result = if domain {
+                Ok(Err(StarDbError::Forbidden))
+            } else {
+                Err(sqlx::Error::Protocol("original star SQL fault".into()))
+            };
+            let error = star_read_after_rollback(
+                result,
+                Err(sqlx::Error::Protocol(
+                    "synthetic returned cleanup failure".into(),
+                )),
+            )
+            .unwrap_err();
+            let sqlx::Error::AnyDriverError(source) = error else {
+                panic!("typed cleanup receipt required")
+            };
+            let receipt = source
+                .downcast_ref::<crate::db::backend::RollbackCleanupUnknown>()
+                .unwrap();
+            let original = receipt.original.as_ref().unwrap();
+            if domain {
+                assert!(matches!(
+                    original.downcast_ref::<StarReadRefusal>().unwrap().0,
+                    StarDbError::Forbidden
+                ));
+            } else {
+                assert!(
+                    matches!(original.downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original star SQL fault")
+                );
+            }
+        }
+        assert!(star_read_after_rollback(
+            Ok(Ok(Vec::new())),
+            Err(sqlx::Error::Protocol(
+                "synthetic returned cleanup failure".into()
+            ))
+        )
+        .is_err());
+        // Propagation only: does not claim remote failure/settlement execution.
+    }
 }

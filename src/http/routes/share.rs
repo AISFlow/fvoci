@@ -1151,6 +1151,17 @@ async fn public_download_route(
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
 
+async fn share_policy_backend(
+    backend: &crate::db::backend::Backend,
+) -> Result<crate::settings::catalog::SharePolicy, sqlx::Error> {
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return crate::settings::share_policy(pool).await;
+    }
+    Ok(crate::settings::current_values_backend(backend, "FVOCI")
+        .await?
+        .share)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,15 +1201,4 @@ mod tests {
             "https://x.example/s/tok"
         );
     }
-}
-
-async fn share_policy_backend(
-    backend: &crate::db::backend::Backend,
-) -> Result<crate::settings::catalog::SharePolicy, sqlx::Error> {
-    if let crate::db::backend::Backend::Postgres(pool) = backend {
-        return crate::settings::share_policy(pool).await;
-    }
-    Ok(crate::settings::current_values_backend(backend, "FVOCI")
-        .await?
-        .share)
 }

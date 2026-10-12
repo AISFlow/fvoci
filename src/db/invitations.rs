@@ -1370,7 +1370,7 @@ async fn grant_family_invitation(
         {
             let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
             if let Some(new) = details.new_account {
-                let n = f.execute("INSERT INTO users(id,email,password_hash,given_name,family_name,locale,timezone,week_starts_on,text_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(email) DO NOTHING", &[Cell::uuid(user), Cell::text(new.email), Cell::optional_text(new.password_hash.as_deref()), Cell::text(new.given_name), Cell::optional_text(new.family_name.as_deref()), Cell::text(new.defaults.locale), Cell::text(new.defaults.timezone), Cell::Integer(new.defaults.week_starts_on as i64), Cell::Integer(new.defaults.text_scale as i64)]).await?;
+                let n = f.execute("INSERT INTO users(id,email,password_hash,given_name,family_name,locale,timezone,week_starts_on,text_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(email) DO NOTHING", &[Cell::uuid(user), Cell::text(new.email), Cell::optional_text(new.password_hash.as_deref()), Cell::text(new.given_name), Cell::optional_text(new.family_name.as_deref()), Cell::text(new.defaults.locale), Cell::text(new.defaults.timezone), Cell::Integer(new.defaults.week_starts_on), Cell::Integer(new.defaults.text_scale)]).await?;
                 if n == 0 {
                     return Ok(Err(InvitationDbError::Unauthorized));
                 }
