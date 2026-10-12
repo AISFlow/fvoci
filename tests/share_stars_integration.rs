@@ -2477,7 +2477,7 @@ mod sqlite_port {
 
         // Public attachments are scoped to the current live subtree and scan state.
         let attachment = Uuid::now_v7();
-        sqlx::query("INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,mime,size_bytes,reserved_size_bytes,storage_key,scan_status) VALUES(?1,?2,?3,?4,'stored','public.txt','text/plain',1,1,?5,'clean')").bind(attachment.as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).bind(attachment.simple().to_string()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,mime,size_bytes,reserved_size_bytes,storage_key,scan_status,completed_at) VALUES(?1,?2,?3,?4,'stored','public.txt','text/plain',1,1,?5,'clean',unixepoch()*1000000)").bind(attachment.as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).bind(attachment.simple().to_string()).execute(&f.pool).await.unwrap();
         let attachment_path = format!("{public}/attachments/{attachment}");
         assert_eq!(
             f.owner("GET", &attachment_path, None).await.0,
@@ -2543,13 +2543,49 @@ mod sqlite_port {
         let (guest, cookie, _) = f.member("guest").await;
         let root = f.document(None).await;
         let _child = f.document(Some(root)).await;
-        sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,user_id,role) VALUES(?1,?2,?3,?4,'member')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).bind(guest.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let group_path = format!("/api/v1/workspaces/{}/groups", f.ws);
+        let (s, group) = f
+            .owner("POST", &group_path, Some(json!({"name":"Guests"})))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{group}");
+        let group = group["id"].as_str().unwrap();
+        assert_eq!(
+            f.owner(
+                "POST",
+                &format!("{group_path}/{group}/members"),
+                Some(json!({"userId":guest}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            f.owner(
+                "POST",
+                &format!("/api/v1/workspaces/{}/documents/{root}/groups", f.ws),
+                Some(json!({"groupId":group,"role":"member"}))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            f.call(
+                "GET",
+                &format!("/api/v1/workspaces/{}/documents/{root}", f.ws),
+                None,
+                &cookie
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
         let links = format!("/api/v1/workspaces/{}/share-links", f.ws);
         assert_eq!(
             f.call("POST", &links, Some(json!({"documentId":root})), &cookie)
                 .await
                 .0,
-            StatusCode::FORBIDDEN
+            StatusCode::NOT_FOUND
         );
         assert_eq!(f.count("share_links").await, 0);
         let project = fvoci_server::db::projects::create_project_backend(

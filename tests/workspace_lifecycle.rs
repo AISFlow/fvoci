@@ -2255,7 +2255,7 @@ mod sqlite_port {
             )
             .await
             .0,
-            StatusCode::FORBIDDEN
+            StatusCode::NOT_FOUND
         );
         let before = f.count("events").await;
         for method in ["PATCH", "DELETE"] {
