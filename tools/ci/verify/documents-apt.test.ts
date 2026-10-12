@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { get, isMapping, parseWorkflow } from "./load.ts";
 import { CACHE_PIN } from "./registry.ts";
 
@@ -27,7 +28,16 @@ function armInstaller(): string {
   return body ?? "exit 99";
 }
 
-function exercise(mode: "miss" | "hit" | "corrupt-hit" | "corrupt-download" | "install-failure") {
+function exercise(
+  mode:
+    | "miss"
+    | "hit"
+    | "corrupt-hit"
+    | "corrupt-download"
+    | "install-failure"
+    | "unpack-failure"
+    | "configure-failure",
+) {
   const directory = mkdtempSync(join(scratch, "case-"));
   const cache = join(directory, "fvoci-clang18-arm64");
   const bin = join(directory, "bin");
@@ -58,7 +68,10 @@ function exercise(mode: "miss" | "hit" | "corrupt-hit" | "corrupt-download" | "i
       '  const at = process.argv.indexOf("--output");\n' +
       "  if (at < 0) process.exit(98);\n" +
       "  writeFileSync(process.argv[at + 1], process.env.PAYLOAD);\n" +
-      '} else if (command === "sudo") process.exit(Number(process.env.INSTALL_EXIT));\n',
+      '} else if (command === "sudo") {\n' +
+      '  const stage = process.argv[2] === "dpkg" ? "unpack" : process.argv[3] === "update" ? "update" : "configure";\n' +
+      "  process.exit(stage === process.env.FAIL_STAGE ? 42 : 0);\n" +
+      "}\n",
     { mode: 0o755 },
   );
   for (const name of ["curl", "sudo"]) copyFileSync(stub, join(bin, name));
@@ -71,7 +84,14 @@ function exercise(mode: "miss" | "hit" | "corrupt-hit" | "corrupt-download" | "i
       RUNNER_TEMP: directory,
       CALLS: callsFile,
       PAYLOAD: mode === "corrupt-download" ? "corrupt\n" : fixture,
-      INSTALL_EXIT: mode === "install-failure" ? "42" : "0",
+      FAIL_STAGE:
+        mode === "install-failure"
+          ? "update"
+          : mode === "unpack-failure"
+            ? "unpack"
+            : mode === "configure-failure"
+              ? "configure"
+              : "",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -145,22 +165,27 @@ test("arm64 cache miss verifies four large packages before dependency resolution
     ).toBe(true);
   }
   const installs = result.calls.filter(([command]) => command === "sudo");
-  expect(installs).toHaveLength(2);
+  expect(installs).toHaveLength(3);
   expect(installs[0]?.slice(1)).toEqual(["apt-get", "update"]);
-  expect(installs[1]?.slice(1, 6)).toEqual([
+  expect(installs[1]?.slice(1, 4)).toEqual(["dpkg", "--unpack", "--"]);
+  expect(installs[1]?.slice(4)).toHaveLength(4);
+  expect(installs[2]?.slice(1, 9)).toEqual([
     "apt-get",
     "install",
     "-y",
     "--no-install-recommends",
+    "--fix-broken",
+    "--no-remove",
+    "--no-upgrade",
     "--",
   ]);
-  expect(installs[1]?.slice(6)).toHaveLength(4);
+  expect(installs[2]?.slice(9)).toEqual(installs[1]?.slice(4));
 });
 
 test("arm64 cache hit verifies large packages without curl downloads", () => {
   const result = exercise("hit");
   expect(result.code, result.stderr).toBe(0);
-  expect(result.calls.map(([command]) => command)).toEqual(["sudo", "sudo"]);
+  expect(result.calls.map(([command]) => command)).toEqual(["sudo", "sudo", "sudo"]);
 });
 
 for (const mode of ["corrupt-hit", "corrupt-download"] as const) {
@@ -179,13 +204,24 @@ test("arm64 installer errors propagate", () => {
   expect(exercise("install-failure").code).toBe(42);
 });
 
+for (const mode of ["unpack-failure", "configure-failure"] as const) {
+  test(`arm64 ${mode} propagates without later installation stages`, () => {
+    const result = exercise(mode);
+    expect(result.code).toBe(42);
+    expect(result.calls.filter(([command]) => command === "sudo")).toHaveLength(
+      mode === "unpack-failure" ? 2 : 3,
+    );
+  });
+}
+
 // Real Ubuntu resolute arm64 package metadata, reduced to dependency/identity
 // fields from main + universe binary-arm64/Packages.xz in the signed Release.
 // Their SHA-256 values are 537715817d9ed77cc919f5123edb91a48d9ae97abf05588a8f18208cc7227e08
 // and 0a68c22478773d9681e098a3a1e650464aa707c4a557b4c3020678d92dfb53c0.
 // This invokes the host apt resolver against an isolated file-only repository;
-// no sudo stub, network, dpkg installation or ARM executable is involved.
-test("arm64 apt resolves the indexed Depends outside the four cached packages", () => {
+// No sudo stub, network or ARM executable is involved. Scriptless tiny debs
+// exercise local acquisition/unpack in an isolated dpkg root, never the host.
+test("arm64 installs verified local files and resolves only indexed Depends", () => {
   const directory = mkdtempSync(join(scratch, "resolver-"));
   const repository = join(directory, "repository");
   for (const path of [repository, "state/lists/partial", "cache/archives/partial"]) {
@@ -207,14 +243,17 @@ test("arm64 apt resolves the indexed Depends outside the four cached packages", 
   }
   writeFileSync(join(repository, "Packages"), index);
   writeFileSync(join(directory, "sources.list"), `deb [trusted=yes] file:${repository} ./\n`);
-  writeFileSync(join(directory, "status"), "");
+  const dpkgRoot = join(directory, "root");
+  const status = join(dpkgRoot, "var/lib/dpkg/status");
+  mkdirSync(join(dpkgRoot, "var/lib/dpkg"), { recursive: true });
+  writeFileSync(status, "");
   const options = [
     `Dir::Etc::sourcelist=${join(directory, "sources.list")}`,
     "Dir::Etc::sourceparts=-",
     "Dir::Etc::main=-",
     "Dir::Etc::parts=-",
     `Dir::State=${join(directory, "state")}`,
-    `Dir::State::status=${join(directory, "status")}`,
+    `Dir::State::status=${status}`,
     `Dir::Cache=${join(directory, "cache")}`,
     "APT::Architecture=arm64",
     "APT::Architectures::=arm64",
@@ -227,21 +266,97 @@ test("arm64 apt resolves the indexed Depends outside the four cached packages", 
       stdout: "pipe",
       stderr: "pipe",
     });
+  let fixtureIndex = index;
+  const localDebs = [...armInstaller().matchAll(/[a-f0-9]{64} ([a-z0-9+_.-]+\.deb)/g)].map(
+    (match) => {
+      const filename = match[1];
+      if (filename === undefined) throw new Error("missing pinned package filename");
+      const entry = index.split("\n\n").find((stanza) => stanza.includes(`/${filename}\n`));
+      if (!entry) throw new Error("missing indexed package");
+      const name = entry.match(/^Package: (.+)$/m)?.[1];
+      if (!name) throw new Error("missing package name");
+      const contents = join(directory, `contents-${name}`);
+      mkdirSync(join(contents, "DEBIAN"), { recursive: true });
+      mkdirSync(join(contents, "usr/share/fvoci-ci-fixture"), { recursive: true });
+      writeFileSync(
+        join(contents, "DEBIAN/control"),
+        entry
+          .split("\n")
+          .filter((line) => line !== "" && !/^(Filename|Size|SHA256):/.test(line))
+          .join("\n") + "\nMaintainer: Fixture <fixture@invalid>\n",
+      );
+      writeFileSync(
+        join(contents, `usr/share/fvoci-ci-fixture/${name}`),
+        "verified-local-payload\n",
+      );
+      const file = join(directory, filename);
+      const build = Bun.spawnSync(["dpkg-deb", "--build", "--root-owner-group", contents, file], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(build.exitCode, build.stderr.toString()).toBe(0);
+      const bytes = readFileSync(file);
+      // Both origins describe identical package bytes, as the real signed index
+      // and the verified cache do. Keep all dependency fields unchanged.
+      fixtureIndex = fixtureIndex.replace(
+        entry,
+        entry
+          .trimEnd()
+          .replace(/^Size: .+$/m, `Size: ${String(bytes.length)}`)
+          .replace(/^SHA256: .+$/m, `SHA256: ${createHash("sha256").update(bytes).digest("hex")}`) +
+          "\nMaintainer: Fixture <fixture@invalid>",
+      );
+      return { name, file };
+    },
+  );
+  expect(localDebs).toHaveLength(4);
+  writeFileSync(join(repository, "Packages"), fixtureIndex);
   const update = apt("update");
   expect(update.exitCode, update.stderr.toString()).toBe(0);
-  const names = [
-    ...armInstaller().matchAll(/[a-f0-9]{64} ([a-z0-9+_.-]+)_18\.1\.8-20ubuntu8_arm64\.deb/g),
-  ].map((match) => {
-    const name = match[1];
-    if (name === undefined) throw new Error("missing pinned package name");
-    return `${name}=1:18.1.8-20ubuntu8`;
-  });
-  expect(names).toHaveLength(4);
-  const install = armInstaller().match(/sudo apt-get install (.+) -- "\$\{debs\[@\]\}"/)?.[1];
+  const body = armInstaller();
+  const directUnpack = body.includes('sudo dpkg --unpack -- "${debs[@]}"');
+  if (directUnpack) {
+    const unpack = Bun.spawnSync(
+      [
+        "dpkg",
+        `--root=${dpkgRoot}`,
+        "--force-not-root",
+        "--force-architecture",
+        "--unpack",
+        "--",
+        ...localDebs.map(({ file }) => file),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(unpack.exitCode, unpack.stderr.toString()).toBe(0);
+  }
+  const install = body.match(/^ {4}sudo apt-get install ([^\n]+)/m)?.[1];
   expect(install).toBeDefined();
-  const result = apt("--print-uris", "install", ...(install ?? "").split(" "), ...names);
+  const flags = (install ?? "").replace(/ -- "\$\{debs\[@\]\}"$/, "").split(" ");
+  const result = apt("--print-uris", "install", ...flags, ...localDebs.map(({ file }) => file));
   expect(result.exitCode, result.stderr.toString()).toBe(0);
   const output = result.stdout.toString();
+  for (const { name, file } of localDebs) {
+    // A local operand alone is insufficient: apt 3.2 substitutes the index
+    // Filename for an equal package/version. Direct unpack must consume the
+    // verified file, and the remaining apt acquire plan must omit that package.
+    if (!directUnpack) {
+      const acquiredUri = output
+        .split("\n")
+        .find((line) => line.startsWith("'file:") && line.includes(`/${name}_`))
+        ?.split("'")[1];
+      expect(acquiredUri === undefined ? undefined : new URL(acquiredUri).href, name).toBe(
+        pathToFileURL(file).href,
+      );
+    }
+    expect(readFileSync(join(dpkgRoot, `usr/share/fvoci-ci-fixture/${name}`), "utf8")).toBe(
+      "verified-local-payload\n",
+    );
+    expect(
+      output.split("\n").some((line) => line.startsWith("'file:") && line.includes(`/${name}_`)),
+      name,
+    ).toBe(false);
+  }
   for (const name of [
     "libstdc++-15-dev",
     "libgcc-15-dev",

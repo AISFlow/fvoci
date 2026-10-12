@@ -187,10 +187,12 @@ jobs:
           8451d5f5290f3a833bb301357c54936e932188ca125e08734071b08fb86b676e libclang1-18_18.1.8-20ubuntu8_arm64.deb
           bcc3bb04c81c97b9157df50801ac36628866692bf681830913874eeef3208491 libllvm18_18.1.8-20ubuntu8_arm64.deb
           PACKAGES
-              # Let apt resolve any smaller Depends absent from this runner.
-              # The four large inputs stay local and are checked before apt runs.
+              # Unpack the verified files directly: apt can substitute an index
+              # URI for a local operand of the same version. Resolve/configure
+              # only the missing Depends after those exact bytes are unpacked.
               sudo apt-get update
-              sudo apt-get install -y --no-install-recommends -- "${debs[@]}"
+              sudo dpkg --unpack -- "${debs[@]}"
+              sudo apt-get install -y --no-install-recommends --fix-broken --no-remove --no-upgrade -- "${debs[@]}"
               ;;
             *) exit 1 ;;
           esac
