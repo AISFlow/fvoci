@@ -28,6 +28,7 @@ test("SQLite ON revision restore: matching ACK, immutable history and fresh clie
   const page = await context.newPage();
   const wire = attachCollabWire(page);
   const token = randomUUID();
+  let bodyFailed = true;
   try {
     await login(page, admin.email, admin.password);
     const workspaces = (await (await page.request.get("/api/v1/me/workspaces")).json()) as {
@@ -107,6 +108,7 @@ test("SQLite ON revision restore: matching ACK, immutable history and fresh clie
     const final = (await finalHistory.json()) as Schema["RevisionListResponse"];
     expect(final.items.filter((item) => item.reason === "restore")).toHaveLength(1);
     const fresh = await newCollabContext(browser, baseURL);
+    let freshFailed = true;
     try {
       const client = await fresh.newPage();
       const freshWire = attachCollabWire(client);
@@ -124,8 +126,9 @@ test("SQLite ON revision restore: matching ACK, immutable history and fresh clie
       await persistBody(client);
       await expectMatchingPersistAck(client, freshWire);
       await expect(editor).toContainText("복원 후 재편집");
+      freshFailed = false;
     } finally {
-      await closeCollabContext(fresh);
+      await closeCollabContext(fresh, freshFailed);
     }
     await info.attach("sqlite-restore-api-ack.json", {
       body: JSON.stringify({
@@ -136,7 +139,8 @@ test("SQLite ON revision restore: matching ACK, immutable history and fresh clie
       }),
       contentType: "application/json",
     });
+    bodyFailed = false;
   } finally {
-    await closeCollabContext(context);
+    await closeCollabContext(context, bodyFailed);
   }
 });
