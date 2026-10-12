@@ -39,7 +39,7 @@ use crate::collab::validation::{
 use crate::db::backend::Backend;
 use crate::db::revisions::{
     create_system_revision_for_room_backend, latest_revision_y_snapshot_for_room_backend,
-    load_durable_collab_for_room_backend, lookup_restored_revision, CreateRevisionInput,
+    load_durable_collab_for_room_backend, lookup_restored_revision_backend, CreateRevisionInput,
     RestoreRevisionAppend, RestoreRevisionInput, RevisionDbError, RevisionTarget,
     SystemRevisionHead, SYSTEM_REVISION_HEAD_RETRIES,
 };
@@ -56,7 +56,6 @@ use crate::collab::wire::CollabKind;
 use crate::collab::wire::{encode, AuthMessage, DocumentMessage, SyncStep, WireFrame};
 use crate::collab::y_sync::{encode_sync_payload, is_empty_update, parse_sync_payload};
 use crate::db::collab::{
-    append_collab_restore_kind,
     compact_collab_snapshot_in_room as compact_collab_snapshot_kind_backend,
     load_room_collab_readonly, project_derived_body_in_room as project_derived_body_kind_backend,
     resolve_collab_admission_kind_backend, verify_room_collab_operation,
@@ -4182,10 +4181,8 @@ impl RoomActor {
         // Recheck current authorization before recovering a previous commit.
         // Recovery precedes the old tail comparison: our own committed restore
         // must not invalidate a response-loss retry of that exact operation.
-        if let Some(restored) = lookup_restored_revision(
-            self.backend
-                .postgres("native revision restore")
-                .map_err(|_| RevisionRestoreError::Unavailable)?,
+        if let Some(restored) = lookup_restored_revision_backend(
+            &self.backend,
             self.workspace_id,
             actor_user_id,
             session_id,
@@ -4454,9 +4451,13 @@ impl RoomActor {
             client_ip: None,
         };
         let append = if let Some(capture) = capture.as_ref() {
-            match self.backend.postgres("native revision restore") {
-                Ok(pool) => append_collab_restore_kind(pool, self.kind, input, capture).await,
-                Err(error) => Err(error),
+            match self.room_guard.as_mut() {
+                Some(guard) => {
+                    guard
+                        .restore(&self.backend, self.kind, input, capture)
+                        .await
+                }
+                None => Ok(Err(CollabDbError::StaleWriter)),
             }
             .map(|result| result.map(|(append, revision_id)| (append, Some(revision_id))))
         } else {
@@ -4487,7 +4488,10 @@ impl RoomActor {
             Ok(Err(err)) if Self::is_definite_append_rejection(&err) => {
                 return Err(ForwardWriteError::Rejected);
             }
-            Err(error) if matches!(self.backend, Backend::LibsqlRemote(_)) => {
+            Err(error)
+                if matches!(self.backend, Backend::LibsqlRemote(_))
+                    && !crate::db::collab::restore_reply_lost_after_finish(&error) =>
+            {
                 self.fatal_remote_write_unconfirmed(error).await;
                 return Err(ForwardWriteError::Unavailable);
             }
@@ -4571,10 +4575,8 @@ impl RoomActor {
                 // Receipt verification permits durable convergence under the
                 // existing room read policy. It is not current write permission:
                 // a demoted/revoked actor must not receive restore success.
-                let recovered = lookup_restored_revision(
-                    self.backend
-                        .postgres("native revision restore")
-                        .map_err(|_| ForwardWriteError::Unavailable)?,
+                let recovered = lookup_restored_revision_backend(
+                    &self.backend,
                     self.workspace_id,
                     actor_user_id,
                     session_id,
