@@ -15,9 +15,9 @@ use crate::api::dto::{
 };
 use crate::auth::scopes::{parse_api_token_scope, ApiTokenScope};
 use crate::db::api_tokens::{
-    create_api_token, list_api_tokens, list_user_api_tokens, revoke_api_token,
-    revoke_user_api_token, ApiTokenDbError, ApiTokenRecord, CreateApiTokenInput,
-    API_TOKEN_CREATE_LIMIT,
+    create_api_token_backend, list_api_tokens_backend, list_user_api_tokens_backend,
+    revoke_api_token_backend, revoke_user_api_token_backend, ApiTokenDbError, ApiTokenRecord,
+    CreateApiTokenInput, API_TOKEN_CREATE_LIMIT,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
@@ -95,7 +95,8 @@ fn map_token_error(err: ApiTokenDbError) -> AppError {
 }
 
 fn internal(err: sqlx::Error) -> AppError {
-    tracing::error!("database error: {}", err);
+    let _ = err;
+    tracing::error!("database operation failed");
     AppError::internal()
 }
 
@@ -113,13 +114,8 @@ async fn list_workspace_tokens(
         Some(workspace_id),
     )
     .await?;
-    let result = list_api_tokens(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
+    let result = list_api_tokens_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -164,13 +160,8 @@ async fn create_workspace_token(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    let result = create_api_token(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
+    let result = create_api_token_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -211,13 +202,8 @@ async fn revoke_workspace_token(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = revoke_api_token(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
+    let result = revoke_api_token_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -238,18 +224,10 @@ async fn list_me_tokens(
     jar: CookieJar,
 ) -> Result<Json<ApiTokenListResponse>, AppError> {
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
-    let result = list_user_api_tokens(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
-        auth.user_id,
-        auth.credential_id,
-    )
-    .await
-    .map_err(internal)?;
+    let result =
+        list_user_api_tokens_backend(&state.auth.db.pool, auth.user_id, auth.credential_id)
+            .await
+            .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(ApiTokenListResponse {
             items: items.iter().map(record_output).collect(),
@@ -280,13 +258,8 @@ async fn create_me_token(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    let result = create_api_token(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
+    let result = create_api_token_backend(
+        &state.auth.db.pool,
         body.workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -320,13 +293,8 @@ async fn revoke_me_token(
     check_origin(&headers, &state.public_origin)?;
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, None).await?;
     let ip = peer_ip(peer.ip());
-    let result = revoke_user_api_token(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/api_tokens.rs")
-            .map_err(internal)?,
+    let result = revoke_user_api_token_backend(
+        &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         id,

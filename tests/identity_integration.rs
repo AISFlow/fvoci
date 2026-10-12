@@ -3806,11 +3806,24 @@ async fn issuer_rewrite_functions_are_absent_and_reruns_preserve_legacy_links() 
     );
     let app = pool::connect_app(&db.app_url).await.unwrap();
     for (sql, id) in [
-        ("SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://new.example')", ids[0]),
-        ("SELECT fvoci.app_identity_link_repin_template($1, 'https://login.microsoftonline.com/{tenantid}/v2.0', 'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0')", ids[1]),
+        (
+            "SELECT fvoci.app_identity_link_backfill_issuer($1, 'https://new.example')",
+            ids[0],
+        ),
+        (
+            "SELECT fvoci.app_identity_link_repin_template($1, 'https://login.microsoftonline.com/{tenantid}/v2.0', 'https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0')",
+            ids[1],
+        ),
     ] {
-        let error = sqlx::query(sql).bind(id).execute(&app).await.expect_err("obsolete rewrite function must be absent");
-        assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("42883"));
+        let error = sqlx::query(sql)
+            .bind(id)
+            .execute(&app)
+            .await
+            .expect_err("obsolete rewrite function must be absent");
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("42883")
+        );
     }
     app.close().await;
     admin.close().await;
@@ -5669,6 +5682,600 @@ mod sqlite_logout_regression {
         std::fs::create_dir(&root).unwrap();
         run(&root).await;
         // Keep the private fixture on assertion failure for diagnosis.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_profile_patch_commits_and_revoked_session_cannot_write() {
+        let root = std::env::temp_dir().join(format!("fvoci-port-auth-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("auth.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: super::keyring(),
+        });
+        let (user, _, token) = auth
+            .setup_instance(
+                "Synthetic-Auth-2026!".into(),
+                SetupInstanceInput {
+                    email: "port-auth@example.invalid".into(),
+                    given_name: "Before".into(),
+                    family_name: Some("Family".into()),
+                    workspace_slug: "port-auth".into(),
+                    workspace_name: "Auth".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let app = fvoci_server::http::router(state(auth.clone(), root.clone()), None);
+        let response = super::call(
+            &app,
+            "PATCH",
+            "/api/v1/auth/me",
+            Some(serde_json::json!({
+                "givenName": "After", "familyName": null, "locale": "ko", "textScale": 20
+            })),
+            Some(&token),
+            super::peer(90),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.json);
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let row: (String, Option<String>, String, i64) = sqlx::query_as(
+            "SELECT given_name,family_name,locale,text_scale FROM users WHERE id=?1",
+        )
+        .bind(user.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(row, ("After".into(), None, "ko".into(), 20));
+        let events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE verb='user.name_updated'")
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        let audits: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE verb='user.name_updated'")
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!((events, audits), (1, 1));
+        auth.logout(&token, Some(user), None).await.unwrap();
+        let denied = super::call(
+            &app,
+            "PATCH",
+            "/api/v1/auth/me",
+            Some(serde_json::json!({"givenName":"Denied"})),
+            Some(&token),
+            super::peer(91),
+        )
+        .await;
+        assert_eq!(denied.status, StatusCode::UNAUTHORIZED);
+        let after: String = sqlx::query_scalar("SELECT given_name FROM users WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(after, "After");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE verb='user.name_updated'"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        drop(app);
+        drop(auth);
+        fresh.close().await;
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn family_fixture() -> (
+        PathBuf,
+        PathBuf,
+        sqlx::SqlitePool,
+        Arc<AuthService>,
+        Uuid,
+        String,
+    ) {
+        let root = std::env::temp_dir().join(format!("fvoci-family-identity-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("identity.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::with_backend_license(
+                Backend::Sqlite(sqlite.clone()),
+                super::license_fixture::signed_license(),
+            ),
+            password_keys: super::keyring(),
+        });
+        let (user, _, token) = auth
+            .setup_instance(
+                super::PASSWORD.into(),
+                SetupInstanceInput {
+                    email: "family@example.com".into(),
+                    given_name: "Family".into(),
+                    family_name: None,
+                    workspace_slug: "identity-family".into(),
+                    workspace_name: "Identity".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        (root, path, sqlite, auth, user, token)
+    }
+
+    #[tokio::test]
+    async fn sqlite_mfa_login_replay_limit_and_revoked_disable_are_atomic() {
+        use fvoci_server::{auth::totp, db::mfa, http::router_with_identity, identity::Identity};
+        let (root, path, sqlite, auth, user, token) = family_fixture().await;
+        let app = router_with_identity(
+            state(auth.clone(), root.join("storage")),
+            None,
+            Arc::new(Identity {
+                encryption_keys: Some(super::encryption_keys()),
+                totp_issuer: "localhost".into(),
+                oidc: super::oidc_settings(vec![], false),
+                clock: Arc::new(|| super::T0_MS),
+            }),
+        );
+        let setup = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/setup",
+            Some(serde_json::json!({"currentPassword":super::PASSWORD})),
+            Some(&token),
+            super::peer(230),
+        )
+        .await;
+        assert_eq!(setup.status, StatusCode::OK, "{:?}", setup.json);
+        let secret = super::decode_base32(setup.json["secret"].as_str().unwrap());
+        let recovery = setup.json["recoveryCodes"][0].as_str().unwrap().to_string();
+        let code = totp::totp_code(&secret, totp::totp_step(super::T0_MS));
+        let enable = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/enable",
+            Some(serde_json::json!({"code":code})),
+            Some(&token),
+            super::peer(231),
+        )
+        .await;
+        assert_eq!(enable.status, StatusCode::OK, "{:?}", enable.json);
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let stored: (String, i64) = sqlx::query_as(
+            "SELECT totp_secret,json_array_length(recovery_hashes) FROM user_mfa WHERE user_id=?1",
+        )
+        .bind(user.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert!(stored.0.starts_with("enc:v2:"));
+        assert_eq!(stored.1, 10);
+        let login = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/login",
+            Some(serde_json::json!({"email":"family@example.com","password":super::PASSWORD})),
+            None,
+            super::peer(232),
+        )
+        .await;
+        assert_eq!(login.status, StatusCode::OK, "{:?}", login.json);
+        let challenge = login.json["mfaToken"].as_str().unwrap();
+        let verify = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/verify",
+            Some(serde_json::json!({"mfaToken":challenge,"code":recovery})),
+            None,
+            super::peer(233),
+        )
+        .await;
+        assert_eq!(verify.status, StatusCode::OK, "{:?}", verify.json);
+        assert!(verify.cookie().is_some());
+        let replay = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/verify",
+            Some(serde_json::json!({"mfaToken":challenge,"code":recovery})),
+            None,
+            super::peer(234),
+        )
+        .await;
+        assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT json_array_length(recovery_hashes) FROM user_mfa WHERE user_id=?1"
+            )
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            9
+        );
+        for _ in 0..2 {
+            assert!(mfa::verify_attempt_backend(&auth.db.pool, user, 3, 300)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        assert!(mfa::verify_attempt_backend(&auth.db.pool, user, 3, 300)
+            .await
+            .unwrap()
+            .is_some());
+        let pending = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/login",
+            Some(serde_json::json!({"email":"family@example.com","password":super::PASSWORD})),
+            None,
+            super::peer(246),
+        )
+        .await;
+        let pending_token = pending.json["mfaToken"].as_str().unwrap();
+        for expected in [StatusCode::BAD_REQUEST, StatusCode::TOO_MANY_REQUESTS] {
+            let limited = super::call(
+                &app,
+                "POST",
+                "/api/v1/auth/mfa/verify",
+                Some(serde_json::json!({"mfaToken":pending_token,"code":recovery})),
+                None,
+                super::peer(247),
+            )
+            .await;
+            assert_eq!(limited.status, expected, "{:?}", limited.json);
+            if expected == StatusCode::TOO_MANY_REQUESTS {
+                assert!(limited.headers.get("retry-after").is_some());
+            }
+        }
+        let session =
+            Uuid::parse_str(&auth.session_user(&token).await.unwrap().unwrap().session_id).unwrap();
+        let row = mfa::find_backend(&auth.db.pool, user)
+            .await
+            .unwrap()
+            .unwrap();
+        auth.logout(&token, Some(user), None).await.unwrap();
+        let recovery_hash = fvoci_server::auth::token::hash_token(&totp::normalize_recovery_code(
+            setup.json["recoveryCodes"][1].as_str().unwrap(),
+        ));
+        let denied = mfa::disable_with_factor_backend(
+            &auth.db.pool,
+            user,
+            session,
+            row.enabled_at.unwrap(),
+            mfa::SecondFactor::Recovery,
+            Some(&recovery_hash),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(denied, Some(mfa::DisableOutcome::SessionGone)));
+        let after = mfa::find_backend(&auth.db.pool, user)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.recovery_hashes, row.recovery_hashes);
+        let disable = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/mfa/disable",
+            Some(serde_json::json!({"currentPassword":super::PASSWORD})),
+            verify.cookie().as_deref(),
+            super::peer(235),
+        )
+        .await;
+        assert_eq!(disable.status, StatusCode::OK, "{:?}", disable.json);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_mfa")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            0
+        );
+        drop(app);
+        drop(auth);
+        fresh.close().await;
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_oidc_link_login_unlink_and_state_replay() {
+        use fvoci_server::{http::router_with_identity, identity::Identity, oidc::ProviderKey};
+        let (root, path, sqlite, auth, user, token) = family_fixture().await;
+        let fake = super::FakeOidc::start(
+            super::CLIENT_ID,
+            super::CLIENT_SECRET,
+            super::Key::ec("family"),
+        )
+        .await;
+        let app = router_with_identity(
+            state(auth.clone(), root.join("storage")),
+            None,
+            Arc::new(Identity {
+                encryption_keys: Some(super::encryption_keys()),
+                totp_issuer: "localhost".into(),
+                oidc: super::oidc_settings(
+                    vec![super::provider(
+                        ProviderKey::Generic,
+                        &fake.base,
+                        super::CLIENT_SECRET,
+                    )],
+                    true,
+                ),
+                clock: Arc::new(|| super::T0_MS),
+            }),
+        );
+        let linked = super::oidc_round_on(
+            &app,
+            &fake,
+            "/api/v1/auth/oidc/generic/link",
+            "generic",
+            super::Profile::new("family-sub", "family@example.com", true),
+            Some(&token),
+            super::peer(236),
+        )
+        .await;
+        assert_eq!(linked.status, StatusCode::FOUND);
+        assert_eq!(
+            linked.location(),
+            "http://localhost/settings/account?linked=1"
+        );
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_links WHERE user_id=?1")
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            1
+        );
+        let start = super::begin_on(
+            &app,
+            "/api/v1/auth/oidc/generic/start",
+            None,
+            super::peer(237),
+        )
+        .await;
+        let query = fake.authorize(
+            &start.location,
+            super::Profile::new("family-sub", "family@example.com", true),
+        );
+        let login = super::callback_on(
+            &app,
+            "generic",
+            &query,
+            Some(&start.state_cookie),
+            None,
+            super::peer(238),
+        )
+        .await;
+        assert_eq!(login.location(), "http://localhost/");
+        assert!(login.cookie().is_some());
+        let replay = super::callback_on(
+            &app,
+            "generic",
+            &query,
+            Some(&start.state_cookie),
+            None,
+            super::peer(239),
+        )
+        .await;
+        assert!(replay.cookie().is_none());
+        assert!(replay.location().contains("oidc_state_mismatch"));
+        let list = super::call(
+            &app,
+            "GET",
+            "/api/v1/auth/identities",
+            None,
+            Some(&token),
+            super::peer(240),
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::OK, "{:?}", list.json);
+        let unlinked = super::call(
+            &app,
+            "POST",
+            "/api/v1/auth/oidc/generic/unlink",
+            None,
+            Some(&token),
+            super::peer(241),
+        )
+        .await;
+        assert_eq!(unlinked.status, StatusCode::OK, "{:?}", unlinked.json);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_links")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            0
+        );
+        drop(app);
+        drop(auth);
+        drop(fake);
+        fresh.close().await;
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_oidc_workspace_configuration_and_jit_keep_current_authority() {
+        use fvoci_server::{db::oidc, http::router_with_identity, identity::Identity};
+        let (root, path, sqlite, auth, user, token) = family_fixture().await;
+        let workspace: Vec<u8> =
+            sqlx::query_scalar("SELECT workspace_id FROM memberships WHERE user_id=?1")
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&sqlite)
+                .await
+                .unwrap();
+        let workspace = Uuid::from_slice(&workspace).unwrap();
+        let app = router_with_identity(
+            state(auth.clone(), root.join("storage")),
+            None,
+            Arc::new(Identity {
+                encryption_keys: Some(super::encryption_keys()),
+                totp_issuer: "localhost".into(),
+                oidc: super::oidc_settings(vec![], false),
+                clock: Arc::new(|| super::T0_MS),
+            }),
+        );
+        let path_config = format!("/api/v1/workspaces/{workspace}/oidc");
+        let input = serde_json::json!({"issuer":"https://id.example.invalid","clientId":"family","clientSecret":"synthetic-client-secret","label":"Family SSO"});
+        let saved = super::call(
+            &app,
+            "PUT",
+            &path_config,
+            Some(input.clone()),
+            Some(&token),
+            super::peer(242),
+        )
+        .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.json);
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let secret: String =
+            sqlx::query_scalar("SELECT client_secret FROM workspace_oidc WHERE workspace_id=?1")
+                .bind(workspace.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert!(secret.starts_with("enc:v2:"));
+        assert!(!secret.contains("synthetic-client-secret"));
+        let read = super::call(
+            &app,
+            "GET",
+            &path_config,
+            None,
+            Some(&token),
+            super::peer(243),
+        )
+        .await;
+        assert_eq!(read.status, StatusCode::OK);
+        assert!(!read.json.to_string().contains("synthetic-client-secret"));
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        for method in ["PUT", "DELETE"] {
+            let refused = super::call(
+                &app,
+                method,
+                &path_config,
+                (method == "PUT").then(|| input.clone()),
+                Some(&token),
+                super::peer(244),
+            )
+            .await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN, "{:?}", refused.json);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT client_secret FROM workspace_oidc WHERE workspace_id=?1"
+            )
+            .bind(workspace.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            secret
+        );
+        sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let removed = super::call(
+            &app,
+            "DELETE",
+            &path_config,
+            None,
+            Some(&token),
+            super::peer(245),
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::OK, "{:?}", removed.json);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workspace_oidc")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE workspaces SET auto_join_domains='[\"example.com\"]' WHERE id=?1")
+            .bind(workspace.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let input =
+            |email: &'static str, domain: &'static str, subject: &'static str| oidc::JitInput {
+                workspace_id: workspace,
+                email,
+                domain,
+                given_name: "Joined",
+                subject,
+                issuer: "https://id.example.invalid",
+            };
+        let joined = oidc::jit_join_backend(
+            &auth.db.pool,
+            &auth.db.license,
+            input("jit@example.com", "example.com", "jit-sub"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(joined, oidc::JitOutcome::Joined(_)));
+        for (email, domain, subject) in [
+            ("jit@example.com", "example.com", "duplicate-email"),
+            ("duplicate-sub@example.com", "example.com", "jit-sub"),
+            ("denied@other.com", "other.com", "denied-sub"),
+        ] {
+            assert!(matches!(
+                oidc::jit_join_backend(
+                    &auth.db.pool,
+                    &auth.db.license,
+                    input(email, domain, subject)
+                )
+                .await
+                .unwrap(),
+                oidc::JitOutcome::Skipped
+            ));
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM identity_links")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memberships")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            2
+        );
+        drop(app);
+        drop(auth);
+        fresh.close().await;
+        sqlite.close().await;
         std::fs::remove_dir_all(root).unwrap();
     }
 }

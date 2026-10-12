@@ -8,8 +8,8 @@ use crate::auth::token::{new_token, SESSION_TTL_SECS};
 use crate::db::identity::{
     authenticate_password_backend, count_users_backend, find_live_session_backend,
     live_to_session_user, maybe_slide_session_backend, new_setup_input,
-    revoke_session_with_push_backend, setup_first_owner_backend, update_profile, ProfilePatch,
-    SetupFirstOwnerResult, SetupSessionParams,
+    revoke_session_with_push_backend, setup_first_owner_backend, update_profile_backend,
+    ProfilePatch, SetupFirstOwnerResult, SetupSessionParams,
 };
 use crate::db::mfa::{issue_session_or_challenge_backend, IssueOptions, Issued};
 use crate::db::Db;
@@ -136,13 +136,8 @@ impl AuthService {
         };
         let user_id = live.user_id;
 
-        let updated = update_profile(
-            self.db.pool.postgres("auth.profile")?,
-            user_id,
-            live.session_id,
-            patch,
-        )
-        .await?;
+        let updated =
+            update_profile_backend(&self.db.pool, user_id, live.session_id, patch).await?;
         if !updated {
             return Ok(Err(()));
         }

@@ -201,16 +201,9 @@ async fn providers(
 ) -> Result<Json<ProvidersOutput>, AppError> {
     let workspace_sso = state.auth.db.license.has_feature("workspaceSso")
         && identity.encryption_keys.is_some()
-        && db::any_workspace_oidc(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/oidc.rs")
-                .map_err(internal)?,
-        )
-        .await
-        .map_err(internal)?;
+        && db::any_workspace_oidc_backend(&state.auth.db.pool)
+            .await
+            .map_err(internal)?;
     Ok(Json(ProvidersOutput {
         providers: identity
             .oidc
@@ -240,17 +233,9 @@ async fn identities(
     jar: CookieJar,
 ) -> Result<Json<IdentitiesOutput>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let links = db::list_links(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
-        auth.user_id,
-    )
-    .await
-    .map_err(internal)?;
+    let links = db::list_links_backend(&state.auth.db.pool, auth.user_id)
+        .await
+        .map_err(internal)?;
     Ok(Json(IdentitiesOutput {
         items: links
             .into_iter()
@@ -316,27 +301,14 @@ async fn begin_sso(
         .get("slug")
         .ok_or_else(|| AppError::with_source(ProblemCode::InvalidInput, "/slug"))?;
     let slug = crate::validate::normalize_slug(slug.trim())?;
-    let Some(workspace_id) = db::sso_workspace_by_slug(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
-        &slug,
-    )
-    .await
-    .map_err(internal)?
+    let Some(workspace_id) = db::sso_workspace_by_slug_backend(&state.auth.db.pool, &slug)
+        .await
+        .map_err(internal)?
     else {
         return Err(AppError::from_code(ProblemCode::ProviderNotConfigured));
     };
-    flow::begin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    flow::begin_backend(
+        &state.auth.db.pool,
         identity,
         &state.auth.db.license,
         BeginParams {
@@ -365,13 +337,8 @@ async fn start(
     limit_ip(&state, peer).await?;
     let query = strict_query(raw, &["workspaceId"])?;
     let workspace_id = uuid_query(&query, "workspaceId")?;
-    let started = flow::begin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let started = flow::begin_backend(
+        &state.auth.db.pool,
         &identity,
         &state.auth.db.license,
         BeginParams {
@@ -429,13 +396,8 @@ async fn start_invite(
         ));
     };
     let consents = parse_consents(form.get("consents"))?;
-    let started = flow::begin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let started = flow::begin_backend(
+        &state.auth.db.pool,
         &identity,
         &state.auth.db.license,
         BeginParams {
@@ -520,26 +482,16 @@ async fn finish_callback(
             }),
         None => None,
     };
-    let settings = crate::settings::current_values_with_license(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let settings = crate::settings::current_values_with_license_backend(
+        &state.auth.db.pool,
         &state.branding_name,
         &state.auth.db.license,
     )
     .await
     .map_err(internal)?;
     let ip = peer_ip(peer.ip());
-    let result = flow::complete(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let result = flow::complete_backend(
+        &state.auth.db.pool,
         identity,
         &state.auth.db.license,
         CompleteParams {
@@ -629,13 +581,8 @@ async fn link(
     limit_ip(&state, peer).await?;
     let query = strict_query(raw, &["workspaceId"])?;
     let workspace_id = uuid_query(&query, "workspaceId")?;
-    let started = flow::begin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let started = flow::begin_backend(
+        &state.auth.db.pool,
         &identity,
         &state.auth.db.license,
         BeginParams {
@@ -661,13 +608,8 @@ async fn unlink(
     check_origin(&headers, &state.public_origin)?;
     let auth = session(&state, &headers, &jar).await?;
     let provider = provider_param(&provider)?;
-    match db::unlink(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    match db::unlink_backend(
+        &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         provider.as_str(),
@@ -730,13 +672,8 @@ async fn get_workspace_oidc(
     }
     let workspace_id = workspace_path(&workspace_id)?;
     let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
-    let row = db::get_workspace_oidc(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let row = db::get_workspace_oidc_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -820,13 +757,8 @@ async fn put_workspace_oidc(
         &workspace_oidc_context(workspace_id),
     )
     .map_err(|_| AppError::internal())?;
-    let row = db::upsert_workspace_oidc(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    let row = db::upsert_workspace_oidc_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -859,13 +791,8 @@ async fn delete_workspace_oidc(
     let workspace_id = workspace_path(&workspace_id)?;
     check_origin(&headers, &state.public_origin)?;
     let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
-    db::remove_workspace_oidc(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/oidc.rs")
-            .map_err(internal)?,
+    db::remove_workspace_oidc_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,

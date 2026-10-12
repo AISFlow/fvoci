@@ -2,6 +2,8 @@
 //! (source `packages/core/src/{oidc,workspace-oidc}.ts`, repos
 //! `identityLinks` / `workspaceOidc`).
 
+use super::backend::{Backend, OperationTx};
+use super::codec::Cell;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -108,6 +110,33 @@ pub async fn find_link(
     ))))
 }
 
+pub async fn find_link_backend(
+    backend: &Backend,
+    provider: &str,
+    subject: &str,
+    issuer: &str,
+) -> Result<LinkLookup, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return find_link(pool, provider, subject, issuer).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family OIDC lookup")
+    };
+    family.require_system_context()?;
+    let rows=family.query("SELECT id,user_id,provider,email,created_at,issuer FROM identity_links WHERE provider=?1 AND provider_user_id=?2",&[Cell::text(provider),Cell::text(subject)]).await?;
+    let result = match rows.first() {
+        None => LinkLookup::Missing,
+        Some(r) if r.cell(5)?.optional(Cell::string)?.as_deref() != Some(issuer) => {
+            LinkLookup::OtherIssuer
+        }
+        Some(r) => LinkLookup::Found(family_link_row(r)?),
+    };
+    tx.rollback().await?;
+    Ok(result)
+}
+
 async fn links_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -132,6 +161,19 @@ pub async fn list_links(pool: &PgPool, user_id: Uuid) -> Result<Vec<LinkRow>, sq
     let mut tx = pool.begin().await?;
     let rows = links_in_tx(&mut tx, user_id).await?;
     tx.commit().await?;
+    Ok(rows)
+}
+
+pub async fn list_links_backend(
+    backend: &Backend,
+    user_id: Uuid,
+) -> Result<Vec<LinkRow>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_links(pool, user_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let rows = family_links(&mut tx.operation(), user_id).await?;
+    tx.rollback().await?;
     Ok(rows)
 }
 
@@ -225,6 +267,38 @@ pub async fn link_for_user(
     Ok(LinkOutcome::Linked)
 }
 
+pub async fn link_for_user_backend(
+    backend: &Backend,
+    session_id: Uuid,
+    link: &NewLink<'_>,
+) -> Result<LinkOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return link_for_user(pool, session_id, link).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(link.user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(LinkOutcome::SessionGone);
+    }
+    if family_links(&mut tx.operation(), link.user_id)
+        .await?
+        .iter()
+        .any(|l| l.provider == link.provider)
+        || !family_insert_link(&mut tx.operation(), link).await?
+    {
+        tx.rollback().await?;
+        return Ok(LinkOutcome::AlreadyLinked);
+    }
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(LinkOutcome::Linked)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum UnlinkOutcome {
     Ok,
@@ -300,6 +374,71 @@ pub async fn unlink(
     Ok(UnlinkOutcome::Ok)
 }
 
+pub async fn unlink_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    provider: &str,
+    mail_enabled: bool,
+) -> Result<UnlinkOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return unlink(pool, user_id, session_id, provider, mail_enabled).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(UnlinkOutcome::SessionGone);
+    }
+    let links = family_links(&mut tx.operation(), user_id).await?;
+    let Some(link) = links.iter().find(|l| l.provider == provider) else {
+        tx.rollback().await?;
+        return Ok(UnlinkOutcome::NotFound);
+    };
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family OIDC unlink")
+    };
+    let rows = family
+        .query(
+            "SELECT password_hash IS NOT NULL,email_verified_at IS NOT NULL FROM users WHERE id=?1",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+    if !row.cell(0)?.boolean()?
+        && !(mail_enabled && row.cell(1)?.boolean()?)
+        && !links.iter().any(|l| l.provider != provider)
+    {
+        tx.rollback().await?;
+        return Ok(UnlinkOutcome::LastMethod);
+    }
+    family
+        .execute(
+            "DELETE FROM identity_links WHERE user_id=?1 AND provider=?2",
+            &[Cell::uuid(user_id), Cell::text(provider)],
+        )
+        .await?;
+    let mut op = tx.operation();
+    op.set_system().await?;
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: None,
+        actor_user_id: Some(user_id),
+        verb: "identity.unlinked".into(),
+        target_type: Some("identity_link".into()),
+        target_id: Some(link.id),
+        payload: json!({"userId":user_id.to_string(),"provider":provider,"email":link.email}),
+    })
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(UnlinkOutcome::Ok)
+}
+
 // ---------------------------------------------------------------------------
 // Workspace SSO configuration
 
@@ -363,11 +502,48 @@ pub async fn workspace_oidc_for_sign_in(
     Ok(row)
 }
 
+pub async fn workspace_oidc_for_sign_in_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+) -> Result<Option<WorkspaceOidcRow>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return workspace_oidc_for_sign_in(pool, workspace_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family SSO lookup")
+    };
+    let rows=family.query("SELECT o.workspace_id,o.issuer,o.client_id,o.client_secret,o.label FROM workspace_oidc o JOIN workspaces w ON w.id=o.workspace_id WHERE w.id=?1 AND w.deleted_at IS NULL AND w.kind<>'personal'",&[Cell::uuid(workspace_id)]).await?;
+    let row = rows.first().map(family_workspace_oidc_row).transpose()?;
+    tx.rollback().await?;
+    Ok(row)
+}
+
 pub async fn sso_workspace_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar("SELECT fvoci.app_workspace_sso_id_by_slug($1)")
         .bind(slug)
         .fetch_one(pool)
         .await
+}
+
+pub async fn sso_workspace_by_slug_backend(
+    backend: &Backend,
+    slug: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return sso_workspace_by_slug(pool, slug).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family SSO slug")
+    };
+    family.require_system_context()?;
+    let rows=family.query("SELECT w.id FROM workspaces w JOIN workspace_oidc o ON o.workspace_id=w.id WHERE w.slug=?1 AND w.deleted_at IS NULL",&[Cell::text(slug)]).await?;
+    let row = rows.first().map(|r| r.cell(0)?.id()).transpose()?;
+    tx.rollback().await?;
+    Ok(row)
 }
 
 /// Source `anyWorkspaceOidcConfigured` (live team workspaces only: a
@@ -387,6 +563,26 @@ pub async fn any_workspace_oidc(pool: &PgPool) -> Result<bool, sqlx::Error> {
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
+    Ok(any)
+}
+
+pub async fn any_workspace_oidc_backend(backend: &Backend) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return any_workspace_oidc(pool).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family SSO availability")
+    };
+    family.require_system_context()?;
+    let rows=family.query("SELECT EXISTS(SELECT 1 FROM workspace_oidc o JOIN workspaces w ON w.id=o.workspace_id WHERE w.deleted_at IS NULL AND w.kind<>'personal')",&[]).await?;
+    let any = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()?;
+    tx.rollback().await?;
     Ok(any)
 }
 
@@ -447,6 +643,27 @@ pub async fn get_workspace_oidc(
     }
     let row = workspace_oidc_in_tx(&mut tx, workspace_id).await?;
     tx.commit().await?;
+    Ok(Ok(row))
+}
+
+pub async fn get_workspace_oidc_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Option<WorkspaceOidcRow>, ManageError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_workspace_oidc(pool, workspace_id, actor, session_id).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if let Err(e) =
+        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(e));
+    }
+    let row = family_workspace_oidc(&mut tx.operation(), workspace_id).await?;
+    tx.rollback().await?;
     Ok(Ok(row))
 }
 
@@ -511,6 +728,54 @@ pub async fn upsert_workspace_oidc(
     Ok(Ok(row))
 }
 
+pub async fn upsert_workspace_oidc_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: Uuid,
+    session_id: Uuid,
+    input: WorkspaceOidcInput<'_>,
+) -> Result<Result<WorkspaceOidcRow, ManageError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return upsert_workspace_oidc(pool, workspace_id, actor, session_id, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if let Err(e) =
+        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(e));
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family SSO save")
+    };
+    family.require_writer()?;
+    family.require_tenant(workspace_id)?;
+    let rows = family
+        .query(
+            "SELECT kind FROM workspaces WHERE id=?1",
+            &[Cell::uuid(workspace_id)],
+        )
+        .await?;
+    if rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .string()?
+        == "personal"
+    {
+        tx.rollback().await?;
+        return Ok(Err(ManageError::PersonalWorkspace));
+    }
+    family.execute("INSERT INTO workspace_oidc (id,workspace_id,issuer,client_id,client_secret,label) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id) DO UPDATE SET issuer=excluded.issuer,client_id=excluded.client_id,client_secret=excluded.client_secret,label=excluded.label,updated_at=?7",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace_id),Cell::text(input.issuer),Cell::text(input.client_id),Cell::text(input.sealed_secret),Cell::text(input.label),Cell::instant(crate::db::identity::stored_now())?]).await?;
+    let row = family_workspace_oidc(&mut tx.operation(), workspace_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Ok(row))
+}
+
 pub async fn remove_workspace_oidc(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -535,6 +800,43 @@ pub async fn remove_workspace_oidc(
     Ok(Ok(()))
 }
 
+pub async fn remove_workspace_oidc_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: Uuid,
+    session_id: Uuid,
+) -> Result<Result<(), ManageError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_workspace_oidc(pool, workspace_id, actor, session_id).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if let Err(e) =
+        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(e));
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family SSO remove")
+    };
+    family.require_writer()?;
+    if family
+        .execute(
+            "DELETE FROM workspace_oidc WHERE workspace_id=?1",
+            &[Cell::uuid(workspace_id)],
+        )
+        .await?
+        != 1
+    {
+        tx.rollback().await?;
+        return Ok(Err(ManageError::NotFound));
+    }
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Ok(()))
+}
+
 // ---------------------------------------------------------------------------
 // Flow state
 
@@ -553,12 +855,73 @@ pub async fn issue_state(
     Ok(())
 }
 
+pub async fn issue_state_backend(
+    backend: &Backend,
+    state_hash: &str,
+    sealed_payload: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return issue_state(pool, state_hash, sealed_payload, expires_at).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family OIDC state issue")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    family
+        .execute(
+            "INSERT INTO oidc_states (state_hash,payload,expires_at) VALUES (?1,?2,?3)",
+            &[
+                Cell::text(state_hash),
+                Cell::text(sealed_payload),
+                Cell::Integer(expires_at.timestamp_micros()),
+            ],
+        )
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))
+}
+
 /// GETDEL: the state is gone after this call whatever the outcome.
 pub async fn consume_state(pool: &PgPool, state_hash: &str) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT fvoci.app_oidc_state_consume($1)")
         .bind(state_hash)
         .fetch_one(pool)
         .await
+}
+
+pub async fn consume_state_backend(
+    backend: &Backend,
+    state_hash: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return consume_state(pool, state_hash).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family OIDC state consume")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows = family
+        .query(
+            "DELETE FROM oidc_states WHERE state_hash=?1 AND expires_at>?2 RETURNING payload",
+            &[
+                Cell::text(state_hash),
+                Cell::instant(crate::db::identity::stored_now())?,
+            ],
+        )
+        .await?;
+    let payload = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +941,35 @@ pub async fn workspace_auto_join_domains(
     .await?;
     tx.commit().await?;
     Ok(row.map(|(d,)| d))
+}
+
+pub async fn workspace_auto_join_domains_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+) -> Result<Option<Vec<String>>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return workspace_auto_join_domains(pool, workspace_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace_id).await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family auto-join domains")
+    };
+    let rows = family
+        .query(
+            "SELECT auto_join_domains FROM workspaces WHERE id=?1 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace_id)],
+        )
+        .await?;
+    let domains = rows
+        .first()
+        .map(|r| {
+            serde_json::from_value(r.cell(0)?.value()?)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+        })
+        .transpose()?;
+    tx.rollback().await?;
+    Ok(domains)
 }
 
 pub fn domain_allowed(domains: &[String], domain: &str) -> bool {
@@ -674,4 +1066,175 @@ pub async fn jit_join(
     }
     tx.commit().await?;
     Ok(JitOutcome::Joined(user_id))
+}
+
+pub async fn jit_join_backend(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    input: JitInput<'_>,
+) -> Result<JitOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return jit_join(pool, license, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut op = tx.operation();
+    op.set_tenant(input.workspace_id).await?;
+    op.set_system().await?;
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family OIDC JIT")
+    };
+    family.require_writer()?;
+    family.require_tenant(input.workspace_id)?;
+    family.require_system_context()?;
+    let rows=family.query("SELECT auto_join_domains FROM workspaces WHERE id=?1 AND deleted_at IS NULL AND kind<>'personal'",&[Cell::uuid(input.workspace_id)]).await?;
+    let domains: Option<Vec<String>> = rows
+        .first()
+        .map(|r| {
+            serde_json::from_value(r.cell(0)?.value()?)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+        })
+        .transpose()?;
+    let taken = family
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE email=?1)",
+            &[Cell::text(input.email)],
+        )
+        .await?;
+    if !domains.is_some_and(|d| domain_allowed(&d, input.domain))
+        || taken
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .boolean()?
+    {
+        tx.rollback().await?;
+        return Ok(JitOutcome::Skipped);
+    }
+    if tx
+        .operation()
+        .require_new_instance_billable_user(None, license)
+        .await?
+        .is_err()
+    {
+        tx.rollback().await?;
+        return Ok(JitOutcome::SeatLimit);
+    }
+    let user = Uuid::now_v7();
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family JIT user")
+    };
+    family
+        .execute(
+            "INSERT INTO users (id,email,password_hash,given_name) VALUES (?1,?2,NULL,?3)",
+            &[
+                Cell::uuid(user),
+                Cell::text(input.email),
+                Cell::text(input.given_name),
+            ],
+        )
+        .await?;
+    family
+        .execute(
+            "INSERT INTO memberships (workspace_id,user_id,role) VALUES (?1,?2,'member')",
+            &[Cell::uuid(input.workspace_id), Cell::uuid(user)],
+        )
+        .await?;
+    if !family_insert_link(
+        &mut tx.operation(),
+        &NewLink {
+            user_id: user,
+            provider: "generic",
+            subject: input.subject,
+            issuer: input.issuer,
+            email: Some(input.email),
+            workspace_id: Some(input.workspace_id),
+        },
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(JitOutcome::Skipped);
+    }
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(JitOutcome::Joined(user))
+}
+
+fn family_link_row(r: &super::codec::FamilyRow) -> Result<LinkRow, sqlx::Error> {
+    Ok(LinkRow {
+        id: r.cell(0)?.id()?,
+        user_id: r.cell(1)?.id()?,
+        provider: r.cell(2)?.string()?,
+        email: r.cell(3)?.optional(Cell::string)?,
+        created_at: r.cell(4)?.datetime()?,
+    })
+}
+async fn family_links(
+    op: &mut OperationTx<'_, '_>,
+    user: Uuid,
+) -> Result<Vec<LinkRow>, sqlx::Error> {
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family identity links")
+    };
+    family.query("SELECT id,user_id,provider,email,created_at FROM identity_links WHERE user_id=?1 ORDER BY created_at,id",&[Cell::uuid(user)]).await?.iter().map(family_link_row).collect()
+}
+async fn family_insert_link(
+    op: &mut OperationTx<'_, '_>,
+    link: &NewLink<'_>,
+) -> Result<bool, sqlx::Error> {
+    let previous = op.set_system().await?;
+    if let Some(workspace) = link.workspace_id {
+        op.set_tenant(workspace).await?;
+    }
+    let id = Uuid::now_v7();
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family identity insert")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let inserted=family.execute("INSERT INTO identity_links (id,user_id,provider,provider_user_id,email,issuer) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",&[Cell::uuid(id),Cell::uuid(link.user_id),Cell::text(link.provider),Cell::text(link.subject),Cell::optional_text(link.email),Cell::text(link.issuer)]).await?==1;
+    if inserted {
+        op.append_event(EventAppend{id:Uuid::now_v7(),workspace_id:link.workspace_id,actor_user_id:Some(link.user_id),verb:"identity.linked".into(),target_type:Some("identity_link".into()),target_id:Some(id),payload:json!({"userId":link.user_id.to_string(),"provider":link.provider,"email":link.email})}).await?;
+    }
+    op.restore_system(previous).await?;
+    Ok(inserted)
+}
+fn family_workspace_oidc_row(r: &super::codec::FamilyRow) -> Result<WorkspaceOidcRow, sqlx::Error> {
+    Ok(WorkspaceOidcRow {
+        workspace_id: r.cell(0)?.id()?,
+        issuer: r.cell(1)?.string()?,
+        client_id: r.cell(2)?.string()?,
+        client_secret: r.cell(3)?.string()?,
+        label: r.cell(4)?.string()?,
+    })
+}
+async fn family_workspace_oidc(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+) -> Result<Option<WorkspaceOidcRow>, sqlx::Error> {
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family workspace OIDC row")
+    };
+    family.require_tenant(workspace)?;
+    family.query("SELECT workspace_id,issuer,client_id,client_secret,label FROM workspace_oidc WHERE workspace_id=?1",&[Cell::uuid(workspace)]).await?.first().map(family_workspace_oidc_row).transpose()
+}
+async fn family_require_manage(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    session: Uuid,
+) -> Result<Result<(), ManageError>, sqlx::Error> {
+    op.set_tenant(workspace).await?;
+    if !op.auth_session_live(actor, session).await? {
+        return Ok(Err(ManageError::SessionGone));
+    }
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(ManageError::NotFound));
+    }
+    Ok(match op.membership_role(workspace, actor, false).await? {
+        None => Err(ManageError::NotFound),
+        Some(r) if r.at_least(WorkspaceRole::Admin) => Ok(()),
+        Some(_) => Err(ManageError::Forbidden),
+    })
 }

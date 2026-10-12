@@ -89,6 +89,16 @@ pub async fn find(pool: &PgPool, user_id: Uuid) -> Result<Option<MfaRow>, sqlx::
     Ok(row)
 }
 
+pub async fn find_backend(backend: &Backend, user_id: Uuid) -> Result<Option<MfaRow>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return find(pool, user_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let row = tx.operation().auth_mfa_row(user_id).await?;
+    tx.rollback().await?;
+    Ok(row)
+}
+
 /// New secret and recovery hashes on a not-yet-enabled row. False when MFA is
 /// already enabled (the caller must disable first).
 pub async fn setup(
@@ -128,6 +138,40 @@ pub async fn setup(
         return Ok(SetupOutcome::AlreadyEnabled);
     }
     tx.commit().await?;
+    Ok(SetupOutcome::Stored)
+}
+
+pub async fn setup_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    sealed_secret: &str,
+    recovery_hashes: &[String],
+) -> Result<SetupOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return setup(pool, user_id, session_id, sealed_secret, recovery_hashes).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(SetupOutcome::SessionGone);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family MFA setup")
+    };
+    family.require_writer()?;
+    let stored=family.execute("INSERT INTO user_mfa (user_id,totp_secret,recovery_hashes) VALUES (?1,?2,?3) ON CONFLICT(user_id) DO UPDATE SET totp_secret=excluded.totp_secret,recovery_hashes=excluded.recovery_hashes,last_used_step=NULL,updated_at=?4 WHERE user_mfa.enabled_at IS NULL",&[Cell::uuid(user_id),Cell::text(sealed_secret),Cell::json(&json!(recovery_hashes))?,Cell::instant(crate::db::identity::stored_now())?]).await?;
+    if stored != 1 {
+        tx.rollback().await?;
+        return Ok(SetupOutcome::AlreadyEnabled);
+    }
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(SetupOutcome::Stored)
 }
 
@@ -204,6 +248,47 @@ pub async fn enable(
     Ok(EnableOutcome::Ok)
 }
 
+pub async fn enable_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    same_secret: impl Fn(&str) -> bool,
+    step: i64,
+    ip: Option<&str>,
+) -> Result<EnableOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return enable(pool, user_id, session_id, same_secret, step, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(EnableOutcome::SessionGone);
+    }
+    let current = tx.operation().auth_mfa_row(user_id).await?;
+    let Some(row) = current.filter(|r| r.enabled_at.is_none() && same_secret(&r.totp_secret))
+    else {
+        tx.rollback().await?;
+        return Ok(EnableOutcome::NotSetup);
+    };
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family MFA enable")
+    };
+    let step =
+        i32::try_from(step).map_err(|_| sqlx::Error::Protocol("MFA step exceeds i32".into()))?;
+    family.execute("UPDATE user_mfa SET enabled_at=?2,last_used_step=?3,updated_at=?2 WHERE user_id=?1 AND enabled_at IS NULL AND totp_secret=?4",&[Cell::uuid(user_id),Cell::instant(crate::db::identity::stored_now())?,Cell::Integer(i64::from(step)),Cell::text(row.totp_secret)]).await?;
+    tx.operation()
+        .record_auth_account_change(mfa_record("auth.mfa_enabled", user_id, ip))
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(EnableOutcome::Ok)
+}
+
 fn mfa_record<'a>(verb: &'a str, user_id: Uuid, ip: Option<&'a str>) -> AccountRecord<'a> {
     AccountRecord {
         verb,
@@ -252,6 +337,107 @@ pub async fn disable(
     record_account_change(&mut tx, mfa_record("auth.mfa_disabled", user_id, ip)).await?;
     tx.commit().await?;
     Ok(DisableOutcome::Ok)
+}
+
+pub async fn disable_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    ip: Option<&str>,
+) -> Result<DisableOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return disable(pool, user_id, session_id, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(DisableOutcome::SessionGone);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family MFA disable")
+    };
+    let removed = family
+        .execute(
+            "DELETE FROM user_mfa WHERE user_id=?1 AND enabled_at IS NOT NULL",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    if removed != 1 {
+        tx.rollback().await?;
+        return Ok(DisableOutcome::NotEnabled);
+    }
+    tx.operation()
+        .record_auth_account_change(mfa_record("auth.mfa_disabled", user_id, ip))
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(DisableOutcome::Ok)
+}
+
+/// Re-authentication and disabling share the writer transaction so a refused
+/// request cannot consume a recovery code or TOTP step.
+pub async fn disable_with_factor_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    enabled_at: DateTime<Utc>,
+    factor: SecondFactor,
+    recovery_hash: Option<&str>,
+    ip: Option<&str>,
+) -> Result<Option<DisableOutcome>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        if !claim_factor_standalone(pool, user_id, factor, recovery_hash).await? {
+            return Ok(None);
+        }
+        return disable(pool, user_id, session_id, ip).await.map(Some);
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Some(DisableOutcome::SessionGone));
+    }
+    if !tx
+        .operation()
+        .auth_mfa_row(user_id)
+        .await?
+        .is_some_and(|row| row.enabled_at == Some(enabled_at))
+    {
+        tx.rollback().await?;
+        return Ok(Some(DisableOutcome::NotEnabled));
+    }
+    if !tx
+        .operation()
+        .auth_claim_factor(user_id, factor, recovery_hash)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family MFA disable")
+    };
+    family
+        .execute(
+            "DELETE FROM user_mfa WHERE user_id=?1",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    tx.operation()
+        .record_auth_account_change(mfa_record("auth.mfa_disabled", user_id, ip))
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Some(DisableOutcome::Ok))
 }
 
 /// Source `claimStep`: only a step newer than the last accepted one.
@@ -430,6 +616,44 @@ pub async fn verify_attempt(
     Ok((retry > 0).then_some(retry as u32))
 }
 
+pub async fn verify_attempt_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    limit: u32,
+    window_seconds: u32,
+) -> Result<Option<u32>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return verify_attempt(pool, user_id, limit, window_seconds).await;
+    }
+    if limit < 1 || !(1..=86400).contains(&window_seconds) || limit > i32::MAX as u32 {
+        return Err(sqlx::Error::Protocol("invalid verify limit".into()));
+    }
+    let mut tx = backend.begin_write().await?;
+    let now = crate::db::identity::stored_now();
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family MFA attempts")
+    };
+    family.require_writer()?;
+    let rows=family.query("UPDATE user_mfa SET verify_count=CASE WHEN verify_window_start>?2 THEN verify_count+1 ELSE 1 END,verify_window_start=CASE WHEN verify_window_start>?2 THEN verify_window_start ELSE ?3 END WHERE user_id=?1 RETURNING verify_count,verify_window_start",&[Cell::uuid(user_id),Cell::instant(now-Duration::seconds(i64::from(window_seconds)))?,Cell::instant(now)?]).await?;
+    let retry = match rows.first() {
+        Some(r) if r.cell(0)?.integer()? > i64::from(limit) => {
+            let end = r.cell(1)?.datetime()? + Duration::seconds(i64::from(window_seconds));
+            let micros = (end - now)
+                .num_microseconds()
+                .ok_or_else(|| sqlx::Error::Protocol("MFA retry interval overflow".into()))?;
+            Some(
+                u32::try_from(((micros + 999_999) / 1_000_000).max(1))
+                    .map_err(|_| sqlx::Error::Protocol("MFA retry interval exceeds u32".into()))?,
+            )
+        }
+        _ => None,
+    };
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(retry)
+}
+
 pub async fn peek_challenge(
     pool: &PgPool,
     token_hash: &str,
@@ -438,6 +662,19 @@ pub async fn peek_challenge(
         .bind(token_hash)
         .fetch_optional(pool)
         .await
+}
+
+pub async fn peek_challenge_backend(
+    backend: &Backend,
+    token_hash: &str,
+) -> Result<Option<(Uuid, i32)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return peek_challenge(pool, token_hash).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = tx.operation().auth_mfa_challenge(token_hash).await?;
+    tx.rollback().await?;
+    Ok(result)
 }
 
 /// How the second factor matched, recorded as the login method.
@@ -482,6 +719,30 @@ pub async fn claim_factor_standalone(
     let claimed = claim_factor(&mut tx, user_id, factor, recovery_hash).await?;
     if claimed {
         tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(claimed)
+}
+
+pub async fn claim_factor_standalone_backend(
+    backend: &Backend,
+    user_id: Uuid,
+    factor: SecondFactor,
+    recovery_hash: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return claim_factor_standalone(pool, user_id, factor, recovery_hash).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let claimed = tx
+        .operation()
+        .auth_claim_factor(user_id, factor, recovery_hash)
+        .await?;
+    if claimed {
+        tx.commit()
+            .await
+            .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     } else {
         tx.rollback().await?;
     }
@@ -540,6 +801,56 @@ pub async fn complete_challenge(
     }
     let token = issue_session_in_tx(&mut tx, check.user_id, check.factor.method()).await?;
     tx.commit().await?;
+    Ok(Some((check.user_id, token)))
+}
+
+pub async fn complete_challenge_backend(
+    backend: &Backend,
+    check: ChallengeCheck<'_>,
+) -> Result<Option<(Uuid, String)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return complete_challenge(pool, check).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut op = tx.operation();
+    let still = op.auth_mfa_challenge(check.token_hash).await?
+        == Some((check.user_id, check.generation))
+        && op.live_auth_generation(check.user_id).await? == Some(check.generation);
+    let row = if still {
+        op.auth_mfa_row(check.user_id).await?
+    } else {
+        None
+    };
+    if !row.is_some_and(|r| r.enabled_at == Some(check.enabled_at))
+        || !op
+            .auth_claim_factor(check.user_id, check.factor, check.recovery_hash)
+            .await?
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family MFA complete")
+    };
+    let consumed = family
+        .execute(
+            "DELETE FROM mfa_challenges WHERE token_hash=?1 AND user_id=?2 AND expires_at>?3",
+            &[
+                Cell::text(check.token_hash),
+                Cell::uuid(check.user_id),
+                Cell::instant(crate::db::identity::stored_now())?,
+            ],
+        )
+        .await?;
+    if consumed != 1 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let token =
+        issue_session_operation(&mut tx.operation(), check.user_id, check.factor.method()).await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(Some((check.user_id, token)))
 }
 
@@ -608,5 +919,68 @@ impl OperationTx<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+impl OperationTx<'_, '_> {
+    async fn auth_mfa_row(&mut self, user: Uuid) -> Result<Option<MfaRow>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => find_in_tx(tx, user).await,
+            Self::SqliteFamily(tx) => {
+                let rows=tx.query("SELECT user_id,totp_secret,enabled_at,recovery_hashes,last_used_step FROM user_mfa WHERE user_id=?1",&[Cell::uuid(user)]).await?;
+                rows.first()
+                    .map(|r| {
+                        Ok::<_, sqlx::Error>(MfaRow {
+                            user_id: r.cell(0)?.id()?,
+                            totp_secret: r.cell(1)?.string()?,
+                            enabled_at: r.cell(2)?.optional(Cell::datetime)?,
+                            recovery_hashes: serde_json::from_value(r.cell(3)?.value()?)
+                                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+                            last_used_step: r.cell(4)?.optional(Cell::int32)?,
+                        })
+                    })
+                    .transpose()
+            }
+        }
+    }
+    async fn auth_mfa_challenge(&mut self, hash: &str) -> Result<Option<(Uuid, i32)>, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => {
+                sqlx::query_as("SELECT user_id,generation FROM fvoci.app_mfa_challenge_peek($1)")
+                    .bind(hash)
+                    .fetch_optional(&mut ***tx)
+                    .await
+            }
+            Self::SqliteFamily(tx) => {
+                let rows=tx.query("SELECT user_id,generation FROM mfa_challenges WHERE token_hash=?1 AND expires_at>?2",&[Cell::text(hash),Cell::instant(crate::db::identity::stored_now())?]).await?;
+                rows.first()
+                    .map(|r| Ok::<_, sqlx::Error>((r.cell(0)?.id()?, r.cell(1)?.int32()?)))
+                    .transpose()
+            }
+        }
+    }
+    async fn auth_claim_factor(
+        &mut self,
+        user: Uuid,
+        factor: SecondFactor,
+        recovery_hash: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        if let Self::Postgres(tx) = self {
+            return claim_factor(tx, user, factor, recovery_hash).await;
+        }
+        let Self::SqliteFamily(tx) = self else {
+            unreachable!("family MFA factor")
+        };
+        tx.require_writer()?;
+        let now = Cell::instant(crate::db::identity::stored_now())?;
+        let changed=match (factor,recovery_hash){
+            (SecondFactor::Totp(step),_)=>{
+                let step=i32::try_from(step).map_err(|_|sqlx::Error::Protocol("MFA step exceeds i32".into()))?;
+                tx.execute("UPDATE user_mfa SET last_used_step=?2,updated_at=?3 WHERE user_id=?1 AND enabled_at IS NOT NULL AND (last_used_step IS NULL OR last_used_step<?2)",&[Cell::uuid(user),Cell::Integer(i64::from(step)),now]).await?
+            },
+            (SecondFactor::Recovery,Some(hash))=>tx.execute("UPDATE user_mfa SET recovery_hashes=COALESCE((SELECT json_group_array(value) FROM json_each(user_mfa.recovery_hashes) WHERE value<>?2),'[]'),updated_at=?3 WHERE user_id=?1 AND enabled_at IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(user_mfa.recovery_hashes) WHERE value=?2)",&[Cell::uuid(user),Cell::text(hash),now]).await?,
+            (SecondFactor::Recovery,None)=>0,
+        };
+        Ok(changed == 1)
     }
 }

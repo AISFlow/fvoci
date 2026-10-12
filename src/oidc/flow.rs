@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::db::backend::Backend;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{Duration, Utc};
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use crate::auth::password::Keyring;
 use crate::auth::token::hash_token;
 use crate::db::invitations::{self, IdentityAcceptRequest, InvitationDbError};
-use crate::db::mfa::{issue_session_or_challenge, IssueOptions, Issued};
+use crate::db::mfa::{issue_session_or_challenge_backend, IssueOptions, Issued};
 use crate::db::oidc::{self as db, JitInput, JitOutcome, LinkOutcome, NewLink};
 use crate::identity::{workspace_oidc_context, Identity};
 use crate::oidc::client::{self, CodeExchange, SocialProfile};
@@ -214,17 +215,17 @@ fn flow_redirect_uri(
 }
 
 async fn load_workspace_provider(
-    pool: &PgPool,
+    pool: &Backend,
     keys: &Keyring,
     workspace_id: Uuid,
 ) -> Result<Option<ResolvedProvider>, sqlx::Error> {
-    Ok(db::workspace_oidc_for_sign_in(pool, workspace_id)
+    Ok(db::workspace_oidc_for_sign_in_backend(pool, workspace_id)
         .await?
         .and_then(|row| workspace_provider(keys, &row)))
 }
 
-pub async fn begin(
-    pool: &PgPool,
+pub async fn begin_backend(
+    pool: &Backend,
     identity: &Identity,
     license: &crate::license::Entitlements,
     params: BeginParams,
@@ -298,7 +299,7 @@ pub async fn begin(
     let payload = serde_json::to_string(&stored).expect("state json");
     let sealed = secret_box::seal(keys, &payload, &state_context(&state_hash))
         .map_err(|_| BeginError::Unavailable)?;
-    db::issue_state(
+    db::issue_state_backend(
         pool,
         &state_hash,
         &sealed,
@@ -321,13 +322,15 @@ fn identity_subject(provider: ProviderKey, sub: &str, workspace_id: Option<Uuid>
 }
 
 async fn oidc_session(
-    pool: &PgPool,
+    pool: &Backend,
     user_id: Uuid,
     provider: ProviderKey,
 ) -> Result<OidcResult, sqlx::Error> {
     let method = format!("oidc:{}", provider.as_str());
     Ok(
-        match issue_session_or_challenge(pool, user_id, &method, IssueOptions::default()).await? {
+        match issue_session_or_challenge_backend(pool, user_id, &method, IssueOptions::default())
+            .await?
+        {
             Some(Issued::Session { user_id, token }) => OidcResult::Session { user_id, token },
             Some(Issued::Challenge { mfa_token }) => OidcResult::Mfa { mfa_token },
             None => error(OidcErrorCode::ProviderError, None),
@@ -349,8 +352,8 @@ pub struct CompleteParams<'a> {
     pub defaults: &'a crate::settings::DefaultsUserSettings,
 }
 
-pub async fn complete(
-    pool: &PgPool,
+pub async fn complete_backend(
+    pool: &Backend,
     identity: &Identity,
     license: &crate::license::Entitlements,
     params: CompleteParams<'_>,
@@ -366,7 +369,7 @@ pub async fn complete(
         return Ok(error(OidcErrorCode::StateMismatch, None));
     }
     let state_hash = hash_token(state);
-    let Some(sealed) = db::consume_state(pool, &state_hash).await? else {
+    let Some(sealed) = db::consume_state_backend(pool, &state_hash).await? else {
         return Ok(error(OidcErrorCode::StateMismatch, None));
     };
     let stored: StoredState = match secret_box::open(keys, &sealed, &state_context(&state_hash))
@@ -479,7 +482,7 @@ fn email_domain(email: &str) -> Option<String> {
 
 /// Source `tryJitJoin`. `None` falls back to `oidc_not_linked`.
 async fn try_jit_join(
-    pool: &PgPool,
+    pool: &Backend,
     license: &crate::license::Entitlements,
     profile: &SocialProfile,
     workspace_id: Uuid,
@@ -493,13 +496,13 @@ async fn try_jit_join(
     let Some(domain) = email_domain(email) else {
         return Ok(None);
     };
-    let Some(domains) = db::workspace_auto_join_domains(pool, workspace_id).await? else {
+    let Some(domains) = db::workspace_auto_join_domains_backend(pool, workspace_id).await? else {
         return Ok(None);
     };
     if !db::domain_allowed(&domains, &domain) {
         return Ok(None);
     }
-    if crate::db::account::email_exists(pool, email).await? {
+    if crate::db::account::email_exists_backend(pool, email).await? {
         return Ok(None);
     }
     let given_name = profile
@@ -510,7 +513,7 @@ async fn try_jit_join(
         .map(|n| n.chars().take(100).collect::<String>())
         .unwrap_or_else(|| invitations::email_local_part(email));
     let subject = identity_subject(ProviderKey::Generic, &profile.sub, Some(workspace_id));
-    match db::jit_join(
+    match db::jit_join_backend(
         pool,
         license,
         JitInput {
@@ -533,14 +536,14 @@ async fn try_jit_join(
 }
 
 async fn login_with_identity(
-    pool: &PgPool,
+    pool: &Backend,
     license: &crate::license::Entitlements,
     provider: ProviderKey,
     profile: &SocialProfile,
     workspace_id: Option<Uuid>,
 ) -> Result<OidcResult, sqlx::Error> {
     let subject = identity_subject(provider, &profile.sub, workspace_id);
-    let lookup = db::find_link(pool, provider.as_str(), &subject, &profile.issuer).await?;
+    let lookup = db::find_link_backend(pool, provider.as_str(), &subject, &profile.issuer).await?;
     // A link made through another issuer is not this identity, and its
     // subject stays taken, so JIT is not tried either.
     let taken = lookup.subject_taken();
@@ -556,7 +559,7 @@ async fn login_with_identity(
 }
 
 async fn link_identity(
-    pool: &PgPool,
+    pool: &Backend,
     provider: ProviderKey,
     profile: &SocialProfile,
     stored: &StoredState,
@@ -569,7 +572,7 @@ async fn link_identity(
         return Ok(error(OidcErrorCode::StateMismatch, Some(Mode::Link)));
     }
     let subject = identity_subject(provider, &profile.sub, stored.workspace_id);
-    let outcome = db::link_for_user(
+    let outcome = db::link_for_user_backend(
         pool,
         session_id,
         &NewLink {
@@ -590,7 +593,7 @@ async fn link_identity(
 }
 
 async fn accept_invite_with_identity(
-    pool: &PgPool,
+    pool: &Backend,
     license: &crate::license::Entitlements,
     provider: ProviderKey,
     profile: &SocialProfile,
@@ -604,22 +607,33 @@ async fn accept_invite_with_identity(
     };
     let consents = stored.consents.clone().unwrap_or_default();
     let subject = identity_subject(provider, &profile.sub, None);
-    let accepted = invitations::accept_invitation_with_identity(
-        pool,
-        license,
-        IdentityAcceptRequest {
-            token_hash,
-            provider: provider.as_str(),
-            subject: &subject,
-            issuer: &profile.issuer,
-            link_email: profile.email.as_deref(),
-            given_name: profile.name.as_deref(),
-            client_ip: ip,
-            consents: &consents,
-            defaults,
-        },
-    )
-    .await?;
+    let accepted = match pool {
+        Backend::Postgres(pool) => {
+            invitations::accept_invitation_with_identity(
+                pool,
+                license,
+                IdentityAcceptRequest {
+                    token_hash,
+                    provider: provider.as_str(),
+                    subject: &subject,
+                    issuer: &profile.issuer,
+                    link_email: profile.email.as_deref(),
+                    given_name: profile.name.as_deref(),
+                    client_ip: ip,
+                    consents: &consents,
+                    defaults,
+                },
+            )
+            .await?
+        }
+        // port-membership owns accept_invitation_with_identity_backend; the integrator
+        // connects that operation when its dependency commit is present.
+        _ => {
+            return Err(sqlx::Error::Protocol(
+                "OIDC invitation acceptance requires port-membership integration".into(),
+            ));
+        }
+    };
     match accepted {
         Ok(user_id) => oidc_session(pool, user_id, provider).await,
         Err(InvitationDbError::AlreadyLinked) => {
@@ -628,6 +642,24 @@ async fn accept_invite_with_identity(
         Err(InvitationDbError::SeatLimit) => Ok(OidcResult::SeatLimit),
         Err(_) => Ok(invalid()),
     }
+}
+
+pub async fn begin(
+    pool: &PgPool,
+    identity: &Identity,
+    license: &crate::license::Entitlements,
+    params: BeginParams,
+) -> Result<Started, BeginError> {
+    begin_backend(&Backend::Postgres(pool.clone()), identity, license, params).await
+}
+
+pub async fn complete(
+    pool: &PgPool,
+    identity: &Identity,
+    license: &crate::license::Entitlements,
+    params: CompleteParams<'_>,
+) -> Result<OidcResult, sqlx::Error> {
+    complete_backend(&Backend::Postgres(pool.clone()), identity, license, params).await
 }
 
 #[cfg(test)]

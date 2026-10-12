@@ -207,6 +207,41 @@ struct Harness {
     workspace_id: Uuid,
 }
 
+fn account_state(auth: Arc<AuthService>, storage: ObjectStorage, mailer: Arc<Mailer>) -> AppState {
+    AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
+        auth,
+        branding_name: "FVOCI".to_string(),
+        public_origin: "http://localhost".to_string(),
+        cookie_secure: false,
+        rate_limiter: RateLimiter::new(),
+        storage,
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+            ),
+        },
+        collab: None,
+        meili: None,
+        search_embedder: None,
+        mailer,
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
+        import_wake: None,
+        import_extractor_available: false,
+        preview_extract: None,
+        quota: Default::default(),
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
+    }
+}
+
 impl Harness {
     async fn start() -> Self {
         Self::start_with_storage(None).await
@@ -227,41 +262,14 @@ impl Harness {
         std::fs::create_dir_all(&storage_root).expect("storage root");
         let storage =
             storage.unwrap_or_else(|| ObjectStorage::from(LocalStorage::new(storage_root.clone())));
-        let state = AppState {
-            realtime_mode: fvoci_server::config::RealtimeMode::On,
-            native_engine: None,
-            auth: Arc::new(AuthService {
+        let state = account_state(
+            Arc::new(AuthService {
                 db: Db::new(app_pool.clone()),
                 password_keys: keyring(),
             }),
-            branding_name: "FVOCI".to_string(),
-            public_origin: "http://localhost".to_string(),
-            cookie_secure: false,
-            rate_limiter: RateLimiter::new(),
-            storage: storage.clone(),
-            upload: fvoci_server::attachments::UploadLimits {
-                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
-                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
-                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
-                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
-                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
-                ),
-            },
-            collab: None,
-            meili: None,
-            search_embedder: None,
-            mailer: mailer.clone(),
-            markdown: Some(
-                fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
-                    "CARGO_BIN_EXE_fvoci-server"
-                )),
-            ),
-            import_wake: None,
-            import_extractor_available: false,
-            preview_extract: None,
-            quota: Default::default(),
-            streams: fvoci_server::http::state::AppState::fresh_streams(),
-        };
+            storage.clone(),
+            mailer.clone(),
+        );
         let app = router(state, None);
         let admin = admin_pool(&db).await;
         let res = call(
@@ -2978,4 +2986,389 @@ async fn i18n_overrides_apply_to_account_mail_and_anonymization() {
             .unwrap();
     assert_eq!(names, ["탈퇴한 사용자", "탈퇴한 사용자"]);
     h.finish().await;
+}
+
+#[tokio::test]
+async fn sqlite_account_credentials_withdrawal_and_export_are_durable() {
+    use fvoci_server::auth::service::SetupInstanceInput;
+    use fvoci_server::db::{account, backend::Backend, magic, migrate};
+    let root = std::env::temp_dir().join(format!("fvoci-account-family-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("account.sqlite");
+    migrate::run_sqlite_migrations(&path).await.unwrap();
+    let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+    let auth = Arc::new(AuthService {
+        db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+        password_keys: keyring(),
+    });
+    let (user, workspace, token) = auth
+        .setup_instance(
+            OWNER_PASSWORD.into(),
+            SetupInstanceInput {
+                email: OWNER_EMAIL.into(),
+                given_name: "Owner".into(),
+                family_name: None,
+                workspace_slug: "account-family".into(),
+                workspace_name: "Account".into(),
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let session =
+        Uuid::parse_str(&auth.session_user(&token).await.unwrap().unwrap().session_id).unwrap();
+    let app = router(
+        account_state(
+            auth.clone(),
+            LocalStorage::new(root.join("storage")).into(),
+            Arc::new(Mailer::disabled()),
+        ),
+        None,
+    );
+    let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+    let denied = call(
+        &app,
+        "PATCH",
+        "/api/v1/auth/password",
+        Some(json!({"currentPassword":"wrong-password","newPassword":"changed-secret1"})),
+        Some(&token),
+        peer(220),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::BAD_REQUEST, "{:?}", denied.json);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM events WHERE verb='auth.password_changed'"
+        )
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        0
+    );
+    let changed = call(
+        &app,
+        "PATCH",
+        "/api/v1/auth/password",
+        Some(json!({"currentPassword":OWNER_PASSWORD,"newPassword":"changed-secret1"})),
+        Some(&token),
+        peer(221),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.json);
+    assert!(auth.session_user(&token).await.unwrap().is_some());
+    let generation: i32 = sqlx::query_scalar("SELECT auth_generation FROM users WHERE id=?1")
+        .bind(user.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(generation, 1);
+    let email_token = fvoci_server::auth::token::new_token();
+    assert!(account::issue_email_change_token_backend(
+        &auth.db.pool,
+        user,
+        session,
+        generation,
+        "changed@example.com",
+        &email_token.hash,
+        magic::magic_expires_at(Utc::now())
+    )
+    .await
+    .unwrap());
+    let email = call(
+        &app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({"token":email_token.token})),
+        None,
+        peer(222),
+    )
+    .await;
+    assert_eq!(email.status, StatusCode::OK, "{:?}", email.json);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        "changed@example.com"
+    );
+    let replay = call(
+        &app,
+        "POST",
+        "/api/v1/auth/email/confirm",
+        Some(json!({"token":email_token.token})),
+        None,
+        peer(223),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+    for address in ["changed@example.com", "absent@example.com"] {
+        let reset = call(
+            &app,
+            "POST",
+            "/api/v1/auth/password-reset",
+            Some(json!({"email":address})),
+            None,
+            peer(224),
+        )
+        .await;
+        assert_eq!(reset.status, StatusCode::ACCEPTED, "{:?}", reset.json);
+    }
+    let reset = fvoci_server::auth::token::new_token();
+    magic::issue_password_reset_token_backend(
+        &auth.db.pool,
+        user,
+        2,
+        &reset.hash,
+        magic::magic_expires_at(Utc::now()),
+    )
+    .await
+    .unwrap();
+    let reset_response = call(
+        &app,
+        "POST",
+        "/api/v1/auth/password-reset/confirm",
+        Some(json!({"token":reset.token,"newPassword":"reset-secret1"})),
+        None,
+        peer(225),
+    )
+    .await;
+    assert_eq!(
+        reset_response.status,
+        StatusCode::OK,
+        "{:?}",
+        reset_response.json
+    );
+    assert!(auth.session_user(&token).await.unwrap().is_none());
+    let replay = call(
+        &app,
+        "POST",
+        "/api/v1/auth/password-reset/confirm",
+        Some(json!({"token":reset.token,"newPassword":"replay-secret1"})),
+        None,
+        peer(226),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+    let login = call(
+        &app,
+        "POST",
+        "/api/v1/auth/login",
+        Some(json!({"email":"changed@example.com","password":"reset-secret1"})),
+        None,
+        peer(227),
+    )
+    .await;
+    assert_eq!(login.status, StatusCode::OK, "{:?}", login.json);
+    let token = login.cookie().unwrap();
+    let document = Uuid::now_v7();
+    sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json,kind) VALUES(?1,?2,'Owner wiki',?3,'a',1,'draft',1,?4,'{}','wiki')").bind(document.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(document.simple().to_string()).bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+    sqlx::query("INSERT INTO comments(id,workspace_id,document_id,created_by,body) VALUES(?1,?2,?3,?4,'own export comment')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+    let guest = Uuid::now_v7();
+    let guest_token = fvoci_server::auth::token::new_token();
+    sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'guest@example.com','Guest')")
+        .bind(guest.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'guest')")
+        .bind(workspace.as_bytes().as_slice())
+        .bind(guest.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,?4)")
+        .bind(Uuid::now_v7().as_bytes().as_slice())
+        .bind(guest.as_bytes().as_slice())
+        .bind(&guest_token.hash)
+        .bind((Utc::now() + chrono::Duration::hours(1)).timestamp_micros())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let locate = format!("/api/v1/me/locate?type=document&id={document}");
+    let own = call(&app, "GET", &locate, None, Some(&token), peer(235)).await;
+    assert_eq!(own.status, StatusCode::OK, "{:?}", own.json);
+    assert_eq!(own.json["workspaceId"], workspace.to_string());
+    let hidden = call(
+        &app,
+        "GET",
+        &locate,
+        None,
+        Some(&guest_token.token),
+        peer(236),
+    )
+    .await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+    let guest_dashboard = call(
+        &app,
+        "GET",
+        "/api/v1/me/dashboard",
+        None,
+        Some(&guest_token.token),
+        peer(237),
+    )
+    .await;
+    assert_eq!(
+        guest_dashboard.status,
+        StatusCode::OK,
+        "{:?}",
+        guest_dashboard.json
+    );
+    assert!(guest_dashboard.json["recent"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let dash = call(
+        &app,
+        "GET",
+        "/api/v1/me/dashboard",
+        None,
+        Some(&token),
+        peer(228),
+    )
+    .await;
+    assert_eq!(dash.status, StatusCode::OK, "{:?}", dash.json);
+    let export = call(
+        &app,
+        "GET",
+        "/api/v1/me/export",
+        None,
+        Some(&token),
+        peer(229),
+    )
+    .await;
+    assert_eq!(export.status, StatusCode::OK, "{:?}", export.json);
+    assert!(zip_check::verify_zip(&export.bytes).unwrap() >= 2);
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&export.bytes)).unwrap();
+    let mut comments = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("comments.json").unwrap(),
+        &mut comments,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&comments).unwrap()[0]["body"],
+        "own export comment"
+    );
+    let link_user = account::login_link_user_backend(&auth.db.pool, "changed@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    let link = fvoci_server::auth::token::new_token();
+    account::issue_login_token_backend(
+        &auth.db.pool,
+        &link_user,
+        &link.hash,
+        magic::magic_expires_at(Utc::now()),
+    )
+    .await
+    .unwrap();
+    let linked_login = call(
+        &app,
+        "POST",
+        "/api/v1/auth/magic-link/consume",
+        Some(json!({"token":link.token})),
+        None,
+        peer(238),
+    )
+    .await;
+    assert_eq!(
+        linked_login.status,
+        StatusCode::OK,
+        "{:?}",
+        linked_login.json
+    );
+    assert!(linked_login.cookie().is_some());
+    let replay = call(
+        &app,
+        "POST",
+        "/api/v1/auth/magic-link/consume",
+        Some(json!({"token":link.token})),
+        None,
+        peer(239),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+    // Team ownership is rechecked by the writer, with no withdrawal event.
+    let refused = call(
+        &app,
+        "POST",
+        "/api/v1/auth/withdraw",
+        Some(json!({"currentPassword":"reset-secret1"})),
+        Some(&token),
+        peer(230),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.json);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE verb='user.withdrawn'")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        0
+    );
+    // Remove team ownership but retain the last-instance-admin protection.
+    sqlx::query("UPDATE memberships SET role='admin' WHERE workspace_id=?1 AND user_id=?2")
+        .bind(workspace.as_bytes().as_slice())
+        .bind(user.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let refused = call(
+        &app,
+        "POST",
+        "/api/v1/auth/withdraw",
+        Some(json!({"currentPassword":"reset-secret1"})),
+        Some(&token),
+        peer(231),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.json);
+    sqlx::query("INSERT INTO users(id,email,given_name,is_instance_admin) VALUES(?1,'second-admin@example.com','Admin',1)").bind(Uuid::now_v7().as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+    let withdrawal = call(
+        &app,
+        "POST",
+        "/api/v1/auth/withdraw",
+        Some(json!({"currentPassword":"reset-secret1"})),
+        Some(&token),
+        peer(232),
+    )
+    .await;
+    assert_eq!(withdrawal.status, StatusCode::OK, "{:?}", withdrawal.json);
+    assert!(auth.session_user(&token).await.unwrap().is_none());
+    let cancelled = call(
+        &app,
+        "POST",
+        "/api/v1/auth/cancel-withdraw",
+        Some(json!({"token":withdrawal.json["cancelToken"]})),
+        None,
+        peer(233),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK, "{:?}", cancelled.json);
+    let replay = call(
+        &app,
+        "POST",
+        "/api/v1/auth/cancel-withdraw",
+        Some(json!({"token":withdrawal.json["cancelToken"]})),
+        None,
+        peer(234),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::NOT_FOUND);
+    assert!(auth.session_user(&token).await.unwrap().is_none());
+    let row: (Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT deleted_at,withdraw_cancel_token_hash FROM users WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(row, (None, None));
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM audit_log WHERE verb IN ('user.withdrawn','user.withdraw_cancelled')").fetch_one(&fresh).await.unwrap(),2);
+    drop(app);
+    drop(auth);
+    fresh.close().await;
+    sqlite.close().await;
+    std::fs::remove_dir_all(root).unwrap();
 }

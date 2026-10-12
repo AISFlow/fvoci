@@ -37,8 +37,8 @@ use crate::auth::password::{hash_password, verify_password};
 use crate::auth::token::new_token;
 use crate::db::account::{self, CancelWithdrawOutcome, WithdrawConfirm, WithdrawError};
 use crate::db::dashboard::{self, DashboardError, LocateKind};
-use crate::db::identity::password_hash_by_id;
-use crate::db::magic::{consume_magic_token, magic_expires_at};
+use crate::db::identity::password_hash_by_id_backend;
+use crate::db::magic::{consume_magic_token_backend, magic_expires_at};
 use crate::db::user_export::{self, ExportAttachment, ExportProfile};
 use crate::error::{AppError, ProblemCode};
 use crate::export_zip::{zip_safe_name, ZipStream};
@@ -141,15 +141,10 @@ async fn withdraw(
     )
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     let confirm = if let Some(password) = body.current_password {
         let password = non_empty(password)?;
-        let Some(stored) = password_hash_by_id(pool, auth.user_id)
+        let Some(stored) = password_hash_by_id_backend(pool, auth.user_id)
             .await
             .map_err(internal)?
         else {
@@ -170,7 +165,7 @@ async fn withdraw(
         return Err(AppError::from_code(ProblemCode::ConfirmInvalid));
     };
     let scheduled =
-        account::withdraw_user(pool, auth.user_id, auth.credential_id, &confirm, Some(&ip))
+        account::withdraw_user_backend(pool, auth.user_id, auth.credential_id, &confirm, Some(&ip))
             .await
             .map_err(internal)?
             .map_err(|err| match err {
@@ -247,18 +242,9 @@ async fn cancel_withdraw(
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    match account::cancel_withdraw(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/account.rs")
-            .map_err(internal)?,
-        &token,
-        Some(&ip),
-    )
-    .await
-    .map_err(internal)?
+    match account::cancel_withdraw_backend(&state.auth.db.pool, &token, Some(&ip))
+        .await
+        .map_err(internal)?
     {
         CancelWithdrawOutcome::Ok => Ok(Json(OkResponse { ok: true })),
         CancelWithdrawOutcome::NotFound | CancelWithdrawOutcome::DeadlinePassed => {
@@ -287,29 +273,25 @@ async fn request_email_change(
     )
     .await?;
     let started = Instant::now();
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
-    let messages = crate::settings::messages::load(pool)
+    let pool = &state.auth.db.pool;
+    let messages = crate::settings::messages::load_backend(pool)
         .await
         .map_err(internal)?;
-    if let Some(user) = account::live_user_identity(pool, auth.user_id)
+    if let Some(user) = account::live_user_identity_backend(pool, auth.user_id)
         .await
         .map_err(internal)?
     {
         // Source requestEmailChange: an address already on any row (withdrawn
         // included) gets no mail, and the response does not say so.
-        if !account::email_exists(pool, &new_email)
+        if !account::email_exists_backend(pool, &new_email)
             .await
             .map_err(internal)?
         {
             let issued = new_token();
-            account::issue_email_change_token(
+            let issued_to_live_session = account::issue_email_change_token_backend(
                 pool,
                 auth.user_id,
+                auth.credential_id,
                 user.generation,
                 &new_email,
                 &issued.hash,
@@ -317,6 +299,9 @@ async fn request_email_change(
             )
             .await
             .map_err(internal)?;
+            if !issued_to_live_session {
+                return Err(AppError::from_code(ProblemCode::AuthenticationRequired));
+            }
             let url = link_url(&state, "/confirm-email", &issued.token);
             state.mailer.send_detached(
                 new_email,
@@ -345,20 +330,18 @@ async fn confirm_email_change(
     limit(&state, format!("magic-ip:{ip}"), MAGIC_PER_IP).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     // Read before the token is consumed so a failed read changes nothing.
-    let messages = crate::settings::messages::load(pool)
+    let messages = crate::settings::messages::load_backend(pool)
         .await
         .map_err(internal)?;
-    let Some(payload) = consume_magic_token(pool, &token).await.map_err(internal)? else {
+    let Some(payload) = consume_magic_token_backend(pool, &token)
+        .await
+        .map_err(internal)?
+    else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
-    let Some(changed) = account::complete_email_change(pool, &payload, Some(&ip))
+    let Some(changed) = account::complete_email_change_backend(pool, &payload, Some(&ip))
         .await
         .map_err(internal)?
     else {
@@ -397,13 +380,8 @@ async fn change_password(
     let Json(body) = body.map_err(AppError::from)?;
     let current = body.current_password.map(non_empty).transpose()?;
     validate_password_length(&body.new_password)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
-    let stored = password_hash_by_id(pool, auth.user_id)
+    let pool = &state.auth.db.pool;
+    let stored = password_hash_by_id_backend(pool, auth.user_id)
         .await
         .map_err(internal)?;
     if let Some(stored) = stored.as_deref() {
@@ -423,7 +401,7 @@ async fn change_password(
             tracing::error!(error = %err, "password hash failed");
             AppError::internal()
         })?;
-    let changed = account::change_password(
+    let changed = account::change_password_backend(
         pool,
         auth.user_id,
         auth.credential_id,
@@ -452,22 +430,17 @@ async fn request_magic_link(
     let email = normalize_email(&body.email)?;
     limit(&state, format!("magic-email:{ip}:{email}"), MAGIC_PER_EMAIL).await?;
     let started = Instant::now();
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     // Read for known and unknown addresses alike (same work on both paths).
-    let messages = crate::settings::messages::load(pool)
+    let messages = crate::settings::messages::load_backend(pool)
         .await
         .map_err(internal)?;
-    if let Some(user) = account::login_link_user(pool, &email)
+    if let Some(user) = account::login_link_user_backend(pool, &email)
         .await
         .map_err(internal)?
     {
         let issued = new_token();
-        account::issue_login_token(pool, &user, &issued.hash, magic_expires_at(Utc::now()))
+        account::issue_login_token_backend(pool, &user, &issued.hash, magic_expires_at(Utc::now()))
             .await
             .map_err(internal)?;
         let url = link_url(&state, "/magic-link", &issued.token);
@@ -492,16 +465,14 @@ async fn consume_magic_link(
     limit(&state, format!("magic-ip:{ip}"), MAGIC_PER_IP).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let token = non_empty(body.token)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?;
-    let Some(payload) = consume_magic_token(pool, &token).await.map_err(internal)? else {
+    let pool = &state.auth.db.pool;
+    let Some(payload) = consume_magic_token_backend(pool, &token)
+        .await
+        .map_err(internal)?
+    else {
         return Err(AppError::from_code(ProblemCode::MagicInvalid));
     };
-    let Some(issued) = account::complete_magic_login(pool, &payload)
+    let Some(issued) = account::complete_magic_login_backend(pool, &payload)
         .await
         .map_err(internal)?
     else {
@@ -544,13 +515,8 @@ async fn me_dashboard(
         .get("lastVisited")
         .map(|value| parse_uuid_param(value))
         .transpose()?;
-    let board = dashboard::build_dashboard(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/account.rs")
-            .map_err(internal)?,
+    let board = dashboard::build_dashboard_backend(
+        &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         last_visited,
@@ -662,13 +628,8 @@ async fn me_locate(
         return Err(AppError::with_source(ProblemCode::InvalidInput, "/id"));
     };
     let id = parse_uuid_param(id)?;
-    let found = dashboard::locate_for_user(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/account.rs")
-            .map_err(internal)?,
+    let found = dashboard::locate_for_user_backend(
+        &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         kind,
@@ -796,7 +757,7 @@ impl ExportWriter {
 
 async fn write_export(
     writer: &mut ExportWriter,
-    pool: &sqlx::PgPool,
+    pool: &crate::db::backend::Backend,
     storage: &ObjectStorage,
     user_id: Uuid,
     profile: ExportProfile,
@@ -822,10 +783,10 @@ async fn write_export(
     for workspace_id in workspaces {
         let mut after = None;
         loop {
-            let page = user_export::export_comment_page(pool, workspace_id, user_id, after)
+            let page = user_export::export_comment_page_backend(pool, workspace_id, user_id, after)
                 .await
-                .map_err(|err| {
-                    tracing::error!(error = %err, "user_export.comments_failed");
+                .map_err(|_| {
+                    tracing::error!("user_export.comments_failed");
                     ExportFailure::Db
                 })?;
             let Some(last) = page.last() else {
@@ -958,23 +919,17 @@ async fn export(
         )
         .await
         .map_err(AppError::rate_limited)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/account.rs")
-        .map_err(internal)?
-        .clone();
-    let Some(profile) = user_export::export_profile(&pool, auth.user_id)
+    let pool = state.auth.db.pool.clone();
+    let Some(profile) = user_export::export_profile_backend(&pool, auth.user_id)
         .await
         .map_err(internal)?
     else {
         return Err(AppError::from_code(ProblemCode::NotFound));
     };
-    let workspaces = user_export::export_membership_workspaces(&pool, auth.user_id)
+    let workspaces = user_export::export_membership_workspaces_backend(&pool, auth.user_id)
         .await
         .map_err(internal)?;
-    let attachments = user_export::export_attachments(&pool, auth.user_id)
+    let attachments = user_export::export_attachments_backend(&pool, auth.user_id)
         .await
         .map_err(internal)?;
     // Zip32 like the source: refuse up front rather than cut the stream.
