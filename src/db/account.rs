@@ -383,6 +383,107 @@ pub async fn withdraw_user(
     }))
 }
 
+pub async fn withdraw_user_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    confirm: &WithdrawConfirm,
+    ip: Option<&str>,
+) -> Result<Result<WithdrawScheduled, WithdrawError>, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return withdraw_user(pool, user_id, session_id, confirm, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut op = tx.operation();
+    if !op.auth_session_live(user_id, session_id).await? {
+        tx.rollback().await?;
+        return Ok(Err(WithdrawError::SessionGone));
+    }
+    op.set_system().await?;
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!("family withdrawal")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows=family.query("SELECT email,password_hash,is_instance_admin FROM users WHERE id=?1 AND deleted_at IS NULL AND anonymized_at IS NULL",&[Cell::uuid(user_id)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Err(WithdrawError::ConfirmInvalid));
+    };
+    let email = row.cell(0)?.string()?;
+    let hash = row.cell(1)?.optional(Cell::string)?;
+    let admin = row.cell(2)?.boolean()?;
+    let confirmed = match confirm {
+        WithdrawConfirm::Password { verified_hash } => {
+            same_hash(hash.as_deref(), Some(verified_hash))
+        }
+        WithdrawConfirm::EmailLocalPart(local) => {
+            hash.is_none() && email_local_part_matches(&email, local)
+        }
+    };
+    if !confirmed {
+        tx.rollback().await?;
+        return Ok(Err(WithdrawError::ConfirmInvalid));
+    }
+    let owned=family.query("SELECT EXISTS(SELECT 1 FROM memberships m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=?1 AND m.role='owner' AND w.kind='team' AND w.deleted_at IS NULL)",&[Cell::uuid(user_id)]).await?;
+    if owned
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()?
+    {
+        tx.rollback().await?;
+        return Ok(Err(WithdrawError::OwnerTransferRequired));
+    }
+    let admins=family.query("SELECT count(*) FROM users WHERE is_instance_admin=1 AND deleted_at IS NULL AND suspended_at IS NULL",&[]).await?;
+    if admin
+        && admins
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .integer()?
+            <= 1
+    {
+        tx.rollback().await?;
+        return Ok(Err(WithdrawError::LastInstanceAdmin));
+    }
+    let cancel = new_token();
+    let at = crate::db::identity::stored_now();
+    family.execute("DELETE FROM invitations WHERE invited_by=?1 AND accepted_at IS NULL AND workspace_id IN (SELECT workspace_id FROM memberships WHERE user_id=?1)",&[Cell::uuid(user_id)]).await?;
+    family.execute("UPDATE users SET deleted_at=?2,withdraw_cancel_token_hash=?3,auth_generation=auth_generation+1,updated_at=?2 WHERE id=?1 AND deleted_at IS NULL AND anonymized_at IS NULL",&[Cell::uuid(user_id),Cell::instant(at)?,Cell::text(&cancel.hash)]).await?;
+    family
+        .execute(
+            "DELETE FROM api_tokens WHERE user_id=?1",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    family
+        .execute(
+            "DELETE FROM ics_tokens WHERE user_id=?1",
+            &[Cell::uuid(user_id)],
+        )
+        .await?;
+    let mut op = tx.operation();
+    op.revoke_auth_sessions(user_id, None).await?;
+    op.record_auth_account_change(user_record(
+        "user.withdrawn",
+        Some(user_id),
+        user_id,
+        json!({"userId":user_id.to_string()}),
+        ip,
+    ))
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Ok(WithdrawScheduled {
+        cancel_token: cancel.token,
+        erase_at: withdrawal_deadline(at),
+        email,
+    }))
+}
+
 enum ScheduleRefusal {
     OwnerTransferRequired,
     LastInstanceAdmin,
@@ -584,6 +685,55 @@ pub async fn cancel_withdraw(
     )
     .await?;
     tx.commit().await?;
+    Ok(CancelWithdrawOutcome::Ok)
+}
+
+pub async fn cancel_withdraw_backend(
+    backend: &super::backend::Backend,
+    token: &str,
+    ip: Option<&str>,
+) -> Result<CancelWithdrawOutcome, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return cancel_withdraw(pool, token, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family withdrawal cancel")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let hash = hash_token(token);
+    let rows=family.query("SELECT id,deleted_at FROM users WHERE withdraw_cancel_token_hash=?1 AND deleted_at IS NOT NULL AND anonymized_at IS NULL",&[Cell::text(&hash)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(CancelWithdrawOutcome::NotFound);
+    };
+    let user = row.cell(0)?.id()?;
+    let deleted_at = row.cell(1)?.datetime()?;
+    let now = crate::db::identity::stored_now();
+    if now >= withdrawal_deadline(deleted_at) {
+        tx.rollback().await?;
+        return Ok(CancelWithdrawOutcome::DeadlinePassed);
+    }
+    let restored=family.execute("UPDATE users SET deleted_at=NULL,withdraw_cancel_token_hash=NULL,updated_at=?3 WHERE id=?1 AND withdraw_cancel_token_hash=?2 AND deleted_at>?4 AND anonymized_at IS NULL",&[Cell::uuid(user),Cell::text(hash),Cell::instant(now)?,Cell::instant(now-Duration::days(WITHDRAW_GRACE_DAYS))?]).await?;
+    if restored != 1 {
+        tx.rollback().await?;
+        return Ok(CancelWithdrawOutcome::NotFound);
+    }
+    tx.operation()
+        .record_auth_account_change(user_record(
+            "user.withdraw_cancelled",
+            Some(user),
+            user,
+            json!({"userId":user.to_string()}),
+            ip,
+        ))
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(CancelWithdrawOutcome::Ok)
 }
 
@@ -1011,6 +1161,57 @@ pub async fn change_password(
     Ok(true)
 }
 
+pub async fn change_password_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    expected_hash: Option<&str>,
+    new_hash: &str,
+    ip: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return change_password(pool, user_id, session_id, expected_hash, new_hash, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family password change")
+    };
+    let rows=family.query("SELECT password_hash FROM users WHERE id=?1 AND deleted_at IS NULL AND suspended_at IS NULL",&[Cell::uuid(user_id)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let hash = row.cell(0)?.optional(Cell::string)?;
+    if !same_hash(hash.as_deref(), expected_hash) {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let mut op = tx.operation();
+    op.change_password_hash(user_id, new_hash).await?;
+    op.revoke_auth_sessions(user_id, Some(session_id)).await?;
+    op.record_auth_account_change(user_record(
+        "auth.password_changed",
+        Some(user_id),
+        user_id,
+        json!({"userId":user_id.to_string()}),
+        ip,
+    ))
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(true)
+}
+
 pub struct LiveUserIdentity {
     pub email: String,
     pub generation: i32,
@@ -1036,12 +1237,66 @@ pub async fn live_user_identity(
     )
 }
 
+pub async fn live_user_identity_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+) -> Result<Option<LiveUserIdentity>, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return live_user_identity(pool, user_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family live identity")
+    };
+    let rows=family.query("SELECT email,auth_generation,suspended_at FROM users WHERE id=?1 AND deleted_at IS NULL",&[Cell::uuid(user_id)]).await?;
+    let row = rows
+        .first()
+        .map(|r| {
+            Ok::<_, sqlx::Error>(LiveUserIdentity {
+                email: r.cell(0)?.string()?,
+                generation: r.cell(1)?.int32()?,
+                suspended: r.cell(2)?.optional(Cell::datetime)?.is_some(),
+            })
+        })
+        .transpose()?;
+    tx.rollback().await?;
+    Ok(row)
+}
+
 /// Source `emailExists`: any row, withdrawn or anonymized included.
 pub async fn email_exists(pool: &PgPool, email: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM fvoci.users WHERE email = $1)")
         .bind(email)
         .fetch_one(pool)
         .await
+}
+
+pub async fn email_exists_backend(
+    backend: &super::backend::Backend,
+    email: &str,
+) -> Result<bool, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return email_exists(pool, email).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family email lookup")
+    };
+    let rows = family
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE email=?1)",
+            &[Cell::text(email)],
+        )
+        .await?;
+    let found = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()?;
+    tx.rollback().await?;
+    Ok(found)
 }
 
 pub async fn issue_email_change_token(
@@ -1063,6 +1318,52 @@ pub async fn issue_email_change_token(
         .execute(&mut *tx)
         .await?;
     tx.commit().await
+}
+
+pub async fn issue_email_change_token_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+    session_id: Uuid,
+    generation: i32,
+    new_email: &str,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return issue_email_change_token(
+            pool, user_id, generation, new_email, token_hash, expires_at,
+        )
+        .await
+        .map(|()| true);
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.operation().set_system().await?;
+    let issued = tx
+        .operation()
+        .issue_magic_token(
+            &MagicPayload {
+                kind: MAGIC_KIND_EMAIL_CHANGE.into(),
+                user_id,
+                generation,
+                new_email: Some(new_email.into()),
+            },
+            token_hash,
+            expires_at,
+        )
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(issued)
 }
 
 pub struct EmailChanged {
@@ -1125,6 +1426,66 @@ pub async fn complete_email_change(
     Ok(Some(EmailChanged { old_email }))
 }
 
+pub async fn complete_email_change_backend(
+    backend: &super::backend::Backend,
+    payload: &MagicPayload,
+    ip: Option<&str>,
+) -> Result<Option<EmailChanged>, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return complete_email_change(pool, payload, ip).await;
+    }
+    if payload.kind != MAGIC_KIND_EMAIL_CHANGE {
+        return Ok(None);
+    }
+    let Some(new_email) = payload.new_email.as_deref() else {
+        return Ok(None);
+    };
+    if normalize_email(new_email).ok().as_deref() != Some(new_email) {
+        return Err(sqlx::Error::Protocol("invalid canonical email".into()));
+    }
+    let mut tx = backend.begin_write().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family email change")
+    };
+    family.require_writer()?;
+    let rows=family.query("SELECT email FROM users WHERE id=?1 AND deleted_at IS NULL AND suspended_at IS NULL AND auth_generation=?2",&[Cell::uuid(payload.user_id),Cell::Integer(i64::from(payload.generation))]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let old_email = row.cell(0)?.string()?;
+    let taken = family
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE email=?1 AND id<>?2)",
+            &[Cell::text(new_email), Cell::uuid(payload.user_id)],
+        )
+        .await?;
+    if taken
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()?
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    family.execute("UPDATE users SET email=?2,email_verified_at=?3,auth_generation=auth_generation+1,updated_at=?3 WHERE id=?1",&[Cell::uuid(payload.user_id),Cell::text(new_email),Cell::instant(crate::db::identity::stored_now())?]).await?;
+    let mut record = user_record(
+        "user.email_changed",
+        Some(payload.user_id),
+        payload.user_id,
+        json!({"userId":payload.user_id.to_string(),"oldEmail":old_email,"newEmail":new_email}),
+        ip,
+    );
+    record.audit_payload = Some(json!({"userId":payload.user_id.to_string()}));
+    tx.operation().record_auth_account_change(record).await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Some(EmailChanged { old_email }))
+}
+
 pub struct LoginLinkUser {
     pub user_id: Uuid,
     pub generation: i32,
@@ -1149,6 +1510,26 @@ pub async fn login_link_user(
     }))
 }
 
+pub async fn login_link_user_backend(
+    backend: &super::backend::Backend,
+    email: &str,
+) -> Result<Option<LoginLinkUser>, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return login_link_user(pool, email).await;
+    }
+    Ok(
+        super::identity::find_reset_user_by_email_backend(backend, email)
+            .await?
+            .and_then(|(user_id, generation, suspended)| {
+                suspended.is_none().then_some(LoginLinkUser {
+                    user_id,
+                    generation,
+                })
+            }),
+    )
+}
+
 pub async fn issue_login_token(
     pool: &PgPool,
     user: &LoginLinkUser,
@@ -1166,6 +1547,30 @@ pub async fn issue_login_token(
         .execute(&mut *tx)
         .await?;
     tx.commit().await
+}
+
+pub async fn issue_login_token_backend(
+    backend: &super::backend::Backend,
+    user: &LoginLinkUser,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return issue_login_token(pool, user, token_hash, expires_at).await;
+    }
+    super::magic::issue_token_backend(
+        backend,
+        &MagicPayload {
+            kind: MAGIC_KIND_LOGIN.into(),
+            user_id: user.user_id,
+            generation: user.generation,
+            new_email: None,
+        },
+        token_hash,
+        expires_at,
+    )
+    .await
 }
 
 /// Source `issueSessionOrChallenge(..., "magic", ip, { generation,
@@ -1187,6 +1592,38 @@ pub async fn complete_magic_login(
         },
     )
     .await
+}
+
+pub async fn complete_magic_login_backend(
+    backend: &super::backend::Backend,
+    payload: &MagicPayload,
+) -> Result<Option<crate::db::mfa::Issued>, sqlx::Error> {
+    use super::backend::Backend;
+    if let Backend::Postgres(pool) = backend {
+        return complete_magic_login(pool, payload).await;
+    }
+    if payload.kind != MAGIC_KIND_LOGIN {
+        return Ok(None);
+    }
+    crate::db::mfa::issue_session_or_challenge_backend(
+        backend,
+        payload.user_id,
+        "magic",
+        crate::db::mfa::IssueOptions {
+            generation: Some(payload.generation),
+            mark_email_verified: true,
+        },
+    )
+    .await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn record_auth_account_change(
+        &mut self,
+        record: AccountRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        self.maintenance_account_record(record).await
+    }
 }
 
 #[cfg(test)]
