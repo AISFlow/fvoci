@@ -5,8 +5,8 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::backend::{Backend, DbTransaction};
-use super::codec::Cell;
+use super::backend::{Backend, DbTransaction, FamilyTx, OperationTx};
+use super::codec::{Cell, FamilyRow};
 
 use crate::db::admin::{record_instance_change, require_admin_session, InstanceChange};
 use crate::db::context::{clear_self_user, set_self_user, set_system, set_tenant};
@@ -76,6 +76,42 @@ pub async fn latest_legal(pool: &PgPool, kind: &str) -> Result<Option<LegalDocum
     Ok(row.map(from_scan))
 }
 
+pub async fn latest_legal_backend(
+    backend: &Backend,
+    kind: &str,
+) -> Result<Option<LegalDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return latest_legal(pool, kind).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let docs=family.query(r#"SELECT id, kind, version, title, body_markdown, body_html, required, effective_at, published_at
+        FROM legal_documents
+        WHERE kind=?1
+        ORDER BY version DESC LIMIT 1"#,&[Cell::text(kind)]).await?;
+    let result = docs.first().map(family_legal_row).transpose()?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(result)
+}
+
+fn family_legal_row(r: &FamilyRow) -> Result<LegalDocument, sqlx::Error> {
+    Ok(LegalDocument {
+        id: r.cell(0)?.id()?,
+        kind: r.cell(1)?.string()?,
+        version: r.cell(2)?.int32()?,
+        title: r.cell(3)?.string()?,
+        body_markdown: r.cell(4)?.string()?,
+        body_html: r.cell(5)?.string()?,
+        required: r.cell(6)?.boolean()?,
+        effective_at: r.cell(7)?.datetime()?,
+        published_at: r.cell(8)?.datetime()?,
+    })
+}
+
 pub async fn legal_version(
     pool: &PgPool,
     kind: &str,
@@ -91,6 +127,31 @@ pub async fn legal_version(
     Ok(row.map(from_scan))
 }
 
+pub async fn legal_version_backend(
+    backend: &Backend,
+    kind: &str,
+    version: i32,
+) -> Result<Option<LegalDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return legal_version(pool, kind, version).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows = family
+        .query(
+            "SELECT id, kind, version, title, body_markdown, body_html, required, effective_at, published_at FROM legal_documents WHERE kind=?1 AND version=?2",
+            &[Cell::text(kind), Cell::Integer(i64::from(version))],
+        )
+        .await?;
+    let result = rows.first().map(family_legal_row).transpose()?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(result)
+}
+
 pub async fn list_legal_versions(
     pool: &PgPool,
     kind: &str,
@@ -102,6 +163,33 @@ pub async fn list_legal_versions(
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(from_scan).collect())
+}
+
+pub async fn list_legal_versions_backend(
+    backend: &Backend,
+    kind: &str,
+) -> Result<Vec<LegalDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_legal_versions(pool, kind).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows = family
+        .query(
+            "SELECT id, kind, version, title, body_markdown, body_html, required, effective_at, published_at FROM legal_documents WHERE kind=?1 ORDER BY version DESC",
+            &[Cell::text(kind)],
+        )
+        .await?;
+    let result = rows
+        .iter()
+        .map(family_legal_row)
+        .collect::<Result<_, _>>()?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(result)
 }
 
 /// Source `listRequiredLatest`: the latest version of each kind, kept when
@@ -213,6 +301,47 @@ pub async fn publish_legal(
     Ok(Some(doc))
 }
 
+pub async fn publish_legal_backend(
+    backend: &Backend,
+    actor: Uuid,
+    session: Uuid,
+    input: LegalPublishInput,
+    ip: Option<&str>,
+) -> Result<Option<LegalDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return publish_legal(pool, actor, session, input, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx.operation().require_admin_session(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows=family.query(r#"INSERT INTO legal_documents(id,kind,version,title,body_markdown,body_html,required,effective_at,published_at,created_by) SELECT ?1,?2,COALESCE(max(version),0)+1,?3,?4,?5,?6,?7,unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000,?8
+        FROM legal_documents
+        WHERE kind=?2
+        RETURNING id, kind, version, title, body_markdown, body_html, required, effective_at, published_at"#,&[Cell::uuid(Uuid::now_v7()),Cell::text(&input.kind),Cell::text(&input.title),Cell::text(&input.body_markdown),Cell::text(&input.body_html),Cell::Integer(i64::from(input.required)),Cell::instant(input.effective_at)?,Cell::uuid(actor)]).await?;
+    let doc = family_legal_row(rows.first().ok_or(sqlx::Error::RowNotFound)?)?;
+    tx.operation()
+        .record_instance_change(InstanceChange {
+            actor_user_id: actor,
+            verb: "legal.published",
+            target: Some(("legal_document", doc.id)),
+            payload: json!({"kind":doc.kind,"version":doc.version,"required":doc.required}),
+            ip,
+        })
+        .await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(doc))
+}
+
 async fn consented_pairs(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -250,6 +379,43 @@ pub async fn pending_consents(
     clear_self_user(&mut tx).await?;
     tx.commit().await?;
     Ok(pending)
+}
+
+pub async fn pending_consents_backend(
+    backend: &Backend,
+    user: Uuid,
+) -> Result<Vec<LegalDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return pending_consents(pool, user).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let docs = family_pending_consents(family, user).await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(docs)
+}
+
+async fn family_pending_consents(
+    tx: &mut FamilyTx,
+    user: Uuid,
+) -> Result<Vec<LegalDocument>, sqlx::Error> {
+    tx.query(r#"SELECT d.id,d.kind,d.version,d.title,d.body_markdown,d.body_html,d.required,d.effective_at,d.published_at
+        FROM legal_documents d
+        WHERE d.required=1
+        AND NOT EXISTS(SELECT 1
+        FROM legal_documents n
+        WHERE n.kind=d.kind
+        AND n.version>d.version)
+        AND NOT EXISTS(SELECT 1
+        FROM user_consents c
+        WHERE c.user_id=?1
+        AND c.kind=d.kind
+        AND c.version=d.version)
+        ORDER BY d.kind DESC"#,&[Cell::uuid(user)]).await?.iter().map(family_legal_row).collect()
 }
 
 /// The 428 gate: one definer call per cookie request.
@@ -378,6 +544,48 @@ pub async fn record_consents(
     Ok(RecordConsentsOutcome::Recorded)
 }
 
+pub async fn record_consents_backend(
+    backend: &Backend,
+    user: Uuid,
+    items: &[(String, i32)],
+    ip: Option<&str>,
+) -> Result<RecordConsentsOutcome, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return record_consents(pool, user, items, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    let live=family.query("SELECT EXISTS(SELECT 1 FROM users WHERE id=?1 AND deleted_at IS NULL AND suspended_at IS NULL)",&[Cell::uuid(user)]).await?;
+    if !live[0].cell(0)?.boolean()? {
+        tx.rollback().await?;
+        return Ok(RecordConsentsOutcome::NotLive);
+    }
+    for (kind, version) in items {
+        family.execute(r#"INSERT INTO user_consents(id,user_id,kind,version,consented_at,ip,channel) SELECT ?1,?2,?3,?4,unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000,?5,'gate'
+            WHERE ?4=(SELECT max(version)
+            FROM legal_documents
+            WHERE kind=?3) ON CONFLICT(user_id,kind,version) DO NOTHING"#,&[Cell::uuid(Uuid::now_v7()),Cell::uuid(user),Cell::text(kind),Cell::Integer(i64::from(*version)),Cell::optional_text(ip)]).await?;
+    }
+    if family_pending_consents(family, user).await?.is_empty() {
+        tx.operation()
+            .record_instance_change(InstanceChange {
+                actor_user_id: user,
+                verb: "consent.recorded",
+                target: Some(("user", user)),
+                payload: json!({"userId":user.to_string(),"channel":"gate"}),
+                ip,
+            })
+            .await?;
+    }
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(RecordConsentsOutcome::Recorded)
+}
+
 #[derive(Debug, Clone)]
 pub struct MemberConsents {
     pub user_id: Uuid,
@@ -432,5 +640,61 @@ pub async fn workspace_consents(
             }),
         }
     }
+    Ok(Some(members))
+}
+
+pub async fn workspace_consents_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    user: Uuid,
+) -> Result<Option<Vec<MemberConsents>>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return workspace_consents(pool, workspace, user).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let mut op = tx.operation();
+    op.set_tenant(workspace).await?;
+    if !op.workspace_is_live(workspace).await?
+        || !matches!(
+            op.membership_role(workspace, user, false).await?,
+            Some(WorkspaceRole::Owner | WorkspaceRole::Admin)
+        )
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!()
+    };
+    family.require_tenant(workspace)?;
+    let rows = family
+        .query(
+            r#"SELECT c.user_id,c.kind,c.version,c.consented_at
+        FROM memberships m
+        JOIN user_consents c ON c.user_id=m.user_id
+        WHERE m.workspace_id=?1
+        ORDER BY c.user_id,c.consented_at,c.kind"#,
+            &[Cell::uuid(workspace)],
+        )
+        .await?;
+    let mut members: Vec<MemberConsents> = Vec::new();
+    for r in rows {
+        let user_id = r.cell(0)?.id()?;
+        let consent = (
+            r.cell(1)?.string()?,
+            r.cell(2)?.int32()?,
+            r.cell(3)?.datetime()?,
+        );
+        match members.last_mut() {
+            Some(last) if last.user_id == user_id => last.consents.push(consent),
+            _ => members.push(MemberConsents {
+                user_id,
+                consents: vec![consent],
+            }),
+        }
+    }
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
     Ok(Some(members))
 }

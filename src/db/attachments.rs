@@ -3309,6 +3309,189 @@ pub async fn admit_transfer_storage(
     Ok(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_attachment_for_transfer_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    source: Uuid,
+    destination: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    attachment: Uuid,
+    destination_attachment: Uuid,
+) -> Result<Result<StagedAttachment, StageAttachmentError>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return stage_attachment_for_transfer(
+            pool,
+            storage,
+            source,
+            destination,
+            actor,
+            session,
+            attachment,
+            destination_attachment,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut op = tx.operation();
+    op.set_tenant(source).await?;
+    if !op.session_is_live(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::Forbidden));
+    }
+    if !op.workspace_is_live(source).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    let Some(att) = op.upload_row(source, attachment).await? else {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    };
+    let parent = match (att.document_id, att.task_id) {
+        (Some(id), None) => AttachmentParent::Document(id),
+        (None, Some(id)) => AttachmentParent::Task(id),
+        _ => {
+            tx.rollback().await?;
+            return Ok(Err(StageAttachmentError::NotFound));
+        }
+    };
+    if op
+        .upload_parent_access(source, actor, parent, false)
+        .await?
+        .is_err()
+    {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    if att.status != "stored" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    let OperationTx::SqliteFamily(family) = &mut op else {
+        unreachable!()
+    };
+    let leased=family.query(r#"SELECT COALESCE(extract_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        OR COALESCE(preview_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        FROM attachments
+        WHERE workspace_id=?1
+        AND id=?2"#,&[Cell::uuid(source),Cell::uuid(attachment)]).await?[0].cell(0)?.boolean()?;
+    if leased || att.scan_status == "infected" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotReady));
+    }
+    let Some(size) = att.size_bytes.filter(|s| *s >= 0) else {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::Changed));
+    };
+    let preview = preview_variant_of(&att.variants);
+    let original_key = Uuid::now_v7().to_string();
+    let preview_key = preview.as_ref().map(|_| Uuid::now_v7().to_string());
+    let mut journal = vec![(Uuid::now_v7(), original_key.clone())];
+    if let Some(key) = &preview_key {
+        journal.push((Uuid::now_v7(), key.clone()));
+    }
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!()
+    };
+    family.scope_transfer_pair(source, destination)?;
+    family.switch_transfer_tenant(destination)?;
+    family.require_writer()?;
+    family.require_tenant(destination)?;
+    for (id, key) in &journal {
+        family.execute(r#"INSERT INTO attachment_object_cleanups(id,workspace_id,attachment_id,storage_key,due_at) VALUES(?1,?2,?3,?4,unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000+?5*1000000)"#,&[Cell::uuid(*id),Cell::uuid(destination),Cell::uuid(destination_attachment),Cell::text(key),Cell::Integer(i64::from(TRANSFER_STAGE_GRACE_SECS))]).await?;
+    }
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    #[cfg(feature = "db-tests")]
+    test_barrier::wait_transfer_stage_copy_barrier(destination_attachment).await;
+    // Journal first, then exclude reclamation for the copy and readback. A
+    // reclaimer that won the gap is detected before any object is written.
+    let mut copying = backend.begin_write().await?;
+    let mut op = copying.operation();
+    op.set_tenant(destination).await?;
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_tenant(destination)?;
+    for (id, _) in &journal {
+        if family
+            .query(
+                "SELECT id FROM attachment_object_cleanups WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(destination), Cell::uuid(*id)],
+            )
+            .await?
+            .is_empty()
+        {
+            copying.rollback().await?;
+            return Ok(Err(StageAttachmentError::Changed));
+        }
+    }
+    let result = async {
+        let original = StagedObject {
+            journal_id: journal[0].0,
+            key: original_key.clone(),
+            size_bytes: size,
+            sha256: copy_verified(storage, &att.storage_key, &original_key, size).await?,
+        };
+        let preview = match (preview, preview_key) {
+            (Some(variant), Some(key)) => {
+                let sha256 = copy_verified(storage, &variant.key, &key, variant.bytes).await?;
+                let mut value = att.variants.get("preview").cloned().unwrap_or(Value::Null);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("key".into(), Value::String(key.clone()));
+                }
+                Some((
+                    StagedObject {
+                        journal_id: journal[1].0,
+                        key,
+                        size_bytes: variant.bytes,
+                        sha256,
+                    },
+                    value,
+                ))
+            }
+            _ => None,
+        };
+        Ok(StagedAttachment {
+            source: att,
+            original,
+            preview,
+        })
+    }
+    .await;
+    copying.rollback().await?;
+    Ok(result)
+}
+
+pub(crate) async fn admit_transfer_storage_operation(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    quota: &StorageQuota,
+    workspace: Uuid,
+    sizes: &[i64],
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    if let crate::db::backend::OperationTx::Postgres(tx) = op {
+        return admit_transfer_storage(tx, quota, workspace, sizes).await;
+    }
+    // The reserved family writer excludes upload/admission writers until the
+    // transfer publishes, exactly as the PG workspace storage lock does.
+    let mut reserved = op.import_attachment_reserved_bytes(workspace).await?;
+    for size in sizes {
+        if let Err(error) = quota.check(reserved, *size) {
+            return Ok(Err(match error {
+                StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+                StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+            }));
+        }
+        reserved = reserved.saturating_add(*size);
+    }
+    Ok(Ok(()))
+}
+
 /// Streams `from` to the fresh key `to`, counting length and SHA-256, then
 /// checks the stored size and that the copy reads back with the same hash.
 async fn copy_verified(

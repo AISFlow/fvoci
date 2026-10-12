@@ -89,6 +89,7 @@ impl Backend {
                     tx,
                     write_reserved: true,
                     tenant: None,
+                    transfer_pair: None,
                     system_context: false,
                 }))
             }),
@@ -119,6 +120,7 @@ impl Backend {
                     tx,
                     write_reserved: false,
                     tenant: None,
+                    transfer_pair: None,
                     system_context: false,
                 }))
             }),
@@ -267,6 +269,7 @@ pub struct LocalTx {
     tx: Transaction<'static, Sqlite>,
     write_reserved: bool,
     tenant: Option<uuid::Uuid>,
+    transfer_pair: Option<(uuid::Uuid, uuid::Uuid)>,
     system_context: bool,
 }
 
@@ -314,6 +317,50 @@ impl FamilyTx {
             ))
         }
     }
+    /// Registers the two locators of one personal transfer. This only scopes
+    /// subsequent named operations: it grants neither actor authority nor a
+    /// writer reservation. The product rechecks both sides in this transaction.
+    pub(crate) fn scope_transfer_pair(
+        &mut self,
+        source: uuid::Uuid,
+        destination: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let (tenant, pair) = match self {
+            Self::Local(tx) => (&mut tx.tenant, &mut tx.transfer_pair),
+            Self::Remote(tx) => (&mut tx.tenant, &mut tx.transfer_pair),
+        };
+        if source == destination || pair.is_some() || tenant.is_some_and(|id| id != source) {
+            return Err(sqlx::Error::Protocol(
+                "transaction transfer pair cannot change".into(),
+            ));
+        }
+        *pair = Some((source, destination));
+        // Keep global-only operations fail-closed even before the first switch.
+        *tenant = Some(source);
+        Ok(())
+    }
+
+    /// The exception to ordinary tenant pinning is closed over exactly the
+    /// registered pair. A rejected switch leaves the current locator intact.
+    pub(crate) fn switch_transfer_tenant(
+        &mut self,
+        workspace: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let (tenant, pair) = match self {
+            Self::Local(tx) => (&mut tx.tenant, tx.transfer_pair),
+            Self::Remote(tx) => (&mut tx.tenant, tx.transfer_pair),
+        };
+        if !pair
+            .is_some_and(|(source, destination)| workspace == source || workspace == destination)
+        {
+            return Err(sqlx::Error::Protocol(
+                "workspace is outside transaction transfer pair".into(),
+            ));
+        }
+        *tenant = Some(workspace);
+        Ok(())
+    }
+
     pub(crate) fn set_tenant(&mut self, workspace: uuid::Uuid) -> Result<(), sqlx::Error> {
         let tenant = match self {
             Self::Local(tx) => &mut tx.tenant,
@@ -590,6 +637,7 @@ impl RemoteDatabase {
             owner: self.clone(),
             write_reserved: write,
             tenant: None,
+            transfer_pair: None,
             system_context: false,
             finish_started: false,
             #[cfg(test)]
@@ -713,6 +761,7 @@ impl RemoteDatabase {
 pub struct RemoteTx {
     write_reserved: bool,
     tenant: Option<uuid::Uuid>,
+    transfer_pair: Option<(uuid::Uuid, uuid::Uuid)>,
     system_context: bool,
     connection: Option<libsql::Connection>,
     lease: Option<RemoteLease>,
@@ -850,6 +899,101 @@ pub(crate) mod maintenance_claim_driver_tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, Ordering};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn transfer_pair_keeps_third_tenants_and_reader_writes_closed() {
+        let f = Fixture::new().await;
+        let pool = f.model.lock().await.pool.clone();
+        let (source, destination, third) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        for backend in [Backend::Sqlite(pool.clone()), f.backend.clone()] {
+            let mut ordinary = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut ordinary else {
+                unreachable!()
+            };
+            family.set_tenant(source).unwrap();
+            assert!(matches!(
+                family.set_tenant(destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(source));
+            ordinary.rollback().await.unwrap();
+
+            let mut scoped = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut scoped else {
+                unreachable!()
+            };
+            assert!(matches!(
+                family.switch_transfer_tenant(destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            family.scope_transfer_pair(source, destination).unwrap();
+            assert_eq!(family.tenant(), Some(source));
+            family.switch_transfer_tenant(destination).unwrap();
+            family.require_tenant(destination).unwrap();
+            assert!(family.require_tenant(source).is_err());
+            assert!(matches!(
+                family.switch_transfer_tenant(third),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.scope_transfer_pair(source, third),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.scope_transfer_pair(source, destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.set_tenant(source),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(destination));
+            family.switch_transfer_tenant(source).unwrap();
+            family.require_tenant(source).unwrap();
+            scoped.rollback().await.unwrap();
+
+            let mut other = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut other else {
+                unreachable!()
+            };
+            family.set_tenant(third).unwrap();
+            assert!(matches!(
+                family.scope_transfer_pair(source, destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(third));
+            other.rollback().await.unwrap();
+
+            let mut reader = backend.begin_read().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut reader else {
+                unreachable!()
+            };
+            family.scope_transfer_pair(source, destination).unwrap();
+            family.switch_transfer_tenant(destination).unwrap();
+            let denied = reader
+                .operation()
+                .append_event(crate::db::identity::EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(destination),
+                    actor_user_id: None,
+                    verb: "scope.probe".into(),
+                    target_type: None,
+                    target_id: None,
+                    payload: json!({}),
+                })
+                .await;
+            assert!(matches!(denied, Err(sqlx::Error::Protocol(_))));
+            reader.rollback().await.unwrap();
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        f.shutdown(false, false).await;
+    }
 
     struct Stream {
         conn: sqlx::SqliteConnection,
@@ -1536,6 +1680,7 @@ pub(crate) mod maintenance_claim_driver_tests {
             let tx = RemoteTx {
                 write_reserved: true,
                 tenant: None,
+                transfer_pair: None,
                 system_context: false,
                 connection: Some(owner.database.connect().unwrap()),
                 lease: Some(RemoteLease {

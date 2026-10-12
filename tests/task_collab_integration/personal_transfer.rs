@@ -3013,3 +3013,358 @@ async fn personal_transfer_move_native_copy_row_budget_boundary() {
     })
     .await;
 }
+
+mod sqlite_family {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Router,
+    };
+    use fvoci_server::api::personal_input_dto::{PersonalInputBody, PersonalInputIntent};
+    use fvoci_server::auth::service::SetupInstanceInput;
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::projects::{create_project_backend, CreateProjectInput};
+    use fvoci_server::db::{migrate, pool, Db};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    async fn post(app: &Router, path: &str, body: Value, token: &str) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("cookie", format!("fvoci_session={token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:9234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    fn state(db: Db, storage_root: &std::path::Path) -> fvoci_server::http::state::AppState {
+        fvoci_server::http::state::AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::On,
+            native_engine: None,
+            auth: Arc::new(fvoci_server::auth::AuthService {
+                db,
+                password_keys: fvoci_server::auth::password::Keyring::parse(super::PEPPER, "test")
+                    .expect("pepper"),
+            }),
+            branding_name: "FVOCI".to_string(),
+            public_origin: "http://localhost".to_string(),
+            cookie_secure: false,
+            rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(storage_root.to_path_buf())
+                .into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: Some(
+                fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                    "CARGO_BIN_EXE_fvoci-server"
+                )),
+            ),
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            streams: fvoci_server::http::state::AppState::fresh_streams(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_personal_copy_move_receipts_native_files_and_time_graph_commit_atomically() {
+        let root = std::env::temp_dir().join(format!("fvoci-port-transfer-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("transfer.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 3).await.unwrap();
+        let state = state(Db::from_backend(Backend::Sqlite(sqlite.clone())), &root);
+        let auth = state.auth.clone();
+        let storage = state.storage.clone();
+        let (actor, team, token) = auth
+            .setup_instance(
+                "Synthetic-Transfer-2026!".into(),
+                SetupInstanceInput {
+                    email: "transfer@example.invalid".into(),
+                    given_name: "Transfer".into(),
+                    family_name: None,
+                    workspace_slug: "transfer-team".into(),
+                    workspace_name: "Transfer team".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let live = auth.session_user(&token).await.unwrap().unwrap();
+        let session = Uuid::parse_str(&live.session_id).unwrap();
+        let source = fvoci_server::db::workspace::ensure_personal_workspace_backend(
+            &auth.db.pool,
+            &auth.db.license,
+            actor,
+            session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+        let project = create_project_backend(
+            &auth.db.pool,
+            team,
+            actor,
+            session,
+            CreateProjectInput {
+                key: "DEST",
+                name: "Destination",
+                visibility: "workspace",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+        let input = fvoci_server::db::personal_input::create_personal_input_backend(
+            &auth.db.pool,
+            source,
+            actor,
+            session,
+            &PersonalInputBody {
+                request_id: Uuid::now_v7(),
+                intent: PersonalInputIntent::Task,
+                title: "Personal pair".into(),
+                project_id: None,
+                source: None,
+            },
+            None,
+            "web",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let document = Uuid::parse_str(&input.document_id).unwrap();
+        let task = Uuid::parse_str(input.task_id.as_ref().unwrap()).unwrap();
+        let status: Vec<u8> = sqlx::query_scalar(
+            r#"SELECT id
+            FROM statuses
+            WHERE workspace_id=?1
+            AND project_id=?2
+            ORDER BY sort_key LIMIT 1"#,
+        )
+        .bind(team.as_bytes().as_slice())
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&sqlite)
+        .await
+        .unwrap();
+        let status = Uuid::from_slice(&status).unwrap();
+        let engine =
+            fvoci_server::collab::seed::SeedEngine::from_env().expect("FVOCI_COLLAB_ENGINE");
+        let content: String = sqlx::query_scalar("SELECT content_json FROM documents WHERE id=?1")
+            .bind(document.as_bytes().as_slice())
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        let seed = engine
+            .tiptap_to_yjs_update(&serde_json::from_str(&content).unwrap())
+            .await
+            .unwrap();
+        sqlx::query(r#"INSERT INTO document_states(workspace_id,document_id,state,encoding) VALUES(?1,?2,?3,1)"#).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(&seed).execute(&sqlite).await.unwrap();
+        let op = Uuid::now_v7();
+        let revision = Uuid::now_v7();
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(&seed);
+        sqlx::query("UPDATE document_states SET tail_seq=1 WHERE document_id=?1")
+            .bind(document.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO document_collab_updates(workspace_id,document_id,seq,op_id,payload) VALUES(?1,?2,1,?3,?4)")
+            .bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(op.as_bytes().as_slice()).bind(&seed).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO document_collab_op_receipts(workspace_id,document_id,op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES(?1,?2,?3,1,?4,?5,?6)")
+            .bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(op.as_bytes().as_slice()).bind(seed.len() as i64).bind(digest.as_slice()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,content_json,text,reason,created_by) VALUES(?1,?2,'document',?3,?4,?5,'','manual',?6)")
+            .bind(revision.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(&seed).bind(&content).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        let attachment = Uuid::now_v7();
+        let key = Uuid::now_v7().to_string();
+        let payload = b"private-transfer-file";
+        storage.put_bytes(&key, payload.to_vec()).await.unwrap();
+        sqlx::query(r#"INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,mime,size_bytes,reserved_size_bytes,storage_key,scan_status,completed_at) VALUES(?1,?2,?3,?4,'stored','file.txt','text/plain',?5,?5,?6,'clean',unixepoch()*1000000)"#).bind(attachment.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).bind(payload.len() as i64).bind(&key).execute(&sqlite).await.unwrap();
+        let entry = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        let segment = Uuid::now_v7();
+        sqlx::query(r#"INSERT INTO time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES(?1,?2,?3,?4,1000000,61000000,60,'private entry')"#).bind(entry.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query(r#"INSERT INTO task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note) VALUES(?1,?2,?3,?4,'stopped',1,1000000,61000000,'private run')"#).bind(run.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query(r#"INSERT INTO task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id) VALUES(?1,?2,?3,?4,?5,1000000,61000000,?6)"#).bind(segment.as_bytes().as_slice()).bind(run.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).bind(source.as_bytes().as_slice()).bind(task.as_bytes().as_slice()).bind(entry.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        let app = fvoci_server::http::router(state, None);
+        let preview_path = format!("/api/v1/workspaces/{source}/personal-transfers/preview");
+        let transfer_path = format!("/api/v1/workspaces/{source}/personal-transfers");
+        let select = |action: &str| json!({"action":action,"documentId":document,"taskId":task,"expectedDocumentVersion":1,"expectedTaskVersion":1,"destinationWorkspaceId":team,"destinationProjectId":project,"destinationStatusId":status});
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        let alien = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'unrelated-transfer-tenant','Unrelated tenant','team')")
+            .bind(alien.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        let mut foreign = select("move");
+        foreign["destinationWorkspaceId"] = json!(alien);
+        let denied = post(&app, &preview_path, foreign, &token).await;
+        assert_eq!(denied.0, StatusCode::NOT_FOUND, "{}", denied.1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&sqlite)
+                .await
+                .unwrap(),
+            before
+        );
+        let copy_preview = post(&app, &preview_path, select("copy"), &token).await;
+        assert_eq!(copy_preview.0, StatusCode::OK, "{}", copy_preview.1);
+        let copy_command = json!({"requestId":Uuid::now_v7(),"selection":select("copy"),"previewDigest":copy_preview.1["digest"],"confirmed":true});
+        let copied = post(&app, &transfer_path, copy_command.clone(), &token).await;
+        assert_eq!(copied.0, StatusCode::OK, "{}", copied.1);
+        assert_ne!(copied.1["documentId"], document.to_string());
+        assert_ne!(copied.1["taskId"], task.to_string());
+        assert_eq!(
+            post(&app, &transfer_path, copy_command, &token).await.1["replayed"],
+            true
+        );
+        let stale = post(&app, &preview_path, select("move"), &token).await;
+        assert_eq!(stale.0, StatusCode::OK, "{}", stale.1);
+        sqlx::query("UPDATE documents SET title='Changed after review' WHERE id=?1")
+            .bind(document.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let refused=post(&app,&transfer_path,json!({"requestId":Uuid::now_v7(),"selection":select("move"),"previewDigest":stale.1["digest"],"confirmed":true}),&token).await;
+        assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+        assert_eq!(refused.1["params"]["code"], "preview_stale");
+        let preview = post(&app, &preview_path, select("move"), &token).await;
+        assert_eq!(preview.0, StatusCode::OK, "{}", preview.1);
+        let command = json!({"requestId":Uuid::now_v7(),"selection":select("move"),"previewDigest":preview.1["digest"],"confirmed":true});
+        let moved = post(&app, &transfer_path, command.clone(), &token).await;
+        assert_eq!(moved.0, StatusCode::OK, "{}", moved.1);
+        assert_eq!(moved.1["documentId"], document.to_string());
+        assert_eq!(moved.1["taskId"], task.to_string());
+        let replay = post(&app, &transfer_path, command.clone(), &token).await;
+        assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+        assert_eq!(replay.1["replayed"], true);
+        let mut changed = command;
+        changed["previewDigest"] = json!("a".repeat(64));
+        let conflict = post(&app, &transfer_path, changed, &token).await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT);
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        for table in [
+            "documents",
+            "tasks",
+            "attachments",
+            "time_entries",
+            "task_timer_runs",
+            "task_timer_segments",
+        ] {
+            let id = match table {
+                "documents" => document,
+                "tasks" => task,
+                "attachments" => attachment,
+                "time_entries" => entry,
+                "task_timer_runs" => run,
+                _ => segment,
+            };
+            let ws: Vec<u8> =
+                sqlx::query_scalar(&format!("SELECT workspace_id FROM {table} WHERE id=?1"))
+                    .bind(id.as_bytes().as_slice())
+                    .fetch_one(&fresh)
+                    .await
+                    .unwrap();
+            assert_eq!(ws, team.as_bytes(), "{table}");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT state FROM document_states WHERE workspace_id=?1 AND document_id=?2"
+            )
+            .bind(team.as_bytes().as_slice())
+            .bind(document.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            seed
+        );
+        let tail: (Vec<u8>, Vec<u8>, i64) = sqlx::query_as("SELECT workspace_id,payload,seq FROM document_collab_updates WHERE document_id=?1 AND op_id=?2")
+            .bind(document.as_bytes().as_slice()).bind(op.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        assert_eq!(tail, (team.as_bytes().to_vec(), seed.clone(), 1));
+        let receipt: (Vec<u8>, Vec<u8>, i64, Vec<u8>) = sqlx::query_as("SELECT workspace_id,payload_sha256,payload_len,actor_user_id FROM document_collab_op_receipts WHERE document_id=?1 AND op_id=?2")
+            .bind(document.as_bytes().as_slice()).bind(op.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        assert_eq!(
+            receipt,
+            (
+                team.as_bytes().to_vec(),
+                digest.to_vec(),
+                seed.len() as i64,
+                actor.as_bytes().to_vec()
+            )
+        );
+        let retained: (Vec<u8>, Vec<u8>, String) = sqlx::query_as(
+            "SELECT workspace_id,y_snapshot,content_json FROM revisions WHERE id=?1",
+        )
+        .bind(revision.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(retained, (team.as_bytes().to_vec(), seed.clone(), content));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM personal_transfer_commands")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM attachment_object_cleanups WHERE workspace_id=?1"
+            )
+            .bind(team.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            0
+        );
+        let new_key: String = sqlx::query_scalar("SELECT storage_key FROM attachments WHERE id=?1")
+            .bind(attachment.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_ne!(new_key, key);
+        assert_eq!(
+            storage
+                .read_range(&new_key, 0, payload.len() as u64 - 1)
+                .await
+                .unwrap(),
+            payload
+        );
+        fresh.close().await;
+        drop(app);
+        drop(auth);
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
