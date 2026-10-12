@@ -6330,7 +6330,9 @@ mod sqlite_logout_regression {
     #[tokio::test]
     async fn sqlite_oidc_manage_accepts_api_tokens_and_rechecks_authority() {
         use fvoci_server::auth::scopes::ApiTokenScope;
+        use fvoci_server::auth::token::hash_token;
         use fvoci_server::db::{api_tokens, identity};
+        use fvoci_server::{http::router_with_identity, identity::Identity};
         let (root, path, sqlite, auth, user, token) = family_fixture().await;
         let workspace: Vec<u8> =
             sqlx::query_scalar("SELECT workspace_id FROM memberships WHERE user_id=?1")
