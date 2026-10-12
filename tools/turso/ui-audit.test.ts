@@ -454,9 +454,10 @@ describe("preservation audit", () => {
           }, field).toThrow(UiError);
         }
         const noResource = clone(after);
-        delete must((noResource.allocations as Record<string, Record<string, Record_>>)[table])[
-          resourceHash
-        ];
+        Reflect.deleteProperty(
+          must((noResource.allocations as Record<string, Record<string, Record_>>)[table]),
+          resourceHash,
+        );
         expect(() => {
           assertPreserved(original, noResource, audit);
         }).toThrow();
