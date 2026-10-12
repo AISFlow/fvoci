@@ -119,23 +119,25 @@ describe("Keycloak runner group verdict from reporter fixtures", () => {
     expect(verdict(undefined, 7, "workspace-sso", cargoPass).code).toBe(1);
   });
 
-  test("zero-exit Rust groups reject zero tests, wrong filters, failures and absent summaries", () => {
-    for (const log of [
-      undefined,
-      "",
+  const rejectedCargoLogs: [string, string | undefined][] = [
+    ["missing log", undefined],
+    ["empty log", ""],
+    [
+      "zero tests",
       "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s\n",
-      cargoPass.replace(ssoTest, "unrelated_test"),
-      cargoPass.replace("running 1 test", "running 2 tests"),
-      cargoPass.replace("0 failed", "1 failed"),
-      cargoPass.replace("0 ignored", "1 ignored"),
-      cargoPass.replace("0 measured", "1 measured"),
-      cargoPass.replace("ok. 1 passed", "FAILED. 0 passed"),
-      cargoPass.replace(" ... ok", " ... ignored"),
-      cargoPass.split("test result:")[0],
-      cargoPass.slice(cargoPass.indexOf("test result:")),
-      `${cargoPass}${cargoPass}`,
-    ]) {
-      expect(verdict(undefined, 0, "workspace-sso", log).code).toBe(1);
-    }
+    ],
+    ["wrong filter", cargoPass.replace(ssoTest, "unrelated_test")],
+    ["inconsistent count", cargoPass.replace("running 1 test", "running 2 tests")],
+    ["failed tests", cargoPass.replace("0 failed", "1 failed")],
+    ["ignored tests", cargoPass.replace("0 ignored", "1 ignored")],
+    ["measured tests", cargoPass.replace("0 measured", "1 measured")],
+    ["failed summary", cargoPass.replace("ok. 1 passed", "FAILED. 0 passed")],
+    ["ignored result", cargoPass.replace(" ... ok", " ... ignored")],
+    ["missing summary", cargoPass.split("test result:")[0]],
+    ["missing execution", cargoPass.slice(cargoPass.indexOf("test result:"))],
+    ["duplicate execution", `${cargoPass}${cargoPass}`],
+  ];
+  test.each(rejectedCargoLogs)("zero-exit Rust group rejects %s", (_reason, log) => {
+    expect(verdict(undefined, 0, "workspace-sso", log).code).toBe(1);
   });
 });
