@@ -279,7 +279,11 @@ pub async fn enable_backend(
     };
     let step =
         i32::try_from(step).map_err(|_| sqlx::Error::Protocol("MFA step exceeds i32".into()))?;
-    family.execute("UPDATE user_mfa SET enabled_at=?2,last_used_step=?3,updated_at=?2 WHERE user_id=?1 AND enabled_at IS NULL AND totp_secret=?4",&[Cell::uuid(user_id),Cell::instant(crate::db::identity::stored_now())?,Cell::Integer(i64::from(step)),Cell::text(row.totp_secret)]).await?;
+    let changed = family.execute("UPDATE user_mfa SET enabled_at=?2,last_used_step=?3,updated_at=?2 WHERE user_id=?1 AND enabled_at IS NULL AND totp_secret=?4",&[Cell::uuid(user_id),Cell::instant(crate::db::identity::stored_now())?,Cell::Integer(i64::from(step)),Cell::text(row.totp_secret)]).await?;
+    if changed != 1 {
+        tx.rollback().await?;
+        return Ok(EnableOutcome::NotSetup);
+    }
     tx.operation()
         .record_auth_account_change(mfa_record("auth.mfa_enabled", user_id, ip))
         .await?;
@@ -579,7 +583,9 @@ pub async fn issue_session_or_challenge_backend(
     }
     if !operation.mfa_is_enabled(user_id).await? {
         let token = issue_session_operation(&mut operation, user_id, method).await?;
-        tx.commit().await.map_err(|unknown| unknown.source)?;
+        tx.commit()
+            .await
+            .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
         return Ok(Some(Issued::Session { user_id, token }));
     }
     let challenge = new_token();
@@ -591,7 +597,9 @@ pub async fn issue_session_or_challenge_backend(
             crate::db::identity::stored_now() + Duration::seconds(MFA_CHALLENGE_TTL_SECS),
         )
         .await?;
-    tx.commit().await.map_err(|unknown| unknown.source)?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(Some(Issued::Challenge {
         mfa_token: challenge.token,
     }))
@@ -834,11 +842,10 @@ pub async fn complete_challenge_backend(
     };
     let consumed = family
         .execute(
-            "DELETE FROM mfa_challenges WHERE token_hash=?1 AND user_id=?2 AND expires_at>?3",
+            "DELETE FROM mfa_challenges WHERE token_hash=?1 AND user_id=?2 AND expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",
             &[
                 Cell::text(check.token_hash),
                 Cell::uuid(check.user_id),
-                Cell::instant(crate::db::identity::stored_now())?,
             ],
         )
         .await?;
@@ -952,7 +959,7 @@ impl OperationTx<'_, '_> {
                     .await
             }
             Self::SqliteFamily(tx) => {
-                let rows=tx.query("SELECT user_id,generation FROM mfa_challenges WHERE token_hash=?1 AND expires_at>?2",&[Cell::text(hash),Cell::instant(crate::db::identity::stored_now())?]).await?;
+                let rows=tx.query("SELECT user_id,generation FROM mfa_challenges WHERE token_hash=?1 AND expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",&[Cell::text(hash)]).await?;
                 rows.first()
                     .map(|r| Ok::<_, sqlx::Error>((r.cell(0)?.id()?, r.cell(1)?.int32()?)))
                     .transpose()

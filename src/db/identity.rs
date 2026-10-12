@@ -602,7 +602,9 @@ pub async fn revoke_session_with_push_backend(
             })
             .await?;
     }
-    tx.commit().await.map_err(|unknown| unknown.source)?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(())
 }
 
@@ -1396,7 +1398,7 @@ impl OperationTx<'_, '_> {
             Self::Postgres(tx) => crate::db::context::recheck_session(tx, user, session).await,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
-                let rows=tx.query("SELECT EXISTS(SELECT 1 FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=?1 AND s.id=?2 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>?3)", &[Cell::uuid(user),Cell::uuid(session),Cell::instant(stored_now())?]).await?;
+                let rows=tx.query("SELECT EXISTS(SELECT 1 FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=?1 AND s.id=?2 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000))", &[Cell::uuid(user),Cell::uuid(session)]).await?;
                 rows.first()
                     .ok_or(sqlx::Error::RowNotFound)?
                     .cell(0)?

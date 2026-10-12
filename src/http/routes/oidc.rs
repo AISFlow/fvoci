@@ -633,15 +633,32 @@ async fn manage_auth(
     headers: &HeaderMap,
     jar: &CookieJar,
     workspace_id: Uuid,
-) -> Result<RequestAuth, AppError> {
-    require_request_auth(
+) -> Result<(RequestAuth, db::ManageCredential), AppError> {
+    let auth = require_request_auth(
         state,
         headers,
         jar,
         Access::Scope(ApiTokenScope::WorkspaceManage),
         Some(workspace_id),
     )
-    .await
+    .await?;
+    let credential = if auth.token_scopes.is_some() {
+        // require_request_auth has validated this Bearer header. Keep its hash
+        // so the family writer can reject a token changed after entry auth.
+        let raw = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().strip_prefix("Bearer "))
+            .map(str::trim)
+            .ok_or_else(|| AppError::from_code(ProblemCode::AuthenticationRequired))?;
+        db::ManageCredential::ApiToken {
+            id: auth.credential_id,
+            hash: crate::auth::token::hash_token(raw),
+        }
+    } else {
+        db::ManageCredential::Session(auth.credential_id)
+    };
+    Ok((auth, credential))
 }
 
 fn manage_error(err: ManageError) -> AppError {
@@ -671,16 +688,12 @@ async fn get_workspace_oidc(
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
     let workspace_id = workspace_path(&workspace_id)?;
-    let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
-    let row = db::get_workspace_oidc_backend(
-        &state.auth.db.pool,
-        workspace_id,
-        auth.user_id,
-        auth.credential_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(manage_error)?;
+    let (auth, credential) = manage_auth(&state, &headers, &jar, workspace_id).await?;
+    let row =
+        db::get_workspace_oidc_backend(&state.auth.db.pool, workspace_id, auth.user_id, credential)
+            .await
+            .map_err(internal)?
+            .map_err(manage_error)?;
     // The exact string the provider must register: the admin's browser may
     // be on another host name than the public origin the server signs with.
     let redirect_uri = identity.oidc.workspace_redirect_uri(workspace_id);
@@ -744,7 +757,7 @@ async fn put_workspace_oidc(
     }
     let workspace_id = workspace_path(&workspace_id)?;
     check_origin(&headers, &state.public_origin)?;
-    let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
+    let (auth, credential) = manage_auth(&state, &headers, &jar, workspace_id).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let (issuer, client_id, label) = validate_input(&body)?;
     let Some(keys) = identity.encryption_keys.as_deref() else {
@@ -761,7 +774,7 @@ async fn put_workspace_oidc(
         &state.auth.db.pool,
         workspace_id,
         auth.user_id,
-        auth.credential_id,
+        credential,
         WorkspaceOidcInput {
             issuer: &issuer,
             client_id: &client_id,
@@ -790,15 +803,10 @@ async fn delete_workspace_oidc(
     }
     let workspace_id = workspace_path(&workspace_id)?;
     check_origin(&headers, &state.public_origin)?;
-    let auth = manage_auth(&state, &headers, &jar, workspace_id).await?;
-    db::remove_workspace_oidc_backend(
-        &state.auth.db.pool,
-        workspace_id,
-        auth.user_id,
-        auth.credential_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(manage_error)?;
+    let (auth, credential) = manage_auth(&state, &headers, &jar, workspace_id).await?;
+    db::remove_workspace_oidc_backend(&state.auth.db.pool, workspace_id, auth.user_id, credential)
+        .await
+        .map_err(internal)?
+        .map_err(manage_error)?;
     Ok(Json(OkResponse { ok: true }))
 }

@@ -105,7 +105,7 @@ pub async fn consume_magic_token_backend(
     };
     family.require_writer()?;
     family.require_system_context()?;
-    let rows=family.query("DELETE FROM magic_tokens WHERE token_hash=?1 AND expires_at>?2 RETURNING kind,user_id,generation,new_email",&[Cell::text(hash_token(token)),Cell::instant(crate::db::identity::stored_now())?]).await?;
+    let rows=family.query("DELETE FROM magic_tokens WHERE token_hash=?1 AND expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) RETURNING kind,user_id,generation,new_email",&[Cell::text(hash_token(token))]).await?;
     let payload = rows
         .first()
         .map(|r| {

@@ -865,6 +865,45 @@ async fn resolve_api_token_in(
 }
 
 impl super::backend::OperationTx<'_, '_> {
+    /// Reuses the family credential fence (expiry, deletion and user state),
+    /// then checks the admitted hash and current scopes in that same writer.
+    pub(crate) async fn recheck_api_token_scope(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        hash: &str,
+        required: ApiTokenScope,
+    ) -> Result<bool, sqlx::Error> {
+        use super::codec::Cell;
+        if !self.recheck_session(actor, credential).await? {
+            return Ok(false);
+        }
+        let Self::SqliteFamily(family) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family API token recheck requires family writer".into(),
+            ));
+        };
+        family.require_writer()?;
+        family.require_tenant(workspace)?;
+        let rows = family.query(
+            "SELECT scopes FROM api_tokens WHERE id=?1 AND user_id=?2 AND workspace_id=?3 AND token_hash=?4",
+            &[Cell::uuid(credential),Cell::uuid(actor),Cell::uuid(workspace),Cell::text(hash)],
+        ).await?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let scopes: Vec<String> = serde_json::from_value(row.cell(0)?.value()?)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let scopes: Vec<_> = scopes
+            .iter()
+            .filter_map(|scope| parse_api_token_scope(scope))
+            .collect();
+        Ok(crate::auth::scopes::grants_api_token_scope(
+            &scopes, required,
+        ))
+    }
+
     async fn api_token_identity(
         &mut self,
         hash: &str,

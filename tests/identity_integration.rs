@@ -6331,7 +6331,7 @@ mod sqlite_logout_regression {
     async fn sqlite_oidc_manage_accepts_api_tokens_and_rechecks_authority() {
         use fvoci_server::auth::scopes::ApiTokenScope;
         use fvoci_server::auth::token::hash_token;
-        use fvoci_server::db::{api_tokens, identity};
+        use fvoci_server::db::{api_tokens, identity, oidc};
         use fvoci_server::{http::router_with_identity, identity::Identity};
         use serde_json::json;
         let (root, path, sqlite, auth, user, token) = family_fixture().await;
@@ -6423,6 +6423,17 @@ mod sqlite_logout_regression {
             .fetch_one(&fresh)
             .await
             .unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'oidc-foreign','Foreign','team')",
+        )
+        .bind(Uuid::now_v7().as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
         for (change, expected) in [
             (
                 "UPDATE memberships SET role='member'",
@@ -6436,9 +6447,23 @@ mod sqlite_logout_regression {
                 "UPDATE api_tokens SET expires_at=(unixepoch()-600)*1000000",
                 StatusCode::UNAUTHORIZED,
             ),
+            ("UPDATE api_tokens SET token_hash='changed-after-entry'",StatusCode::UNAUTHORIZED),
+            ("UPDATE users SET suspended_at=unixepoch()*1000000",StatusCode::UNAUTHORIZED),
+            ("UPDATE users SET deleted_at=unixepoch()*1000000",StatusCode::UNAUTHORIZED),
+            ("UPDATE api_tokens SET workspace_id=(SELECT id FROM workspaces WHERE slug='oidc-foreign')",StatusCode::NOT_FOUND),
             ("DELETE FROM api_tokens", StatusCode::UNAUTHORIZED),
         ] {
+            // Model a completed entry check followed by revocation/role change,
+            // without relying on scheduling or a second auth check to reject it.
+            let entry = api_tokens::resolve_api_token_session_backend(&auth.db.pool,&hash_token(&created.token))
+                .await.unwrap().expect("live entry credential before authority change");
             sqlx::query(change).execute(&sqlite).await.unwrap();
+            let credential = || oidc::ManageCredential::ApiToken {id: entry.token_id,hash: hash_token(&created.token)};
+            assert!(oidc::get_workspace_oidc_backend(&auth.db.pool,workspace,user,credential()).await.unwrap().is_err(),"{change}");
+            assert!(oidc::upsert_workspace_oidc_backend(&auth.db.pool,workspace,user,credential(),oidc::WorkspaceOidcInput {
+                issuer: "https://changed.example.invalid",client_id: "changed",sealed_secret: "enc:v2:changed",label: "Changed",
+            }).await.unwrap().is_err(),"{change}");
+            assert!(oidc::remove_workspace_oidc_backend(&auth.db.pool,workspace,user,credential()).await.unwrap().is_err(),"{change}");
             for method in ["GET", "PUT", "DELETE"] {
                 let response = super::call_with(
                     &app,
@@ -6469,12 +6494,15 @@ mod sqlite_logout_regression {
                         .unwrap(),
                     events
                 );
+                assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM audit_log").fetch_one(&fresh).await.unwrap(),audits);
             }
+            sqlx::query("UPDATE users SET suspended_at=NULL,deleted_at=NULL").execute(&sqlite).await.unwrap();
             sqlx::query("UPDATE memberships SET role='owner'")
                 .execute(&sqlite)
                 .await
                 .unwrap();
-            sqlx::query("UPDATE api_tokens SET scopes='[\"workspace.manage\"]',expires_at=(unixepoch()+3600)*1000000").execute(&sqlite).await.unwrap();
+            sqlx::query("UPDATE api_tokens SET token_hash=?1,workspace_id=?2,scopes='[\"workspace.manage\"]',expires_at=(unixepoch()+3600)*1000000")
+                .bind(hash_token(&created.token)).bind(workspace.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
         }
         drop(app);
         drop(auth);

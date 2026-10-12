@@ -595,6 +595,20 @@ pub enum ManageError {
     PersonalWorkspace,
 }
 
+/// The credential admitted by the route, retained for the writer's recheck.
+pub enum ManageCredential {
+    Session(Uuid),
+    ApiToken { id: Uuid, hash: String },
+}
+
+impl ManageCredential {
+    fn id(&self) -> Uuid {
+        match self {
+            Self::Session(id) | Self::ApiToken { id, .. } => *id,
+        }
+    }
+}
+
 /// Source `requirePermission(workspace, "manage")` under the tenant context:
 /// a non-member sees 404, a member without manage 403.
 async fn require_manage(
@@ -650,14 +664,14 @@ pub async fn get_workspace_oidc_backend(
     backend: &Backend,
     workspace_id: Uuid,
     actor: Uuid,
-    session_id: Uuid,
+    credential: ManageCredential,
 ) -> Result<Result<Option<WorkspaceOidcRow>, ManageError>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
-        return get_workspace_oidc(pool, workspace_id, actor, session_id).await;
+        return get_workspace_oidc(pool, workspace_id, actor, credential.id()).await;
     }
     let mut tx = backend.begin_write().await?;
     if let Err(e) =
-        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+        family_require_manage(&mut tx.operation(), workspace_id, actor, &credential).await?
     {
         tx.rollback().await?;
         return Ok(Err(e));
@@ -732,15 +746,15 @@ pub async fn upsert_workspace_oidc_backend(
     backend: &Backend,
     workspace_id: Uuid,
     actor: Uuid,
-    session_id: Uuid,
+    credential: ManageCredential,
     input: WorkspaceOidcInput<'_>,
 ) -> Result<Result<WorkspaceOidcRow, ManageError>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
-        return upsert_workspace_oidc(pool, workspace_id, actor, session_id, input).await;
+        return upsert_workspace_oidc(pool, workspace_id, actor, credential.id(), input).await;
     }
     let mut tx = backend.begin_write().await?;
     if let Err(e) =
-        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+        family_require_manage(&mut tx.operation(), workspace_id, actor, &credential).await?
     {
         tx.rollback().await?;
         return Ok(Err(e));
@@ -804,14 +818,14 @@ pub async fn remove_workspace_oidc_backend(
     backend: &Backend,
     workspace_id: Uuid,
     actor: Uuid,
-    session_id: Uuid,
+    credential: ManageCredential,
 ) -> Result<Result<(), ManageError>, sqlx::Error> {
     if let Backend::Postgres(pool) = backend {
-        return remove_workspace_oidc(pool, workspace_id, actor, session_id).await;
+        return remove_workspace_oidc(pool, workspace_id, actor, credential.id()).await;
     }
     let mut tx = backend.begin_write().await?;
     if let Err(e) =
-        family_require_manage(&mut tx.operation(), workspace_id, actor, session_id).await?
+        family_require_manage(&mut tx.operation(), workspace_id, actor, &credential).await?
     {
         tx.rollback().await?;
         return Ok(Err(e));
@@ -894,6 +908,7 @@ pub async fn consume_state(pool: &PgPool, state_hash: &str) -> Result<Option<Str
         .await
 }
 
+/// Family consumes only live states; expired rows remain for token GC.
 pub async fn consume_state_backend(
     backend: &Backend,
     state_hash: &str,
@@ -910,11 +925,8 @@ pub async fn consume_state_backend(
     family.require_system_context()?;
     let rows = family
         .query(
-            "DELETE FROM oidc_states WHERE state_hash=?1 AND expires_at>?2 RETURNING payload",
-            &[
-                Cell::text(state_hash),
-                Cell::instant(crate::db::identity::stored_now())?,
-            ],
+            "DELETE FROM oidc_states WHERE state_hash=?1 AND expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) RETURNING payload",
+            &[Cell::text(state_hash)],
         )
         .await?;
     let payload = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
@@ -1223,10 +1235,23 @@ async fn family_require_manage(
     op: &mut OperationTx<'_, '_>,
     workspace: Uuid,
     actor: Uuid,
-    session: Uuid,
+    credential: &ManageCredential,
 ) -> Result<Result<(), ManageError>, sqlx::Error> {
     op.set_tenant(workspace).await?;
-    if !op.auth_session_live(actor, session).await? {
+    let live = match credential {
+        ManageCredential::Session(id) => op.auth_session_live(actor, *id).await?,
+        ManageCredential::ApiToken { id, hash } => {
+            op.recheck_api_token_scope(
+                workspace,
+                actor,
+                *id,
+                hash,
+                crate::auth::scopes::ApiTokenScope::WorkspaceManage,
+            )
+            .await?
+        }
+    };
+    if !live {
         return Ok(Err(ManageError::SessionGone));
     }
     if !op.workspace_is_live(workspace).await? {
