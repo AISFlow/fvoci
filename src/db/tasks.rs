@@ -7365,6 +7365,15 @@ impl OperationTx<'_, '_> {
         tx.execute("INSERT INTO tasks(id,workspace_id,project_id,number,title,type,priority,status_id,start_date,due_date,parent_id,milestone_id,recurrence,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)", &[
             Cell::uuid(task_id),Cell::uuid(workspace),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(input.title.trim()),Cell::text(input.task_type),Cell::text(input.priority),Cell::uuid(status),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),Cell::optional_uuid(input.parent_id),Cell::optional_uuid(input.milestone_id),input.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::text(sort),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&empty_document_json())?,Cell::uuid(actor)
         ]).await?;
+        // Mirror tasks_collection_item: the project must already own its
+        // unique task collection; missing materialization aborts this writer.
+        let target=tx.query("SELECT id FROM collections WHERE workspace_id=?1 AND project_id=?2 AND kind='task'",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+        let collection = target
+            .first()
+            .ok_or_else(|| sqlx::Error::Protocol("task collection missing".into()))?
+            .cell(0)?
+            .id()?;
+        tx.execute("INSERT INTO collection_items(id,workspace_id,collection_id,task_id) VALUES(?1,?2,?3,?4)",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(collection),Cell::uuid(task_id)]).await?;
         Ok(Ok(()))
     }
 
@@ -7649,6 +7658,11 @@ mod selected_import_task_tests {
         let workflow = Uuid::now_v7();
         let status = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'IMP','Import','private',?3)").bind(project.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+
+        // Mirror projects_task_collection for this raw-SQL project fixture.
+        sqlx::query("INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,'task','Import')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
 
         // Normal private-project creation installs the creator's lead grant;
         // workspace admin status alone does not grant private-project access.
