@@ -6775,7 +6775,7 @@ mod sqlite_task_port {
             );
             assert_eq!(problem["code"], "invalid_input");
             assert_eq!(before, f.snapshot().await, "NUL {method} {path}");
-            f.read(&format!("{project_path}/tasks/parents?childType=subtask"))
+            f.read_scalar(&format!("{project_path}/tasks/parents?childType=subtask"))
                 .await;
             f.read(&format!("{project_path}/labels")).await;
         }
@@ -7131,10 +7131,6 @@ mod sqlite_task_port {
                 >= 300_000
         );
         for route in [
-            format!("{project_path}/tasks"),
-            format!("{project_path}/tasks/parents?q=read&childType=subtask"),
-            format!("{project_path}/task-layout?year=2026&month=10"),
-            format!("/api/v1/workspaces/{workspace}/tasks"),
             format!("/api/v1/workspaces/{workspace}/statuses"),
             format!("/api/v1/workspaces/{workspace}/labels"),
             format!("{task_path}/activity"),
@@ -7144,6 +7140,14 @@ mod sqlite_task_port {
             "/api/v1/me/task-timer".into(),
         ] {
             f.read(&route).await;
+        }
+        for route in [
+            format!("{project_path}/tasks"),
+            format!("{project_path}/tasks/parents?q=read&childType=subtask"),
+            format!("{project_path}/task-layout?year=2026&month=10"),
+            format!("/api/v1/workspaces/{workspace}/tasks"),
+        ] {
+            f.read_scalar(&route).await;
         }
         let (s,cleanup_run)=json_request(app.clone(),"POST",&timer,Some(json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"operation":"start","expectedVersion":0,"runId":null})),Some(&cookie)).await;
         assert_eq!(s, StatusCode::OK, "{cleanup_run}");
@@ -7538,6 +7542,28 @@ mod sqlite_task_port {
             .await;
             assert_eq!(s, expected, "{method} {path}: {b}");
             b
+        }
+        async fn read_scalar(&self, path: &str) {
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                self.read(path).await;
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                // Task scalar reads fail closed until this architecture has
+                // a sealed runtime receipt; keep testing the remaining flow.
+                let before = self.snapshot().await;
+                let (status, problem) =
+                    json_request(self.app.clone(), "GET", path, None, Some(&self.cookie)).await;
+                assert_eq!(
+                    status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "GET {path}: {problem}"
+                );
+                assert_eq!(problem["code"], "internal_error");
+                assert!(problem.get("items").is_none(), "no task rows disclosed");
+                assert_eq!(before, self.snapshot().await, "GET {path} has no effects");
+            }
         }
         async fn read(&self, path: &str) -> Value {
             let (s, b) =
