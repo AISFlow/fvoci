@@ -6434,6 +6434,8 @@ mod sqlite_logout_regression {
         .execute(&sqlite)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) SELECT id,?1,'owner' FROM workspaces WHERE slug='oidc-foreign'")
+            .bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
         for (change, expected) in [
             (
                 "UPDATE memberships SET role='member'",
