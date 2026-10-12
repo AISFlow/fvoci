@@ -19,10 +19,11 @@ use crate::api::dto::{
 use crate::attachments::content_disposition_attachment;
 use crate::auth::session::SessionUser;
 use crate::db::documents::{
-    create_wiki_document_command_backend, get_wiki_document_backend, list_trashed_wiki_documents,
-    list_wiki_ancestors_backend, list_wiki_tree_backend, list_workspace_wiki_discovery_backend,
-    move_wiki_document, reorder_wiki_document, restore_wiki_document, trash_wiki_document,
-    update_wiki_document_meta, CreateCommandError, CreateDocumentInput, DocumentDbError,
+    create_wiki_document_command_backend, get_wiki_document_backend,
+    list_trashed_wiki_documents_backend, list_wiki_ancestors_backend, list_wiki_tree_backend,
+    list_workspace_wiki_discovery_backend, move_wiki_document_backend,
+    reorder_wiki_document_backend, restore_wiki_document_backend, trash_wiki_document_backend,
+    update_wiki_document_meta_backend, CreateCommandError, CreateDocumentInput, DocumentDbError,
     DocumentMeta, TrashChildrenMode, UpdateDocumentMetaInput, MAX_TREE_DEPTH,
 };
 use crate::documents::export::{
@@ -278,13 +279,8 @@ async fn patch_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let title = body.title.as_deref().map(str::trim);
-    let result = update_wiki_document_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
+    let result = update_wiki_document_meta_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -325,13 +321,8 @@ async fn list_tree(
         .map_err(internal)?;
     let tagged = match tag {
         Some(tag) => Some(
-            crate::db::document_tags::tagged_document_id_set(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("unported wiki operation")
-                    .map_err(internal)?,
+            crate::db::document_tags::tagged_document_id_set_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 tag,
             )
@@ -469,13 +460,8 @@ async fn move_document(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = move_wiki_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
+    let result = move_wiki_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -510,13 +496,8 @@ async fn sort_document(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = reorder_wiki_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
+    let result = reorder_wiki_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -551,13 +532,8 @@ async fn trash_document(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = trash_wiki_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
+    let result = trash_wiki_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -590,13 +566,8 @@ async fn restore_document(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = restore_wiki_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
+    let result = restore_wiki_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -625,19 +596,10 @@ async fn list_trash(
         Some(workspace_id),
     )
     .await?;
-    let result = list_trashed_wiki_documents(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("unported wiki operation")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?;
+    let result =
+        list_trashed_wiki_documents_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await
+            .map_err(internal)?;
     match result {
         Ok(items) => Ok(Json(TrashListResponse {
             items: items
@@ -722,13 +684,8 @@ pub(crate) async fn export_document(
             .await
         }
         Some(project_id) => {
-            crate::db::project_documents::get_project_document(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("unported wiki operation")
-                    .map_err(internal)?,
+            crate::db::project_documents::get_project_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 project_id,
                 document_id,

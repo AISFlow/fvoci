@@ -1,5 +1,525 @@
 #![cfg(feature = "db-tests")]
 
+mod sqlite_doctree {
+    use super::*;
+    use fvoci_server::db::backend::Backend;
+
+    struct Fixture {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        pool: sqlx::SqlitePool,
+        app: axum::Router,
+        cookie: String,
+        workspace: Uuid,
+        actor: Uuid,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("doctree-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("db.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let pool = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let state = app_state_backend(Backend::Sqlite(pool.clone())).await;
+            let (actor, workspace, cookie) = state
+                .auth
+                .setup_instance(
+                    "Doctree-Synthetic-2026!".into(),
+                    fvoci_server::auth::service::SetupInstanceInput {
+                        email: "doctree@example.invalid".into(),
+                        given_name: "Doctree".into(),
+                        family_name: None,
+                        workspace_slug: "doctree".into(),
+                        workspace_name: "Doctree".into(),
+                        client_ip: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            Self {
+                root,
+                path,
+                pool,
+                app: document_app(state),
+                cookie,
+                workspace,
+                actor,
+            }
+        }
+
+        fn uri(&self, id: Uuid, suffix: &str) -> String {
+            format!(
+                "/api/v1/workspaces/{}/documents/{id}{suffix}",
+                self.workspace
+            )
+        }
+
+        async fn request(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            let (status, json, _, _) = json_request(
+                self.app.clone(),
+                method,
+                path,
+                body,
+                Some(&self.cookie),
+                &[],
+            )
+            .await;
+            (status, json)
+        }
+
+        async fn create(&self, parent: Option<Uuid>, title: &str) -> Uuid {
+            let (status, body) = self
+                .request(
+                    "POST",
+                    &format!("/api/v1/workspaces/{}/documents", self.workspace),
+                    Some(json!({"commandId":Uuid::now_v7(),"parentId":parent,"title":title})),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+        }
+
+        async fn snapshot(&self) -> (Vec<String>, i64, i64, i64) {
+            let rows=sqlx::query_scalar("SELECT json_object('id',hex(id),'title',title,'icon',icon,'status',status,'path',path,'parent',hex(parent_id),'project',hex(project_id),'number',number,'sort',sort_key,'deleted',deleted_at,'updated',updated_at,'version',version,'body',content_json) FROM documents ORDER BY id").fetch_all(&self.pool).await.unwrap();
+            let events = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+            let audits = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+            (
+                rows,
+                events,
+                audits,
+                sqlx::query_scalar("SELECT last_seq FROM event_sequence WHERE id=1")
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap(),
+            )
+        }
+
+        async fn close(self) {
+            drop(self.app);
+            self.pool.close().await;
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_move_sort_trash_restore_http_and_fresh_readback() {
+        let f = Fixture::new().await;
+        let root = f.create(None, "Root").await;
+        let a = f.create(Some(root), "A").await;
+        let b = f.create(Some(root), "B").await;
+        let child = f.create(Some(a), "Child").await;
+        let (status, meta) = f
+            .request(
+                "PATCH",
+                &f.uri(a, ""),
+                Some(json!({"title":"Renamed","icon":"📄","status":"published"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{meta}");
+        assert_eq!(meta["title"], "Renamed");
+        assert_eq!(meta["status"], "published");
+        assert_eq!(
+            f.request("PATCH", &f.uri(a, ""), Some(json!({"icon":null})))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (status, moved) = f
+            .request("POST", &f.uri(a, "/move"), Some(json!({"newParentId":b})))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        assert_eq!(moved["parentId"], b.to_string());
+        let before = f.snapshot().await;
+        let (status, _) = f
+            .request(
+                "POST",
+                &f.uri(b, "/move"),
+                Some(json!({"newParentId":child})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(f.snapshot().await, before);
+        let c = f.create(Some(b), "C").await;
+        assert_eq!(
+            f.request("POST", &f.uri(c, "/sort"), Some(json!({"afterId":null})))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        let order:Vec<Vec<u8>>=sqlx::query_scalar("SELECT id FROM documents WHERE parent_id=?1 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY").bind(b.as_bytes().as_slice()).fetch_all(&fresh).await.unwrap();
+        assert_eq!(order, vec![c.as_bytes().to_vec(), a.as_bytes().to_vec()]);
+
+        let (title, icon, status, path): (String, Option<String>, String, String) =
+            sqlx::query_as("SELECT title,icon,status,path FROM documents WHERE id=?1")
+                .bind(a.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(
+            (title, icon, status),
+            ("Renamed".into(), None, "published".into())
+        );
+        let child_path: String = sqlx::query_scalar("SELECT path FROM documents WHERE id=?1")
+            .bind(child.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(child_path, format!("{path}.{}", child.simple()));
+        fresh.close().await;
+        assert_eq!(
+            f.request("POST", &f.uri(a, "/trash"), None).await.0,
+            StatusCode::OK
+        );
+        let (status, trash) = f
+            .request(
+                "GET",
+                &format!("/api/v1/workspaces/{}/trash", f.workspace),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{trash}");
+        assert_eq!(trash["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            f.request("POST", &f.uri(child, "/restore"), None).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            f.request("POST", &f.uri(a, "/restore"), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            f.request("POST", &f.uri(child, "/restore"), None).await.0,
+            StatusCode::OK
+        );
+        let before = f.snapshot().await;
+        assert_eq!(
+            f.request("POST", &f.uri(child, "/restore"), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.snapshot().await, before);
+        assert_eq!(
+            f.request("POST", &f.uri(a, "/trash?children=reparent"), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        let parent: Vec<u8> = sqlx::query_scalar(
+            "SELECT parent_id FROM documents WHERE id=?1 AND deleted_at IS NULL",
+        )
+        .bind(child.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(parent, b.as_bytes());
+        fresh.close().await;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn current_membership_tenant_session_and_token_refusals_are_effect_free() {
+        use fvoci_server::db::documents::{
+            update_wiki_document_meta_backend, DocumentDbError, UpdateDocumentMetaInput,
+        };
+        let f = Fixture::new().await;
+        let root = f.create(None, "Root").await;
+        let doc = f.create(Some(root), "Live").await;
+        let trashed = f.create(Some(root), "Trash").await;
+        assert_eq!(
+            f.request("POST", &f.uri(trashed, "/trash"), None).await.0,
+            StatusCode::OK
+        );
+        let before = f.snapshot().await;
+        let operations = [
+            ("PATCH", f.uri(doc, ""), Some(json!({"title":"refused"}))),
+            (
+                "POST",
+                f.uri(doc, "/move"),
+                Some(json!({"newParentId":root})),
+            ),
+            ("POST", f.uri(doc, "/sort"), Some(json!({"afterId":null}))),
+            ("POST", f.uri(doc, "/trash"), None),
+            ("POST", f.uri(trashed, "/restore"), None),
+        ];
+        sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for (method, uri, body) in &operations {
+            let (status, body) = f.request(method, uri, body.clone()).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {body}");
+            assert_eq!(body["code"], "not_found");
+            assert_eq!(f.snapshot().await, before);
+        }
+        let (status, body) = f
+            .request(
+                "GET",
+                &format!("/api/v1/workspaces/{}/trash", f.workspace),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().unwrap().is_empty());
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(f.actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let foreign = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'foreign','Foreign')")
+            .bind(foreign.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for (method, uri, body) in &operations {
+            let uri = uri.replace(&f.workspace.to_string(), &foreign.to_string());
+            assert_eq!(
+                f.request(method, &uri, body.clone()).await.0,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(f.snapshot().await, before);
+        }
+        let credential: Vec<u8> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id=?1")
+            .bind(f.actor.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let credential = Uuid::from_slice(&credential).unwrap();
+        // A previously authenticated principal loses authority before the product writer starts.
+        sqlx::query("UPDATE sessions SET revoked_at=1 WHERE id=?1")
+            .bind(credential.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let result = update_wiki_document_meta_backend(
+            &Backend::Sqlite(f.pool.clone()),
+            f.workspace,
+            f.actor,
+            credential,
+            doc,
+            UpdateDocumentMetaInput {
+                title: Some("refused"),
+                icon: None,
+                status: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(DocumentDbError::Forbidden)));
+        assert_eq!(f.snapshot().await, before);
+        for (method, uri, body) in &operations {
+            assert_eq!(
+                f.request(method, uri, body.clone()).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let token_id = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Doctree','[\"documents.write\"]')").bind(token_id.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).bind(&token.hash).execute(&f.pool).await.unwrap();
+        update_wiki_document_meta_backend(
+            &Backend::Sqlite(f.pool.clone()),
+            f.workspace,
+            f.actor,
+            token_id,
+            doc,
+            UpdateDocumentMetaInput {
+                title: Some("API token saved"),
+                icon: None,
+                status: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let authorization = format!("Bearer {}", token.token);
+        let (status, body, _, _) = json_request(
+            f.app.clone(),
+            "PATCH",
+            &f.uri(doc, ""),
+            Some(json!({"title":"API token HTTP saved"})),
+            None,
+            &[("authorization", &authorization)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["title"], "API token HTTP saved");
+        let before = f.snapshot().await;
+        sqlx::query("UPDATE api_tokens SET expires_at=unixepoch()*1000000-1 WHERE id=?1")
+            .bind(token_id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_wiki_document_meta_backend(
+                &Backend::Sqlite(f.pool.clone()),
+                f.workspace,
+                f.actor,
+                token_id,
+                doc,
+                UpdateDocumentMetaInput {
+                    title: Some("refused"),
+                    icon: None,
+                    status: None
+                },
+                None
+            )
+            .await
+            .unwrap(),
+            Err(DocumentDbError::Forbidden)
+        ));
+        assert_eq!(f.snapshot().await, before);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn audit_failure_rolls_back_each_write_and_database_clock_expires_trash() {
+        let f = Fixture::new().await;
+        let root = f.create(None, "Root").await;
+        let doc = f.create(Some(root), "Live").await;
+        let child = f.create(Some(doc), "Child").await;
+        let destination = f.create(Some(root), "Destination").await;
+        let trashed = f.create(Some(root), "Trash").await;
+        assert_eq!(
+            f.request("POST", &f.uri(trashed, "/trash"), None).await.0,
+            StatusCode::OK
+        );
+        sqlx::query("CREATE TRIGGER doctree_audit_fail BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'synthetic doctree audit failure'); END").execute(&f.pool).await.unwrap();
+        let before = f.snapshot().await;
+        for (method, uri, body) in [
+            ("PATCH", f.uri(doc, ""), Some(json!({"title":"rollback"}))),
+            (
+                "POST",
+                f.uri(doc, "/move"),
+                Some(json!({"newParentId":destination})),
+            ),
+            (
+                "POST",
+                f.uri(doc, "/sort"),
+                Some(json!({"afterId":destination})),
+            ),
+            ("POST", f.uri(doc, "/trash"), None),
+            ("POST", f.uri(doc, "/trash?children=reparent"), None),
+            ("POST", f.uri(trashed, "/restore"), None),
+        ] {
+            let (status, body) = f.request(method, &uri, body).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}: {body}");
+            assert_eq!(f.snapshot().await, before);
+        }
+        sqlx::query("DROP TRIGGER doctree_audit_fail")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for body in [
+            json!({"title":"bad\u{0}title"}),
+            json!({"icon":"bad\u{0}icon"}),
+        ] {
+            let (status, json) = f.request("PATCH", &f.uri(doc, ""), Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["code"], "invalid_input");
+            assert_eq!(f.snapshot().await, before);
+        }
+        sqlx::query(
+            "UPDATE documents SET deleted_at=unixepoch()*1000000-30*86400000000 WHERE id=?1",
+        )
+        .bind(trashed.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let before = f.snapshot().await;
+        assert_eq!(
+            f.request("POST", &f.uri(trashed, "/restore"), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.snapshot().await, before);
+        let (_, body) = f
+            .request(
+                "GET",
+                &format!("/api/v1/workspaces/{}/trash", f.workspace),
+                None,
+            )
+            .await;
+        assert!(body["items"].as_array().unwrap().is_empty());
+        assert_eq!(
+            f.request("GET", &f.uri(child, ""), None).await.0,
+            StatusCode::OK
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn project_move_renumbers_descendants_and_tag_filter_preserves_tree_contract() {
+        let f = Fixture::new().await;
+        let doc = f.create(None, "Move").await;
+        let child = f.create(Some(doc), "Child").await;
+        let project =
+            create_project_via_api(&f.app, &f.cookie, f.workspace, "TREE", "workspace").await;
+        let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+        let project_root: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM documents WHERE project_id=?1 AND parent_id IS NULL",
+        )
+        .bind(project_id.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let project_root = Uuid::from_slice(&project_root).unwrap();
+        let (status, meta) = f
+            .request(
+                "POST",
+                &f.uri(doc, "/move"),
+                Some(json!({"newParentId":project_root})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{meta}");
+        assert_eq!(meta["projectId"], project_id.to_string());
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        let rows: Vec<(i32, Vec<u8>)> = sqlx::query_as(
+            "SELECT number,project_id FROM documents WHERE id IN (?1,?2) ORDER BY number",
+        )
+        .bind(doc.as_bytes().as_slice())
+        .bind(child.as_bytes().as_slice())
+        .fetch_all(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].0, rows[1].0);
+        assert!(rows.iter().all(|r| r.1 == project_id.as_bytes()));
+        fresh.close().await;
+        let wiki = f.create(None, "Tagged").await;
+        let tag = Uuid::now_v7();
+        sqlx::query("INSERT INTO document_tags(id,workspace_id,name,color) VALUES(?1,?2,'Doctree','violet')").bind(tag.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO document_tag_assignments(workspace_id,document_id,tag_id) VALUES(?1,?2,?3)").bind(f.workspace.as_bytes().as_slice()).bind(wiki.as_bytes().as_slice()).bind(tag.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let (status, body) = f
+            .request(
+                "GET",
+                &format!("/api/v1/workspaces/{}/tree?tag={tag}", f.workspace),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["id"], wiki.to_string());
+        f.close().await;
+    }
+}
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
