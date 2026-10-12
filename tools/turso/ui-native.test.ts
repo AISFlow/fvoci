@@ -17,6 +17,7 @@ import { join } from "node:path";
 import process from "node:process";
 import { sha, write } from "../selected-backend-ci/io.ts";
 import { OFF, ON } from "./ui-audit.ts";
+import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import { failureCode, UiError, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { browser, fixture, stop } from "./ui-native.ts";
@@ -304,6 +305,114 @@ const rewrite = (inputs: BrowserInputs, change: (external: Record<string, string
 };
 
 describe("browser", () => {
+  test("diagnostics bound hostile reports and never treat body numbers as HTTP status", () => {
+    const source = 'test("registered", async () => {\n  expect(body.secret).toBe(200);\n});';
+    const result = {
+      status: "failed",
+      error: { message: "Error: expect(received).toBe(expected)\nReceived: 401\nPRIVATE_BODY" },
+      errorLocation: { file: ON, line: 2 },
+    };
+    const report = {
+      suites: [{ specs: [{ title: "registered", tests: [{ results: Array(100).fill(result) }] }] }],
+    };
+    const diagnostic = browserFailureDiagnostic(report, ON, "restart", source);
+    expect(diagnostic.browserFailure).toMatchObject({
+      stage: "restart",
+      failures: Array(16).fill({
+        title: "registered",
+        category: "assertion",
+        step: "expect",
+        httpStatus: null,
+        line: 2,
+      }),
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE_");
+    expect(browserFailureDiagnostic(null, ON, "off", source).browserFailure).toEqual({
+      stage: "off",
+      report: "unavailable",
+      failures: [],
+      globalErrors: 0,
+      globalErrorCategories: [],
+    });
+  });
+
+  test("a failed browser publishes only registered titles, fixed classes, stages and HTTP status", async () => {
+    const inputs = browserInputs();
+    const title = "selected normal main: synthetic browser failure";
+    const source = `test("${title}", async () => {\n  expect(response.status()).toBe(200);\n});\n`;
+    mkdirSync(join(inputs.workspace, "apps/web/e2e-pending"), { recursive: true });
+    writeFileSync(join(inputs.workspace, "apps/web/e2e-pending", ON), source);
+    writeFileSync(
+      join(inputs.run, "playwright.private.json"),
+      JSON.stringify({
+        suites: [
+          {
+            specs: [
+              {
+                title,
+                tests: [
+                  {
+                    results: [
+                      {
+                        status: "failed",
+                        error: {
+                          message:
+                            "Error: expect(received).toBe(expected)\nExpected: 200\nReceived: 503\nPRIVATE_URL_TOKEN_COOKIE_BODY_KEYRING",
+                        },
+                        errorLocation: {
+                          file: join(inputs.workspace, "apps/web/e2e-pending", ON),
+                          line: 2,
+                          column: 3,
+                        },
+                        stdout: [{ text: "PRIVATE_STDOUT" }],
+                        attachments: [{ body: "PRIVATE_BODY" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+              {
+                title: "PRIVATE_TEST_TITLE",
+                tests: [
+                  { results: [{ status: "timedOut", error: { message: "PRIVATE_TIMEOUT" } }] },
+                ],
+              },
+            ],
+          },
+        ],
+        errors: [{ message: "PRIVATE_GLOBAL_ERROR" }],
+      }),
+    );
+    const output = new Captured();
+    const { scope, calls } = fakeScope({ spawn: () => exitedChild(1), output });
+    expect(
+      await failureOf(
+        browser(scope, inputs.manifest, inputs.run, {}, ON, undefined, inputs.workspace),
+      ),
+    ).toBe("UI_ACTUAL_BROWSER_FAILED");
+    expect(calls.finish).toHaveLength(1);
+    const diagnostic = JSON.parse(output.stderr[0] as string) as Record_;
+    expect(diagnostic).toMatchObject({
+      originalFailure: "UI_ACTUAL_BROWSER_FAILED",
+      browserFailure: {
+        stage: "on",
+        report: "available",
+        failures: [
+          { title, category: "assertion", step: "http-status", httpStatus: 503, line: 2 },
+          {
+            title: "unregistered",
+            category: "timeout",
+            step: "test-body",
+            httpStatus: null,
+            line: null,
+          },
+        ],
+        globalErrors: 1,
+      },
+    });
+    expect(output.all).not.toContain("PRIVATE_");
+  });
+
   test("the direct CLI keeps arguments, environment, wait and ownership", async () => {
     for (const [spec, grep] of [
       [ON, "^selected normal main:"],
@@ -458,7 +567,9 @@ describe("browser", () => {
         browser(failing.scope, again.manifest, again.run, {}, ON, undefined, again.workspace),
       ),
     ).toBe("UI_ACTUAL_BROWSER_FAILED");
-    expect(JSON.parse(output.stderr[0] as string)).toEqual({
+    expect(
+      JSON.parse(output.stderr.find((line) => line.includes("browserProcessClosure")) as string),
+    ).toEqual({
       originalFailure: "UI_ACTUAL_BROWSER_FAILED",
       browserProcessClosure: "UI_PROCESS_CLOSURE_FAILED",
     });
