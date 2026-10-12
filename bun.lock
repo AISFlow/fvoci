@@ -30,7 +30,7 @@
         "@office-kit/pptx": "0.21.0",
         "@office-kit/pptx-preview": "0.11.0",
         "@office-kit/xlsx": "0.21.1",
-        "@rhwp/core": "0.8.6",
+        "@rhwp/core": "0.8.7",
         "@tanstack/query-core": "5.104.0",
         "@tanstack/vue-query": "5.104.0",
         "clsx": "^2.1.1",
@@ -468,7 +468,7 @@
 
     "@resvg/resvg-js-win32-x64-msvc": ["@resvg/resvg-js-win32-x64-msvc@2.6.2", "", { "os": "win32", "cpu": "x64" }, "sha512-ZXtYhtUr5SSaBrUDq7DiyjOFJqBVL/dOBN7N/qmi/pO0IgiWW/f/ue3nbvu9joWE5aAKDoIzy/CxsY0suwGosQ=="],
 
-    "@rhwp/core": ["@rhwp/core@0.8.6", "", {}, "sha512-ZMO2QMHbR4v7t86feMWiRJ4QozjjqHDGv4PyzTT4LyMuX1LeUpmQaOHrGLQpbYMJV0IWCYjVRewKqkXx+w16XQ=="],
+    "@rhwp/core": ["@rhwp/core@0.8.7", "", {}, "sha512-qgNpY9aclCvy9D7cPnpuplu42kUFZCCPhdjAS5HBso4Z4XeHG3uchYdUleQBoas/zEuwfJ7H4/ulepqdL/LXDA=="],
 
     "@rolldown/binding-android-arm-eabi": ["@rolldown/binding-android-arm-eabi@1.2.10", "", { "os": "android", "cpu": "arm" }, "sha512-bp9svZb+QurZeh+8H4BhrZkifEB0YBNvTVzNSJnJQkj4NrRwmQoDUCGP0vSN7PbvLeM7l1tK6GXL8mrTiH2myg=="],
 
