@@ -26,6 +26,12 @@ description: "바꾼 경로의 검사, 실패 원인, CI 수락을 고를 때 �
 7. native bundle은 같은 실행 안에서 아키텍처, feature, target, profile, toolchain, native 입력 전체를 hash로 대조할 때만 재사용한다. 경로 일부의 `git diff --quiet`나 디렉터리 존재는 입력 동등성이 아니다. `scripts/web-e2e-run-group.sh`는 `$ROOT/apps/web/dist`를 복사하므로 `ROOT`는 그 작업 트리의 절대 경로다.
 8. CI 플래너의 현재 정본은 `tools/ci/plan.ts`와 `tools/ci/planner/`다. 승인된 Rust/TS 이전에서는 호출자·검사 등록·거부 반례·게이트를 함께 전환하고 정본 구현은 하나만 유지한다. PR narrow는 체크아웃 HEAD가 tested merge SHA와 같고 둘째 parent가 event head와 같을 때만 된다. 누적 PR diff와 첫 parent 대비 merge 결과 diff를 합쳐 분류한다. 게이트는 `NEEDS_JSON=${{ toJSON(needs) }}`와 tested SHA에서 plan·job 결과를 읽는다. 제품 job은 plan boolean으로만 skip한다. 새 job은 `WORKFLOW_JOBS`, `WORKFLOW_YAML`, plan 출력, gate `needs`를 함께 갱신한다. 이전 후에는 실제 정본 경로와 검사 명령을 이 지침에도 갱신한다.
 9. 빌드·artifact 인계 이전은 source/tree, repository, run/attempt, 플랫폼·feature·toolchain·실제 입력의 기존 생산자/소비자 대조를 보존한다. 잘못된 대상·오래된 산출물은 계속 거부해야 한다. 다른 실행의 receipt를 재생성해 누락 근거를 채우거나, 새 구현이 생겼다는 이유로 빌드·검사를 중복 실행하지 않는다. 반복 조건은 AGENTS.md를 따르고 비교한 SHA·환경·의도된 차이를 보고한다.
+10. 간헐 실패는 아래의 알려진 원인부터 대조한다. 타이밍을 늘려 가리지 않는다.
+   - **uid 차이:** GitHub 러너 uid는 1001이고 로컬은 다를 수 있다. "다른 uid"가 필요한 테스트는 1001을 고정하지 말고 자기 uid에 1을 더해 쓴다.
+   - **ETXTBSY:** 실행 파일을 쓰고 곧바로 실행하는 Rust 테스트를 libtest가 병렬로 돌리면, 다른 테스트의 fork가 열린 쓰기 fd를 물려받아 exec가 실패한다. 그런 테스트는 파일 단위 `Mutex`로 직렬화한다.
+   - **Playwright route 핸들러 해제:** `{ times: 1 }` 핸들러가 해제되는 순간에 들어온 요청은 처리되지 않고 남을 수 있다. 한 번만 가로채려면 동기 플래그로 처리 여부를 표시하고, 나머지 요청은 `route.fallback()`으로 넘긴다.
+   - **비동기 순서 가정:** 서버의 close나 응답을 기다리는 테스트는 실제 이벤트(close 코드, 응답 수신)를 확인한 뒤 다음 단계로 간다. 고정 대기로 순서를 맞추지 않는다.
+   - **tmpfs TMPDIR:** tmpfs에서는 inode가 재사용되지 않아 CI 디스크와 동작이 다르다. 파일 동일성에 기대는 검사는 일반 디스크의 TMPDIR로도 돌린다.
 
 ## 손대지 말 것
 
