@@ -22,7 +22,7 @@
     "bytes": 6531,
     "mode": "0o644",
     "sha256": "b0683d9aaf97908397aab8db6292cf72cdb740246ef2009bc387efb6025df7fc",
-    "cachedSourceEqual": true,
+    "cachedSourceEqual": false,
     "originalExtractedMode": "0o644",
     "cacheMode": "0o644"
   },
@@ -130,7 +130,7 @@
     "bytes": 1381,
     "mode": "0o644",
     "sha256": "71bd46ae7ee58bac6bd39ab0e501ced21c47d9a1abec2c89a14359e182d77e41",
-    "cachedSourceEqual": true,
+    "cachedSourceEqual": false,
     "originalExtractedMode": "0o644",
     "cacheMode": "0o644"
   },
@@ -211,7 +211,7 @@
     "bytes": 29624,
     "mode": "0o644",
     "sha256": "4491e0e52b1d0e88662d633075d9a60f7144c7a2cb52c5b4f3df10a6d488a26b",
-    "cachedSourceEqual": true,
+    "cachedSourceEqual": false,
     "originalExtractedMode": "0o644",
     "cacheMode": "0o644"
   },
@@ -292,7 +292,7 @@
     "bytes": 6030,
     "mode": "0o644",
     "sha256": "85acb61fc42aa9860fae2109f17c23595b89e8ae0fcfda39b41aea853eb5f3c5",
-    "cachedSourceEqual": true,
+    "cachedSourceEqual": false,
     "originalExtractedMode": "0o644",
     "cacheMode": "0o644"
   },
