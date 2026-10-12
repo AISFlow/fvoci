@@ -2192,3 +2192,467 @@ async fn wiki_share_needs_view_on_every_exposed_document() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+mod sqlite_port {
+    use super::*;
+    use fvoci_server::auth::password::Keyring;
+    use fvoci_server::auth::AuthService;
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{router, state::AppState};
+    use std::sync::Arc;
+    struct Fixture {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        pool: sqlx::SqlitePool,
+        backend: Backend,
+        app: axum::Router,
+        cookie: String,
+        ws: Uuid,
+        actor: Uuid,
+    }
+    impl Fixture {
+        async fn start() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("fvoci-membership-port-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("db.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let backend = Backend::Sqlite(sqlite.clone());
+            let auth=Arc::new(AuthService{db:Db::from_backend(backend.clone()),password_keys:Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()});
+            let state = AppState {
+                realtime_mode: fvoci_server::config::RealtimeMode::Off,
+                native_engine: None,
+                auth,
+                branding_name: "FVOCI".into(),
+                public_origin: "http://localhost".into(),
+                cookie_secure: false,
+                rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+                upload: fvoci_server::attachments::UploadLimits {
+                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                    ),
+                },
+                collab: None,
+                meili: None,
+                search_embedder: None,
+                streams: AppState::fresh_streams(),
+                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+                quota: Default::default(),
+                markdown: None,
+                import_wake: None,
+                import_extractor_available: false,
+                preview_extract: None,
+            };
+
+            let app = router(state, None);
+            let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let cookie = headers
+                .get(axum::http::header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let ws = Uuid::from_slice(&bytes).unwrap();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM users WHERE email='owner@example.invalid'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let actor = Uuid::from_slice(&bytes).unwrap();
+            Self {
+                root,
+                path,
+                pool: sqlite,
+                backend,
+                app,
+                cookie,
+                ws,
+                actor,
+            }
+        }
+        async fn member(&self, role: &str) -> (Uuid, String, Uuid) {
+            let user = Uuid::now_v7();
+            let session = Uuid::now_v7();
+            let token = fvoci_server::auth::token::new_token();
+            sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Peer')")
+                .bind(user.as_bytes().as_slice())
+                .bind(format!("{user}@example.invalid"))
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+                .bind(self.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .bind(role)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(session.as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(token.hash).execute(&self.pool).await.unwrap();
+            (user, token.token, session)
+        }
+        async fn call(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+            cookie: &str,
+        ) -> (StatusCode, Value) {
+            project_harness::json_request(self.app.clone(), method, path, body, Some(cookie)).await
+        }
+        async fn owner(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            self.call(method, path, body, &self.cookie).await
+        }
+        async fn document(&self, parent: Option<Uuid>) -> Uuid {
+            let id = Uuid::now_v7();
+            let path = if let Some(p) = parent {
+                let prefix: String = sqlx::query_scalar("SELECT path FROM documents WHERE id=?1")
+                    .bind(p.as_bytes().as_slice())
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap();
+                format!("{prefix}.{}", id.simple())
+            } else {
+                id.simple().to_string()
+            };
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Visible',?3,?4,'a',1,'published',1,?5,?6)").bind(id.as_bytes().as_slice()).bind(self.ws.as_bytes().as_slice()).bind(path).bind(parent.map(|id|id.as_bytes().to_vec())).bind(self.actor.as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared text"}]}]}).to_string()).execute(&self.pool).await.unwrap();
+            id
+        }
+        async fn foreign(&self) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Foreign')")
+                .bind(id.as_bytes().as_slice())
+                .bind(id.simple().to_string())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            id
+        }
+        async fn count(&self, table: &str) -> i64 {
+            let fresh = pool::connect_sqlite_app(&self.path, 1).await.unwrap();
+            let n = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            fresh.close().await;
+            n
+        }
+        async fn close(self) {
+            self.backend.close().await.unwrap();
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_shares_stars_and_recent_recheck_subtree_and_revocation() {
+        let f = Fixture::start().await;
+        let (guest, cookie, _) = f.member("guest").await;
+        let foreign = f.foreign().await;
+        let root = f.document(None).await;
+        let child = f.document(Some(root)).await;
+        let outside = f.document(None).await;
+        let links = format!("/api/v1/workspaces/{}/share-links", f.ws);
+        let stars = format!("/api/v1/workspaces/{}/stars", f.ws);
+        let share = json!({"documentId":root,"expiresInDays":1});
+        assert_eq!(
+            f.call("POST", &links, Some(share.clone()), &cookie).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner(
+                "POST",
+                &format!("/api/v1/workspaces/{foreign}/share-links"),
+                Some(share.clone())
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.count("share_links").await, 0);
+        let (s, created) = f.owner("POST", &links, Some(share)).await;
+        assert_eq!(s, StatusCode::CREATED, "{created}");
+        let token = created["url"].as_str().unwrap().rsplit('/').next().unwrap();
+        let public = format!("/api/v1/share/{token}");
+        assert_eq!(f.owner("GET", &public, None).await.0, StatusCode::OK);
+        assert_eq!(
+            f.owner("GET", &format!("{public}/tree"), None).await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            f.owner("GET", &format!("{public}/documents/{outside}"), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner("GET", &links, None).await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let star = json!({"type":"document","id":root});
+        let (s, first) = f.owner("POST", &stars, Some(star.clone())).await;
+        assert_eq!(s, StatusCode::CREATED, "{first}");
+        let (s, again) = f.owner("POST", &stars, Some(star)).await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(first["id"], again["id"]);
+        assert_eq!(f.count("stars").await, 1);
+        assert_eq!(
+            f.call(
+                "POST",
+                &stars,
+                Some(json!({"type":"document","id":root})),
+                &cookie
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner(
+                "POST",
+                &format!("/api/v1/workspaces/{foreign}/stars"),
+                Some(json!({"type":"document","id":root}))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(f.count("stars").await, 1);
+        let recent = format!("/api/v1/workspaces/{}/recent", f.ws);
+        assert_eq!(
+            f.owner("GET", &recent, None).await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        sqlx::query("UPDATE documents SET deleted_at=unixepoch()*1000000 WHERE id=?1")
+            .bind(child.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.owner("GET", &format!("{public}/tree"), None).await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let backend = &f.backend;
+        assert!(fvoci_server::db::share::hydrate_share_hits_backend(
+            backend,
+            token,
+            &[child, outside],
+            &[]
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .is_empty());
+
+        // Public attachments are scoped to the current live subtree and scan state.
+        let attachment = Uuid::now_v7();
+        sqlx::query("INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,mime,size_bytes,reserved_size_bytes,storage_key,scan_status) VALUES(?1,?2,?3,?4,'stored','public.txt','text/plain',1,1,?5,'clean')").bind(attachment.as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).bind(attachment.simple().to_string()).execute(&f.pool).await.unwrap();
+        let attachment_path = format!("{public}/attachments/{attachment}");
+        assert_eq!(
+            f.owner("GET", &attachment_path, None).await.0,
+            StatusCode::OK
+        );
+        sqlx::query("UPDATE attachments SET scan_status='infected' WHERE id=?1")
+            .bind(attachment.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.owner("GET", &attachment_path, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let meta = fvoci_server::db::share::share_public_meta_backend(&f.backend, token, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.excerpt, "Shared text");
+        sqlx::query("UPDATE share_links SET expires_at=(unixepoch()-1)*1000000")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(f.owner("GET", &public, None).await.0, StatusCode::NOT_FOUND);
+        sqlx::query("UPDATE share_links SET expires_at=(unixepoch()+3600)*1000000")
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(
+            f.call("DELETE", &format!("{links}/{id}"), None, &cookie)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner("DELETE", &format!("{links}/{id}"), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(f.owner("GET", &public, None).await.0, StatusCode::NOT_FOUND);
+        let id = first["id"].as_str().unwrap();
+        assert_eq!(
+            f.call("DELETE", &format!("{stars}/{id}"), None, &cookie)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner("DELETE", &format!("{stars}/{id}"), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(f.count("stars").await, 0);
+        assert_eq!(
+            f.owner("DELETE", &format!("{stars}/{id}"), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let _ = guest;
+        f.close().await;
+    }
+    #[tokio::test]
+    async fn sqlite_project_share_task_star_and_hidden_wiki_child() {
+        let f = Fixture::start().await;
+        let (guest, cookie, _) = f.member("guest").await;
+        let root = f.document(None).await;
+        let _child = f.document(Some(root)).await;
+        sqlx::query("INSERT INTO document_members(id,workspace_id,document_id,user_id,role) VALUES(?1,?2,?3,?4,'member')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(root.as_bytes().as_slice()).bind(guest.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let links = format!("/api/v1/workspaces/{}/share-links", f.ws);
+        assert_eq!(
+            f.call("POST", &links, Some(json!({"documentId":root})), &cookie)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(f.count("share_links").await, 0);
+        let project = fvoci_server::db::projects::create_project_backend(
+            &f.backend,
+            f.ws,
+            f.actor,
+            {
+                let bytes: Vec<u8> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id=?1")
+                    .bind(f.actor.as_bytes().as_slice())
+                    .fetch_one(&f.pool)
+                    .await
+                    .unwrap();
+                Uuid::from_slice(&bytes).unwrap()
+            },
+            fvoci_server::db::projects::CreateProjectInput {
+                key: "SHARE",
+                name: "Project share",
+                visibility: "workspace",
+                description: None,
+                icon: None,
+                lead_user_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let task = Uuid::now_v7();
+        let status: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM statuses WHERE project_id=?1 LIMIT 1")
+                .bind(project.id.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'Shared task',?4,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(task.as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(project.id.as_bytes().as_slice()).bind(status).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let (s, link) = f
+            .owner("POST", &links, Some(json!({"projectId":project.id})))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{link}");
+        let token = link["url"].as_str().unwrap().rsplit('/').next().unwrap();
+        assert_eq!(
+            fvoci_server::db::share::share_public_meta_backend(&f.backend, token, true)
+                .await
+                .unwrap()
+                .unwrap()
+                .title,
+            "Project share"
+        );
+        let hits = fvoci_server::db::share::hydrate_share_hits_backend(
+            &f.backend,
+            token,
+            &[root],
+            &[task],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .1;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].is_task);
+        let stars = format!("/api/v1/workspaces/{}/stars", f.ws);
+        let (s, star) = f
+            .owner("POST", &stars, Some(json!({"type":"task","id":task})))
+            .await;
+        assert_eq!(s, StatusCode::CREATED, "{star}");
+        let (s, denied) = f
+            .call(
+                "POST",
+                &stars,
+                Some(json!({"type":"task","id":task})),
+                &cookie,
+            )
+            .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{denied}");
+        sqlx::query("UPDATE tasks SET archived_at=unixepoch()*1000000 WHERE id=?1")
+            .bind(task.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert!(fvoci_server::db::share::hydrate_share_hits_backend(
+            &f.backend,
+            token,
+            &[],
+            &[task]
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .1
+        .is_empty());
+        assert!(f.owner("GET", &stars, None).await.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["targetId"] != task.to_string()));
+        // The existing star is still returned by explicit idempotent creation on an archived task.
+        let (s, again) = f
+            .owner("POST", &stars, Some(json!({"type":"task","id":task})))
+            .await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(again["id"], star["id"]);
+        f.close().await;
+    }
+}

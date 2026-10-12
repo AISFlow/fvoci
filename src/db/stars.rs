@@ -5,6 +5,10 @@
 //! read access, so a star on a document or task the actor can no longer read
 //! stays in the table but is never returned.
 
+use crate::db::backend::{Backend, DbTx, OperationTx};
+use crate::db::codec::Cell;
+use crate::projects::ProjectPermission;
+
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -404,6 +408,49 @@ pub async fn add_star(
     Ok(Ok(item))
 }
 
+pub async fn add_star_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    target: StarTarget,
+    kinds: Option<&[ContentKind]>,
+) -> Result<Result<StarItem, StarDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return add_star(pool, ws, actor, credential, target, kinds).await;
+    }
+    if !kind_allowed(kinds, target.kind()) {
+        return Ok(Err(StarDbError::NotFound));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        if let Err(e) = family_star_actor(&mut op, ws, actor, credential).await? {
+            return Ok(Err(e));
+        }
+        let (id, read_sql, insert_sql) = match target {
+            StarTarget::Document(id) => (id, "SELECT title,project_id,number FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", "INSERT INTO stars(id,workspace_id,user_id,document_id) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,user_id,document_id) DO UPDATE SET document_id=excluded.document_id RETURNING id,created_at"),
+            StarTarget::Task(id) => (id, "SELECT title,project_id,number FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", "INSERT INTO stars(id,workspace_id,user_id,task_id) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,user_id,task_id) DO UPDATE SET task_id=excluded.task_id RETURNING id,created_at"),
+        };
+        let rows = {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.query(read_sql, &[Cell::uuid(ws), Cell::uuid(id)]).await?
+        };
+        let Some(row) = rows.first() else {
+            return Ok(Err(StarDbError::NotFound));
+        };
+        let project = row.cell(1)?.optional(Cell::id)?;
+        if !family_star_visible(&mut op, ws, actor, target.kind(), id, project).await? {
+            return Ok(Err(StarDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let inserted = f.query(insert_sql, &[Cell::uuid(Uuid::now_v7()), Cell::uuid(ws), Cell::uuid(actor), Cell::uuid(id)]).await?;
+        let star = inserted.first().ok_or(sqlx::Error::RowNotFound)?;
+        Ok(Ok(StarItem { id: star.cell(0)?.id()?, kind: target.kind(), target_id: id, title: row.cell(0)?.string()?, project_id: project, number: row.cell(2)?.int32()?, created_at: star.cell(1)?.datetime()? }))
+    }.await;
+    finish_star(tx, result, true).await
+}
+
 pub async fn remove_star(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -440,6 +487,30 @@ pub async fn remove_star(
     }
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn remove_star_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    star: Uuid,
+    kinds: Option<&[ContentKind]>,
+) -> Result<Result<(), StarDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_star(pool, ws, actor, credential, star, kinds).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        if let Err(e) = family_star_actor(&mut op, ws, actor, credential).await? {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let n = f.execute("DELETE FROM stars WHERE workspace_id=?1 AND user_id=?2 AND id=?3 AND ((?4 AND document_id IS NOT NULL) OR (?5 AND task_id IS NOT NULL))", &[Cell::uuid(ws), Cell::uuid(actor), Cell::uuid(star), Cell::Integer(i64::from(kind_allowed(kinds, ContentKind::Document))), Cell::Integer(i64::from(kind_allowed(kinds, ContentKind::Task)))]).await?;
+        Ok(if n == 0 { Err(StarDbError::NotFound) } else { Ok(()) })
+    }.await;
+    finish_star(tx, result, true).await
 }
 
 /// Source `listRecent`: live documents and live, unarchived tasks the actor can
@@ -508,6 +579,44 @@ pub async fn list_recent(
         .collect()))
 }
 
+pub async fn list_recent_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    limit: i64,
+    kinds: Option<&[ContentKind]>,
+) -> Result<Result<Vec<RecentItem>, StarDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_recent(pool, ws, actor, credential, limit, kinds).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        if let Err(e) = family_star_actor(&mut op, ws, actor, credential).await? {
+            return Ok(Err(e));
+        }
+        let rows = {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.query("SELECT type,id,title,project_id,number,ua FROM (SELECT 'document' AS type,id,title,project_id,number,(updated_at/1000)*1000 AS ua FROM documents WHERE workspace_id=?1 AND deleted_at IS NULL AND ?2 UNION ALL SELECT 'task' AS type,id,title,project_id,number,(updated_at/1000)*1000 AS ua FROM tasks WHERE workspace_id=?1 AND deleted_at IS NULL AND archived_at IS NULL AND ?3) ORDER BY ua DESC,id DESC", &[Cell::uuid(ws), Cell::Integer(i64::from(kind_allowed(kinds, ContentKind::Document))), Cell::Integer(i64::from(kind_allowed(kinds, ContentKind::Task)))]).await?
+        };
+        let mut items = Vec::new();
+        for r in rows {
+            let kind = parse_kind(&r.cell(0)?.string()?);
+            let id = r.cell(1)?.id()?;
+            let project = r.cell(3)?.optional(Cell::id)?;
+            if family_star_visible(&mut op, ws, actor, kind, id, project).await? {
+                items.push(RecentItem { kind, id, title: r.cell(2)?.string()?, project_id: project, number: r.cell(4)?.int32()?, updated_at: r.cell(5)?.datetime()? });
+                if items.len() >= limit.clamp(1, RECENT_MAX_LIMIT) as usize {
+                    break;
+                }
+            }
+        }
+        Ok(Ok(items))
+    }.await;
+    finish_star(tx, result, false).await
+}
+
 #[cfg(test)]
 mod selected_star_read_finish_tests {
     use super::*;
@@ -553,4 +662,64 @@ mod selected_star_read_finish_tests {
         .is_err());
         // Propagation only: does not claim remote failure/settlement execution.
     }
+}
+
+async fn finish_star<T>(
+    tx: DbTx,
+    result: Result<Result<T, StarDbError>, sqlx::Error>,
+    write: bool,
+) -> Result<Result<T, StarDbError>, sqlx::Error> {
+    if write && matches!(&result, Ok(Ok(_))) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    } else if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(e) => Some(Box::new(e)),
+            Ok(Err(e)) => Some(Box::new(StarReadRefusal(e))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+async fn family_star_actor(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<(), StarDbError>, sqlx::Error> {
+    op.set_tenant(ws).await?;
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(StarDbError::Forbidden));
+    }
+    if !op.workspace_is_live(ws).await? {
+        return Ok(Err(StarDbError::NotFound));
+    }
+    if op.membership_role(ws, actor, false).await?.is_none() {
+        return Ok(Err(StarDbError::Forbidden));
+    }
+    Ok(Ok(()))
+}
+async fn family_star_visible(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    actor: Uuid,
+    kind: ContentKind,
+    id: Uuid,
+    project: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    if let Some(project) = project {
+        return Ok(op
+            .project_permission_by_id(ws, actor, project)
+            .await?
+            .is_some_and(|p| p.at_least(ProjectPermission::View)));
+    }
+    Ok(kind == ContentKind::Document
+        && op
+            .document_permission(ws, actor, id, true)
+            .await?
+            .at_least(ProjectPermission::View))
 }

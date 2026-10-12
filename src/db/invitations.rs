@@ -1,3 +1,6 @@
+use crate::db::backend::{Backend, DbTx, OperationTx};
+use crate::db::codec::Cell;
+
 use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -344,6 +347,62 @@ pub async fn create_invitation(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_invitation_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    email: &str,
+    role: WorkspaceRole,
+    ip: Option<&str>,
+) -> Result<Result<CreatedInvitation, InvitationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_invitation(pool, ws, actor, credential, email, role, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let token = new_token();
+    let id = Uuid::now_v7();
+    let result= async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        if !op.recheck_session(actor, credential).await? {
+            return Ok(Err(InvitationDbError::Forbidden));
+        }
+        let kind = {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.query("SELECT kind FROM workspaces WHERE id=?1 AND deleted_at IS NULL", &[Cell::uuid(ws)]).await?.first().map(|r| r.cell(0)?.string()).transpose()?
+        };
+        let Some(kind) = kind else {
+            return Ok(Err(InvitationDbError::NotFound));
+        };
+        let inviter = match op.membership_role(ws, actor, true).await? {
+            Some(r) if r.at_least(WorkspaceRole::Admin) => r,
+            Some(_) => return Ok(Err(InvitationDbError::Forbidden)),
+            None => return Ok(Err(InvitationDbError::NotFound)),
+        };
+        if kind == "personal" {
+            return Ok(Err(InvitationDbError::PersonalImmutable));
+        }
+        if !inviter.at_least(role) {
+            return Ok(Err(InvitationDbError::RoleCap));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.execute("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", &[Cell::uuid(id), Cell::uuid(ws), Cell::text(email), Cell::text(role.as_str()), Cell::text(&token.hash), Cell::uuid(actor), Cell::instant(Utc::now() + INVITE_TTL)?]).await?;
+        }
+        let payload = json!({
+        "workspaceId":ws.to_string(),
+        "email":email,
+        "invitationId":id.to_string()
+        });
+        op.append_event(crate::db::identity::EventAppend { id: Uuid::now_v7(), workspace_id: Some(ws), actor_user_id: Some(actor), verb: "invitation.created".into(), target_type: Some("invitation".into()), target_id: Some(id), payload: payload.clone() }).await?;
+        op.append_audit(crate::db::identity::AuditAppend { id: Uuid::now_v7(), workspace_id: Some(ws), actor_user_id: Some(actor), verb: "invitation.created".into(), target_type: Some("invitation".into()), target_id: Some(id), payload, ip: ip.map(str::to_string) }).await?;
+        Ok(Ok(CreatedInvitation { accept_path_token: token.token }))
+    }.await;
+    finish_invitation(tx, result, true).await
+}
+
 pub async fn get_invitation_public(
     pool: &PgPool,
     raw_token: &str,
@@ -384,6 +443,37 @@ pub async fn get_invitation_public(
         role: invitation.role,
         required_legal,
     }))
+}
+
+pub async fn get_invitation_public_backend(
+    backend: &Backend,
+    raw: &str,
+) -> Result<Result<InvitationPublic, InvitationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_invitation_public(pool, raw).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let invite = match family_invitation(&mut op, &hash_token(raw)).await? {
+            Ok(i) => i,
+            Err(e) => return Ok(Err(e)),
+        };
+        op.set_tenant(invite.workspace_id).await?;
+        let name = {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.query("SELECT name FROM workspaces WHERE id=?1 AND deleted_at IS NULL AND kind<>'personal'", &[Cell::uuid(invite.workspace_id)]).await?.first().map(|r| r.cell(0)?.string()).transpose()?
+        };
+        let Some(workspace_name) = name else {
+            return Ok(Err(InvitationDbError::NotFound));
+        };
+        if !family_inviter_authorized(&mut op, &invite).await? {
+            return Ok(Err(InvitationDbError::NotFound));
+        }
+        let required_legal = family_invitation_legal(&mut op).await?;
+        Ok(Ok(InvitationPublic { workspace_name, email_masked: mask_email(&invite.email), role: invite.role, required_legal }))
+    }.await;
+    finish_invitation(tx, result, false).await
 }
 
 /// `password_gate` runs with the invited address right before the password
@@ -497,6 +587,113 @@ where
     }
 }
 
+pub async fn accept_invitation_backend<G, F>(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    keys: &Keyring,
+    raw: &str,
+    request: AcceptInvitationRequest<'_>,
+    password_gate: G,
+) -> Result<Result<crate::db::mfa::Issued, InvitationDbError>, sqlx::Error>
+where
+    G: FnOnce(String) -> F,
+    F: std::future::Future<Output = Result<(), u32>>,
+{
+    if let Backend::Postgres(pool) = backend {
+        return accept_invitation(pool, license, keys, raw, request, password_gate).await;
+    }
+    let hash = hash_token(raw);
+    let mut read = backend.begin_read().await?;
+    let preflight= async {
+        let mut op = read.operation();
+        let invite = match family_invitation(&mut op, &hash).await? {
+            Ok(i) => i,
+            Err(e) => return Ok(Err(e)),
+        };
+        if request.email.is_some_and(|e| e != invite.email) {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        let required = family_invitation_legal(&mut op).await?;
+        if !required.iter().all(|(k, v, _)| request.consents.iter().any(|(ck, cv)| k == ck && v == cv)) {
+            return Ok(Err(InvitationDbError::ConsentRequired));
+        }
+        let previous = op.set_system().await?;
+        let account = async {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            let rows = f.query("SELECT id,password_hash,deleted_at IS NULL AND suspended_at IS NULL FROM users WHERE email=?1", &[Cell::text(&invite.email)]).await?;
+            rows.first().map(|r| Ok::<_, sqlx::Error>((r.cell(0)?.id()?, r.cell(1)?.optional(Cell::string)?, r.cell(2)?.boolean()?))).transpose()
+        }
+        .await;
+        op.restore_system(previous).await?;
+        Ok(Ok((invite, account?)))
+    }.await;
+    let (invite, account) = match finish_invitation(read, preflight, false).await? {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    let (user, new_account, expected_hash) = if let Some((user, stored, live)) = account {
+        if let Err(n) = password_gate(invite.email.clone()).await {
+            return Ok(Err(InvitationDbError::RateLimited(n)));
+        }
+        let verified =
+            verify_password(stored.as_deref(), request.password.unwrap_or(""), keys).await;
+        if !verified.ok || stored.is_none() || !live {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        (user, None, stored)
+    } else {
+        let (Some(email), Some(given_name), Some(password)) =
+            (request.email, request.given_name, request.password)
+        else {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        };
+        let password_hash = match hash_password(password, keys).await {
+            Ok(h) => h,
+            Err(_) => return Ok(Err(InvitationDbError::Unauthorized)),
+        };
+        (
+            Uuid::now_v7(),
+            Some(NewAccount {
+                email: email.into(),
+                given_name: given_name.into(),
+                family_name: request
+                    .family_name
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                password_hash: Some(password_hash),
+                defaults: request.defaults.clone(),
+            }),
+            None,
+        )
+    };
+    if let Err(e) = grant_family_invitation(
+        backend,
+        license,
+        &invite,
+        user,
+        FamilyGrantDetails {
+            new_account,
+            expected_password: expected_hash,
+            identity: None,
+            identity_existing: false,
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
+    )
+    .await?
+    {
+        return Ok(Err(e));
+    }
+    Ok(crate::db::mfa::issue_session_or_challenge_backend(
+        backend,
+        user,
+        "invitation",
+        crate::db::mfa::IssueOptions::default(),
+    )
+    .await?
+    .ok_or(InvitationDbError::Unauthorized))
+}
+
 /// Source `acceptInviteWithIdentity` after the provider exchange.
 pub struct IdentityAcceptRequest<'a> {
     pub token_hash: &'a str,
@@ -597,6 +794,100 @@ pub async fn accept_invitation_with_identity(
     )
     .await?
     .map(|()| user_id))
+}
+
+pub async fn accept_invitation_with_identity_backend(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    request: IdentityAcceptRequest<'_>,
+) -> Result<Result<Uuid, InvitationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return accept_invitation_with_identity(pool, license, request).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let invitation = match family_invitation(&mut op, request.token_hash).await? {
+            Ok(i) => i,
+            Err(e) => return Ok(Err(e)),
+        };
+        let required = family_invitation_legal(&mut op).await?;
+        if !required.iter().all(|(k, v, _)| request.consents.iter().any(|(ck, cv)| k == ck && v == cv)) {
+            return Ok(Err(InvitationDbError::ConsentRequired));
+        }
+        let previous = op.set_system().await?;
+        let lookup = async {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            let users = f.query("SELECT id,deleted_at IS NULL AND suspended_at IS NULL FROM users WHERE email=?1", &[Cell::text(&invitation.email)]).await?;
+            let account = users.first().map(|r| Ok::<_, sqlx::Error>((r.cell(0)?.id()?, r.cell(1)?.boolean()?))).transpose()?;
+            let links = f.query("SELECT user_id,issuer FROM identity_links WHERE provider=?1 AND provider_user_id=?2", &[Cell::text(request.provider), Cell::text(request.subject)]).await?;
+            let link = links.first().map(|r| Ok::<_, sqlx::Error>((r.cell(0)?.id()?, r.cell(1)?.optional(Cell::string)?))).transpose()?;
+            Ok::<_, sqlx::Error>((account, link))
+        }
+        .await;
+        op.restore_system(previous).await?;
+        let (account, link) = lookup?;
+        Ok(Ok((invitation, account, link)))
+    }.await;
+    let (invite, account, existing_link) = match finish_invitation(tx, result, false).await? {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    let (user, new_account, identity_existing) = if let Some((user, live)) = account {
+        if !live
+            || !existing_link.as_ref().is_some_and(|(owner, issuer)| {
+                *owner == user && issuer.as_deref() == Some(request.issuer)
+            })
+        {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        (user, None, true)
+    } else {
+        if existing_link.is_some() {
+            return Ok(Err(InvitationDbError::AlreadyLinked));
+        }
+        let given_name = request
+            .given_name
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| n.chars().take(100).collect())
+            .unwrap_or_else(|| email_local_part(&invite.email));
+        (
+            Uuid::now_v7(),
+            Some(NewAccount {
+                email: invite.email.clone(),
+                given_name,
+                family_name: None,
+                password_hash: None,
+                defaults: request.defaults.clone(),
+            }),
+            false,
+        )
+    };
+    let link = crate::db::oidc::NewLink {
+        user_id: user,
+        provider: request.provider,
+        subject: request.subject,
+        issuer: request.issuer,
+        email: request.link_email,
+        workspace_id: None,
+    };
+    Ok(grant_family_invitation(
+        backend,
+        license,
+        &invite,
+        user,
+        FamilyGrantDetails {
+            new_account,
+            expected_password: None,
+            identity: Some(&link),
+            identity_existing,
+            client_ip: request.client_ip,
+            consents: request.consents,
+        },
+    )
+    .await?
+    .map(|()| user))
 }
 
 /// Source `emailLocalPart`: the display name fallback for a new account.
@@ -942,4 +1233,200 @@ pub async fn revoke_pending_invitation_for_test(
             .await?;
     tx.commit().await?;
     Ok(result.rows_affected())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invitation operation refused: {0:?}")]
+struct InvitationRefusal(InvitationDbError);
+async fn finish_invitation<T>(
+    tx: DbTx,
+    result: Result<Result<T, InvitationDbError>, sqlx::Error>,
+    write: bool,
+) -> Result<Result<T, InvitationDbError>, sqlx::Error> {
+    if write && matches!(&result, Ok(Ok(_))) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    } else if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(e) => Some(Box::new(e)),
+            Ok(Err(e)) => Some(Box::new(InvitationRefusal(e))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+async fn family_invitation(
+    op: &mut OperationTx<'_, '_>,
+    hash: &str,
+) -> Result<Result<InvitationRow, InvitationDbError>, sqlx::Error> {
+    let previous = op.set_system().await?;
+    let result= async {
+        let OperationTx::SqliteFamily(f) = op else { unreachable!() };
+        f.require_system_context()?;
+        let rows = f.query("SELECT id,workspace_id,email,role,token_hash,invited_by,expires_at,accepted_at FROM invitations WHERE token_hash=?1", &[Cell::text(hash)]).await?;
+        let Some(r) = rows.first() else {
+            return Ok(Err(InvitationDbError::NotFound));
+        };
+        let row = InvitationRow { id: r.cell(0)?.id()?, workspace_id: r.cell(1)?.id()?, email: r.cell(2)?.string()?, role: WorkspaceRole::parse(&r.cell(3)?.string()?).ok_or_else(|| sqlx::Error::Protocol("invalid invitation role".into()))?, token_hash: r.cell(4)?.string()?, invited_by: r.cell(5)?.id()?, expires_at: r.cell(6)?.datetime()?, accepted_at: r.cell(7)?.optional(Cell::datetime)? };
+        if row.accepted_at.is_some() {
+            return Ok(Err(InvitationDbError::AlreadyAccepted));
+        }
+        if row.expires_at <= Utc::now() {
+            return Ok(Err(InvitationDbError::Expired));
+        }
+        Ok(Ok(row))
+    }.await;
+    op.restore_system(previous).await?;
+    result
+}
+async fn family_inviter_authorized(
+    op: &mut OperationTx<'_, '_>,
+    invite: &InvitationRow,
+) -> Result<bool, sqlx::Error> {
+    op.set_tenant(invite.workspace_id).await?;
+    let live = {
+        let OperationTx::SqliteFamily(f) = op else {
+            unreachable!()
+        };
+        !f.query(
+            "SELECT 1 FROM users WHERE id=?1 AND deleted_at IS NULL AND suspended_at IS NULL",
+            &[Cell::uuid(invite.invited_by)],
+        )
+        .await?
+        .is_empty()
+    };
+    Ok(live
+        && op
+            .membership_role(invite.workspace_id, invite.invited_by, false)
+            .await?
+            .is_some_and(|r| r.at_least(WorkspaceRole::Admin) && r.at_least(invite.role)))
+}
+async fn family_invitation_legal(
+    op: &mut OperationTx<'_, '_>,
+) -> Result<Vec<(String, i32, String)>, sqlx::Error> {
+    let previous = op.set_system().await?;
+    let result= async {
+        let OperationTx::SqliteFamily(f) = op else { unreachable!() };
+        f.query("SELECT d.kind,d.version,d.title FROM legal_documents d WHERE d.required=1 AND d.version=(SELECT max(x.version) FROM legal_documents x WHERE x.kind=d.kind) ORDER BY d.kind DESC", &[]).await?.iter().map(|r| Ok((r.cell(0)?.string()?, r.cell(1)?.int32()?, r.cell(2)?.string()?))).collect::<Result<Vec<_>, sqlx::Error>>()
+    }.await;
+    op.restore_system(previous).await?;
+    result
+}
+
+struct FamilyGrantDetails<'a> {
+    new_account: Option<NewAccount>,
+    expected_password: Option<String>,
+    identity: Option<&'a crate::db::oidc::NewLink<'a>>,
+    identity_existing: bool,
+    client_ip: Option<&'a str>,
+    consents: &'a [(String, i32)],
+}
+async fn grant_family_invitation(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    invite: &InvitationRow,
+    user: Uuid,
+    details: FamilyGrantDetails<'_>,
+) -> Result<Result<(), InvitationDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        op.acquire_admission_lock().await?;
+        let current = match family_invitation(&mut op, &invite.token_hash).await? {
+            Ok(i) => i,
+            Err(e) => return Ok(Err(e)),
+        };
+        op.set_tenant(current.workspace_id).await?;
+        if current.id != invite.id || current.email != invite.email {
+            return Ok(Err(InvitationDbError::NotFound));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            if f.query("SELECT 1 FROM workspaces WHERE id=?1 AND deleted_at IS NULL AND kind<>'personal'", &[Cell::uuid(current.workspace_id)]).await?.is_empty() {
+                return Ok(Err(InvitationDbError::NotFound));
+            }
+        }
+        if !family_inviter_authorized(&mut op, &current).await? {
+            return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        let required = family_invitation_legal(&mut op).await?;
+        if !required.iter().all(|(k, v, _)| details.consents.iter().any(|(ck, cv)| k == ck && v == cv)) {
+            return Ok(Err(InvitationDbError::ConsentRequired));
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            if let Some(new) = details.new_account {
+                let n = f.execute("INSERT INTO users(id,email,password_hash,given_name,family_name,locale,timezone,week_starts_on,text_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(email) DO NOTHING", &[Cell::uuid(user), Cell::text(new.email), Cell::optional_text(new.password_hash.as_deref()), Cell::text(new.given_name), Cell::optional_text(new.family_name.as_deref()), Cell::text(new.defaults.locale), Cell::text(new.defaults.timezone), Cell::Integer(new.defaults.week_starts_on as i64), Cell::Integer(new.defaults.text_scale as i64)]).await?;
+                if n == 0 {
+                    return Ok(Err(InvitationDbError::Unauthorized));
+                }
+            } else if f.query("SELECT 1 FROM users WHERE id=?1 AND email=?2 AND deleted_at IS NULL AND suspended_at IS NULL AND (?3 IS NULL OR password_hash=?3)", &[Cell::uuid(user), Cell::text(&current.email), Cell::optional_text(details.expected_password.as_deref())]).await?.is_empty() {
+                return Ok(Err(InvitationDbError::Unauthorized));
+            }
+        }
+        if op.membership_role(current.workspace_id, user, true).await?.is_none() {
+            if current.role != WorkspaceRole::Guest {
+                if let Err(e) = op.require_new_instance_billable_user(Some(user), license).await? {
+                    return Ok(Err(quota_error(e)));
+                }
+            }
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)", &[Cell::uuid(current.workspace_id), Cell::uuid(user), Cell::text(current.role.as_str())]).await?;
+        }
+        {
+            let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+            f.execute("UPDATE invitations SET accepted_at=?2,updated_at=?2 WHERE id=?1 AND accepted_at IS NULL", &[Cell::uuid(current.id), Cell::instant(crate::db::identity::stored_now())?]).await?;
+            for (kind, version) in details.consents {
+                f.execute("INSERT INTO user_consents(id,user_id,kind,version,consented_at,ip,channel) SELECT ?1,?2,?3,?4,?5,?6,'signup' WHERE ?4=(SELECT max(version) FROM legal_documents WHERE kind=?3) ON CONFLICT(user_id,kind,version) DO NOTHING", &[Cell::uuid(Uuid::now_v7()), Cell::uuid(user), Cell::text(kind), Cell::Integer(i64::from(*version)), Cell::instant(crate::db::identity::stored_now())?, Cell::optional_text(details.client_ip)]).await?;
+            }
+        }
+        let payload = json!({
+        "workspaceId":current.workspace_id.to_string(),
+        "userId":user.to_string(),
+        "email":current.email
+        });
+        op.append_event(crate::db::identity::EventAppend { id: Uuid::now_v7(), workspace_id: Some(current.workspace_id), actor_user_id: Some(user), verb: "invitation.accepted".into(), target_type: Some("invitation".into()), target_id: Some(current.id), payload: payload.clone() }).await?;
+        op.append_audit(crate::db::identity::AuditAppend { id: Uuid::now_v7(), workspace_id: Some(current.workspace_id), actor_user_id: Some(user), verb: "invitation.accepted".into(), target_type: Some("invitation".into()), target_id: Some(current.id), payload, ip: details.client_ip.map(str::to_string) }).await?;
+        if let Some(link) = details.identity {
+            let previous = op.set_system().await?;
+            let identity_result = async {
+                let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+                if details.identity_existing {
+                    return Ok::<_, sqlx::Error>(!f.query("SELECT 1 FROM identity_links WHERE user_id=?1 AND provider=?2 AND provider_user_id=?3 AND issuer=?4", &[Cell::uuid(user), Cell::text(link.provider), Cell::text(link.subject), Cell::text(link.issuer)]).await?.is_empty());
+                }
+                let id = Uuid::now_v7();
+                let n = f.execute("INSERT INTO identity_links(id,user_id,provider,provider_user_id,email,issuer) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING", &[Cell::uuid(id), Cell::uuid(user), Cell::text(link.provider), Cell::text(link.subject), Cell::optional_text(link.email), Cell::text(link.issuer)]).await?;
+                if n == 0 {
+                    return Ok(false);
+                }
+                op.append_event(crate::db::identity::EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: None,
+                    actor_user_id: Some(user),
+                    verb: "identity.linked".into(),
+                    target_type: Some("identity_link".into()),
+                    target_id: Some(id),
+                    payload: json!({
+                    "userId":user.to_string(),
+                    "provider":link.provider,
+                    "email":link.email
+                    }),
+                })
+                .await?;
+                Ok(true)
+            }
+            .await;
+            op.restore_system(previous).await?;
+            if !identity_result? {
+                return Ok(Err(InvitationDbError::AlreadyLinked));
+            }
+        }
+        Ok(Ok(()))
+    }.await;
+
+    finish_invitation(tx, result, true).await
 }

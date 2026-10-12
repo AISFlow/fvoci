@@ -38,8 +38,9 @@ use crate::api::dto::{
 use crate::attachments::content_disposition_attachment;
 use crate::auth::scopes::ApiTokenScope;
 use crate::db::share::{
-    create_share_link, hydrate_share_hits, list_share_links, revoke_share_link, share_attachment,
-    share_document, share_public_meta, share_search_scope, share_tree, DocumentAffiliation,
+    create_share_link_backend, hydrate_share_hits_backend, list_share_links_backend,
+    revoke_share_link_backend, share_attachment_backend, share_document_backend,
+    share_public_meta_backend, share_search_scope_backend, share_tree_backend, DocumentAffiliation,
     ShareDbError, ShareLinkRecord, ShareSearchRow, ShareTarget,
 };
 use crate::documents::export::{export_filename, render_pdf_export, ExportRenderError};
@@ -153,16 +154,9 @@ fn map_share_error(err: ShareDbError) -> AppError {
 /// Source share public routes: 404 for every route while the instance share
 /// policy is disabled (checked before anything else, like `onBeforeHandle`).
 async fn ensure_sharing_enabled(state: &AppState) -> Result<(), AppError> {
-    let policy = crate::settings::share_policy(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-    )
-    .await
-    .map_err(internal)?;
+    let policy = share_policy_backend(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     if policy.enabled {
         Ok(())
     } else {
@@ -214,13 +208,8 @@ async fn list_links_route(
 ) -> Result<Json<ShareLinkListResponse>, AppError> {
     let (user_id, credential_id) =
         require_share_manage(&state, &headers, &jar, workspace_id).await?;
-    let items = list_share_links(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
+    let items = list_share_links_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -243,23 +232,11 @@ async fn create_link(
     expires_in_days: Option<i64>,
     affiliation: Option<DocumentAffiliation>,
 ) -> Result<Response, AppError> {
-    let policy = crate::settings::share_policy(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-    )
-    .await
-    .map_err(internal)?;
-    let created = create_share_link(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
+    let policy = share_policy_backend(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
+    let created = create_share_link_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -332,13 +309,8 @@ async fn revoke_link_route(
     check_origin(&headers, &state.public_origin)?;
     let (user_id, credential_id) =
         require_share_manage(&state, &headers, &jar, workspace_id).await?;
-    revoke_share_link(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
+    revoke_share_link_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -359,13 +331,8 @@ async fn list_document_links(
     affiliation: DocumentAffiliation,
 ) -> Result<Json<ShareLinkListResponse>, AppError> {
     let (user_id, credential_id) = require_share_manage(state, headers, jar, workspace_id).await?;
-    let items = list_share_links(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
+    let items = list_share_links_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -504,31 +471,15 @@ pub(crate) async fn shell_head_meta(
     if enforce_share_limit(state, peer).await.is_err() {
         return Ok(None);
     }
-    let policy = crate::settings::share_policy(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-    )
-    .await
-    .map_err(internal)?;
+    let policy = share_policy_backend(&state.auth.db.pool)
+        .await
+        .map_err(internal)?;
     if !policy.enabled {
         return Ok(None);
     }
-    share_public_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        token,
-        true,
-    )
-    .await
-    .map_err(internal)
+    share_public_meta_backend(&state.auth.db.pool, token, true)
+        .await
+        .map_err(internal)
 }
 
 async fn public_meta_route(
@@ -538,19 +489,10 @@ async fn public_meta_route(
 ) -> Result<Json<SharePublicMetaOutput>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let meta = share_public_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        &token,
-        false,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let meta = share_public_meta_backend(&state.auth.db.pool, &token, false)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     Ok(Json(SharePublicMetaOutput {
         title: meta.title,
         document_id: meta.document_id.map(|id| id.to_string()),
@@ -640,19 +582,10 @@ async fn document_body_response(
     document_id: Option<Uuid>,
     format: BodyFormat,
 ) -> Result<Response, AppError> {
-    let doc = share_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        token,
-        document_id,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let doc = share_document_backend(&state.auth.db.pool, token, document_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     let tag = strong_etag(&iso(doc.updated_at), format);
     if format != BodyFormat::Html {
         if let Some(header) = headers.get(IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
@@ -765,18 +698,10 @@ async fn public_tree_route(
 ) -> Result<Json<TreeResponse>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let nodes = share_tree(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        &token,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let nodes = share_tree_backend(&state.auth.db.pool, &token)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     Ok(Json(TreeResponse {
         items: nodes
             .into_iter()
@@ -822,19 +747,10 @@ async fn public_pdf_route(
         ),
     };
     enforce_share_limit(&state, peer).await?;
-    let doc = share_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        &token,
-        document_id,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let doc = share_document_backend(&state.auth.db.pool, &token, document_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     let Some(markdown) = state.markdown.as_ref() else {
         tracing::error!("share pdf requested but the markdown child is unavailable");
         return Err(AppError::internal());
@@ -1011,13 +927,8 @@ async fn public_search_route(
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     }
     enforce_share_limit(&state, peer).await?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/share.rs")
-        .map_err(internal)?;
-    let scope = share_search_scope(pool, &token)
+    let pool = &state.auth.db.pool;
+    let scope = share_search_scope_backend(pool, &token)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
@@ -1108,7 +1019,7 @@ async fn public_search_route(
     }
     let document_ids: Vec<Uuid> = ordered.iter().filter(|h| !h.0).map(|h| h.1).collect();
     let task_ids: Vec<Uuid> = ordered.iter().filter(|h| h.0).map(|h| h.1).collect();
-    let (current, rows) = hydrate_share_hits(pool, &token, &document_ids, &task_ids)
+    let (current, rows) = hydrate_share_hits_backend(pool, &token, &document_ids, &task_ids)
         .await
         .map_err(internal)?
         .ok_or_else(not_found)?;
@@ -1152,19 +1063,10 @@ async fn public_attachment_route(
 ) -> Result<Json<AttachmentOutput>, AppError> {
     ensure_sharing_enabled(&state).await?;
     enforce_share_limit(&state, peer).await?;
-    let att = share_attachment(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        &token,
-        attachment_id,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let att = share_attachment_backend(&state.auth.db.pool, &token, attachment_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     Ok(Json(AttachmentOutput {
         id: att.id.to_string(),
         name: att.name,
@@ -1201,19 +1103,10 @@ async fn public_download_route(
         Some(_) => return Err(AppError::from_code(ProblemCode::InvalidInput)),
     };
     enforce_share_limit(&state, peer).await?;
-    let att = share_attachment(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/share.rs")
-            .map_err(internal)?,
-        &token,
-        attachment_id,
-    )
-    .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    let att = share_attachment_backend(&state.auth.db.pool, &token, attachment_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(not_found)?;
     if preview {
         let variant =
             crate::db::attachments::preview_variant_of(&att.variants).ok_or_else(not_found)?;
@@ -1297,4 +1190,15 @@ mod tests {
             "https://x.example/s/tok"
         );
     }
+}
+
+async fn share_policy_backend(
+    backend: &crate::db::backend::Backend,
+) -> Result<crate::settings::catalog::SharePolicy, sqlx::Error> {
+    if let crate::db::backend::Backend::Postgres(pool) = backend {
+        return crate::settings::share_policy(pool).await;
+    }
+    Ok(crate::settings::current_values_backend(backend, "FVOCI")
+        .await?
+        .share)
 }

@@ -13,6 +13,119 @@ use project_harness::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+#[tokio::test]
+async fn sqlite_group_creation_rechecks_membership_and_commits() {
+    use fvoci_server::auth::password::Keyring;
+    use fvoci_server::auth::AuthService;
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{router, state::AppState};
+    use std::sync::Arc;
+    let root = std::env::temp_dir().join(format!("fvoci-membership-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("db.sqlite");
+    migrate::run_sqlite_migrations(&path).await.unwrap();
+    let sqlite = pool::connect_sqlite_app(&path, 3).await.unwrap();
+    let auth = Arc::new(AuthService {
+        db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+        password_keys: Keyring::parse(
+            r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            "test",
+        )
+        .unwrap(),
+    });
+    let state = AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::Off,
+        native_engine: None,
+        auth,
+        branding_name: "FVOCI".into(),
+        public_origin: "http://localhost".into(),
+        cookie_secure: false,
+        rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+            ),
+        },
+        collab: None,
+        meili: None,
+        search_embedder: None,
+        streams: AppState::fresh_streams(),
+        mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+        quota: Default::default(),
+        markdown: None,
+        import_wake: None,
+        import_extractor_available: false,
+        preview_extract: None,
+    };
+    let app = router(state, None);
+    let (status, _, headers) = http_request(app.clone(), "POST", "/api/v1/setup",
+        Some(json!({"email":"group@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),
+        Some("application/json"), None, &[]).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cookie = headers
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1
+        .to_string();
+    let ws_bytes: Vec<u8> = sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
+        .fetch_one(&sqlite)
+        .await
+        .unwrap();
+    let ws = Uuid::from_slice(&ws_bytes).unwrap();
+    let (status, group) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/groups"),
+        Some(json!({"name":"Team"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{group}");
+    let reopened = pool::connect_sqlite_app(&path, 1).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM groups WHERE name='Team'")
+            .fetch_one(&reopened)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1")
+        .bind(ws.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let (status, _) = json_request(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/groups"),
+        Some(json!({"name":"Denied"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM groups")
+            .fetch_one(&reopened)
+            .await
+            .unwrap(),
+        1
+    );
+    reopened.close().await;
+    sqlite.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 async fn bearer(
     app: axum::Router,
     method: &str,
@@ -1587,4 +1700,309 @@ async fn group_only_viewer_project_list_reports_can_edit_false() {
 
     admin.close().await;
     harness.cleanup().await;
+}
+
+mod sqlite_port {
+    use super::*;
+    use fvoci_server::auth::password::Keyring;
+    use fvoci_server::auth::AuthService;
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{router, state::AppState};
+    use std::sync::Arc;
+    struct Fixture {
+        root: std::path::PathBuf,
+        path: std::path::PathBuf,
+        pool: sqlx::SqlitePool,
+        backend: Backend,
+        app: axum::Router,
+        cookie: String,
+        ws: Uuid,
+        actor: Uuid,
+    }
+    impl Fixture {
+        async fn start() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("fvoci-membership-port-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("db.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let backend = Backend::Sqlite(sqlite.clone());
+            let auth=Arc::new(AuthService{db:Db::from_backend(backend.clone()),password_keys:Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()});
+            let state = AppState {
+                realtime_mode: fvoci_server::config::RealtimeMode::Off,
+                native_engine: None,
+                auth,
+                branding_name: "FVOCI".into(),
+                public_origin: "http://localhost".into(),
+                cookie_secure: false,
+                rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+                upload: fvoci_server::attachments::UploadLimits {
+                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                    ),
+                },
+                collab: None,
+                meili: None,
+                search_embedder: None,
+                streams: AppState::fresh_streams(),
+                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+                quota: Default::default(),
+                markdown: None,
+                import_wake: None,
+                import_extractor_available: false,
+                preview_extract: None,
+            };
+
+            let app = router(state, None);
+            let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let cookie = headers
+                .get(axum::http::header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let ws = Uuid::from_slice(&bytes).unwrap();
+            let bytes: Vec<u8> =
+                sqlx::query_scalar("SELECT id FROM users WHERE email='owner@example.invalid'")
+                    .fetch_one(&sqlite)
+                    .await
+                    .unwrap();
+            let actor = Uuid::from_slice(&bytes).unwrap();
+            Self {
+                root,
+                path,
+                pool: sqlite,
+                backend,
+                app,
+                cookie,
+                ws,
+                actor,
+            }
+        }
+        async fn member(&self, role: &str) -> (Uuid, String, Uuid) {
+            let user = Uuid::now_v7();
+            let session = Uuid::now_v7();
+            let token = fvoci_server::auth::token::new_token();
+            sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Peer')")
+                .bind(user.as_bytes().as_slice())
+                .bind(format!("{user}@example.invalid"))
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+                .bind(self.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .bind(role)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(session.as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(token.hash).execute(&self.pool).await.unwrap();
+            (user, token.token, session)
+        }
+        async fn call(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+            cookie: &str,
+        ) -> (StatusCode, Value) {
+            project_harness::json_request(self.app.clone(), method, path, body, Some(cookie)).await
+        }
+        async fn owner(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            self.call(method, path, body, &self.cookie).await
+        }
+        async fn document(&self, parent: Option<Uuid>) -> Uuid {
+            let id = Uuid::now_v7();
+            let path = if let Some(p) = parent {
+                let prefix: String = sqlx::query_scalar("SELECT path FROM documents WHERE id=?1")
+                    .bind(p.as_bytes().as_slice())
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap();
+                format!("{prefix}.{}", id.simple())
+            } else {
+                id.simple().to_string()
+            };
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Visible',?3,?4,'a',1,'published',1,?5,?6)").bind(id.as_bytes().as_slice()).bind(self.ws.as_bytes().as_slice()).bind(path).bind(parent.map(|id|id.as_bytes().to_vec())).bind(self.actor.as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared text"}]}]}).to_string()).execute(&self.pool).await.unwrap();
+            id
+        }
+        async fn foreign(&self) -> Uuid {
+            let id = Uuid::now_v7();
+            sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,'Foreign')")
+                .bind(id.as_bytes().as_slice())
+                .bind(id.simple().to_string())
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            id
+        }
+        async fn count(&self, table: &str) -> i64 {
+            let fresh = pool::connect_sqlite_app(&self.path, 1).await.unwrap();
+            let n = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            fresh.close().await;
+            n
+        }
+        async fn close(self) {
+            self.backend.close().await.unwrap();
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_groups_members_and_grants_enforce_current_authority() {
+        let f = Fixture::start().await;
+        let (guest, cookie, _) = f.member("guest").await;
+        let foreign = f.foreign().await;
+        let base = format!("/api/v1/workspaces/{}/groups", f.ws);
+        let (s, g) = f.owner("POST", &base, Some(json!({"name":"Team"}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{g}");
+        let group = g["id"].as_str().unwrap();
+        let members = format!("{base}/{group}/members");
+        let body = json!({"userId":guest});
+        assert_eq!(
+            f.owner("POST", &members, Some(body.clone())).await.0,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            f.owner("POST", &members, Some(body.clone())).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            f.owner("GET", &members, None).await.1["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let project = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'GROUP','Private','private',?3)").bind(project.as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.ws.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let wiki = f.document(None).await;
+        for (domain, target) in [("projects", project), ("documents", wiki)] {
+            let path = format!("/api/v1/workspaces/{}/{domain}/{target}/groups", f.ws);
+            assert_eq!(
+                f.call("GET", &path, None, &cookie).await.0,
+                StatusCode::NOT_FOUND
+            );
+            let grant = json!({"groupId":group,"role":"member"});
+            assert_eq!(
+                f.owner("POST", &path, Some(grant.clone())).await.0,
+                StatusCode::CREATED
+            );
+            assert_eq!(
+                f.owner("POST", &path, Some(grant.clone())).await.0,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                f.owner("GET", &path, None).await.1["items"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(f.call("GET", &path, None, &cookie).await.0, StatusCode::OK);
+            assert_eq!(
+                f.call("DELETE", &path, Some(json!({"groupId":group})), &cookie)
+                    .await
+                    .0,
+                StatusCode::NOT_FOUND
+            );
+            let other = format!("/api/v1/workspaces/{foreign}/{domain}/{target}/groups");
+            for method in ["GET", "POST", "DELETE"] {
+                assert_eq!(
+                    f.owner(
+                        method,
+                        &other,
+                        if method == "GET" {
+                            None
+                        } else {
+                            Some(grant.clone())
+                        }
+                    )
+                    .await
+                    .0,
+                    StatusCode::NOT_FOUND
+                );
+            }
+            assert_eq!(
+                f.owner("DELETE", &path, Some(json!({"groupId":group})))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+            assert_eq!(
+                f.call("GET", &path, None, &cookie).await.0,
+                StatusCode::NOT_FOUND
+            );
+        }
+        // A group can be the only lead; neither grant removal nor purge may orphan it.
+        assert_eq!(
+            f.owner("POST", &members, Some(json!({"userId":f.actor})))
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        sqlx::query("UPDATE project_members SET user_id=NULL,group_id=?1 WHERE project_id=?2")
+            .bind(Uuid::parse_str(group).unwrap().as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let path = format!("/api/v1/workspaces/{}/projects/{project}/groups", f.ws);
+        assert_eq!(
+            f.owner("DELETE", &path, Some(json!({"groupId":group})))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            f.owner("DELETE", &format!("{base}/{group}"), None).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(f.count("groups").await, 1);
+        sqlx::query("UPDATE projects SET visibility='workspace' WHERE id=?1")
+            .bind(project.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.owner("DELETE", &members, Some(body.clone())).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            f.owner("DELETE", &members, Some(body)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.owner("DELETE", &format!("{base}/{group}"), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(f.count("groups").await, 0);
+        f.close().await;
+    }
 }
