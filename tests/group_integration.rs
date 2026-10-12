@@ -2009,4 +2009,96 @@ mod sqlite_port {
         assert_eq!(f.count("groups").await, 0);
         f.close().await;
     }
+
+    // This binary runs in PostgreSQL shard b, which supplies FVOCI_COLLAB_ENGINE.
+    #[tokio::test]
+    async fn sqlite_active_room_closes_demoted_and_removed_members() {
+        use fvoci_server::collab::{
+            config::{CollabConfig, FamilyRoomTimings},
+            hub::CollabHub,
+            room::{AuthenticatedConnection, CollabSession, RoomJoin, RoomKey},
+        };
+        let f = Fixture::start().await;
+        let (demoted, _, demoted_session) = f.member("admin").await;
+        let (removed, _, removed_session) = f.member("member").await;
+        let (status, doc) = f
+            .owner(
+                "POST",
+                &format!("/api/v1/workspaces/{}/documents", f.ws),
+                Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"Room"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{doc}");
+        let document = Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap();
+        let key = RoomKey::document(f.ws, document);
+        let mut config = CollabConfig::from_env().expect("allocated built collab engine required");
+        config.revoke_poll_ms = 50;
+        config.revision_session_snapshot = false;
+        let hub = CollabHub::new_backend(
+            config,
+            f.backend.clone(),
+            Some(FamilyRoomTimings::new(30_000, 5_000).unwrap()),
+        )
+        .unwrap();
+        let mut peers = Vec::new();
+        for (index, (user, session)) in [(demoted, demoted_session), (removed, removed_session)]
+            .into_iter()
+            .enumerate()
+        {
+            let (events, receive) = tokio::sync::mpsc::channel(64);
+            let (cancel, cancelled) = tokio::sync::watch::channel(None);
+            let lease = hub
+                .join_room(
+                    key,
+                    RoomJoin {
+                        conn: AuthenticatedConnection {
+                            conn_id: Uuid::now_v7(),
+                            session: CollabSession {
+                                session_id: session,
+                                user_id: user,
+                                given_name: "Peer".into(),
+                                family_name: None,
+                                locale: "en".into(),
+                            },
+                            client_id: 701 + index as u32,
+                            read_only: false,
+                            routing_key: format!("{}:{document}", f.ws),
+                        },
+                        events,
+                        cancel: Some(cancel),
+                    },
+                )
+                .await
+                .unwrap();
+            peers.push((lease, receive, cancelled));
+        }
+        for (index, method, user, body) in [
+            (0, "PATCH", demoted, Some(json!({"role":"guest"}))),
+            (1, "DELETE", removed, None),
+        ] {
+            let (status, body) = f
+                .owner(
+                    method,
+                    &format!("/api/v1/workspaces/{}/members/{user}", f.ws),
+                    body,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let cancel = &mut peers[index].2;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if cancel.borrow().is_some() {
+                        break;
+                    }
+                    cancel.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("current membership must close the active room");
+            assert_eq!(cancel.borrow().as_ref().unwrap().code, 1008);
+        }
+        drop(peers);
+        assert!(hub.shutdown().await.is_clean());
+        f.close().await;
+    }
 }
