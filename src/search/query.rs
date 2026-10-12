@@ -343,6 +343,73 @@ pub async fn query_workspace_search(
     let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
     Ok(Ok(SearchResultPage { items, next_cursor }))
 }
+pub async fn query_workspace_search_backend(
+    pool: &Backend,
+    input: WorkspaceSearchRequest<'_>,
+) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
+    if let Backend::Postgres(pg) = pool {
+        return query_workspace_search(pg, input).await;
+    }
+
+    let mut prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => {
+            return Ok(Ok(SearchResultPage {
+                items: Vec::new(),
+                next_cursor: None,
+            }));
+        }
+        Err(err) => return Ok(Err(err)),
+    };
+
+    let (acl, cookie) = match family_workspace_search_acl(
+        pool,
+        input.workspace_id,
+        input.actor_user_id,
+        input.session_id,
+        input.project_id,
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
+    };
+    prepared.bibliographic_session = cookie;
+
+    if input.project_id.is_some() && acl.project_ids.is_empty() {
+        return Ok(Ok(SearchResultPage {
+            items: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+
+    let embedding = query_embedding(&input, &prepared).await;
+    let filters = search_filters(&input, &acl, embedding.is_some());
+    if let Some(cursor) = input.cursor {
+        if !cursor_matches(cursor, &filters) {
+            return Ok(Err(SearchQueryError::InvalidCursor));
+        }
+    }
+
+    let scanned = match embedding {
+        Some(vector) => {
+            hybrid_scan_backend(pool, input.meili, &input, &acl, &prepared, vector).await
+        }
+        None => scan_lexical_backend(pool, input.meili, &input, &acl, &prepared).await,
+    };
+    let scanned = match scanned {
+        Ok(page) => page,
+        // Meili failures are the 503 problem; a database failure stays an error.
+        Err(ScanError::Meili(error)) => {
+            tracing::warn!(error = %error, "meili search unavailable");
+            return Ok(Err(SearchQueryError::MeiliUnavailable));
+        }
+        Err(ScanError::Db(error)) => return Err(error),
+    };
+    let items = finish_items(input.workspace_id, &prepared, scanned.items);
+    let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
+    Ok(Ok(SearchResultPage { items, next_cursor }))
+}
 
 pub async fn query_global_search(
     pool: &PgPool,
@@ -394,6 +461,74 @@ pub async fn query_global_search(
         }
         Err(ScanError::Db(error)) => return Err(error),
     };
+    let items = finish_items_global(&prepared, scanned.items);
+    let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
+    Ok(Ok(SearchResultPage { items, next_cursor }))
+}
+pub async fn query_global_search_backend(
+    pool: &Backend,
+    input: GlobalSearchRequest<'_>,
+) -> Result<Result<SearchResultPage, SearchQueryError>, sqlx::Error> {
+    if let Backend::Postgres(pg) = pool {
+        return query_global_search(pg, input).await;
+    }
+
+    let mut prepared = match prepare_query(input.q, input.r#type, input.limit, input.cursor) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => {
+            return Ok(Ok(SearchResultPage {
+                items: Vec::new(),
+                next_cursor: None,
+            }));
+        }
+        Err(err) => return Ok(Err(err)),
+    };
+
+    let mut visible =
+        load_visible_acls_backend(pool, input.actor_user_id, input.session_id).await?;
+    if let Some(token_workspace_id) = input.token_workspace_id {
+        visible.retain(|entry| entry.workspace_id == token_workspace_id);
+    }
+    if visible.is_empty() {
+        return Ok(Ok(SearchResultPage {
+            items: Vec::new(),
+            next_cursor: None,
+        }));
+    }
+
+    let mut credential_tx = pool.begin_read().await?;
+    let result = async {
+        let DbTransaction::SqliteFamily(family) = &mut credential_tx else {
+            unreachable!()
+        };
+        family_cookie_live(family, input.actor_user_id, input.session_id).await
+    }
+    .await;
+    if let Err(cleanup) = credential_tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
+    prepared.bibliographic_session = result?;
+    let filters = global_search_filters(&input, &visible);
+    if let Some(cursor) = input.cursor {
+        if !cursor_matches(cursor, &filters) {
+            return Ok(Err(SearchQueryError::InvalidCursor));
+        }
+    }
+
+    let scanned =
+        match scan_lexical_global_backend(pool, input.meili, &input, &visible, &prepared).await {
+            Ok(page) => page,
+            Err(ScanError::Meili(error)) => {
+                tracing::warn!(error = %error, "meili search unavailable");
+                return Ok(Err(SearchQueryError::MeiliUnavailable));
+            }
+            Err(ScanError::Db(error)) => return Err(error),
+        };
     let items = finish_items_global(&prepared, scanned.items);
     let next_cursor = scanned.next_off.map(|off| encode_cursor(off, &filters));
     Ok(Ok(SearchResultPage { items, next_cursor }))
@@ -1900,6 +2035,651 @@ pub fn parse_snippet(html: &str) -> Vec<SnippetPiece> {
     }
     out.retain(|p| !p.text.is_empty());
     out
+}
+
+async fn scan_lexical_global_backend(
+    pool: &Backend,
+    meili: &MeiliConfig,
+    input: &GlobalSearchRequest<'_>,
+    visible: &[VisibleWorkspaceAcl],
+    prepared: &PreparedQuery,
+) -> Result<ScannedPage, ScanError> {
+    let workspace_ids: HashSet<String> = visible
+        .iter()
+        .map(|entry| entry.workspace_id.to_string())
+        .collect();
+    let scopes: Vec<MeiliSearchScope> = visible
+        .iter()
+        .map(|entry| meili_scope(entry.workspace_id, &entry.acl))
+        .collect();
+    let acl_by_ws: HashMap<Uuid, SearchAcl> = visible
+        .iter()
+        .map(|entry| (entry.workspace_id, entry.acl.clone()))
+        .collect();
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = prepared.offset;
+    let mut scanned = 0u32;
+    let mut pages = 0u32;
+    let t0 = Instant::now();
+    let mut meili_exhausted = false;
+
+    while items.len() < prepared.limit as usize
+        && scanned < MAX_CANDIDATES
+        && pages < MAX_MEILI_PAGES
+        && t0.elapsed().as_millis() < u128::from(MAX_SEARCH_MS)
+        && offset < MEILI_MAX_TOTAL_HITS
+    {
+        let want = MEILI_PAGE
+            .min(MEILI_MAX_TOTAL_HITS.saturating_sub(offset))
+            .min(MAX_CANDIDATES.saturating_sub(scanned));
+        if want == 0 {
+            break;
+        }
+        let res = search_current_fields(
+            prepared,
+            meili,
+            &MeiliSearchInput {
+                q: prepared.q.clone(),
+                stem: prepared.stem.clone(),
+                scopes: scopes.clone(),
+                kind: prepared.r#type.meili_kind(),
+                parent_kinds: input.allowed_kinds,
+                limit: want,
+                offset,
+            },
+        )
+        .await?;
+        pages += 1;
+        scanned += res.hits.len() as u32;
+        if res.hits.is_empty() {
+            meili_exhausted = true;
+            break;
+        }
+
+        let mut unique = Vec::new();
+        for (i, raw) in res.hits.iter().enumerate() {
+            if !accept_hit(raw, &workspace_ids, prepared.r#type) {
+                continue;
+            }
+            let key = format!(
+                "{}:{}",
+                raw.workspace_id,
+                hit_key(raw.kind, &raw.resource_id)
+            );
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            unique.push((key, raw.clone(), offset + i as u32));
+        }
+
+        let mut grouped: HashMap<Uuid, Vec<MeiliHit>> = HashMap::new();
+        for (_, hit, _) in &unique {
+            let Ok(workspace_id) = Uuid::parse_str(&hit.workspace_id) else {
+                continue;
+            };
+            grouped.entry(workspace_id).or_default().push(hit.clone());
+        }
+
+        let mut by_key = HashMap::new();
+        for (workspace_id, hits) in grouped {
+            let Some(acl) = acl_by_ws.get(&workspace_id) else {
+                continue;
+            };
+            let rows = hydrate_hits_for_workspace_backend(
+                pool,
+                workspace_id,
+                input.actor_user_id,
+                input.session_id,
+                HydrateFilters {
+                    project_id: None,
+                    tag: input.tag,
+                },
+                acl,
+                &hits,
+            )
+            .await
+            .map_err(ScanError::Db)?;
+            for row in rows {
+                by_key.insert(
+                    format!(
+                        "{workspace_id}:{}",
+                        hit_key(kind_of(row.r#type), &row.id.to_string())
+                    ),
+                    row,
+                );
+            }
+        }
+
+        let mut stopped_mid = false;
+        let mut next_off = offset + res.hits.len() as u32;
+        for (u, (key, hit, at)) in unique.iter().enumerate() {
+            let Some(row) = by_key.get(key) else {
+                continue;
+            };
+            if !parent_allowed(row, input.allowed_kinds) {
+                continue;
+            }
+            if items.len() >= prepared.limit as usize {
+                stopped_mid = true;
+                next_off = *at;
+                for rest in unique.iter().skip(u) {
+                    seen.remove(&rest.0);
+                }
+                break;
+            }
+            items.push((hit.clone(), row.clone()));
+        }
+        if stopped_mid {
+            return Ok(ScannedPage {
+                items,
+                next_off: Some(next_off),
+            });
+        }
+        match res.next_offset {
+            None => {
+                meili_exhausted = true;
+                break;
+            }
+            Some(next) => offset = next,
+        }
+    }
+
+    let next_off = if items.len() == prepared.limit as usize && !meili_exhausted {
+        Some(offset)
+    } else {
+        None
+    };
+    Ok(ScannedPage { items, next_off })
+}
+
+async fn scan_lexical_backend(
+    pool: &Backend,
+    meili: &MeiliConfig,
+    input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    prepared: &PreparedQuery,
+) -> Result<ScannedPage, ScanError> {
+    let workspace_ids = HashSet::from([input.workspace_id.to_string()]);
+    let scopes = [meili_scope(input.workspace_id, acl)];
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = prepared.offset;
+    let mut scanned = 0u32;
+    let mut pages = 0u32;
+    let t0 = Instant::now();
+    let mut meili_exhausted = false;
+
+    while items.len() < prepared.limit as usize
+        && scanned < MAX_CANDIDATES
+        && pages < MAX_MEILI_PAGES
+        && t0.elapsed().as_millis() < u128::from(MAX_SEARCH_MS)
+        && offset < MEILI_MAX_TOTAL_HITS
+    {
+        let want = MEILI_PAGE
+            .min(MEILI_MAX_TOTAL_HITS.saturating_sub(offset))
+            .min(MAX_CANDIDATES.saturating_sub(scanned));
+        if want == 0 {
+            break;
+        }
+        let res = search_current_fields(
+            prepared,
+            meili,
+            &MeiliSearchInput {
+                q: prepared.q.clone(),
+                stem: prepared.stem.clone(),
+                scopes: scopes.to_vec(),
+                kind: prepared.r#type.meili_kind(),
+                parent_kinds: input.allowed_kinds,
+                limit: want,
+                offset,
+            },
+        )
+        .await?;
+        pages += 1;
+        scanned += res.hits.len() as u32;
+        if res.hits.is_empty() {
+            meili_exhausted = true;
+            break;
+        }
+
+        let mut unique = Vec::new();
+        for (i, raw) in res.hits.iter().enumerate() {
+            if !accept_hit(raw, &workspace_ids, prepared.r#type) {
+                continue;
+            }
+            let key = hit_key(raw.kind, &raw.resource_id);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            unique.push((key, raw.clone(), offset + i as u32));
+        }
+
+        let hits: Vec<MeiliHit> = unique.iter().map(|(_, hit, _)| hit.clone()).collect();
+        let rows = hydrate_hits_backend(pool, input, acl, &hits)
+            .await
+            .map_err(ScanError::Db)?;
+        let mut by_key = HashMap::new();
+        for row in rows {
+            by_key.insert(hit_key(kind_of(row.r#type), &row.id.to_string()), row);
+        }
+
+        let mut stopped_mid = false;
+        let mut next_off = offset + res.hits.len() as u32;
+        for (u, (key, hit, at)) in unique.iter().enumerate() {
+            let Some(row) = by_key.get(key) else {
+                continue;
+            };
+            if !parent_allowed(row, input.allowed_kinds) {
+                continue;
+            }
+            if items.len() >= prepared.limit as usize {
+                stopped_mid = true;
+                next_off = *at;
+                for rest in unique.iter().skip(u) {
+                    seen.remove(&rest.0);
+                }
+                break;
+            }
+            items.push((hit.clone(), row.clone()));
+        }
+        if stopped_mid {
+            return Ok(ScannedPage {
+                items,
+                next_off: Some(next_off),
+            });
+        }
+        match res.next_offset {
+            None => {
+                meili_exhausted = true;
+                break;
+            }
+            Some(next) => offset = next,
+        }
+    }
+
+    let next_off = if items.len() == prepared.limit as usize && !meili_exhausted {
+        Some(offset)
+    } else {
+        None
+    };
+    Ok(ScannedPage { items, next_off })
+}
+
+async fn hybrid_scan_backend(
+    pool: &Backend,
+    meili: &MeiliConfig,
+    input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    prepared: &PreparedQuery,
+    embedding: Vec<f32>,
+) -> Result<ScannedPage, ScanError> {
+    let workspace_ids = HashSet::from([input.workspace_id.to_string()]);
+    let scope = meili_scope(input.workspace_id, acl);
+    let res = search_current_fields(
+        prepared,
+        meili,
+        &MeiliSearchInput {
+            q: prepared.q.clone(),
+            stem: prepared.stem.clone(),
+            scopes: vec![scope.clone()],
+            kind: prepared.r#type.meili_kind(),
+            parent_kinds: input.allowed_kinds,
+            limit: HYBRID_LEXICAL_K,
+            offset: 0,
+        },
+    )
+    .await?;
+    let mut lexical = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in res.hits {
+        if !accept_hit(&raw, &workspace_ids, prepared.r#type)
+            || !seen.insert(hit_key(raw.kind, &raw.resource_id))
+        {
+            continue;
+        }
+        lexical.push(raw);
+    }
+    let semantic = if matches!(
+        prepared.r#type,
+        SearchTypeFilter::All | SearchTypeFilter::Attachment
+    ) {
+        semantic_attachment_hits(
+            search_meili_vector(
+                meili,
+                &MeiliVectorSearchInput {
+                    vector: embedding,
+                    scopes: vec![scope],
+                    parent_kinds: input.allowed_kinds,
+                    limit: SEMANTIC_CHUNK_K,
+                },
+            )
+            .await?,
+            &workspace_ids,
+        )
+    } else {
+        Vec::new()
+    };
+    let fused = fuse_hybrid(lexical, semantic);
+    let offset = prepared.offset as usize;
+    if offset >= fused.len() {
+        return Ok(ScannedPage {
+            items: Vec::new(),
+            next_off: None,
+        });
+    }
+    let window = &fused[offset..];
+    let rows = hydrate_hits_backend(pool, input, acl, window)
+        .await
+        .map_err(ScanError::Db)?;
+    let mut by_key = HashMap::new();
+    for row in rows {
+        by_key.insert(hit_key(kind_of(row.r#type), &row.id.to_string()), row);
+    }
+    let mut items = Vec::new();
+    let mut i = 0usize;
+    while i < window.len() && items.len() < prepared.limit as usize {
+        let hit = &window[i];
+        i += 1;
+        if let Some(row) = by_key.get(&hit_key(hit.kind, &hit.resource_id)) {
+            if parent_allowed(row, input.allowed_kinds) {
+                items.push((hit.clone(), row.clone()));
+            }
+        }
+    }
+    let next = offset + i;
+    Ok(ScannedPage {
+        items,
+        next_off: (next < fused.len()).then_some(next as u32),
+    })
+}
+
+async fn hydrate_hits_backend(
+    pool: &Backend,
+    input: &WorkspaceSearchRequest<'_>,
+    acl: &SearchAcl,
+    hits: &[MeiliHit],
+) -> Result<Vec<HydratedRow>, sqlx::Error> {
+    hydrate_hits_for_workspace_backend(
+        pool,
+        input.workspace_id,
+        input.actor_user_id,
+        input.session_id,
+        HydrateFilters {
+            project_id: input.project_id,
+            tag: input.tag,
+        },
+        acl,
+        hits,
+    )
+    .await
+}
+
+use crate::db::backend::{Backend, DbTransaction, FamilyTx, OperationTx};
+use crate::db::codec::Cell;
+
+async fn family_cookie_live(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let rows=tx.query("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?2 AND s.user_id=?1 AND s.revoked_at IS NULL AND s.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000) AND u.deleted_at IS NULL AND u.suspended_at IS NULL)",&[Cell::uuid(actor),Cell::uuid(credential)]).await?;
+    rows.first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()
+}
+
+async fn family_personal_allowed(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: Uuid,
+) -> Result<(bool, bool), sqlx::Error> {
+    let rows=tx.query("SELECT w.kind,u.personal_workspace_id,m.role FROM workspaces w LEFT JOIN users u ON u.id=?2 LEFT JOIN memberships m ON m.workspace_id=w.id AND m.user_id=?2 WHERE w.id=?1 AND w.deleted_at IS NULL",&[Cell::uuid(ws),Cell::uuid(actor)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok((false, false));
+    };
+    let personal = row.cell(0)?.string()? == "personal";
+    Ok((
+        personal,
+        !personal
+            || (row.cell(1)?.optional(Cell::id)? == Some(ws)
+                && row.cell(2)?.optional(Cell::string)?.as_deref() == Some("owner")),
+    ))
+}
+
+pub(crate) async fn family_load_search_acl(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: Uuid,
+    role: WorkspaceRole,
+    project_filter: Option<Uuid>,
+) -> Result<SearchAcl, sqlx::Error> {
+    tx.require_tenant(ws)?;
+    let rows=tx.query("SELECT id FROM projects WHERE workspace_id=?1 AND deleted_at IS NULL ORDER BY key COLLATE BINARY",&[Cell::uuid(ws)]).await?;
+    let mut project_ids = Vec::new();
+    for row in rows {
+        let id = row.cell(0)?.id()?;
+        if OperationTx::SqliteFamily(&mut *tx)
+            .project_permission_by_id(ws, actor, id)
+            .await?
+            .is_some_and(|p| p.at_least(ProjectPermission::View))
+        {
+            project_ids.push(id);
+        }
+    }
+    let mut wiki_document_ids = Vec::new();
+    if role == WorkspaceRole::Guest {
+        let rows=tx.query("SELECT id FROM documents WHERE workspace_id=?1 AND project_id IS NULL AND deleted_at IS NULL ORDER BY id",&[Cell::uuid(ws)]).await?;
+        for row in rows {
+            let id = row.cell(0)?.id()?;
+            if OperationTx::SqliteFamily(&mut *tx)
+                .document_permission(ws, actor, id, true)
+                .await?
+                .at_least(ProjectPermission::View)
+            {
+                wiki_document_ids.push(id);
+            }
+        }
+    }
+    Ok(restrict_search_acl(
+        SearchAcl {
+            project_ids,
+            include_wiki: role != WorkspaceRole::Guest,
+            wiki_document_ids,
+        },
+        project_filter,
+    ))
+}
+
+async fn family_workspace_search_acl(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    project: Option<Uuid>,
+) -> Result<Result<(SearchAcl, bool), SearchQueryError>, sqlx::Error> {
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(ws).await?;
+        if !op.session_is_live(actor, credential).await? {
+            return Ok(Err(SearchQueryError::Forbidden));
+        }
+        if !op.workspace_is_live(ws).await? {
+            return Ok(Err(SearchQueryError::NotFound));
+        }
+        let Some(role) = op.membership_role(ws, actor, false).await? else {
+            return Ok(Err(SearchQueryError::NotFound));
+        };
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let (personal, allowed) = family_personal_allowed(family, ws, actor).await?;
+        if !allowed {
+            return Ok(Err(SearchQueryError::NotFound));
+        }
+        let cookie = personal && family_cookie_live(family, actor, credential).await?;
+        Ok(Ok((
+            family_load_search_acl(family, ws, actor, role, project).await?,
+            cookie,
+        )))
+    }
+    .await;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            match result {
+                Err(error) => Some(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+                Ok(Err(refusal)) => Some(Box::new(sqlx::Error::Protocol(format!(
+                    "search refusal: {refusal:?}"
+                )))
+                    as Box<dyn std::error::Error + Send + Sync>),
+                Ok(Ok(_)) => None,
+            },
+            cleanup,
+        ));
+    }
+    result
+}
+
+async fn load_visible_acls_backend(
+    backend: &Backend,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Vec<VisibleWorkspaceAcl>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return load_visible_acls(pool, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_system().await?;
+        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+        family.query("SELECT w.id FROM workspaces w JOIN memberships m ON m.workspace_id=w.id WHERE m.user_id=?1 AND w.deleted_at IS NULL ORDER BY w.slug,w.id",&[Cell::uuid(actor_user_id)]).await?.iter().map(|r|r.cell(0)?.id()).collect::<Result<Vec<_>,sqlx::Error>>()
+    }.await;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
+    let mut visible = Vec::new();
+    for workspace_id in result? {
+        // Every ACL has its own tenant context, just as the PG loop.
+        if let Ok((acl, _)) =
+            family_workspace_search_acl(backend, workspace_id, actor_user_id, session_id, None)
+                .await?
+        {
+            visible.push(VisibleWorkspaceAcl { workspace_id, acl });
+        }
+    }
+    Ok(visible)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_visible_after_hydrate(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: Uuid,
+    project_filter: Option<Uuid>,
+    acl: &SearchAcl,
+    project: Option<Uuid>,
+    document: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    if project_filter.is_some() && project_filter != project {
+        return Ok(false);
+    }
+    Ok(match project {
+        Some(id) => {
+            acl.project_ids.contains(&id)
+                && OperationTx::SqliteFamily(tx)
+                    .project_permission_by_id(ws, actor, id)
+                    .await?
+                    .is_some_and(|p| p.at_least(ProjectPermission::View))
+        }
+        None => match document {
+            Some(id) => {
+                (acl.include_wiki || acl.wiki_document_ids.contains(&id))
+                    && OperationTx::SqliteFamily(tx)
+                        .document_permission(ws, actor, id, true)
+                        .await?
+                        .at_least(ProjectPermission::View)
+            }
+            None => false,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hydrate_hits_for_workspace_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    filters: HydrateFilters,
+    acl: &SearchAcl,
+    hits: &[MeiliHit],
+) -> Result<Vec<HydratedRow>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return hydrate_hits_for_workspace(pool, ws, actor, credential, filters, acl, hits).await;
+    }
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(ws).await?;
+        if !op.session_is_live(actor,credential).await?||!op.workspace_is_live(ws).await?||op.membership_role(ws,actor,false).await?.is_none(){return Ok(Vec::new());}
+        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+        if !family_personal_allowed(family,ws,actor).await?.1 {return Ok(Vec::new());}
+        let mut loaded=HashMap::new();
+        for kind in [SearchSourceKind::Document,SearchSourceKind::Task,SearchSourceKind::Attachment,SearchSourceKind::Comment] {
+            if filters.tag.is_some()&&matches!(kind,SearchSourceKind::Attachment|SearchSourceKind::Comment){continue;}
+            let ids:Vec<_>=hits.iter().filter(|h|h.kind==kind).filter_map(|h|Uuid::parse_str(&h.resource_id).ok()).collect();
+            if ids.is_empty(){continue;}
+            let sql=match kind {
+                SearchSourceKind::Document=>"SELECT d.id,d.title,d.text,d.project_id,d.id,NULL,d.number,d.updated_at,p.key,NULL FROM documents d LEFT JOIN projects p ON p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL WHERE d.workspace_id=?1 AND hex(d.id) IN (SELECT value FROM json_each(?2)) AND d.deleted_at IS NULL AND d.status<>'archived' AND (?3 IS NULL OR EXISTS(SELECT 1 FROM document_tag_assignments a WHERE a.workspace_id=d.workspace_id AND a.document_id=d.id AND a.tag_id=?3))",
+                SearchSourceKind::Task=>"SELECT t.id,t.title,t.title,t.project_id,NULL,t.id,t.number,t.updated_at,p.key,NULL FROM tasks t LEFT JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND hex(t.id) IN (SELECT value FROM json_each(?2)) AND t.deleted_at IS NULL AND t.archived_at IS NULL AND (?3 IS NULL OR 1)",
+                SearchSourceKind::Attachment=>"SELECT a.id,a.name,a.extract_text,a.extract_status,a.document_id,a.task_id FROM attachments a WHERE a.workspace_id=?1 AND hex(a.id) IN (SELECT value FROM json_each(?2)) AND a.status='stored' AND a.scan_status<>'infected' AND (?3 IS NULL OR 1)",
+                SearchSourceKind::Comment=>"SELECT a.id,NULL,a.body,NULL,a.document_id,a.task_id FROM comments a WHERE a.workspace_id=?1 AND hex(a.id) IN (SELECT value FROM json_each(?2)) AND (?3 IS NULL OR 1)",
+            };
+            let rows=family.query(sql,&[Cell::uuid(ws),crate::db::view_query::selected_ids(&ids),Cell::optional_uuid(filters.tag)]).await?;
+            for r in rows {
+                let id=r.cell(0)?.id()?;
+                let mut row=if matches!(kind,SearchSourceKind::Document|SearchSourceKind::Task) {
+                    HydratedRow {r#type:if kind==SearchSourceKind::Document{SearchTypeFilter::Document}else{SearchTypeFilter::Task},id,title:r.cell(1)?.string()?,body:r.cell(2)?.string()?,project_id:r.cell(3)?.optional(Cell::id)?,document_id:r.cell(4)?.optional(Cell::id)?,task_id:r.cell(5)?.optional(Cell::id)?,number:Some(r.cell(6)?.int32()?),updated_at:r.cell(7)?.datetime()?,project_key:r.cell(8)?.optional(Cell::string)?,extract_status:None}
+                } else {
+                    let doc=r.cell(4)?.optional(Cell::id)?;let task=r.cell(5)?.optional(Cell::id)?;
+                    let (table,parent)=match (doc,task){(Some(id),_)=>("documents",id),(_,Some(id))=>("tasks",id),_=>continue};
+                    let _live=if doc.is_some(){"r.status<>'archived'"}else{"r.archived_at IS NULL"};
+                    let parent_rows=family.query(match table {"tasks"=>"SELECT r.project_id,r.title,r.number,p.key FROM tasks r LEFT JOIN projects p ON p.workspace_id=r.workspace_id AND p.id=r.project_id AND p.deleted_at IS NULL WHERE r.workspace_id=?1 AND r.id=?2 AND r.deleted_at IS NULL AND r.archived_at IS NULL",_=>"SELECT r.project_id,r.title,r.number,p.key FROM documents r LEFT JOIN projects p ON p.workspace_id=r.workspace_id AND p.id=r.project_id AND p.deleted_at IS NULL WHERE r.workspace_id=?1 AND r.id=?2 AND r.deleted_at IS NULL AND r.status<>'archived'"},&[Cell::uuid(ws),Cell::uuid(parent)]).await?;
+                    let Some(p)=parent_rows.first() else {continue;};
+                    let stamp_table=if kind==SearchSourceKind::Attachment{"attachments"}else{"comments"};let _stamp_column=if kind==SearchSourceKind::Attachment{"created_at"}else{"updated_at"};
+                    let stamps=family.query(match stamp_table {"attachments"=>"SELECT created_at FROM attachments WHERE workspace_id=?1 AND id=?2",_=>"SELECT updated_at FROM comments WHERE workspace_id=?1 AND id=?2"},&[Cell::uuid(ws),Cell::uuid(id)]).await?;
+                    HydratedRow {r#type:if kind==SearchSourceKind::Attachment{SearchTypeFilter::Attachment}else{SearchTypeFilter::Comment},id,title:if kind==SearchSourceKind::Attachment{r.cell(1)?.string()?}else{p.cell(1)?.string()?},body:r.cell(2)?.string()?,project_id:p.cell(0)?.optional(Cell::id)?,document_id:doc,task_id:task,number:Some(p.cell(2)?.int32()?),project_key:p.cell(3)?.optional(Cell::string)?,extract_status:r.cell(3)?.optional(Cell::string)?,updated_at:stamps.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.datetime()?}
+                };
+                if !family_visible_after_hydrate(family,ws,actor,filters.project_id,acl,row.project_id,row.document_id).await?{continue;}
+                row.updated_at=DateTime::from_timestamp_micros(row.updated_at.timestamp_micros().div_euclid(1000)*1000).ok_or_else(||sqlx::Error::Protocol("search timestamp out of range".into()))?;
+                if kind==SearchSourceKind::Document&&family_cookie_live(family,actor,credential).await? {
+                    let metadata=family.query("SELECT r.bibliography FROM zotero_references r JOIN users u ON u.id=r.owner_user_id AND u.personal_workspace_id=r.workspace_id AND u.deleted_at IS NULL JOIN workspaces w ON w.id=r.workspace_id AND w.kind='personal' AND w.deleted_at IS NULL JOIN memberships m ON m.workspace_id=r.workspace_id AND m.user_id=r.owner_user_id AND m.role='owner' WHERE r.workspace_id=?1 AND r.document_id=?2 AND r.owner_user_id=?3",&[Cell::uuid(ws),Cell::uuid(id),Cell::uuid(actor)]).await?;
+                    if let Some(m)=metadata.first(){let text=crate::db::zotero::bibliographic_text(m.cell(0)?.value()?);if !text.is_empty(){row.body.push('\n');row.body.push_str(&text);}}
+                }
+                loaded.insert(hit_key(kind,&id.to_string()),row);
+            }
+        }
+        let mut seen=HashSet::new();
+        Ok(hits.iter().filter_map(|h|{let key=hit_key(h.kind,&h.resource_id);if seen.insert(key.clone()){loaded.get(&key).cloned()}else{None}}).collect())
+    }.await;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
+    result
 }
 
 #[cfg(test)]

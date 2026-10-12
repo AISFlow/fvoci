@@ -27,10 +27,11 @@ use crate::collections::{
     iso_millis, parse_attach, parse_collection_create, parse_collection_view, parse_field_create,
     parse_field_patch, parse_query_input, parse_value_input, AttachTarget,
 };
-use crate::db::collection_query::{query_collection, QueryRow};
+use crate::db::collection_query::{query_collection_backend, QueryRow};
 use crate::db::collections::{
-    attach_item, create_collection, create_field, item_for_target, list_collections, list_fields,
-    list_views, patch_field, project_collection, put_value, remove_view, save_view, Actor,
+    attach_item_backend, create_collection_backend, create_field_backend, item_for_target_backend,
+    list_collections_backend, list_fields_backend, list_views_backend, patch_field_backend,
+    project_collection_backend, put_value_backend, remove_view_backend, save_view_backend, Actor,
     CollectionDbError, CollectionRow, CollectionViewRow, FieldRow, ItemRow,
 };
 use crate::error::{AppError, ProblemCode};
@@ -322,19 +323,10 @@ async fn list_route(
         None,
     )
     .await?;
-    let items = list_collections(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let items = list_collections_backend(&state.auth.db.pool, workspace_id, &actor)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok(Json(CollectionListResponse {
         items: items.into_iter().map(collection_output).collect(),
     }))
@@ -359,20 +351,10 @@ async fn create_route(
     )
     .await?;
     let input = parse_collection_create(&json_body(body)?).map_err(|_| invalid())?;
-    let row = create_collection(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        &input,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let row = create_collection_backend(&state.auth.db.pool, workspace_id, &actor, &input)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok((StatusCode::CREATED, Json(collection_output(row))).into_response())
 }
 
@@ -391,20 +373,10 @@ async fn fields_route(
         None,
     )
     .await?;
-    let fields = list_fields(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        collection_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let fields = list_fields_backend(&state.auth.db.pool, workspace_id, &actor, collection_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok(Json(CollectionFieldListResponse {
         items: fields.into_iter().map(field_output).collect(),
     }))
@@ -429,13 +401,8 @@ async fn create_field_route(
     )
     .await?;
     let input = parse_field_create(&json_body(body)?).map_err(|_| invalid())?;
-    let field = create_field(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let field = create_field_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -466,13 +433,8 @@ async fn patch_field_route(
     )
     .await?;
     let input = parse_field_patch(&json_body(body)?).map_err(|_| invalid())?;
-    let field = patch_field(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let field = patch_field_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -503,13 +465,8 @@ async fn attach_route(
     )
     .await?;
     let target = parse_attach(&json_body(body)?).map_err(|_| invalid())?;
-    let item = attach_item(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let item = attach_item_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -539,13 +496,8 @@ async fn put_value_route(
     )
     .await?;
     let input = parse_value_input(&json_body(body)?).map_err(|_| invalid())?;
-    let version = put_value(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let version = put_value_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -575,13 +527,8 @@ async fn query_route(
     )
     .await?;
     let input = parse_query_input(&json_body(body)?).map_err(|_| invalid())?;
-    let result = query_collection(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let result = query_collection_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -633,20 +580,10 @@ async fn views_route(
         None,
     )
     .await?;
-    let list = list_views(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        collection_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let list = list_views_backend(&state.auth.db.pool, workspace_id, &actor, collection_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok(Json(CollectionViewListResponse {
         can_save: list.can_save,
         can_manage: list.can_manage,
@@ -673,13 +610,8 @@ async fn create_view_route(
     )
     .await?;
     let input = parse_collection_view(&json_body(body)?, false).map_err(|_| invalid())?;
-    let view = save_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let view = save_view_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -711,13 +643,8 @@ async fn update_view_route(
     )
     .await?;
     let input = parse_collection_view(&json_body(body)?, true).map_err(|_| invalid())?;
-    let view = save_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    let view = save_view_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -747,13 +674,8 @@ async fn remove_view_route(
         Some(peer),
     )
     .await?;
-    remove_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
+    remove_view_backend(
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         collection_id,
@@ -781,20 +703,10 @@ async fn item_lookup(
         None,
     )
     .await?;
-    let lookup = item_for_target(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        target,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let lookup = item_for_target_backend(&state.auth.db.pool, workspace_id, &actor, target)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok(Json(CollectionItemLookupResponse {
         item: lookup.item.map(item_output),
         values: values_object(lookup.values),
@@ -849,20 +761,10 @@ async fn project_collection_route(
         None,
     )
     .await?;
-    let found = project_collection(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/collections.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        project_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let found = project_collection_backend(&state.auth.db.pool, workspace_id, &actor, project_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     let base = collection_output(found.collection);
     Ok(Json(ProjectCollectionOutput {
         id: base.id,

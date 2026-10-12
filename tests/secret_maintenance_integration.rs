@@ -477,3 +477,109 @@ async fn vapid_replace_is_a_system_only_compare_and_set() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+mod sqlite_data_secrets {
+    use super::*;
+    use fvoci_server::db::{migrate, pool};
+
+    #[tokio::test]
+    async fn sqlite_verify_secrets_cli_counts_aad_missing_keys_and_redaction() {
+        let root = std::env::temp_dir().join(format!("fvoci-data-secrets-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("secrets.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let db = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let user = Uuid::now_v7();
+        let ws = Uuid::now_v7();
+        let webhook = Uuid::now_v7();
+        let keys = ring(&[("k1", K1_HEX)], "k1");
+        sqlx::query(
+            "INSERT INTO users(id,email,given_name) VALUES(?1,'secrets@example.invalid','Secrets')",
+        )
+        .bind(user.as_bytes().as_slice())
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,'secrets','Secrets')")
+            .bind(ws.as_bytes().as_slice())
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')")
+            .bind(ws.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&db)
+            .await
+            .unwrap();
+        let totp = secret_box::seal(&keys, TOTP_SECRET, &user_mfa_context(user)).unwrap();
+        sqlx::query("INSERT INTO user_mfa(user_id,totp_secret) VALUES(?1,?2)")
+            .bind(user.as_bytes().as_slice())
+            .bind(&totp)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspace_oidc(id,workspace_id,issuer,client_id,client_secret) VALUES(?1,?2,'https://example.invalid','client',?3)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(secret_box::seal(&keys,SSO_SECRET,&workspace_oidc_context(ws)).unwrap()).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO webhooks(id,workspace_id,url,secret,events,created_by) VALUES(?1,?2,'https://example.invalid',?3,'[\"document.created\"]',?4)").bind(webhook.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(secret_box::seal(&keys,WEBHOOK_A,&webhook_secret_context(ws,webhook)).unwrap()).bind(user.as_bytes().as_slice()).execute(&db).await.unwrap();
+        sqlx::query("UPDATE instance_config SET vapid_private_key=?1 WHERE id=1")
+            .bind(
+                secret_box::seal(&keys, "vapid-private", fvoci_server::push::vapid_context())
+                    .unwrap(),
+            )
+            .execute(&db)
+            .await
+            .unwrap();
+        for (missing, corrupt) in [(false, false), (true, false), (false, true)] {
+            if corrupt {
+                sqlx::query("UPDATE user_mfa SET totp_secret=?1 WHERE user_id=?2")
+                    .bind(
+                        secret_box::seal(&keys, TOTP_SECRET, &user_mfa_context(Uuid::now_v7()))
+                            .unwrap(),
+                    )
+                    .bind(user.as_bytes().as_slice())
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_fvoci-migrate"));
+            cmd.arg("--verify-secrets")
+                .env_clear()
+                .env("FVOCI_DATABASE_BACKEND", "sqlite")
+                .env("FVOCI_SQLITE_PATH", &path);
+            if !missing {
+                cmd.env("ENCRYPTION_KEYS", ring_json(&[("k1", K1_HEX)]))
+                    .env("ENCRYPTION_ACTIVE_KEY_ID", "k1");
+            }
+            let out = cmd.output().await.unwrap();
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            let stderr = String::from_utf8(out.stderr).unwrap();
+            let report: Value = serde_json::from_str(stdout.trim()).unwrap();
+            let run = Run {
+                ok: out.status.success(),
+                report,
+                output: format!("{stdout}{stderr}"),
+            };
+            assert_no_secrets(&run);
+            assert!(!run.output.contains("vapid-private"));
+            assert!(!run.output.contains(path.to_str().unwrap()));
+            assert_eq!(run.ok, !missing && !corrupt, "{}", run.output);
+            for table in ["userMfa", "workspaceOidc", "webhooks", "vapid"] {
+                assert_eq!(run.report[table]["checked"], 1);
+            }
+            if missing {
+                assert_eq!(run.report["userMfa"]["keyUnavailable"], json!([user]));
+            }
+            if corrupt {
+                assert_eq!(run.report["userMfa"]["invalid"], json!([user]));
+            }
+        }
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(events, 0);
+        fresh.close().await;
+        db.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

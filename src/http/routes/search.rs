@@ -20,8 +20,8 @@ use crate::http::routes::projects::map_project_error;
 use crate::http::state::AppState;
 use crate::search::meili::ParentKinds;
 use crate::search::query::{
-    query_global_search, query_workspace_search, GlobalSearchRequest, SearchQueryError,
-    SearchResultItem, SearchTypeFilter, WorkspaceSearchRequest,
+    query_global_search_backend, query_workspace_search_backend, GlobalSearchRequest,
+    SearchQueryError, SearchResultItem, SearchTypeFilter, WorkspaceSearchRequest,
 };
 
 const SEARCH_IP_LIMIT: u32 = 120;
@@ -187,13 +187,8 @@ async fn global_search(
     let Some(meili) = state.meili.as_ref() else {
         return Err(search_unavailable());
     };
-    let result = query_global_search(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/search.rs")
-            .map_err(internal)?,
+    let result = query_global_search_backend(
+        &state.auth.db.pool,
         GlobalSearchRequest {
             actor_user_id,
             session_id,
@@ -292,13 +287,8 @@ async fn workspace_search(
     let Some(meili) = state.meili.as_ref() else {
         return Err(search_unavailable());
     };
-    let result = query_workspace_search(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/search.rs")
-            .map_err(internal)?,
+    let result = query_workspace_search_backend(
+        &state.auth.db.pool,
         WorkspaceSearchRequest {
             workspace_id,
             actor_user_id,

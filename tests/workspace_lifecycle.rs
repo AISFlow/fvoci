@@ -2360,3 +2360,233 @@ mod sqlite_port {
         f.close().await;
     }
 }
+
+mod sqlite_data_port {
+    use super::*;
+    use fvoci_server::auth::{password::Keyring, service::SetupInstanceInput, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use serde_json::Value;
+    use std::sync::Arc;
+    async fn fixture() -> (
+        std::path::PathBuf,
+        sqlx::SqlitePool,
+        axum::Router,
+        String,
+        Uuid,
+        Uuid,
+    ) {
+        let root = std::env::temp_dir().join(format!("fvoci-data-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.as_path().join("data.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (user, ws, token) = auth
+            .setup_instance(
+                "Data-Oracle-2026!".into(),
+                SetupInstanceInput {
+                    email: "data@example.invalid".into(),
+                    given_name: "Data".into(),
+                    family_name: None,
+                    workspace_slug: "data-oracle".into(),
+                    workspace_name: "Data oracle".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let state = AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::On,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.as_path().join("storage"))
+                .into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        };
+        (
+            root,
+            sqlite,
+            fvoci_server::http::router(state, None),
+            token,
+            user,
+            ws,
+        )
+    }
+
+    #[tokio::test]
+    async fn sqlite_export_events_snapshot_readback_and_denial() {
+        let (root, db, app, cookie, actor, ws) = fixture().await;
+        let doc = Uuid::now_v7();
+        sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json,text) VALUES(?1,?2,'Portable wiki',?3,'a',1,'published',2,?4,?5,'export marker')").bind(doc.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(actor.as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"export marker"}]}]}).to_string()).execute(&db).await.unwrap();
+        let private = Uuid::now_v7();
+        sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'HIDDEN','Hidden','private',?3)").bind(private.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&db).await.unwrap();
+        let event_ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+        let mut event_tx = db.begin().await.unwrap();
+        sqlx::query("DELETE FROM events")
+            .execute(&mut *event_tx)
+            .await
+            .unwrap();
+        for (index, project) in [None, Some(private), None].into_iter().enumerate() {
+            sqlx::query("UPDATE event_sequence SET last_seq=last_seq+1 WHERE id=1")
+                .execute(&mut *event_tx)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO events(id,workspace_id,verb,target_type,target_id,payload,seq) VALUES(?1,?2,'document.created','document',?3,?4,(SELECT last_seq FROM event_sequence WHERE id=1))").bind(event_ids[index].as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.as_bytes().as_slice()).bind(project.map(|id|json!({"projectId":id})).unwrap_or(json!({"documentId":doc})).to_string()).execute(&mut *event_tx).await.unwrap();
+        }
+        event_tx.commit().await.unwrap();
+        let base = format!("/api/v1/workspaces/{ws}");
+        let (status, page) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/events?limit=1"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        let cursor = page["nextCursor"].as_str().unwrap();
+        let (status, second) = json_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/events?limit=1&cursor={cursor}"),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], event_ids[0].to_string());
+        assert_eq!(second["items"][0]["id"], event_ids[2].to_string());
+        assert_ne!(page["items"][0]["id"], second["items"][0]["id"]);
+        let (status, bytes, _) = bytes_request(
+            app.clone(),
+            "GET",
+            &format!("{base}/export"),
+            Some(&cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        zip_check::external_zip_check(&bytes);
+        let workspace: Value =
+            serde_json::from_slice(&read_zip_entry(&bytes, "workspace.json").unwrap()).unwrap();
+        assert_eq!(workspace["id"], ws.to_string());
+        assert_eq!(workspace["excludedPrivateProjectCount"], 1);
+        let documents: Value =
+            serde_json::from_slice(&read_zip_entry(&bytes, "documents.json").unwrap()).unwrap();
+        assert_eq!(documents.as_array().unwrap().len(), 1);
+        assert_eq!(documents[0]["id"], doc.to_string());
+        assert_eq!(documents[0]["title"], "Portable wiki");
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let credential: Vec<u8> =
+            sqlx::query_scalar("SELECT id FROM sessions WHERE user_id=?1 AND revoked_at IS NULL")
+                .bind(actor.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        let backend = Backend::Sqlite(fresh.clone());
+        assert!(
+            fvoci_server::db::workspace_export::recheck_document_delivery_backend(
+                &backend,
+                ws,
+                actor,
+                Uuid::from_slice(&credential).unwrap(),
+                doc,
+                None
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(ws.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&db)
+            .await
+            .unwrap();
+        for route in ["events", "export"] {
+            let (status, _, _) = bytes_request(
+                app.clone(),
+                "GET",
+                &format!("{base}/{route}"),
+                Some(&cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                if route == "export" {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+        assert!(
+            fvoci_server::db::workspace_export::recheck_document_delivery_backend(
+                &backend,
+                ws,
+                actor,
+                Uuid::from_slice(&credential).unwrap(),
+                doc,
+                None
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            before
+        );
+        fresh.close().await;
+        db.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

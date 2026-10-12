@@ -2470,7 +2470,7 @@ struct ProjectTasksReadRefusal(ProjectDbError);
 
 /// Exact typed values; decimal text is never cast to REAL or an integer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum TaskScalar {
+pub(crate) enum TaskScalar {
     Text(String),
     Number(bigdecimal::BigDecimal),
     Date(NaiveDate),
@@ -2480,7 +2480,7 @@ enum TaskScalar {
 }
 
 impl TaskScalar {
-    fn from_policy(policy: &ScalarPolicy) -> Result<Self, sqlx::Error> {
+    pub(crate) fn from_policy(policy: &ScalarPolicy) -> Result<Self, sqlx::Error> {
         Ok(match policy {
             ScalarPolicy::Text(value) => Self::Text(value.clone()),
             ScalarPolicy::Number(value) => Self::Number(decimal_value(value)?),
@@ -2511,20 +2511,20 @@ fn task_query_instant(at: DateTime<Utc>) -> Result<DateTime<Utc>, sqlx::Error> {
         .ok_or_else(|| sqlx::Error::Protocol("Task query instant out of range".into()))
 }
 
-fn decimal_value(value: &str) -> Result<bigdecimal::BigDecimal, sqlx::Error> {
+pub(crate) fn decimal_value(value: &str) -> Result<bigdecimal::BigDecimal, sqlx::Error> {
     bigdecimal::BigDecimal::from_str(value)
         .map_err(|_| sqlx::Error::Protocol("invalid stored Task decimal".into()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TaskOrderCell {
-    value: Option<TaskScalar>,
-    desc: bool,
+pub(crate) struct TaskOrderCell {
+    pub(crate) value: Option<TaskScalar>,
+    pub(crate) desc: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TaskPageKey {
-    cells: Vec<TaskOrderCell>,
-    id: Uuid,
+pub(crate) struct TaskPageKey {
+    pub(crate) cells: Vec<TaskOrderCell>,
+    pub(crate) id: Uuid,
 }
 
 fn task_scalar_error(message: &'static str) -> sqlx::Error {
@@ -3018,12 +3018,12 @@ impl TaskProjection {
     }
 }
 
-struct TaskTimeZone {
-    name: String,
+pub(crate) struct TaskTimeZone {
+    pub(crate) name: String,
     zone: tz::TimeZone,
 }
 impl TaskTimeZone {
-    fn from_name(name: &str) -> Result<Self, sqlx::Error> {
+    pub(crate) fn from_name(name: &str) -> Result<Self, sqlx::Error> {
         let profile = TaskScalarProfile::compiled()?;
         // Exact PG catalog admission, including its real configured aliases;
         // only unknown/case-mismatched names retain the original UTC fallback.
@@ -3043,7 +3043,7 @@ impl TaskTimeZone {
             zone,
         })
     }
-    fn date(&self, at: DateTime<Utc>) -> Result<NaiveDate, sqlx::Error> {
+    pub(crate) fn date(&self, at: DateTime<Utc>) -> Result<NaiveDate, sqlx::Error> {
         let local = tz::DateTime::from_timespec(
             at.timestamp(),
             at.timestamp_subsec_nanos(),
@@ -9725,4 +9725,79 @@ mod task_patch_instant_tests {
             assert_eq!(original.as_slice(), normalized.as_slice());
         }
     }
+}
+
+// Collection calendar projection uses the same sealed TZif data. It does not
+// require a GNU locale receipt because date arithmetic never calls collation.
+pub(crate) fn family_collection_zone_known(name: &str) -> Result<bool, sqlx::Error> {
+    Ok(TaskScalarProfile::compiled()?
+        .zones
+        .binary_search_by(|z| z.name.as_str().cmp(name))
+        .is_ok())
+}
+pub(crate) fn family_collection_compare(
+    left: &TaskPageKey,
+    right: &TaskPageKey,
+    sort: &[ViewSort],
+) -> Result<Ordering, sqlx::Error> {
+    if left.cells.len() != sort.len() || right.cells.len() != sort.len() {
+        return Err(task_scalar_error("collection scalar sort plan mismatch"));
+    }
+    // Custom text follows PG's qualified collation. Title, rank and status
+    // sort keys explicitly use COLLATE C in the shared PG query compiler.
+    let locale_needed = left
+        .cells
+        .iter()
+        .zip(&right.cells)
+        .zip(sort)
+        .any(|((a, b), term)| {
+            matches!(term.field, SortField::Field(_))
+                && matches!(
+                    (&a.value, &b.value),
+                    (Some(TaskScalar::Text(_)), _) | (_, Some(TaskScalar::Text(_)))
+                )
+        });
+    let locale = if locale_needed {
+        Some(TaskTextLocale::for_profile(TaskScalarProfile::compiled()?)?)
+    } else {
+        None
+    };
+    for ((a, b), term) in left.cells.iter().zip(&right.cells).zip(sort) {
+        let desc = term.direction == SortDirection::Desc;
+        if a.desc != desc || b.desc != desc {
+            return Err(task_scalar_error(
+                "collection scalar sort direction mismatch",
+            ));
+        }
+        let order = match (&a.value, &b.value) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(a), Some(b)) => {
+                if std::mem::discriminant(a) != std::mem::discriminant(b) {
+                    return Err(task_scalar_error("collection scalar sort type mismatch"));
+                }
+                let order = match (a, b) {
+                    (TaskScalar::Text(a), TaskScalar::Text(b))
+                        if matches!(term.field, SortField::Field(_)) =>
+                    {
+                        locale
+                            .as_ref()
+                            .ok_or_else(|| task_scalar_error("collection locale unavailable"))?
+                            .compare(a, b)?
+                    }
+                    _ => a.cmp(b),
+                };
+                if desc {
+                    order.reverse()
+                } else {
+                    order
+                }
+            }
+        };
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    Ok(left.id.cmp(&right.id))
 }
