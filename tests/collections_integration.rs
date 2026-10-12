@@ -3212,6 +3212,9 @@ mod sqlite_port_data {
         let (status, cleared) = put_value(&app, &cookie, ws, id, &item, &points, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{cleared}");
         item["version"] = cleared["version"].clone();
+        let cleared_client = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM collection_values WHERE item_id=?1 AND field_id=?2"
@@ -3228,11 +3231,12 @@ mod sqlite_port_data {
                     .as_bytes()
                     .as_slice()
             )
-            .fetch_one(&sqlite)
+            .fetch_one(&cleared_client)
             .await
             .unwrap(),
             0
         );
+        cleared_client.close().await;
         let current: i32 = sqlx::query_scalar("SELECT version FROM collection_items WHERE id=?1")
             .bind(
                 Uuid::parse_str(item["id"].as_str().unwrap())
@@ -3528,6 +3532,8 @@ mod sqlite_port_data {
             .unwrap();
         assert_eq!(before, after);
         sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn sqlite_collection_text_sort_uses_qualified_profile() {

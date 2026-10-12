@@ -2555,14 +2555,8 @@ mod sqlite_data_port {
                 &[],
             )
             .await;
-            assert_eq!(
-                status,
-                if route == "export" {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::FORBIDDEN
-                }
-            );
+            // map_workspace_error(Forbidden, false) hides both PG routes with 404.
+            assert_eq!(status, StatusCode::NOT_FOUND);
         }
         assert!(
             fvoci_server::db::workspace_export::recheck_document_delivery_backend(
