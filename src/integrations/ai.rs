@@ -15,6 +15,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::db::backend::{Backend, DbTx, OperationTx};
+use crate::db::codec::Cell;
+
 use crate::db::context::{session_is_live, set_tenant};
 use crate::db::documents::document_permission;
 use crate::db::projects::project_permission_by_id;
@@ -111,6 +114,49 @@ pub async fn is_member(
     Ok(ok)
 }
 
+pub async fn is_member_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    user: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return is_member(pool, workspace, user, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let ok = tx.operation().session_is_live(user, credential).await?
+        && tx.operation().workspace_is_live(workspace).await?
+        && tx
+            .operation()
+            .membership_role(workspace, user, false)
+            .await?
+            .is_some();
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(ok)
+}
+
+async fn can_view_backend(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    user: Uuid,
+    document: Uuid,
+    project: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    Ok(match project {
+        Some(project) => op
+            .project_permission_by_id(workspace, user, project)
+            .await?
+            .is_some_and(|p| p.at_least(ProjectPermission::View)),
+        None => op
+            .document_permission(workspace, user, document, true)
+            .await?
+            .at_least(ProjectPermission::View),
+    })
+}
+
 /// Source `requirePermission(view)` for any document: a wiki document by its
 /// own permission, a project document by the project's.
 async fn can_view(
@@ -184,6 +230,52 @@ pub async fn viewable_document(
     Ok(visible.then_some((title, content)))
 }
 
+pub async fn viewable_document_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    user: Uuid,
+    credential: Uuid,
+    document: Uuid,
+) -> Result<Option<(String, Value)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return viewable_document(pool, workspace, user, credential, document).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if !tx.operation().session_is_live(user, credential).await?
+        || !tx.operation().workspace_is_live(workspace).await?
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    family.require_tenant(workspace)?;
+    let rows=family.query("SELECT project_id,title,content_json FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let visible = can_view_backend(
+        &mut tx.operation(),
+        workspace,
+        user,
+        document,
+        row.cell(0)?.optional(Cell::id)?,
+    )
+    .await?;
+    let result = if visible {
+        Some((row.cell(1)?.string()?, row.cell(2)?.value()?))
+    } else {
+        None
+    };
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(result)
+}
+
 /// Source `suggestDocumentLinks` over `visibleTreeFor`: live documents other
 /// than `document_id` (wiki and project) that the user can view, in tree order,
 /// with their stored titles. Ids and titles come from the same permission-filtered
@@ -224,6 +316,43 @@ pub async fn visible_documents(
         }
     }
     tx.commit().await?;
+    Ok(visible)
+}
+
+pub async fn visible_documents_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    user: Uuid,
+    document: Uuid,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return visible_documents(pool, workspace, user, document).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    family.require_tenant(workspace)?;
+    let rows=family.query("SELECT id,project_id,title FROM documents WHERE workspace_id=?1 AND deleted_at IS NULL AND id<>?2 ORDER BY project_id,sort_key COLLATE BINARY,id", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    let mut visible = Vec::new();
+    for row in rows {
+        let id = row.cell(0)?.id()?;
+        if can_view_backend(
+            &mut tx.operation(),
+            workspace,
+            user,
+            id,
+            row.cell(1)?.optional(Cell::id)?,
+        )
+        .await?
+        {
+            visible.push((id, row.cell(2)?.string()?));
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
     Ok(visible)
 }
 

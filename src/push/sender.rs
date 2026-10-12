@@ -313,7 +313,11 @@ impl Sender {
     /// deletes the rows that no longer qualify, marks the rest handed off and
     /// commits before any POST.
     async fn final_check_pg(&self, claimed: &[Claimed]) -> Result<Vec<Ready>, sqlx::Error> {
-        let pool = self.backend.postgres("push final authorization")?;
+        let Backend::Postgres(pool) = &self.backend else {
+            return Err(sqlx::Error::Protocol(
+                "expected PostgreSQL push transaction".into(),
+            ));
+        };
         let mut tx = pool.begin().await?;
         set_system(&mut tx).await?;
         let mut ready = Vec::new();
@@ -440,11 +444,12 @@ impl Sender {
     }
 
     async fn ack_pg(&self, claimed: &[Claimed], expired: &[&Ready]) -> Result<(), sqlx::Error> {
-        let mut tx = self
-            .backend
-            .postgres("push acknowledgment")?
-            .begin()
-            .await?;
+        let Backend::Postgres(pool) = &self.backend else {
+            return Err(sqlx::Error::Protocol(
+                "expected PostgreSQL push transaction".into(),
+            ));
+        };
+        let mut tx = pool.begin().await?;
         set_system(&mut tx).await?;
         let (ids, attempts): (Vec<Uuid>, Vec<i32>) =
             claimed.iter().map(|row| (row.id, row.attempt)).unzip();

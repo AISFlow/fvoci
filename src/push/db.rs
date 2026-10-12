@@ -86,6 +86,61 @@ pub async fn register_subscription(
     Ok(true)
 }
 
+/// Register against the selected backend with the current cookie session and
+/// membership checked in the same writer reservation as the per-user cap.
+pub async fn register_subscription_backend(
+    backend: &crate::db::backend::Backend,
+    workspace: Uuid,
+    user: Uuid,
+    session: Uuid,
+    subscription: &PushSubscriptionRow,
+) -> Result<bool, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return register_subscription(pool, workspace, user, session, subscription).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    tx.operation().lock_membership_users(&[user]).await?;
+    if !tx.operation().session_is_live(user, session).await?
+        || !tx.operation().workspace_is_live(workspace).await?
+        || tx
+            .operation()
+            .membership_role(workspace, user, true)
+            .await?
+            .is_none()
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let previous = tx.operation().set_system().await?;
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    // Registration is cookie-only: PAT ids must never become session FKs.
+    if family
+        .query(
+            "SELECT 1 FROM sessions WHERE id=?1 AND user_id=?2",
+            &[Cell::uuid(session), Cell::uuid(user)],
+        )
+        .await?
+        .is_empty()
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    family.execute("INSERT INTO push_subscriptions(id,user_id,session_id,endpoint,p256dh,auth) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(user_id,endpoint) DO UPDATE SET session_id=excluded.session_id,p256dh=excluded.p256dh,auth=excluded.auth,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(user),Cell::uuid(session),Cell::text(&subscription.endpoint),Cell::text(&subscription.p256dh),Cell::text(&subscription.auth)]).await?;
+    family.execute("DELETE FROM push_subscriptions WHERE user_id=?1 AND id NOT IN(SELECT id FROM push_subscriptions WHERE user_id=?1 ORDER BY updated_at DESC,id DESC LIMIT ?2)", &[Cell::uuid(user),Cell::Integer(PUSH_SUBSCRIPTIONS_PER_USER)]).await?;
+    tx.operation().restore_system(previous).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(true)
+}
+
 /// Upsert on `(user_id, endpoint)` bound to the registering session, then
 /// drop the user's least recently updated rows beyond
 /// [`PUSH_SUBSCRIPTIONS_PER_USER`].

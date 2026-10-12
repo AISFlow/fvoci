@@ -8,6 +8,9 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -48,8 +51,697 @@ const ENC_KEYS: &str =
 const GITHUB_KEY: &str = include_str!("fixtures/github-app-test-key.pem");
 const GITHUB_SECRET: &str = "gh-webhook-secret";
 
+mod sqlite_port {
+    use super::*;
+    #[tokio::test]
+    async fn sqlite_webhook_routes_commit_readback_and_reject_foreign_tenant() {
+        let f = integrations_family::Fixture::new().await;
+        let app = f.app(integrations(Outbound::system(Default::default())));
+        let workspace = f.workspace;
+        let token = &f.token;
+        let path = format!("/api/v1/workspaces/{workspace}/webhooks");
+        let (status, created, _) = call(
+            &app,
+            "POST",
+            &path,
+            Some(json!({"url":"https://example.com/hook","events":["task.created"]})),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let fresh = f.fresh().await;
+        let secret: String = sqlx::query_scalar("SELECT secret FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert!(secret.starts_with("enc:v2:"));
+        assert_ne!(secret, created["secret"].as_str().unwrap());
+        let (status, listed, _) = call(&app, "GET", &path, None, Some(token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["items"][0]["id"], created["id"]);
+        let (status, _, _) = call(
+            &app,
+            "DELETE",
+            &format!(
+                "/api/v1/workspaces/{}/webhooks/{}",
+                Uuid::now_v7(),
+                created["id"].as_str().unwrap()
+            ),
+            None,
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &path,
+                Some(json!({"url":"https://example.com/denied","events":["task.created"]})),
+                Some(token)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("{path}/{}", created["id"].as_str().unwrap()),
+                None,
+                Some(token)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &app,
+            "DELETE",
+            &format!("{path}/{}", created["id"].as_str().unwrap()),
+            None,
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        fresh.close().await;
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() {
+    use fvoci_server::integrations::github::{self, InboundOutcome};
+    let f = integrations_family::Fixture::new().await;
+    let (_, addr) = start_fake_github().await;
+    let app = f.app(github_integrations(addr));
+    let state = start_install(&app, &f.token, f.workspace).await;
+    let callback = format!("/api/v1/github/callback?installation_id=42&state={state}");
+    assert_eq!(
+        call(&app, "GET", &callback, None, Some(&f.token)).await.0,
+        StatusCode::FOUND
+    );
+    assert_eq!(
+        call(&app, "GET", &callback, None, Some(&f.token)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let fresh = f.fresh().await;
+    let installed: String = sqlx::query_scalar("SELECT installation_id FROM github_installations")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(installed, "42");
+    let base = format!("/api/v1/workspaces/{}/github", f.workspace);
+    let (status, read, _) = call(&app, "GET", &base, None, Some(&f.token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["installationId"], "42");
+    let (project, backlog, done) = f.seed_project().await;
+    let config = github_config(addr);
+    let delivery = Uuid::now_v7();
+    let payload = json!({"installation":{"id":42},"action":"opened","repository":{"full_name":"fixture/repo"},"issue":{"number":1,"title":"GitHub task","state":"open"}});
+    let body = serde_json::to_vec(&payload).unwrap();
+    let signature = sign_github(&body);
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery.to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Applied
+    ));
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery.to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Duplicate
+    ));
+    let task: Vec<u8> = sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=?1")
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let task = Uuid::from_slice(&task).unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_activity")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE channel='webhook'")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let mut closed = payload.clone();
+    closed["action"] = json!("closed");
+    closed["issue"]["state"] = json!("closed");
+    let bytes = serde_json::to_vec(&closed).unwrap();
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &bytes,
+            Some(&sign_github(&bytes)),
+            Some("issues"),
+            Some(&Uuid::now_v7().to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Applied
+    ));
+    let status: Vec<u8> = sqlx::query_scalar("SELECT status_id FROM tasks WHERE id=?1")
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(Uuid::from_slice(&status).unwrap(), done);
+    let path = format!("{base}/issue-links");
+    let manual = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,2,'Manual link',?4,'a1',1,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(manual.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&fresh).await.unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &path,
+            Some(json!({"taskId":manual,"repo":"fixture/manual","issueNumber":2})),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER integration_activity_abort BEFORE INSERT ON task_activity BEGIN SELECT RAISE(ABORT,'synthetic activity failure'); END").execute(&fresh).await.unwrap();
+    let mut edited = payload.clone();
+    edited["action"] = json!("edited");
+    edited["issue"]["title"] = json!("Rolled back title");
+    let bytes = serde_json::to_vec(&edited).unwrap();
+    let rejected = Uuid::now_v7();
+    assert!(github::handle_webhook_backend(
+        &f.auth.db.pool,
+        &config,
+        &bytes,
+        Some(&sign_github(&bytes)),
+        Some("issues"),
+        Some(&rejected.to_string())
+    )
+    .await
+    .is_err());
+    let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?1")
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(title, "GitHub task");
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM github_deliveries WHERE delivery_id=?1")
+            .bind(rejected.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("DROP TRIGGER integration_activity_abort")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &path,
+        Some(json!({"taskId":task,"repo":"fixture/repo","issueNumber":1})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{}/github/issue-links", Uuid::now_v7()),
+        Some(json!({"taskId":task,"repo":"fixture/other","issueNumber":2})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(&app, "DELETE", &base, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM github_installations")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+fn sign_github(body: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(GITHUB_SECRET.as_bytes()).unwrap();
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+#[tokio::test]
+async fn sqlite_zotero_http_sync_links_retirement_and_current_owner() {
+    use fvoci_server::db::zotero::{self, Actor};
+    use fvoci_server::integrations::zotero::fixtures::{Upstream, KEY};
+    use std::sync::atomic::Ordering;
+    let f = integrations_family::Fixture::new().await;
+    let upstream = Upstream::start().await;
+    let mut config = (*integrations(Outbound::system(Default::default()))).clone();
+    config.zotero = upstream.reader();
+    let app = f.app(Arc::new(config));
+    let base = format!("/api/v1/workspaces/{}/zotero", f.personal);
+    let input = json!({"libraryType":"user","remoteLibraryId":"42","libraryUrl":"https://www.zotero.org/users/42","apiKey":KEY});
+    let (status, connected, _) =
+        call(&app, "POST", &base, Some(input.clone()), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = Uuid::parse_str(connected["id"].as_str().unwrap()).unwrap();
+    let fresh = f.fresh().await;
+    let sealed: String = sqlx::query_scalar("SELECT sealed_key FROM zotero_credentials")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert!(sealed.starts_with("enc:v2:"));
+    assert_ne!(sealed, KEY);
+    let (status, listed, _) = call(&app, "GET", &base, None, Some(&f.token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["connectors"][0]["id"], connected["id"]);
+    let library = format!("{base}/libraries/{id}");
+    let (status, first, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(!first["references"].as_array().unwrap().is_empty());
+    assert_eq!(first["connector"]["completedVersion"], "12");
+    let reference = first["references"][0]["id"].as_str().unwrap();
+    let initial_version = first["references"][0]["localVersion"].clone();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_references")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, first["references"].as_array().unwrap().len() as i64);
+    let (status, repeated, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated["references"][0]["localVersion"], initial_version);
+    let link = format!("{base}/references/{reference}/links");
+    let body =
+        json!({"documentId":reference,"expectedVersion":initial_version,"anchor":"citation"});
+    for _ in 0..2 {
+        assert_eq!(
+            call(&app, "POST", &link, Some(body.clone()), Some(&f.token))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_links")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    upstream.model.mode.store(14, Ordering::SeqCst);
+    sqlx::query("CREATE TRIGGER integration_zotero_abort BEFORE INSERT ON events WHEN NEW.verb='document.updated' BEGIN SELECT RAISE(ABORT,'synthetic mirror failure'); END").execute(&fresh).await.unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("{library}/sync"),
+            None,
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let complete: i64 =
+        sqlx::query_scalar("SELECT completed_version FROM zotero_connectors WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(complete, 12);
+    let version: i64 =
+        sqlx::query_scalar("SELECT local_version FROM zotero_references WHERE id=?1")
+            .bind(Uuid::parse_str(reference).unwrap().as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(version, 1);
+    sqlx::query("DROP TRIGGER integration_zotero_abort")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, updated, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["connector"]["completedVersion"], "14");
+    assert_eq!(
+        call(&app, "POST", &link, Some(body), Some(&f.token))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{}/zotero", f.workspace),
+            Some(input.clone()),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let actor = Actor {
+        workspace: f.personal,
+        user: f.user,
+        session: f.session,
+    };
+    let cycle = zotero::start_backend(&f.auth.db.pool, actor, id, &keys())
+        .await
+        .unwrap();
+    assert!(zotero::start_backend(&f.auth.db.pool, actor, id, &keys())
+        .await
+        .is_err());
+    let (status, reconnected, _) = call(&app, "POST", &base, Some(input), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(reconnected["generation"], "2");
+    assert!(zotero::current_backend(&f.auth.db.pool, &cycle)
+        .await
+        .is_err());
+    assert!(
+        zotero::finish_failed_backend(&f.auth.db.pool, &cycle, 30, true)
+            .await
+            .is_err()
+    );
+    zotero::release_read_backend(&f.auth.db.pool, &cycle)
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        call(&app, "DELETE", &library, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_credentials")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        call(&app, "GET", &library, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE users SET suspended_at=unixepoch()*1000000 WHERE id=?1")
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(matches!(
+        zotero::library_backend(&f.auth.db.pool, actor, id).await,
+        Err(zotero::DbError::NotFound)
+    ));
+    fresh.close().await;
+    upstream.shutdown().await;
+    f.cleanup().await;
+}
+
 fn keys() -> Arc<Keyring> {
     Arc::new(Keyring::parse(ENC_KEYS, "k1").expect("keys"))
+}
+
+#[tokio::test]
+async fn sqlite_integration_writer_races_admit_one_sync_and_one_delivery() {
+    use fvoci_server::api::zotero_dto::{ConnectBody, LibraryType};
+    use fvoci_server::db::zotero::{self, Actor, DbError};
+    use fvoci_server::integrations::github::{self, InboundOutcome};
+    let f = integrations_family::Fixture::new().await;
+    let actor = Actor {
+        workspace: f.personal,
+        user: f.user,
+        session: f.session,
+    };
+    let keys = keys();
+    let input = ConnectBody {
+        library_type: LibraryType::User,
+        remote_library_id: "42".into(),
+        library_url: "https://www.zotero.org/users/42".into(),
+        api_key: "SYNTHETIC_ONLY".into(),
+    };
+    let connected = zotero::connect_backend(&f.auth.db.pool, actor, &input, &keys)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        zotero::start_backend(&f.auth.db.pool, actor, connected.id, &keys),
+        zotero::start_backend(&f.auth.db.pool, actor, connected.id, &keys)
+    );
+    let cycle = match (a, b) {
+        (Ok(cycle), Err(DbError::Conflict)) | (Err(DbError::Conflict), Ok(cycle)) => cycle,
+        _ => panic!("one sync must own the writer-fenced lease"),
+    };
+    zotero::release_read_backend(&f.auth.db.pool, &cycle)
+        .await
+        .unwrap();
+    f.seed_project().await;
+    github::begin_install_backend(
+        &f.auth.db.pool,
+        f.workspace,
+        f.user,
+        f.session,
+        "synthetic-race-nonce",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    github::complete_install_backend(
+        &f.auth.db.pool,
+        f.workspace,
+        f.user,
+        f.session,
+        "synthetic-race-nonce",
+        "42",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let config = github_config(([127, 0, 0, 1], 1).into());
+    let body=serde_json::to_vec(&json!({"installation":{"id":42},"action":"opened","repository":{"full_name":"fixture/race"},"issue":{"number":1,"title":"Race task","state":"open"}})).unwrap();
+    let signature = sign_github(&body);
+    let delivery = Uuid::now_v7().to_string();
+    let (a, b) = tokio::join!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery)
+        ),
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery)
+        )
+    );
+    assert!(matches!(
+        (a.unwrap(), b.unwrap()),
+        (InboundOutcome::Applied, InboundOutcome::Duplicate)
+            | (InboundOutcome::Duplicate, InboundOutcome::Applied)
+    ));
+    let fresh = f.fresh().await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM github_deliveries")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_ai_http_document_permissions_and_api_token_actor() {
+    use fvoci_server::integrations::ai;
+    let f = integrations_family::Fixture::new().await;
+    let mut config = (*integrations(Outbound::system(Default::default()))).clone();
+    config.ai = Some(AiConfig::new("synthetic-ai-fixture"));
+    let app = f.app(Arc::new(config));
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let mut documents = Vec::new();
+    for title in ["First", "Second"] {
+        let (status, doc, _) = call(
+            &app,
+            "POST",
+            &format!("{base}/documents"),
+            Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":title})),
+            Some(&f.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{doc}");
+        documents.push(Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap());
+    }
+    let fresh = f.fresh().await;
+    sqlx::query("UPDATE documents SET content_json=?2 WHERE id=?1").bind(documents[0].as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Heading"}]},{"type":"paragraph","content":[{"type":"text","text":"Hello"}]}]}).to_string()).execute(&fresh).await.unwrap();
+    let body = json!({"documentId":documents[0]});
+    let (status, summary, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/summarize"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert!(summary["summary"].as_str().unwrap().contains("Heading"));
+    let (status, titles, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/generate-tasks"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(titles["titles"], json!(["Heading"]));
+    let (status, links, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/suggest-links"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(links["documentIds"], json!([documents[1]]));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{}/ai/summarize", Uuid::now_v7()),
+            Some(body),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let pat = Uuid::now_v7();
+    let issued = fvoci_server::auth::token::new_token();
+    sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Fixture','[\"documents.read\"]')").bind(pat.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&issued.hash).execute(&fresh).await.unwrap();
+    assert!(
+        ai::is_member_backend(&f.auth.db.pool, f.workspace, f.user, pat)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ai::viewable_document_backend(&f.auth.db.pool, f.workspace, f.user, pat, documents[0])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("UPDATE api_tokens SET expires_at=unixepoch()*1000000-1 WHERE id=?1")
+        .bind(pat.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(
+        !ai::is_member_backend(&f.auth.db.pool, f.workspace, f.user, pat)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ai::viewable_document_backend(&f.auth.db.pool, f.workspace, f.user, pat, documents[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fresh.close().await;
+    f.cleanup().await;
 }
 
 // ---------------------------------------------------------------------------
