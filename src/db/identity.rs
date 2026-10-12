@@ -137,8 +137,18 @@ pub async fn maybe_slide_session_backend(
 /// Generated DB instants deliberately start at storage precision. Requests
 /// containing finer precision still fail the checked Cell::instant boundary.
 pub(crate) fn stored_now() -> DateTime<Utc> {
+    #[cfg(test)]
+    if let Ok(now) = TEST_AUTH_CLOCK.try_with(|now| *now) {
+        return now;
+    }
     DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
         .expect("current time in chrono range")
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    // Only the scoped test task sees this app clock; database time is unchanged.
+    static TEST_AUTH_CLOCK: DateTime<Utc>;
 }
 
 pub async fn find_live_session(
@@ -1423,6 +1433,195 @@ impl OperationTx<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod auth_clock_tests {
+    use super::*;
+    use crate::auth::token::hash_token;
+    use crate::db::backend::{DbTransaction, RemoteDatabase};
+    use crate::db::{account, magic, mfa, oidc};
+    use futures_util::FutureExt;
+
+    async fn expired_credentials(backend: &Backend, fresh: &Backend) {
+        let user = Uuid::now_v7();
+        let session = Uuid::now_v7();
+        let mut tx = backend.begin_write().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'clock@example.invalid','Before')", &[Cell::uuid(user)]).await.unwrap();
+        family.execute("INSERT INTO sessions(id,user_id,token_hash,created_at,expires_at) VALUES(?1,?2,?3,(unixepoch()-7200)*1000000,(unixepoch()-600)*1000000)", &[Cell::uuid(session),Cell::uuid(user),Cell::text(hash_token("clock-session"))]).await.unwrap();
+        family.execute("INSERT INTO magic_tokens(token_hash,kind,user_id,generation,created_at,expires_at) VALUES(?1,'login',?2,0,(unixepoch()-1500)*1000000,(unixepoch()-600)*1000000)", &[Cell::text(hash_token("clock-magic")),Cell::uuid(user)]).await.unwrap();
+        family.execute("INSERT INTO mfa_challenges(token_hash,user_id,generation,expires_at) VALUES('clock-mfa',?1,0,(unixepoch()-600)*1000000)", &[Cell::uuid(user)]).await.unwrap();
+        family.execute("INSERT INTO oidc_states(state_hash,payload,expires_at) VALUES('clock-oidc','enc:v2:fixture',(unixepoch()-600)*1000000)", &[]).await.unwrap();
+        let db_now = family
+            .query("SELECT unixepoch()*1000000", &[])
+            .await
+            .unwrap()[0]
+            .cell(0)
+            .unwrap()
+            .datetime()
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        // The app is an hour behind the database, whose fixtures expired 10m ago.
+        TEST_AUTH_CLOCK.scope(db_now - Duration::hours(1), async {
+            assert_eq!(stored_now(), db_now - Duration::hours(1));
+            assert!(find_live_session_backend(backend, &hash_token("clock-session")).await.unwrap().is_none());
+            let updated = update_profile_backend(backend, user, session, ProfilePatch {
+                given_name: "After".into(), family_name: FamilyNamePatch::Preserve,
+                locale: None, timezone: None, week_starts_on: None, text_scale: None,
+            }).await.unwrap();
+            let payload = magic::consume_magic_token_backend(backend, "clock-magic").await.unwrap();
+            let consumed = payload.is_some();
+            let issued = match payload {
+                Some(payload) => account::complete_magic_login_backend(backend, &payload).await.unwrap().is_some(),
+                None => false,
+            };
+            let challenge = mfa::peek_challenge_backend(backend, "clock-mfa").await.unwrap().is_some();
+            let state = oidc::consume_state_backend(backend, "clock-oidc").await.unwrap().is_some();
+            let mut read = fresh.begin_read().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut read else { unreachable!() };
+            let rows = family.query("SELECT given_name,(SELECT count(*) FROM sessions),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM magic_tokens),(SELECT count(*) FROM mfa_challenges),(SELECT count(*) FROM oidc_states) FROM users WHERE id=?1", &[Cell::uuid(user)]).await.unwrap();
+            let row = &rows[0];
+            let name = row.cell(0).unwrap().string().unwrap();
+            let counts: Vec<_> = (1..=6).map(|i| row.cell(i).unwrap().integer().unwrap()).collect();
+            read.rollback().await.unwrap();
+            assert_eq!((updated,consumed,issued,challenge,state), (false,false,false,false,false), "database-expired credentials must stay rejected with a slow app clock");
+            assert_eq!(name, "Before");
+            assert_eq!(counts, [1,0,0,1,1,1], "refusals leave no auth writes or events");
+        }).await;
+
+        // A fast app clock must not expire credentials that the DB still accepts.
+        let mut tx = backend.begin_write().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family
+            .execute(
+                "UPDATE sessions SET expires_at=(unixepoch()+600)*1000000",
+                &[],
+            )
+            .await
+            .unwrap();
+        family
+            .execute(
+                "UPDATE magic_tokens SET expires_at=(unixepoch()+600)*1000000",
+                &[],
+            )
+            .await
+            .unwrap();
+        family
+            .execute(
+                "UPDATE mfa_challenges SET expires_at=(unixepoch()+600)*1000000",
+                &[],
+            )
+            .await
+            .unwrap();
+        family
+            .execute(
+                "UPDATE oidc_states SET expires_at=(unixepoch()+600)*1000000",
+                &[],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        TEST_AUTH_CLOCK
+            .scope(db_now + Duration::hours(1), async {
+                assert!(
+                    find_live_session_backend(backend, &hash_token("clock-session"))
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(update_profile_backend(
+                    backend,
+                    user,
+                    session,
+                    ProfilePatch {
+                        given_name: "Accepted".into(),
+                        family_name: FamilyNamePatch::Preserve,
+                        locale: None,
+                        timezone: None,
+                        week_starts_on: None,
+                        text_scale: None,
+                    }
+                )
+                .await
+                .unwrap());
+                assert!(magic::consume_magic_token_backend(backend, "clock-magic")
+                    .await
+                    .unwrap()
+                    .is_some());
+                assert!(mfa::peek_challenge_backend(backend, "clock-mfa")
+                    .await
+                    .unwrap()
+                    .is_some());
+                assert!(oidc::consume_state_backend(backend, "clock-oidc")
+                    .await
+                    .unwrap()
+                    .is_some());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_auth_expiry_uses_database_clock() {
+        let root = std::env::temp_dir().join(format!("fvoci-auth-clock-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("clock.sqlite");
+        crate::db::migrate::run_sqlite_migrations(&path)
+            .await
+            .unwrap();
+        let backend = Backend::Sqlite(crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap());
+        let fresh = Backend::Sqlite(crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap());
+        let result = std::panic::AssertUnwindSafe(expired_credentials(&backend, &fresh))
+            .catch_unwind()
+            .await;
+        fresh.close().await.unwrap();
+        backend.close().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn remote_auth_expiry_uses_database_clock() {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-remote-auth-clock-{}", Uuid::now_v7()));
+        let fixture = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+            .await
+            .unwrap();
+        let connection = |database| {
+            Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+                database,
+                std::num::NonZeroU32::MIN,
+            )))
+        };
+        let backend = connection(fixture.database().await.unwrap());
+        let fresh = connection(fixture.database().await.unwrap());
+        let result = std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&backend)
+                .await
+                .unwrap();
+            expired_credentials(&backend, &fresh).await;
+        })
+        .catch_unwind()
+        .await;
+        fresh.close().await.unwrap();
+        backend.close().await.unwrap();
+        let receipt = fixture.finish().await.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 

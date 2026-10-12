@@ -6328,6 +6328,159 @@ mod sqlite_logout_regression {
     }
 
     #[tokio::test]
+    async fn sqlite_oidc_manage_accepts_api_tokens_and_rechecks_authority() {
+        use fvoci_server::auth::scopes::ApiTokenScope;
+        use fvoci_server::db::{api_tokens, identity};
+        let (root, path, sqlite, auth, user, token) = family_fixture().await;
+        let workspace: Vec<u8> =
+            sqlx::query_scalar("SELECT workspace_id FROM memberships WHERE user_id=?1")
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&sqlite)
+                .await
+                .unwrap();
+        let workspace = Uuid::from_slice(&workspace).unwrap();
+        let session = identity::find_live_session_backend(&auth.db.pool, &hash_token(&token))
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let created = api_tokens::create_api_token_backend(
+            &auth.db.pool,
+            workspace,
+            user,
+            session,
+            api_tokens::CreateApiTokenInput {
+                name: "SSO manager",
+                scopes: &[ApiTokenScope::WorkspaceManage],
+                unlimited: false,
+                service: false,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let app = router_with_identity(
+            state(auth.clone(), root.join("storage")),
+            None,
+            Arc::new(Identity {
+                encryption_keys: Some(super::encryption_keys()),
+                totp_issuer: "localhost".into(),
+                oidc: super::oidc_settings(vec![], false),
+                clock: Arc::new(|| super::T0_MS),
+            }),
+        );
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let config_path = format!("/api/v1/workspaces/{workspace}/oidc");
+        let input = json!({"issuer":"https://id.example.invalid","clientId":"family","clientSecret":"synthetic-client-secret","label":"PAT SSO"});
+        let bearer = format!("Bearer {}", created.token);
+        for method in ["PUT", "GET", "DELETE"] {
+            let response = super::call_with(
+                &app,
+                method,
+                &config_path,
+                (method == "PUT").then(|| input.clone()),
+                &[],
+                super::peer(246),
+                &[("authorization", &bearer)],
+            )
+            .await;
+            assert_eq!(
+                response.status,
+                StatusCode::OK,
+                "{method}: {:?}",
+                response.json
+            );
+            assert!(!response
+                .json
+                .to_string()
+                .contains("synthetic-client-secret"));
+            let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM workspace_oidc")
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            assert_eq!(saved, i64::from(method != "DELETE"));
+        }
+        // Retain one row, then exercise all three methods after authority changes.
+        let response = super::call(
+            &app,
+            "PUT",
+            &config_path,
+            Some(input.clone()),
+            Some(&token),
+            super::peer(247),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let snapshot = sqlx::query_scalar::<_, String>("SELECT client_secret FROM workspace_oidc")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        for (change, expected) in [
+            (
+                "UPDATE memberships SET role='member'",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "UPDATE api_tokens SET scopes='[\"documents.read\"]'",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "UPDATE api_tokens SET expires_at=(unixepoch()-600)*1000000",
+                StatusCode::UNAUTHORIZED,
+            ),
+            ("DELETE FROM api_tokens", StatusCode::UNAUTHORIZED),
+        ] {
+            sqlx::query(change).execute(&sqlite).await.unwrap();
+            for method in ["GET", "PUT", "DELETE"] {
+                let response = super::call_with(
+                    &app,
+                    method,
+                    &config_path,
+                    (method == "PUT").then(|| input.clone()),
+                    &[],
+                    super::peer(248),
+                    &[("authorization", &bearer)],
+                )
+                .await;
+                assert_eq!(
+                    response.status, expected,
+                    "{change}, {method}: {:?}",
+                    response.json
+                );
+                assert_eq!(
+                    sqlx::query_scalar::<_, String>("SELECT client_secret FROM workspace_oidc")
+                        .fetch_one(&fresh)
+                        .await
+                        .unwrap(),
+                    snapshot
+                );
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                        .fetch_one(&fresh)
+                        .await
+                        .unwrap(),
+                    events
+                );
+            }
+            sqlx::query("UPDATE memberships SET role='owner'")
+                .execute(&sqlite)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE api_tokens SET scopes='[\"workspace.manage\"]',expires_at=(unixepoch()+3600)*1000000").execute(&sqlite).await.unwrap();
+        }
+        drop(app);
+        drop(auth);
+        fresh.close().await;
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn sqlite_oidc_workspace_configuration_and_jit_keep_current_authority() {
         use fvoci_server::{db::oidc, http::router_with_identity, identity::Identity};
         let (root, path, sqlite, auth, user, token) = family_fixture().await;
