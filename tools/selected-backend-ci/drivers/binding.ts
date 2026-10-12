@@ -38,7 +38,7 @@ const offSpecSha256 = "3345890f670f6462a6b14931a335de49b62b3c8355bdeece699d030b2
 export const restoreSpec = "e2e-pending/v060-sqlite-revision-restore.spec.ts";
 export const restoreBrowserTitle =
   "SQLite ON revision restore: matching ACK, immutable history and fresh client readback";
-const restoreSpecSha256 = "20af5a56e6540465bcf8bfdfaaf2db96759244a484cc937441f805afd99fd1f3";
+const restoreSpecSha256 = "5e0e539eefc477f03665f6324ec6b853e3a6d645b3b891e41fa16a6f7f122e4d";
 
 export type Lane = "install" | "postgres" | "sqlite";
 export interface Manifest {
