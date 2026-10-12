@@ -104,12 +104,11 @@ await test("installed XLSX worker packages reach the public notice, with the exi
     ["@office-kit/xlsx", "dist/io.mjs"],
     ["fflate", "esm/browser.js"],
     ["saxes", "saxes.js"],
-    ["@nodable/entities", "src/index.js"],
   ].map(([name, file]) => path.join(installedPackageDir(name), file));
   const entries = packageLicenseEntries(modules);
   assert.deepEqual(
     entries.map((entry) => `${entry.name}@${entry.version}`),
-    ["@office-kit/xlsx@0.21.1", "fflate@0.8.3", "saxes@6.0.0", "@nodable/entities@3.0.0"],
+    ["@office-kit/xlsx@0.24.2", "fflate@0.8.3", "saxes@6.0.0"],
   );
   const notice = finalizeBrowserOpenSourceNotice(
     mergeLicenseEntries("[]", entries),
@@ -117,15 +116,14 @@ await test("installed XLSX worker packages reach the public notice, with the exi
     manifestPath,
   );
   for (const heading of [
-    "## @nodable/entities - 3.0.0 (MIT)",
-    "## @office-kit/xlsx - 0.21.1 (MIT)",
+    "## @office-kit/xlsx - 0.24.2 (MIT)",
     "## fflate - 0.8.3 (MIT)",
     "## saxes - 6.0.0 (ISC)",
   ]) {
     assert.ok(notice.includes(heading), heading);
   }
-  // saxes and @nodable/entities ship no LICENSE file; the manifest supplements fill them.
-  assert.equal(notice.match(/^Supplement source: /gm)?.length, 2);
+  // saxes ships no LICENSE file; its manifest supplement fills the notice.
+  assert.equal(notice.match(/^Supplement source: /gm)?.length, 1);
 });
 
 await test("the icon module's bundled sets are read from the code @nuxt/icon generates", () => {
@@ -146,14 +144,14 @@ await test("the icon module's bundled sets are read from the code @nuxt/icon gen
 await test("a bundled icon set joins the notice with its pinned license supplement", () => {
   const entries = iconSetLicenseEntries(["lucide"], webRoot);
   assert.deepEqual(entries, [
-    { name: "@iconify-json/lucide", version: "1.2.137", identifier: "ISC" },
+    { name: "@iconify-json/lucide", version: "1.2.142", identifier: "ISC" },
   ]);
   const notice = finalizeBrowserOpenSourceNotice(
     mergeLicenseEntries("[]", entries),
     repoRoot,
     manifestPath,
   );
-  assert.ok(notice.includes("## @iconify-json/lucide - 1.2.137 (ISC)"));
+  assert.ok(notice.includes("## @iconify-json/lucide - 1.2.142 (ISC)"));
   assert.match(
     notice,
     /Supplement source: https:\/\/raw\.githubusercontent\.com\/lucide-icons\/lucide\/[0-9a-f]{40}\/LICENSE/,
@@ -216,7 +214,7 @@ await test("the plugin takes icon sets only from a chunk that kept the icon modu
     assert.ok(
       notice({
         "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts", NUXT_UI_ICONS_MODULE_ID] },
-      }).includes("## @iconify-json/lucide - 1.2.137 (ISC)"),
+      }).includes("## @iconify-json/lucide - 1.2.142 (ISC)"),
     );
     assert.ok(
       !notice({ "main.js": { type: "chunk", moduleIds: ["/src/vue/main.ts"] } }).includes(

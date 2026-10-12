@@ -1,4 +1,4 @@
-/* WHY: 방 수용 한도(close 1013)나 협업 불가(1011)로 서버가 인증 전에 소켓을 닫으면 provider 4.6.0
+/* WHY: 방 수용 한도(close 1013)나 협업 불가(1011)로 서버가 인증 전에 소켓을 닫으면 provider 4.7.0
  * 은 두 경로로 동시에 재접속한다. onOpen 이 재시도 루프의 취소 핸들을 지운 뒤라
  * (hocuspocus-provider.esm.js:188-193) 루프는 첫 서버 프레임 전까지 끝나지 않았는데도
  * (:305-334) onClose 가 setTimeout(connect) 로 새 루프를 만들고(:404-414) 옛 루프도 자기
@@ -14,7 +14,7 @@ import {
   type HocuspocusProviderWebsocketConfiguration,
 } from "@hocuspocus/provider";
 
-/** Backoff of the socket's own retry loop (@lifeomic/attempt 3.1 via provider 4.6.0): retry n
+/** Backoff of the socket's own retry loop (@lifeomic/attempt 3.1 via provider 4.7.0): retry n
  * waits a random delay in [minDelay, min(delay·factor^(n-1), maxDelay)]. minDelay < delay keeps
  * the first retry jittered; delay < minDelay would make connect() reject. A served session that
  * drops waits `delay` before its fresh loop starts again from the first step. */
@@ -63,7 +63,7 @@ export class RefusalWatch {
   }
 }
 
-/* WHY: 두 가지를 provider 4.6.0 위에서 고친다(공개 멤버만 재정의, index.d.ts:261-281).
+/* WHY: 두 가지를 provider 4.7.0 위에서 고친다(공개 멤버만 재정의, index.d.ts:261-281).
  * 1) 재시도 루프는 하나: onOpen 은 취소 핸들을 지우지 않고, 첫 서버 프레임이 시도를 끝낼 때만
  *    지운다. 그 전의 close 는 루프가 backoff 로 다시 시도하고, onClose 는 핸들이 있어 새 루프를
  *    만들지 않는다. 서비스 중 끊긴 세션(프레임 뒤)은 핸들이 없어 onClose 가 새 루프를 연다.

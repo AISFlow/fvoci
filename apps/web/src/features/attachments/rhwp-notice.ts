@@ -7,13 +7,13 @@
  * at the commit npm's provenance names for this version) plus the Volexity
  * BSD-3-Clause notice for code rhwp incorporates. Shared by vite.config.ts.
  */
-export const RHWP_CORE_VERSION = "0.8.6";
-export const RHWP_SOURCE_COMMIT = "e8800c8def63449808a4092798442652ed460552";
-export const RHWP_THIRD_PARTY_FILE = "supplements/rhwp-e8800c8-wasm32-NOTICES.txt";
+export const RHWP_CORE_VERSION = "0.8.7";
+export const RHWP_SOURCE_COMMIT = "1a76570e833917d15817415a53c09ad61ab3203f";
+export const RHWP_THIRD_PARTY_FILE = "supplements/rhwp-1a76570-wasm32-NOTICES.txt";
 export const RHWP_THIRD_PARTY_SHA256 =
-  "20065de7878b0fb6f8b0e36a42c1bc5ed6a6f5fa7665939f8be95fcde72777d8";
+  "fd84144f0cf23e21e02b1c1406e6f1a441d1b33d0c8bd95ccfec3381c7114d4d";
 /** Crates in the resolved graph, excluding rhwp's own MIT workspace crates. */
-export const RHWP_WASM_CRATE_COUNT = 137;
+export const RHWP_WASM_CRATE_COUNT = 140;
 
 export function rhwpWasmNoticeTitle(version: string): string {
   if (version !== RHWP_CORE_VERSION) {

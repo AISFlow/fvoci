@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Golden Hocuspocus 4.6.0 wire fixtures for the Rust collab codec.
+ * Golden Hocuspocus 4.7.0 wire fixtures for the Rust collab codec.
  *
- * Client frames are produced by the installed @hocuspocus/provider@4.6.0
+ * Client frames are produced by the installed @hocuspocus/provider@4.7.0
  * outgoing constructors (AuthenticationMessage, SyncStepOneMessage,
  * SyncStepTwoMessage, UpdateMessage, AwarenessMessage, StatelessMessage,
  * QueryAwarenessMessage, CloseMessage) and by sendPong. Server auth uses
- * @hocuspocus/common@4.6.0 writers. SyncStatus / CLOSE-with-reason have no
- * provider outgoing class; they follow MessageReceiver 4.6.0.
+ * @hocuspocus/common@4.7.0 writers. SyncStatus / CLOSE-with-reason have no
+ * provider outgoing class; they follow MessageReceiver 4.7.0.
  *
  * Y.Doc clientIDs are fixed. Awareness and docs are destroyed so Node exits.
  */
@@ -319,9 +319,9 @@ async function main() {
 
   const fixtures = {
     pins: {
-      "@hocuspocus/provider": "4.6.0",
-      "@hocuspocus/common": "4.6.0",
-      yjs: "13.6.32",
+      "@hocuspocus/provider": "4.7.0",
+      "@hocuspocus/common": "4.7.0",
+      yjs: "13.6.33",
       "y-protocols": "1.0.7",
       lib0: "peer",
     },

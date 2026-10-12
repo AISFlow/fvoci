@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Dev-only: pinned Yjs 13.6.32 + Tiptap y-tiptap XML fragment "prosemirror"
+ * Dev-only: pinned Yjs 13.6.33 + Tiptap y-tiptap XML fragment "prosemirror"
  * exchanged through the Yrs updateV1 bridge. Product code must never import this.
  */
 import { spawn } from "node:child_process";
@@ -321,7 +321,7 @@ async function run() {
     const failed = results.filter((r) => !r.ok);
     const summary = {
       ok: failed.length === 0,
-      yjs: "13.6.32",
+      yjs: "13.6.33",
       fragment: FRAGMENT,
       encoding: "updateV1",
       gc: false,

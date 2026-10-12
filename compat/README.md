@@ -10,10 +10,10 @@ Source inspected locally (read-only) at `393795261322b916e588043cf94feca99917584
 | --- | --- |
 | rustc / cargo | 1.98.1 (`rust-toolchain.toml`) |
 | yrs | 0.23.5 (`skip_gc`, update V1) |
-| yjs | 13.6.32 |
+| yjs | 13.6.33 |
 | y-protocols | 1.0.7 |
-| @hocuspocus/provider + common | 4.6.0 |
-| @tiptap/core, starter-kit, pm | 3.31.3 |
+| @hocuspocus/provider + common | 4.7.0 |
+| @tiptap/core, starter-kit, pm | 3.31.4 |
 | @tiptap/y-tiptap | 3.0.9 |
 | Y.Doc | `gc: false` / Yrs `skip_gc: true` |
 | XML fragment | `prosemirror` |

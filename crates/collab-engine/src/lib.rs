@@ -16,7 +16,7 @@
 #![allow(clippy::result_large_err)]
 
 pub const YRS_VERSION: &str = "0.28.0";
-pub const YJS_VERSION: &str = "13.6.32";
+pub const YJS_VERSION: &str = "13.6.33";
 pub const FRAGMENT: &str = "prosemirror";
 pub const ENCODING_V1: u8 = 1;
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Capture a real @hocuspocus/provider 4.6.0 handshake frame and try to decode
+ * Capture a real @hocuspocus/provider 4.7.0 handshake frame and try to decode
  * it with y-protocols 1.0.7 sync (the "standard Y sync" decoder).
  * A mismatch is a finding, not a Yrs bug: Yrs updateV1 ≠ Hocuspocus framing.
  */
@@ -198,7 +198,7 @@ async function main() {
     {
       id: "sync-status-ping-pong",
       need: "Handle MessageType.SyncStatus (8), Ping (9), Pong (10). y-protocols 1.0.7 has none of these.",
-      why: "Hocuspocus provider 4.6.0 uses these for connection liveness and sync status, not Y.Doc updates.",
+      why: "Hocuspocus provider 4.7.0 uses these for connection liveness and sync status, not Y.Doc updates.",
     },
     {
       id: "stateless-control",
@@ -214,10 +214,10 @@ async function main() {
 
   const report = {
     pins: {
-      yjs: "13.6.32",
+      yjs: "13.6.33",
       "y-protocols": "1.0.7",
-      "@hocuspocus/provider": "4.6.0",
-      "@hocuspocus/common": "4.6.0",
+      "@hocuspocus/provider": "4.7.0",
+      "@hocuspocus/common": "4.7.0",
       gc: false,
     },
     MessageType,
@@ -246,7 +246,7 @@ async function main() {
     encoding.writeVarString(enc, DOC_NAME);
     encoding.writeVarUint(enc, MessageType.Auth);
     writeAuthentication(enc, String(ydoc.clientID));
-    encoding.writeVarString(enc, "4.6.0");
+    encoding.writeVarString(enc, "4.7.0");
     const auth = encoding.toUint8Array(enc);
     const enc2 = encoding.createEncoder();
     encoding.writeVarString(enc2, DOC_NAME);

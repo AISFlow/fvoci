@@ -1,4 +1,4 @@
-//! Offline tests for the Hocuspocus 4.6.0 wire codec.
+//! Offline tests for the Hocuspocus 4.7.0 wire codec.
 //!
 //! Exercise the shared codec module; no WebSocket route is enabled.
 
@@ -165,7 +165,7 @@ fn golden_fixtures_match_js_serialization() {
                     panic!("expected auth token for {id}");
                 };
                 assert_eq!(token, "12345");
-                assert_eq!(provider_version.as_deref(), Some("4.6.0"));
+                assert_eq!(provider_version.as_deref(), Some("4.7.0"));
             }
             "auth_token_request_server" => {
                 let WireFrame::Document { message, .. } = decoded else {
