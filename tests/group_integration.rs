@@ -1941,7 +1941,11 @@ mod sqlite_port {
                         if method == "GET" {
                             None
                         } else {
-                            Some(grant.clone())
+                            Some(if method == "POST" {
+                                grant.clone()
+                            } else {
+                                json!({"groupId":group})
+                            })
                         }
                     )
                     .await

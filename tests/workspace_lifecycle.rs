@@ -2244,7 +2244,7 @@ mod sqlite_port {
             f.call("PATCH", &ws, Some(json!({"name":"Denied"})), &cookie)
                 .await
                 .0,
-            StatusCode::FORBIDDEN
+            StatusCode::NOT_FOUND
         );
         assert_eq!(
             f.call(

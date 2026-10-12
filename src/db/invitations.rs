@@ -389,7 +389,7 @@ pub async fn create_invitation_backend(
         }
         {
             let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
-            f.execute("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", &[Cell::uuid(id), Cell::uuid(ws), Cell::text(email), Cell::text(role.as_str()), Cell::text(&token.hash), Cell::uuid(actor), Cell::instant(Utc::now() + INVITE_TTL)?]).await?;
+            f.execute("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", &[Cell::uuid(id), Cell::uuid(ws), Cell::text(email), Cell::text(role.as_str()), Cell::text(&token.hash), Cell::uuid(actor), Cell::instant(crate::db::identity::stored_now() + INVITE_TTL)?]).await?;
         }
         let payload = json!({
         "workspaceId":ws.to_string(),
@@ -631,6 +631,7 @@ where
         Ok(v) => v,
         Err(e) => return Ok(Err(e)),
     };
+    let mut rehash = None;
     let (user, new_account, expected_hash) = if let Some((user, stored, live)) = account {
         if let Err(n) = password_gate(invite.email.clone()).await {
             return Ok(Err(InvitationDbError::RateLimited(n)));
@@ -639,6 +640,11 @@ where
             verify_password(stored.as_deref(), request.password.unwrap_or(""), keys).await;
         if !verified.ok || stored.is_none() || !live {
             return Ok(Err(InvitationDbError::Unauthorized));
+        }
+        if verified.needs_pepper_rotation {
+            if let Ok(replacement) = hash_password(request.password.unwrap_or(""), keys).await {
+                rehash = stored.clone().map(|expected| (expected, replacement));
+            }
         }
         (user, None, stored)
     } else {
@@ -683,6 +689,10 @@ where
     .await?
     {
         return Ok(Err(e));
+    }
+    if let Some((expected, replacement)) = rehash {
+        // Match PostgreSQL's optional CAS rotation after a committed grant.
+        let _ = rehash_invited_family_password(backend, user, &replacement, &expected).await;
     }
     Ok(crate::db::mfa::issue_session_or_challenge_backend(
         backend,
@@ -1429,4 +1439,23 @@ async fn grant_family_invitation(
     }.await;
 
     finish_invitation(tx, result, true).await
+}
+
+async fn rehash_invited_family_password(
+    backend: &Backend,
+    user: Uuid,
+    replacement: &str,
+    expected: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_system().await?;
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        f.execute("UPDATE users SET password_hash=?2,updated_at=?4 WHERE id=?1 AND deleted_at IS NULL AND password_hash=?3", &[Cell::uuid(user), Cell::text(replacement), Cell::text(expected), Cell::instant(crate::db::identity::stored_now())?]).await?;
+        Ok::<_, sqlx::Error>(Ok::<_, InvitationDbError>(()))
+    }.await;
+    finish_invitation(tx, result, true)
+        .await?
+        .map_err(|_| sqlx::Error::Protocol("password rotation refused".into()))
 }

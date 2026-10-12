@@ -351,7 +351,7 @@ pub async fn create_share_link_backend(
         )
         .await;
     }
-    let expires = match share_expiry(days, policy, Utc::now()) {
+    let expires = match share_expiry(days, policy, crate::db::identity::stored_now()) {
         Ok(e) => e,
         Err(e) => return Ok(Err(e)),
     };
