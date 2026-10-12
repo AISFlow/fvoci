@@ -662,6 +662,144 @@ pub async fn complete(
     complete_backend(&Backend::Postgres(pool.clone()), identity, license, params).await
 }
 
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_invitation_tests {
+    use super::*;
+    use crate::db::backend::{DbTransaction, RemoteDatabase};
+    use crate::db::codec::Cell;
+    use futures_util::FutureExt;
+
+    fn state(hash: &str) -> StoredState {
+        StoredState {
+            provider: "generic".into(),
+            mode: Mode::Invite,
+            nonce: "fixture-nonce".into(),
+            pkce_verifier: "fixture-verifier".into(),
+            invitation_token_hash: Some(hash.into()),
+            user_id: None,
+            consents: Some(vec![]),
+            workspace_id: None,
+            expires_at_ms: (Utc::now() + Duration::minutes(1)).timestamp_millis(),
+            issuer: "https://idp.example.invalid".into(),
+            client_id: "fixture-client".into(),
+        }
+    }
+
+    fn profile(subject: &str) -> SocialProfile {
+        // The HTTP integration test verifies the SDK/provider round trip;
+        // this fixture exercises the callback's already-validated identity.
+        SocialProfile {
+            sub: subject.into(),
+            issuer: "https://idp.example.invalid".into(),
+            email: Some("remote-idp@example.invalid".into()),
+            name: Some("Remote invite".into()),
+            email_verified: true,
+        }
+    }
+
+    async fn effects(backend: &Backend) -> Vec<i64> {
+        let mut tx = backend.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let rows = family
+            .query(
+                "SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM memberships),\
+             (SELECT count(*) FROM identity_links),(SELECT count(*) FROM events),\
+             (SELECT count(*) FROM audit_log),(SELECT count(*) FROM sessions),\
+             (SELECT count(*) FROM invitations WHERE accepted_at IS NOT NULL)",
+                &[],
+            )
+            .await
+            .unwrap();
+        let counts = (0..7)
+            .map(|i| rows[0].cell(i).unwrap().integer().unwrap())
+            .collect();
+        tx.rollback().await.unwrap();
+        counts
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn remote_oidc_invitation_callback_commits_once_and_refusals_have_no_effect() {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-remote-oidc-invite-{}", Uuid::now_v7()));
+        let driver = crate::db::libsql_finish_fixture::LibsqlFinishFixture::start(&sqld, &root)
+            .await
+            .unwrap();
+        let backend = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::MIN,
+        )));
+        let result = std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&backend).await.unwrap();
+            let owner = Uuid::now_v7();
+            let workspace = Uuid::now_v7();
+            let mut tx = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut tx else { unreachable!() };
+            family.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'remote-owner@example.invalid','Owner')", &[Cell::uuid(owner)]).await.unwrap();
+            family.execute("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'remote-oidc-invite','Remote invitation','team')", &[Cell::uuid(workspace)]).await.unwrap();
+            family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(workspace), Cell::uuid(owner)]).await.unwrap();
+            for (hash, email, expired) in [
+                ("remote-accept", "remote-invited@example.invalid", false),
+                ("remote-expired", "remote-expired@example.invalid", true),
+                ("remote-conflict", "remote-conflict@example.invalid", false),
+                ("remote-existing", "remote-owner@example.invalid", false),
+                ("remote-unauthorized", "remote-unauthorized@example.invalid", false),
+            ] {
+                let expires = if expired { Cell::Integer(0) } else { Cell::instant(Utc::now() + Duration::hours(1)).unwrap() };
+                family.execute("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at) VALUES(?1,?2,?3,'member',?4,?5,?6)", &[Cell::uuid(Uuid::now_v7()), Cell::uuid(workspace), Cell::text(email), Cell::text(hash), Cell::uuid(owner), expires]).await.unwrap();
+            }
+            tx.commit().await.unwrap();
+            let defaults = crate::settings::catalog::SettingsValues::defaults("FVOCI").defaults_user;
+            let license = crate::license::absent();
+            let accepted = accept_invite_with_identity(&backend, &license, ProviderKey::Generic, &profile("remote-invited-sub"), &state("remote-accept"), None, &defaults).await.unwrap();
+            let OidcResult::Session { user_id, .. } = accepted else { panic!("accepted invitation must issue a session") };
+            let fresh = Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(driver.database().await.unwrap(), std::num::NonZeroU32::MIN)));
+            let mut read = fresh.begin_read().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut read else { unreachable!() };
+            let rows = family.query("SELECT u.email,m.role,l.provider_user_id,l.issuer,(SELECT count(*) FROM events WHERE verb='invitation.accepted'),(SELECT count(*) FROM audit_log WHERE verb='invitation.accepted'),(SELECT count(*) FROM events WHERE verb='identity.linked') FROM users u JOIN memberships m ON m.user_id=u.id JOIN identity_links l ON l.user_id=u.id WHERE u.id=?1 AND m.workspace_id=?2", &[Cell::uuid(user_id), Cell::uuid(workspace)]).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            for (index, expected) in ["remote-invited@example.invalid", "member", "remote-invited-sub", "https://idp.example.invalid"].into_iter().enumerate() {
+                assert_eq!(rows[0].cell(index).unwrap().string().unwrap(), expected);
+            }
+            for index in 4..7 { assert_eq!(rows[0].cell(index).unwrap().integer().unwrap(), 1); }
+            read.rollback().await.unwrap();
+            fresh.close().await.unwrap();
+            for (hash, subject, code, demote) in [
+                ("remote-accept", "remote-invited-sub", OidcErrorCode::InvitationInvalid, false),
+                ("remote-expired", "remote-expired-sub", OidcErrorCode::InvitationInvalid, false),
+                ("remote-conflict", "remote-invited-sub", OidcErrorCode::AlreadyLinked, false),
+                ("remote-existing", "remote-unowned-sub", OidcErrorCode::InvitationInvalid, false),
+                ("remote-unauthorized", "remote-unauthorized-sub", OidcErrorCode::InvitationInvalid, true),
+            ] {
+                if demote {
+                    let mut tx = backend.begin_write().await.unwrap();
+                    let DbTransaction::SqliteFamily(family) = &mut tx else { unreachable!() };
+                    family.execute("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2", &[Cell::uuid(workspace), Cell::uuid(owner)]).await.unwrap();
+                    tx.commit().await.unwrap();
+                }
+                let before = effects(&backend).await;
+                let refused = accept_invite_with_identity(&backend, &license, ProviderKey::Generic, &profile(subject), &state(hash), None, &defaults).await.unwrap();
+                assert!(matches!(refused, OidcResult::Error { code: actual, mode: Some(Mode::Invite) } if actual == code));
+                assert_eq!(effects(&backend).await, before);
+            }
+        }).catch_unwind().await;
+        let close = backend.close().await;
+        let finish = driver.finish().await;
+        close.unwrap();
+        let receipt = finish.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

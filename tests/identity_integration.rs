@@ -1478,18 +1478,30 @@ async fn oidc_invite_round(
     profile: Profile,
     from: SocketAddr,
 ) -> Response {
+    oidc_invite_round_on(&h.app, fake, provider, invitation, consents, profile, from).await
+}
+
+async fn oidc_invite_round_on(
+    app: &axum::Router,
+    fake: &FakeOidc,
+    provider: &str,
+    invitation: &str,
+    consents: Option<&str>,
+    profile: Profile,
+    from: SocketAddr,
+) -> Response {
     let mut fields = vec![("invitation", invitation)];
     if let Some(consents) = consents {
         fields.push(("consents", consents));
     }
     let start = format!("/api/v1/auth/oidc/{provider}/start");
-    let res = form_post(&h.app, &start, &fields, Some("http://localhost"), from).await;
+    let res = form_post(app, &start, &fields, Some("http://localhost"), from).await;
     let location = authorization_url_json(&start, &res);
     let state_cookie = state_cookie_of(&start, &res);
     let path = redirect_path(&location);
     assert_eq!(path, format!("/api/v1/auth/oidc/{provider}/callback"));
     let query = fake.authorize(&location, profile);
-    callback_at(&h.app, &path, &query, Some(&state_cookie), None, from).await
+    callback_at(app, &path, &query, Some(&state_cookie), None, from).await
 }
 
 /// start → provider authorize → callback, all for `profile`. Like a real
@@ -6101,6 +6113,209 @@ mod sqlite_logout_regression {
                 .unwrap(),
             0
         );
+        drop(app);
+        drop(auth);
+        drop(fake);
+        fresh.close().await;
+        sqlite.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_oidc_invitation_callback_commits_once_and_refusals_have_no_effect() {
+        use fvoci_server::{http::router_with_identity, identity::Identity, oidc::ProviderKey};
+
+        async fn invite(app: &axum::Router, workspace: Uuid, owner: &str, email: &str) -> String {
+            let response = super::call(
+                app,
+                "POST",
+                &format!("/api/v1/workspaces/{workspace}/invitations"),
+                Some(serde_json::json!({"email":email,"role":"member"})),
+                Some(owner),
+                super::peer(247),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::CREATED, "{:?}", response.json);
+            response.json["acceptUrl"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .into()
+        }
+
+        async fn effects(pool: &sqlx::SqlitePool) -> (i64, i64, i64, i64, i64, i64, i64) {
+            sqlx::query_as(
+                "SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM memberships),\
+                 (SELECT count(*) FROM identity_links),(SELECT count(*) FROM events),\
+                 (SELECT count(*) FROM audit_log),(SELECT count(*) FROM sessions),\
+                 (SELECT count(*) FROM invitations WHERE accepted_at IS NOT NULL)",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+
+        let (root, path, sqlite, auth, owner, token) = family_fixture().await;
+        let workspace: Vec<u8> =
+            sqlx::query_scalar("SELECT workspace_id FROM memberships WHERE user_id=?1")
+                .bind(owner.as_bytes().as_slice())
+                .fetch_one(&sqlite)
+                .await
+                .unwrap();
+        let workspace = Uuid::from_slice(&workspace).unwrap();
+        let fake = super::FakeOidc::start(
+            super::CLIENT_ID,
+            super::CLIENT_SECRET,
+            super::Key::ec("family-invitation"),
+        )
+        .await;
+        let app = router_with_identity(
+            state(auth.clone(), root.join("storage")),
+            None,
+            Arc::new(Identity {
+                encryption_keys: Some(super::encryption_keys()),
+                totp_issuer: "localhost".into(),
+                oidc: super::oidc_settings(
+                    vec![super::provider(
+                        ProviderKey::Generic,
+                        &fake.base,
+                        super::CLIENT_SECRET,
+                    )],
+                    true,
+                ),
+                clock: Arc::new(|| super::T0_MS),
+            }),
+        );
+        let accepted = invite(&app, workspace, &token, "invited-family@example.invalid").await;
+        let response = super::oidc_invite_round_on(
+            &app,
+            &fake,
+            "generic",
+            &accepted,
+            Some("[]"),
+            super::Profile::new("invited-family-sub", "idp-mail@example.invalid", true),
+            super::peer(248),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::FOUND, "{:?}", response.json);
+        assert_eq!(response.location(), "http://localhost/");
+        let session = response
+            .cookie()
+            .expect("accepted invitation issues session");
+        let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let row: (Vec<u8>, String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT u.id,m.role,l.provider_user_id,l.issuer,u.password_hash FROM users u \
+             JOIN memberships m ON m.user_id=u.id JOIN identity_links l ON l.user_id=u.id \
+             WHERE u.email='invited-family@example.invalid' AND m.workspace_id=?1 AND l.provider='generic'",
+        )
+        .bind(workspace.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(
+            (&*row.1, &*row.2, &*row.3),
+            ("member", "invited-family-sub", fake.base.as_str())
+        );
+        assert!(row.4.is_none());
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events WHERE verb='invitation.accepted'),\
+             (SELECT count(*) FROM audit_log WHERE verb='invitation.accepted'),\
+             (SELECT count(*) FROM events WHERE verb='identity.linked')",
+        )
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(counts, (1, 1, 1));
+        let me = super::call(
+            &app,
+            "GET",
+            "/api/v1/auth/me",
+            None,
+            Some(&session),
+            super::peer(248),
+        )
+        .await;
+        assert_eq!(me.status, StatusCode::OK);
+        assert_eq!(me.json["userId"], Uuid::from_slice(&row.0).unwrap().to_string());
+        assert_eq!(me.json["email"], "invited-family@example.invalid");
+
+        let expired = invite(&app, workspace, &token, "expired-family@example.invalid").await;
+        sqlx::query("UPDATE invitations SET expires_at=0 WHERE token_hash=?1")
+            .bind(fvoci_server::auth::token::hash_token(&expired))
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let conflict = invite(&app, workspace, &token, "conflict-family@example.invalid").await;
+        let existing = invite(&app, workspace, &token, "family@example.com").await;
+        let unauthorized = invite(
+            &app,
+            workspace,
+            &token,
+            "unauthorized-family@example.invalid",
+        )
+        .await;
+        for (invitation, subject, error, demote) in [
+            (
+                accepted,
+                "invited-family-sub",
+                "oidc_invitation_invalid",
+                false,
+            ),
+            (
+                expired,
+                "expired-family-sub",
+                "oidc_invitation_invalid",
+                false,
+            ),
+            (conflict, "invited-family-sub", "oidc_already_linked", false),
+            (
+                existing,
+                "unowned-family-sub",
+                "oidc_invitation_invalid",
+                false,
+            ),
+            (
+                unauthorized,
+                "unauthorized-family-sub",
+                "oidc_invitation_invalid",
+                true,
+            ),
+        ] {
+            if demote {
+                sqlx::query(
+                    "UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2",
+                )
+                .bind(workspace.as_bytes().as_slice())
+                .bind(owner.as_bytes().as_slice())
+                .execute(&sqlite)
+                .await
+                .unwrap();
+            }
+            let before = effects(&fresh).await;
+            let response = super::oidc_invite_round_on(
+                &app,
+                &fake,
+                "generic",
+                &invitation,
+                Some("[]"),
+                super::Profile::new(subject, "idp-mail@example.invalid", true),
+                super::peer(249),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::FOUND, "{:?}", response.json);
+            assert_eq!(
+                response.location(),
+                format!("http://localhost/login?error={error}")
+            );
+            assert!(response.cookie().is_none());
+            assert_eq!(
+                effects(&fresh).await,
+                before,
+                "refusal must not change business state: {error}"
+            );
+        }
         drop(app);
         drop(auth);
         drop(fake);
