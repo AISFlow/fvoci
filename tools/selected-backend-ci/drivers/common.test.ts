@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import process from "node:process";
 import { parseJson, sha } from "../io.ts";
+import { restoreBrowserTitle, restoreSpec } from "./binding.ts";
 import {
   attachmentJson,
   command,
@@ -39,17 +40,49 @@ const secret = "http://secret.example/a cookie=PRIVATE_BROWSER_SECRET";
 const specFile = "/opt/fvoci/apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts";
 const temporary = () => mkdtempSync(join(tmpdir(), "fvoci-driver-common-"));
 // Reports reach the projection through io.read, which keeps integer tokens.
-const report = (result: unknown, title = knownOnBrowserTest, workers = "1") =>
+const report = (result: unknown, title = knownOnBrowserTest, workers = "1", file = specFile) =>
   parseJson(
     `{"config":{"workers":${workers}},"suites":[{"specs":[${JSON.stringify({
       title,
-      file: specFile,
+      file,
       tests: [{ results: [result] }],
     })}]}]}`,
   );
 const project = (result: unknown) => knownBrowserCheckpoint(report(result));
 
 describe("known browser checkpoint", () => {
+  test("restore failures expose only the exact selected test and emitted location", () => {
+    const result = {
+      status: "failed",
+      errorLocation: { file: "/opt/fvoci/apps/web/" + restoreSpec, line: 83 },
+      error: { message: secret, stack: secret },
+    };
+    const restore = report(result, restoreBrowserTitle, "1", restoreSpec);
+    const found = knownBrowserCheckpoint(restore, "sqlite-restore");
+    expect(found).toEqual({
+      known_browser_test: restoreBrowserTitle,
+      known_browser_status: "failed",
+      known_browser_checkpoint: restoreSpec + ":83",
+      browser_report_state: "matched",
+    });
+    expect(JSON.stringify(found)).not.toContain("PRIVATE");
+    expect(knownBrowserCheckpoint(restore).browser_report_state).toBe("spec-mismatch");
+    expect(knownBrowserCheckpoint(restore, true).browser_report_state).toBe("spec-mismatch");
+    expect(knownBrowserCheckpoint(report(result), "sqlite-restore").browser_report_state).toBe(
+      "spec-mismatch",
+    );
+    expect(
+      knownBrowserCheckpoint(
+        report(
+          { ...result, errorLocation: { file: secret, line: 83 } },
+          restoreBrowserTitle,
+          "1",
+          restoreSpec,
+        ),
+        "sqlite-restore",
+      ).known_browser_checkpoint,
+    ).toBeNull();
+  });
   test("reads only the emitted location fields", () => {
     const found = project({
       status: "failed",
