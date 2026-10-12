@@ -6238,7 +6238,10 @@ mod sqlite_logout_regression {
         )
         .await;
         assert_eq!(me.status, StatusCode::OK);
-        assert_eq!(me.json["userId"], Uuid::from_slice(&row.0).unwrap().to_string());
+        assert_eq!(
+            me.json["userId"],
+            Uuid::from_slice(&row.0).unwrap().to_string()
+        );
         assert_eq!(me.json["email"], "invited-family@example.invalid");
 
         let expired = invite(&app, workspace, &token, "expired-family@example.invalid").await;

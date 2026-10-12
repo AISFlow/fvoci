@@ -607,33 +607,22 @@ async fn accept_invite_with_identity(
     };
     let consents = stored.consents.clone().unwrap_or_default();
     let subject = identity_subject(provider, &profile.sub, None);
-    let accepted = match pool {
-        Backend::Postgres(pool) => {
-            invitations::accept_invitation_with_identity(
-                pool,
-                license,
-                IdentityAcceptRequest {
-                    token_hash,
-                    provider: provider.as_str(),
-                    subject: &subject,
-                    issuer: &profile.issuer,
-                    link_email: profile.email.as_deref(),
-                    given_name: profile.name.as_deref(),
-                    client_ip: ip,
-                    consents: &consents,
-                    defaults,
-                },
-            )
-            .await?
-        }
-        // port-membership owns accept_invitation_with_identity_backend; the integrator
-        // connects that operation when its dependency commit is present.
-        _ => {
-            return Err(sqlx::Error::Protocol(
-                "OIDC invitation acceptance requires port-membership integration".into(),
-            ));
-        }
-    };
+    let accepted = invitations::accept_invitation_with_identity_backend(
+        pool,
+        license,
+        IdentityAcceptRequest {
+            token_hash,
+            provider: provider.as_str(),
+            subject: &subject,
+            issuer: &profile.issuer,
+            link_email: profile.email.as_deref(),
+            given_name: profile.name.as_deref(),
+            client_ip: ip,
+            consents: &consents,
+            defaults,
+        },
+    )
+    .await?;
     match accepted {
         Ok(user_id) => oidc_session(pool, user_id, provider).await,
         Err(InvitationDbError::AlreadyLinked) => {
