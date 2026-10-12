@@ -230,10 +230,63 @@ where
     Ok(Messages::from_row(raw.as_ref()))
 }
 
+pub async fn load_backend(backend: &crate::db::backend::Backend) -> Result<Messages, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTx};
+    if let Backend::Postgres(pool) = backend {
+        return load(pool).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!("family message read");
+    };
+    let rows = family
+        .query("SELECT value FROM instance_settings WHERE key='i18n'", &[])
+        .await?;
+    let raw = rows.first().map(|row| row.cell(0)?.value()).transpose()?;
+    tx.rollback().await?;
+    Ok(Messages::from_row(raw.as_ref()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn sqlite_backend_reads_current_message_overrides() {
+        use crate::db::backend::Backend;
+        let root = std::env::temp_dir().join(format!("fvoci-messages-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("messages.sqlite");
+        crate::db::migrate::run_sqlite_migrations(&path)
+            .await
+            .unwrap();
+        let pool = crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap();
+        let backend = Backend::Sqlite(pool.clone());
+        assert_eq!(
+            load_backend(&backend)
+                .await
+                .unwrap()
+                .subject(Message::InviteSubject),
+            Messages::defaults().subject(Message::InviteSubject)
+        );
+        sqlx::query("INSERT INTO instance_settings (key,value) VALUES ('i18n',?1)")
+            .bind(json!({"overrides":{"mail.invite.subject":"Synthetic invitation"}}).to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fresh = crate::db::pool::connect_sqlite_app(&path, 1).await.unwrap();
+        assert_eq!(
+            load_backend(&Backend::Sqlite(fresh.clone()))
+                .await
+                .unwrap()
+                .subject(Message::InviteSubject),
+            "Synthetic invitation"
+        );
+        fresh.close().await;
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn every_catalog_key_has_a_message_with_its_default_variables() {

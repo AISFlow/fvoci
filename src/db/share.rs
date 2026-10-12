@@ -8,6 +8,9 @@
 //! workspace liveness and the shared root's current state, and recomputes the
 //! visible subtree inside the same tenant transaction that reads content.
 
+use crate::db::backend::{Backend, DbTx, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -324,6 +327,76 @@ pub async fn create_share_link(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_share_link_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    target: ShareTarget,
+    days: Option<i64>,
+    policy: &SharePolicy,
+    affiliation: Option<DocumentAffiliation>,
+) -> Result<Result<ShareLinkCreated, ShareDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_share_link(
+            pool,
+            ws,
+            actor,
+            credential,
+            target,
+            days,
+            policy,
+            affiliation,
+        )
+        .await;
+    }
+    let expires = match share_expiry(days, policy, crate::db::identity::stored_now()) {
+        Ok(e) => e,
+        Err(e) => return Ok(Err(e)),
+    };
+    let mut tx = backend.begin_write().await?;
+    let result= async {
+        let mut op = tx.operation();
+        if let Err(e) = family_share_actor(&mut op, ws, actor, credential).await? {
+            return Ok(Err(e));
+        }
+        let permission = match target {
+            ShareTarget::Document(doc) => family_share_document_access(&mut op, ws, actor, doc, affiliation).await?,
+            ShareTarget::Project(p) => op.project_permission_by_id(ws, actor, p).await?.unwrap_or(ProjectPermission::None),
+        };
+        if !permission.at_least(ProjectPermission::View) {
+            return Ok(Err(ShareDbError::NotFound));
+        }
+        if !permission.at_least(ProjectPermission::Edit) {
+            return Ok(Err(ShareDbError::Forbidden));
+        }
+        if let ShareTarget::Document(root) = target {
+            let wiki = {
+                let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+                let rows = f.query("SELECT project_id IS NULL FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(ws), Cell::uuid(root)]).await?;
+                rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()?
+            };
+            if wiki {
+                for doc in family_share_subtree(&mut op, ws, root).await? {
+                    if !op.document_permission(ws, actor, doc, true).await?.at_least(ProjectPermission::View) {
+                        return Ok(Err(ShareDbError::Forbidden));
+                    }
+                }
+            }
+        }
+        let (doc, project) = match target {
+            ShareTarget::Document(d) => (Some(d), None),
+            ShareTarget::Project(p) => (None, Some(p)),
+        };
+        let token = new_token();
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let rows = f.query("INSERT INTO share_links(id,workspace_id,user_id,token_hash,document_id,project_id,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7) RETURNING id,workspace_id,document_id,project_id,(expires_at/1000)*1000,(created_at/1000)*1000", &[Cell::uuid(Uuid::now_v7()), Cell::uuid(ws), Cell::uuid(actor), Cell::text(token.hash), Cell::optional_uuid(doc), Cell::optional_uuid(project), Cell::instant(expires)?]).await?;
+        Ok(Ok(ShareLinkCreated { record: family_share_record(rows.first().ok_or(sqlx::Error::RowNotFound)?)?, token: token.token }))
+    }.await;
+    finish_share(tx, result, true).await
+}
+
 /// Source `listShareLinks`: workspace managers (owner/admin) see every link,
 /// others only their own. `document` narrows to one document after checking
 /// the actor can view it under the route affiliation.
@@ -375,6 +448,35 @@ pub async fn list_share_links(
     Ok(Ok(rows.into_iter().map(record_from_row).collect()))
 }
 
+pub async fn list_share_links_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Option<(Uuid, DocumentAffiliation)>,
+) -> Result<Result<Vec<ShareLinkRecord>, ShareDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_share_links(pool, ws, actor, credential, document).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let role = match family_share_actor(&mut op, ws, actor, credential).await? {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        if let Some((doc, affiliation)) = document {
+            if !family_share_document_access(&mut op, ws, actor, doc, Some(affiliation)).await?.at_least(ProjectPermission::View) {
+                return Ok(Err(ShareDbError::NotFound));
+            }
+        }
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let rows = f.query("SELECT id,workspace_id,document_id,project_id,(expires_at/1000)*1000,(created_at/1000)*1000 FROM share_links WHERE workspace_id=?1 AND (?2 OR user_id=?3) AND (?4 IS NULL OR document_id=?4) ORDER BY created_at DESC,id DESC", &[Cell::uuid(ws), Cell::Integer(i64::from(role.at_least(WorkspaceRole::Admin))), Cell::uuid(actor), Cell::optional_uuid(document.map(|(d, _)| d))]).await?;
+        Ok(Ok(rows.iter().map(family_share_record).collect::<Result<Vec<_>, _>>()?))
+    }.await;
+    finish_share(tx, result, false).await
+}
+
 /// Source `revokeShareLink`: the creator, or a workspace manager. The row is
 /// deleted, so the token stops resolving on the next request.
 pub async fn revoke_share_link(
@@ -411,6 +513,47 @@ pub async fn revoke_share_link(
     }
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn revoke_share_link_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    share: Uuid,
+) -> Result<Result<(), ShareDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return revoke_share_link(pool, ws, actor, credential, share).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        let role = match family_share_actor(&mut op, ws, actor, credential).await? {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        let OperationTx::SqliteFamily(f) = &mut op else {
+            unreachable!()
+        };
+        let n = f
+            .execute(
+                "DELETE FROM share_links WHERE workspace_id=?1 AND id=?2 AND (?3 OR user_id=?4)",
+                &[
+                    Cell::uuid(ws),
+                    Cell::uuid(share),
+                    Cell::Integer(i64::from(role.at_least(WorkspaceRole::Admin))),
+                    Cell::uuid(actor),
+                ],
+            )
+            .await?;
+        Ok(if n == 0 {
+            Err(ShareDbError::NotFound)
+        } else {
+            Ok(())
+        })
+    }
+    .await;
+    finish_share(tx, result, true).await
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +826,68 @@ pub async fn share_public_meta(
     }))
 }
 
+pub async fn share_public_meta_backend(
+    backend: &Backend,
+    raw: &str,
+    with_excerpt: bool,
+) -> Result<Option<SharePublicMeta>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return share_public_meta(pool, raw, with_excerpt).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        let ws = scope.share.workspace_id;
+        let OperationTx::SqliteFamily(f) = &mut op else {
+            unreachable!()
+        };
+        let (title, excerpt) =
+            if let (Some(project), None) = (scope.share.project_id, scope.share.document_id) {
+                let rows = f
+                    .query(
+                        "SELECT name FROM projects WHERE workspace_id=?1 AND id=?2",
+                        &[Cell::uuid(ws), Cell::uuid(project)],
+                    )
+                    .await?;
+                (
+                    rows.first()
+                        .ok_or(sqlx::Error::RowNotFound)?
+                        .cell(0)?
+                        .string()?,
+                    String::new(),
+                )
+            } else {
+                let rows = f
+                    .query(
+                        "SELECT title,content_json FROM documents WHERE workspace_id=?1 AND id=?2",
+                        &[Cell::uuid(ws), Cell::uuid(scope.root)],
+                    )
+                    .await?;
+                let r = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+                (
+                    r.cell(0)?.string()?,
+                    if with_excerpt {
+                        share_excerpt(&r.cell(1)?.value()?)
+                    } else {
+                        String::new()
+                    },
+                )
+            };
+        Ok(Some(SharePublicMeta {
+            title: fold_one_line(&title),
+            excerpt,
+            document_id: Some(scope.root),
+            project_id: scope.share.project_id,
+            expires_at: scope.share.expires_at,
+        }))
+    }
+    .await;
+    finish_public_share(tx, result).await
+}
+
 #[derive(Debug, Clone)]
 pub struct ShareDocument {
     pub id: Uuid,
@@ -732,6 +937,32 @@ pub async fn share_document(
             content_json,
         }),
     )
+}
+
+pub async fn share_document_backend(
+    backend: &Backend,
+    raw: &str,
+    document: Option<Uuid>,
+) -> Result<Option<ShareDocument>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return share_document(pool, raw, document).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        let ws = scope.share.workspace_id;
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let target = document.unwrap_or(scope.root);
+        if !scope.visible.contains(&target) {
+            return Ok(None);
+        }
+        let rows = f.query("SELECT id,title,(updated_at/1000)*1000,content_json FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(ws), Cell::uuid(target)]).await?;
+        rows.first().map(|r| Ok(ShareDocument { id: r.cell(0)?.id()?, title: r.cell(1)?.string()?, updated_at: r.cell(2)?.datetime()?, content_json: r.cell(3)?.value()? })).transpose()
+    }.await;
+    finish_public_share(tx, result).await
 }
 
 #[derive(Debug, Clone)]
@@ -816,6 +1047,34 @@ pub async fn share_tree(
             )
             .collect(),
     ))
+}
+
+pub async fn share_tree_backend(
+    backend: &Backend,
+    raw: &str,
+) -> Result<Option<Vec<ShareTreeNode>>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return share_tree(pool, raw).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        let ws = scope.share.workspace_id;
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let rows = f.query("SELECT id,workspace_id,parent_id,project_id,title,icon,path,sort_key,number,status FROM documents WHERE workspace_id=?1 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY,id", &[Cell::uuid(ws)]).await?;
+        let mut nodes = Vec::new();
+        for r in rows {
+            let id = r.cell(0)?.id()?;
+            if scope.visible.contains(&id) {
+                nodes.push(ShareTreeNode { id, workspace_id: r.cell(1)?.id()?, parent_id: r.cell(2)?.optional(Cell::id)?, project_id: r.cell(3)?.optional(Cell::id)?, title: r.cell(4)?.string()?, icon: r.cell(5)?.optional(Cell::string)?, path: r.cell(6)?.string()?, sort_key: r.cell(7)?.string()?, number: r.cell(8)?.int32()?, status: r.cell(9)?.string()? });
+            }
+        }
+        Ok(Some(nodes))
+    }.await;
+    finish_public_share(tx, result).await
 }
 
 #[derive(Debug, Clone)]
@@ -915,6 +1174,34 @@ pub async fn share_attachment(
     }))
 }
 
+pub async fn share_attachment_backend(
+    backend: &Backend,
+    raw: &str,
+    attachment: Uuid,
+) -> Result<Option<ShareAttachment>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return share_attachment(pool, raw, attachment).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        let ws = scope.share.workspace_id;
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let rows = f.query("SELECT id,document_id,name,mime,size_bytes,image,scan_status,status,storage_key,variants,created_at,completed_at FROM attachments WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(ws), Cell::uuid(attachment)]).await?;
+        let Some(r) = rows.first() else {
+            return Ok(None);
+        };
+        if r.cell(7)?.string()? != "stored" || r.cell(6)?.string()? == "infected" || !r.cell(1)?.optional(Cell::id)?.is_some_and(|d| scope.visible.contains(&d)) {
+            return Ok(None);
+        }
+        Ok(Some(ShareAttachment { id: r.cell(0)?.id()?, name: r.cell(2)?.string()?, mime: r.cell(3)?.string()?, size_bytes: r.cell(4)?.optional(Cell::integer)?, image: r.cell(5)?.boolean()?, scan_status: r.cell(6)?.string()?, storage_key: r.cell(8)?.string()?, variants: r.cell(9)?.value()?, created_at: r.cell(10)?.datetime()?, completed_at: r.cell(11)?.optional(Cell::datetime)? }))
+    }.await;
+    finish_public_share(tx, result).await
+}
+
 // ---------------------------------------------------------------------------
 // Public search hydration
 // ---------------------------------------------------------------------------
@@ -953,6 +1240,28 @@ pub async fn share_search_scope(
     let visible = visible_document_ids(&mut tx, &share).await?;
     tx.commit().await?;
     Ok(Some(ShareSearchScope { share, visible }))
+}
+
+pub async fn share_search_scope_backend(
+    backend: &Backend,
+    raw: &str,
+) -> Result<Option<ShareSearchScope>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return share_search_scope(pool, raw).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        Ok(Some(ShareSearchScope {
+            share: scope.share,
+            visible: scope.visible,
+        }))
+    }
+    .await;
+    finish_public_share(tx, result).await
 }
 
 /// Source `hydrateShareHits` + the post-hydrate recheck: the token is resolved
@@ -1043,6 +1352,43 @@ pub async fn hydrate_share_hits(
     Ok(Some((share, rows)))
 }
 
+pub async fn hydrate_share_hits_backend(
+    backend: &Backend,
+    raw: &str,
+    documents: &[Uuid],
+    tasks: &[Uuid],
+) -> Result<Option<(ResolvedShare, Vec<ShareSearchRow>)>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return hydrate_share_hits(pool, raw, documents, tasks).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result= async {
+        let mut op = tx.operation();
+        let Some(scope) = family_share_scope(&mut op, raw).await? else {
+            return Ok(None);
+        };
+        let ws = scope.share.workspace_id;
+        let OperationTx::SqliteFamily(f) = &mut op else { unreachable!() };
+        let mut hits = Vec::new();
+        for id in documents.iter().filter(|d| scope.visible.contains(d)) {
+            let rows = f.query("SELECT id,title,text,project_id,(updated_at/1000)*1000 FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(ws), Cell::uuid(*id)]).await?;
+            if let Some(r) = rows.first() {
+                hits.push(ShareSearchRow { is_task: false, id: r.cell(0)?.id()?, title: r.cell(1)?.string()?, body: r.cell(2)?.string()?, project_id: r.cell(3)?.optional(Cell::id)?, updated_at: r.cell(4)?.datetime()? });
+            }
+        }
+        if let (Some(project), None) = (scope.share.project_id, scope.share.document_id) {
+            for id in tasks {
+                let rows = f.query("SELECT t.id,t.title,t.project_id,(t.updated_at/1000)*1000,t.content_json FROM tasks t JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.project_id=?2 AND t.id=?3 AND t.deleted_at IS NULL AND t.archived_at IS NULL", &[Cell::uuid(ws), Cell::uuid(project), Cell::uuid(*id)]).await?;
+                if let Some(r) = rows.first() {
+                    hits.push(ShareSearchRow { is_task: true, id: r.cell(0)?.id()?, title: r.cell(1)?.string()?, body: extract_text(&r.cell(4)?.value()?).nfc().collect(), project_id: Some(r.cell(2)?.id()?), updated_at: r.cell(3)?.datetime()? });
+                }
+            }
+        }
+        Ok(Some((scope.share, hits)))
+    }.await;
+    finish_public_share(tx, result).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,4 +1429,177 @@ mod tests {
         };
         assert!(share_expiry(Some(1), &disabled, now).is_err());
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("share operation refused: {0:?}")]
+struct ShareRefusal(ShareDbError);
+async fn finish_share<T>(
+    tx: DbTx,
+    result: Result<Result<T, ShareDbError>, sqlx::Error>,
+    write: bool,
+) -> Result<Result<T, ShareDbError>, sqlx::Error> {
+    if write && matches!(&result, Ok(Ok(_))) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    } else if let Err(cleanup) = tx.rollback().await {
+        let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+            Err(e) => Some(Box::new(e)),
+            Ok(Err(e)) => Some(Box::new(ShareRefusal(e))),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+async fn finish_public_share<T>(
+    tx: DbTx,
+    result: Result<Option<T>, sqlx::Error>,
+) -> Result<Option<T>, sqlx::Error> {
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
+    result
+}
+async fn family_share_actor(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<WorkspaceRole, ShareDbError>, sqlx::Error> {
+    op.set_tenant(ws).await?;
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(ShareDbError::Forbidden));
+    }
+    if !op.workspace_is_live(ws).await? {
+        return Ok(Err(ShareDbError::NotFound));
+    }
+    Ok(op
+        .membership_role(ws, actor, false)
+        .await?
+        .ok_or(ShareDbError::Forbidden))
+}
+fn family_share_record(r: &FamilyRow) -> Result<ShareLinkRecord, sqlx::Error> {
+    Ok(ShareLinkRecord {
+        id: r.cell(0)?.id()?,
+        workspace_id: r.cell(1)?.id()?,
+        document_id: r.cell(2)?.optional(Cell::id)?,
+        project_id: r.cell(3)?.optional(Cell::id)?,
+        expires_at: r.cell(4)?.datetime()?,
+        created_at: r.cell(5)?.datetime()?,
+    })
+}
+async fn family_share_document_access(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    actor: Uuid,
+    doc: Uuid,
+    affiliation: Option<DocumentAffiliation>,
+) -> Result<ProjectPermission, sqlx::Error> {
+    let rows = {
+        let OperationTx::SqliteFamily(f) = op else {
+            unreachable!()
+        };
+        f.query("SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(ws),Cell::uuid(doc)]).await?
+    };
+    let Some(r) = rows.first() else {
+        return Ok(ProjectPermission::None);
+    };
+    let project = r.cell(0)?.optional(Cell::id)?;
+    match (affiliation, project) {
+        (Some(DocumentAffiliation::Workspace), Some(_)) => return Ok(ProjectPermission::None),
+        (Some(DocumentAffiliation::Project(route)), actual) if actual != Some(route) => {
+            return Ok(ProjectPermission::None)
+        }
+        _ => {}
+    }
+    if let Some(project) = project {
+        return Ok(op
+            .project_permission_by_id(ws, actor, project)
+            .await?
+            .unwrap_or(ProjectPermission::None));
+    }
+    op.document_permission(ws, actor, doc, true).await
+}
+async fn family_share_subtree(
+    op: &mut OperationTx<'_, '_>,
+    ws: Uuid,
+    root: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let OperationTx::SqliteFamily(f) = op else {
+        unreachable!()
+    };
+    f.require_tenant(ws)?;
+    f.query("WITH root AS (SELECT path,project_id FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL) SELECT d.id FROM documents d CROSS JOIN root WHERE d.workspace_id=?1 AND d.deleted_at IS NULL AND d.project_id IS root.project_id AND (d.path=root.path OR substr(d.path,1,length(root.path)+1)=root.path||'.') AND NOT EXISTS(SELECT 1 FROM documents x WHERE x.workspace_id=?1 AND x.deleted_at IS NOT NULL AND substr(d.path,1,length(x.path)+1)=x.path||'.' AND (x.path=root.path OR substr(x.path,1,length(root.path)+1)=root.path||'.')) ORDER BY d.sort_key COLLATE BINARY,d.id",&[Cell::uuid(ws),Cell::uuid(root)]).await?.iter().map(|r|r.cell(0)?.id()).collect()
+}
+struct FamilyShareScope {
+    share: ResolvedShare,
+    root: Uuid,
+    visible: Vec<Uuid>,
+}
+async fn family_share_scope(
+    op: &mut OperationTx<'_, '_>,
+    raw: &str,
+) -> Result<Option<FamilyShareScope>, sqlx::Error> {
+    if raw.is_empty() || raw.len() > MAX_TOKEN_LEN {
+        return Ok(None);
+    }
+    let hash = hash_token(raw);
+    let previous = op.set_system().await?;
+    let lookup= async {
+        let OperationTx::SqliteFamily(f) = &mut *op else { unreachable!() };
+        f.require_system_context()?;
+        f.query("SELECT id,workspace_id,token_hash,document_id,project_id,(expires_at/1000)*1000 FROM share_links WHERE token_hash=?1", &[Cell::text(&hash)]).await
+    }.await;
+    op.restore_system(previous).await?;
+    let rows = lookup?;
+    let Some(r) = rows.first() else {
+        return Ok(None);
+    };
+    let expires_at = r.cell(5)?.datetime()?;
+    if !token_hashes_eq(&r.cell(2)?.string()?, &hash) || expires_at <= Utc::now() {
+        return Ok(None);
+    }
+    let share = ResolvedShare {
+        id: r.cell(0)?.id()?,
+        workspace_id: r.cell(1)?.id()?,
+        document_id: r.cell(3)?.optional(Cell::id)?,
+        project_id: r.cell(4)?.optional(Cell::id)?,
+        expires_at,
+    };
+    op.set_tenant(share.workspace_id).await?;
+    if !op.workspace_is_live(share.workspace_id).await? {
+        return Ok(None);
+    }
+    let root = {
+        let OperationTx::SqliteFamily(f) = &mut *op else {
+            unreachable!()
+        };
+        let root = if let Some(doc) = share.document_id {
+            Some(doc)
+        } else if let Some(project) = share.project_id {
+            f.query("SELECT root_document_id FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(share.workspace_id),Cell::uuid(project)]).await?.first().map(|r|r.cell(0)?.optional(Cell::id)).transpose()?.flatten()
+        } else {
+            None
+        };
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        if f.query("SELECT 1 FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL AND (?3 IS NULL OR project_id=?3)",&[Cell::uuid(share.workspace_id),Cell::uuid(root),Cell::optional_uuid(share.project_id)]).await?.is_empty(){return Ok(None);}
+        root
+    };
+    let visible = family_share_subtree(op, share.workspace_id, root).await?;
+    Ok(Some(FamilyShareScope {
+        share,
+        root,
+        visible,
+    }))
 }

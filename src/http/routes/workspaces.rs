@@ -177,13 +177,8 @@ async fn patch_workspace(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = crate::db::workspace::update_workspace_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::update_workspace_meta_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -218,13 +213,8 @@ async fn create_workspace(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = crate::db::workspace::create_workspace_as_instance_admin(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::create_workspace_as_instance_admin_backend(
+        &state.auth.db.pool,
         &state.auth.db.license,
         user_id,
         session_id,
@@ -374,13 +364,8 @@ async fn delete_workspace(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    let result = crate::db::workspace::trash_workspace(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces.rs")
-            .map_err(internal)?,
+    let result = crate::db::workspace::trash_workspace_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
