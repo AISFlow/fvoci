@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 import { writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { z } from "zod";
 const revisionDetailSchema = z
   .object({
@@ -129,65 +128,46 @@ async function nativeDrop(page: Page, path: string): Promise<void> {
   }
 }
 
-/** Only the current invocation's isolated restricted role, read-only tenant transaction. */
-function restrictedWitness(workspace: string, document: string): Record<string, unknown> {
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  const connection = process.env.DATABASE_APP_URL;
-  if (!container?.startsWith("fvoci-rust-test-pg-") || !connection)
-    throw new Error("Missing owned app-role DB fixture");
-  const app = new URL(connection);
-  if (
-    app.hostname !== "127.0.0.1" ||
-    !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
-    !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
-  )
-    throw new Error("Refusing non-fixture DB");
-  for (const id of [workspace, document])
-    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
-      throw new Error("Invalid fixture ID");
-  const result = spawnSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-X",
-      "-qAt",
-      "-U",
-      app.username,
-      "-d",
-      app.pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-    ],
-    {
-      input: `BEGIN READ ONLY;
-SET LOCAL app.tenant_id = '${workspace}';
-SELECT jsonb_build_object('role',current_user,'superuser',r.rolsuper,'bypassRls',r.rolbypassrls,
-'notOwner',pg_get_userbyid(c.relowner) <> current_user,'forced',c.relforcerowsecurity,'rlsActive',row_security_active(c.oid),
-'body',(SELECT content_json FROM fvoci.documents WHERE workspace_id='${workspace}' AND id='${document}'),
-'tail',(SELECT tail_seq::text FROM fvoci.document_states WHERE workspace_id='${workspace}' AND document_id='${document}'),
-'updates',(SELECT count(*) FROM fvoci.document_collab_updates WHERE workspace_id='${workspace}' AND document_id='${document}'),
-'receipts',(SELECT count(*) FROM fvoci.document_collab_op_receipts WHERE workspace_id='${workspace}' AND document_id='${document}'),
-'history',(SELECT jsonb_agg(jsonb_build_object('id',id,'reason',reason,'source',restored_from_id,'actor',created_by,'at',created_at,'base',restore_base_tail_seq::text,'committed',restore_committed_tail_seq::text) ORDER BY created_at,id) FROM fvoci.revisions WHERE workspace_id='${workspace}' AND target_kind='document' AND target_id='${document}'))
-FROM pg_roles r JOIN pg_class c ON c.oid='fvoci.revisions'::regclass WHERE r.rolname=current_user;
-ROLLBACK;`,
-      encoding: "utf8",
-      timeout: 10000,
-    },
+/** Fresh authenticated API reads work on every backend. Exact receipt and
+ * rollback counters are also covered by revision_sqlite_restore.rs. */
+async function durableWitness(
+  page: Page,
+  workspace: string,
+  document: string,
+): Promise<Record<string, unknown>> {
+  const base = `/api/v1/workspaces/${workspace}/documents/${document}`;
+  const body = await page.request.get(base + "/body");
+  expect(body.status()).toBe(200);
+  const listed = await page.request.get(base + "/revisions");
+  expect(listed.status()).toBe(200);
+  const items = ((await listed.json()) as { items: { id: string }[] }).items;
+  expect(items.length).toBeGreaterThan(0);
+  const history = await Promise.all(
+    items.map(async ({ id }) => {
+      const response = await page.request.get(base + "/revisions/" + id);
+      expect(response.status()).toBe(200);
+      const row = revisionDetailSchema.parse(await response.json());
+      return {
+        id: row.id,
+        reason: row.reason,
+        source: row.restoredFromId,
+        actor: row.createdBy,
+        at: row.createdAt,
+        content: row.contentJson,
+        snapshot: row.ySnapshot,
+      };
+    }),
   );
-  expect(result.status, result.stderr).toBe(0);
-  const witness = JSON.parse(result.stdout) as Record<string, unknown>;
-  expect(witness).toMatchObject({
-    role: app.username,
-    superuser: false,
-    bypassRls: false,
-    notOwner: true,
-    forced: true,
-    rlsActive: true,
-  });
-  return witness;
+  history.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
+  const newest = items[0];
+  if (!newest) throw new Error("Missing revision history");
+  const preview = await page.request.get(base + "/revisions/" + newest.id + "/restore-preview");
+  expect(preview.status()).toBe(200);
+  return {
+    body: ((await body.json()) as { contentJson: unknown }).contentJson,
+    tail: ((await preview.json()) as { currentTailSeq: string }).currentTailSeq,
+    history,
+  };
 }
 
 function literalRestoredMeaning(body: TiptapNode, fileId: unknown, reference: string): void {
@@ -434,14 +414,14 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     await peer.keyboard.type(" 동료 최신 변경");
     await peer.getByRole("button", { name: "저장", exact: true }).click();
     await expect(peer.locator('[data-collab-persisted="true"]')).toBeVisible();
-    const beforeConflict = restrictedWitness(ws, doc.id);
+    const beforeConflict = await durableWitness(a.page, ws, doc.id);
     const conflict = a.page.waitForResponse((response) =>
       response.url().endsWith(`/revisions/${source.id}/restore`),
     );
     await a.page.getByTestId("revision-restore-confirm").click();
     expect((await conflict).status()).toBe(409);
-    const afterConflict = restrictedWitness(ws, doc.id);
-    for (const key of ["body", "history", "tail", "updates", "receipts"])
+    const afterConflict = await durableWitness(a.page, ws, doc.id);
+    for (const key of ["body", "history", "tail"])
       expect(afterConflict[key], `409 must not mutate ${key}`).toEqual(beforeConflict[key]);
     await expect(a.page.getByTestId("revision-restore-confirm")).toBeDisabled();
     await a.page.getByTestId("revision-restore-refresh").click();
@@ -472,32 +452,28 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
       contentJson: sourceDetail.contentJson,
     });
     expect(Date.parse(newDetail.createdAt)).toBeGreaterThan(Date.now() - 60000);
-    const firstReadback = restrictedWitness(ws, doc.id);
+    const firstReadback = await durableWitness(a.page, ws, doc.id);
     // Historical idless nodes may acquire IDs in the live editor. Check the
     // literal meaning and existing identities; never normalize away known IDs.
     const restoredBody = firstReadback.body as TiptapNode;
     literalRestoredMeaning(restoredBody, firstFile.attrs?.id, referenced.id);
-    const sqlHistory = firstReadback.history as {
+    const historyRows = firstReadback.history as {
       id: string;
       reason: string;
       source: string | null;
       actor: string | null;
       at: string;
-      base: string | null;
-      committed: string | null;
     }[];
-    expect(sqlHistory).toHaveLength(3);
-    const sqlRestored = sqlHistory.find((row) => row.id === restored.revisionId);
-    expect(sqlRestored).toMatchObject({
+    expect(historyRows).toHaveLength(3);
+    const restoredRow = historyRows.find((row) => row.id === restored.revisionId);
+    expect(restoredRow).toMatchObject({
       reason: "restore",
       source: source.id,
       actor: me.userId,
-      base: afterConflict.tail,
     });
-    expect(BigInt(sqlRestored?.committed ?? "-1")).toBe(BigInt(afterConflict.tail as string) + 1n);
-    expect(firstReadback.tail).toBe(sqlRestored?.committed);
-    expect(Date.parse(sqlRestored?.at ?? "")).toBe(Date.parse(newDetail.createdAt));
-    expect(sqlHistory.filter((row) => row.id !== restored.revisionId)).toEqual(
+    expect(BigInt(firstReadback.tail as string)).toBe(BigInt(afterConflict.tail as string) + 1n);
+    expect(Date.parse(restoredRow?.at ?? "")).toBe(Date.parse(newDetail.createdAt));
+    expect(historyRows.filter((row) => row.id !== restored.revisionId)).toEqual(
       afterConflict.history,
     );
     expect(
@@ -540,7 +516,9 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
       await fresh.getByRole("button", { name: "저장", exact: true }).click();
       await expect(fresh.locator('[data-collab-persisted="true"]')).toBeVisible();
       await expect(editorOf(a.page)).toContainText("복원 후 재편집");
-      expect(JSON.stringify(restrictedWitness(ws, doc.id).body)).toContain("복원 후 재편집");
+      expect(JSON.stringify((await durableWitness(fresh, ws, doc.id)).body)).toContain(
+        "복원 후 재편집",
+      );
       expect(
         await (await fresh.request.get(base + "/revisions/" + restored.revisionId)).json(),
       ).toEqual(newDetail);
@@ -559,7 +537,7 @@ test("literal Korean semantic pair navigates, previews a conflict, restores new 
     }));
     expect(layout.scroll).toBeLessThanOrEqual(layout.width + 1);
     expect(parseFloat(layout.font)).toBeGreaterThanOrEqual(32);
-    await info.attach("w4-real-pair-restore-app-role-readback.json", {
+    await info.attach("w4-real-pair-restore-api-readback.json", {
       body: JSON.stringify({ source: source.id, after: after.id, restored, firstReadback, layout }),
       contentType: "application/json",
     });

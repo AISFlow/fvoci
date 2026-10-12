@@ -26,6 +26,11 @@ import {
 } from "./rust-postgres.ts";
 import { verifySqlitePrefixCache } from "./rust-sqlite.ts";
 import { RUST1_MUTATIONS, loadRustWorkflow } from "./rust1-mutations.ts";
+import { RUST_INTEGRATION_MANUAL_TARGETS } from "./rust-shared.ts";
+import { collaborationScriptInventory } from "./rust-collab.ts";
+import { postgresS3Inventory } from "./rust-exec.ts";
+import { selectedInstallInventory } from "./rust-install.ts";
+import { schemaBaselineInventory } from "./rust-schema.ts";
 
 const root = resolve(import.meta.dir, "../../..");
 type Jobs = Record<string, Mapping>;
@@ -51,8 +56,21 @@ describe("real rust.yml", () => {
     expect(verifyRustBinaryHandoffCtx(ctx)).toEqual([]);
     const { perArch, error } = postgresMatrixInventory(workflow.jobs);
     expect(error).toBeNull();
-    expect(perArch.x64.size).toBe(44);
+    expect(perArch.x64.size).toBe(45);
     expect([...perArch.x64].sort()).toEqual([...perArch.arm64].sort());
+    const remote = "revision_libsql_restore";
+    expect(RUST_INTEGRATION_MANUAL_TARGETS.has(remote)).toBe(true);
+    expect(perArch.x64.has(remote)).toBe(false);
+    expect(perArch.arm64.has(remote)).toBe(false);
+    for (const [inventory, error] of [
+      collaborationScriptInventory(root),
+      postgresS3Inventory(workflow.jobs),
+      selectedInstallInventory(workflow.jobs),
+      schemaBaselineInventory(workflow.jobs),
+    ]) {
+      expect(error).toBeNull();
+      expect(inventory?.has(remote)).toBe(false);
+    }
   });
 
   test("absent rust.yml is left to the workflow-file check", () => {
@@ -102,8 +120,9 @@ describe("real rust.yml", () => {
       const [a, b, c] = [shard("a"), shard("b"), shard("c")];
       expect([...a].sort()).toEqual([...originalA].filter((name) => !moved.has(name)).sort());
       expect([...c].sort()).toEqual([...moved].sort());
-      expect(b.size).toBe(26);
-      expect(new Set([...a, ...b, ...c]).size).toBe(44);
+      expect(b.size).toBe(27);
+      expect(b.has("revision_sqlite_restore")).toBe(true);
+      expect(new Set([...a, ...b, ...c]).size).toBe(45);
     }
     expect(field(postgres.strategy, "matrix")).toBe(POSTGRES_MATRIX_EXPR);
     expect(field(field(postgres.services, "postgres"), "image")).toBe(
