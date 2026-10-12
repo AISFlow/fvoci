@@ -7597,3 +7597,158 @@ mod sqlite_task_port {
         }
     }
 }
+
+mod sqlite_task_materialization {
+    use super::*;
+    use fvoci_server::auth::{password::Keyring, service::SetupInstanceInput, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use std::sync::Arc;
+    pub(super) async fn fixture() -> (
+        std::path::PathBuf,
+        sqlx::SqlitePool,
+        axum::Router,
+        String,
+        Uuid,
+        Uuid,
+    ) {
+        let root = std::env::temp_dir().join(format!("fvoci-data-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.as_path().join("data.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (user, ws, token) = auth
+            .setup_instance(
+                "Data-Oracle-2026!".into(),
+                SetupInstanceInput {
+                    email: "data@example.invalid".into(),
+                    given_name: "Data".into(),
+                    family_name: None,
+                    workspace_slug: "data-oracle".into(),
+                    workspace_name: "Data oracle".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let state = AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::On,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.as_path().join("storage"))
+                .into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        };
+        (
+            root,
+            sqlite,
+            fvoci_server::http::router(state, None),
+            token,
+            user,
+            ws,
+        )
+    }
+
+    #[tokio::test]
+    async fn sqlite_task_collection_materialization_atomic_http_fresh_client() {
+        let (root, db, app, cookie, _, ws) = fixture().await;
+        let project = create_project(app.clone(), &cookie, ws, "MAT", "workspace").await;
+        let project_id = Uuid::parse_str(project["id"].as_str().unwrap()).unwrap();
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let collections: Vec<(Vec<u8>, String, String)> = sqlx::query_as(
+            "SELECT id,kind,name FROM collections WHERE workspace_id=?1 AND project_id=?2",
+        )
+        .bind(ws.as_bytes().as_slice())
+        .bind(project_id.as_bytes().as_slice())
+        .fetch_all(&fresh)
+        .await
+        .unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].1, "task");
+        assert_eq!(collections[0].2, project["name"].as_str().unwrap());
+        let path = format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks");
+        let (status, task) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"title":"Atomic item"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{task}");
+        let item: (Vec<u8>,i32)=sqlx::query_as("SELECT collection_id,version FROM collection_items WHERE workspace_id=?1 AND task_id=?2")
+            .bind(ws.as_bytes().as_slice()).bind(Uuid::parse_str(task["id"].as_str().unwrap()).unwrap().as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        assert_eq!(item.0, collections[0].0);
+        assert_eq!(item.1, 1);
+        let before:(i64,i64,i64,i64,i64,i32)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),next_number FROM projects WHERE id=?1").bind(project_id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_task_item BEFORE INSERT ON collection_items WHEN NEW.task_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'test item refusal'); END").execute(&fresh).await.unwrap();
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"title":"Rollback item"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(sqlx::query_as::<_,(i64,i64,i64,i64,i64,i32)>("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),next_number FROM projects WHERE id=?1").bind(project_id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap(),before);
+        sqlx::query("DROP TRIGGER reject_task_item")
+            .execute(&fresh)
+            .await
+            .unwrap();
+        // PG raises when the project's unique task collection is missing.
+        // Do not repair broken state or commit a task without its item.
+        sqlx::query("DELETE FROM collections WHERE id=?1")
+            .bind(&collections[0].0)
+            .execute(&fresh)
+            .await
+            .unwrap();
+        let before:(i64,i64,i64,i64,i64,i32)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),next_number FROM projects WHERE id=?1").bind(project_id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        let (status, body) = json_request(
+            app.clone(),
+            "POST",
+            &path,
+            Some(json!({"title":"Missing collection"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(sqlx::query_as::<_,(i64,i64,i64,i64,i64,i32)>("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),next_number FROM projects WHERE id=?1").bind(project_id.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap(),before);
+        fresh.close().await;
+        db.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
