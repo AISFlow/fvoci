@@ -1067,6 +1067,25 @@ pub async fn tagged_document_id_set(
     Ok(ids)
 }
 
+pub async fn tagged_document_id_set_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    tag_id: Uuid,
+) -> Result<std::collections::HashSet<Uuid>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return tagged_document_id_set(pool, workspace_id, tag_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        tx.operation().set_tenant(workspace_id).await?;
+        let crate::db::backend::DbTx::SqliteFamily(family) = &mut tx else { unreachable!() };
+        family.require_tenant(workspace_id)?;
+        family.query("SELECT document_id FROM document_tag_assignments WHERE workspace_id=?1 AND tag_id=?2", &[Cell::uuid(workspace_id),Cell::uuid(tag_id)]).await?.iter().map(|row|row.cell(0)?.id()).collect()
+    }.await;
+    tx.rollback().await?;
+    result
+}
+
 #[cfg(all(test, feature = "db-tests"))]
 mod selected_assigned_tag_read_tests {
     use super::*;
