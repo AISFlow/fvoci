@@ -95,9 +95,9 @@ export const COLLABORATION_SOURCE_MTIME_RUN =
   'source_epoch="$(git show -s --format=%ct HEAD)"\n' +
   'git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --\n';
 
-// These are unqualified Cargo caches, never selected-backend packets. The
-// original producer still executes every compiler stage and verifies its full
-// physical inputs before publishing any current-source executable.
+// Long-term seeds keep checkout mtimes so Cargo recompiles workspace sources.
+// Only exact current-run targets can use normalized mtimes; the original
+// producer still qualifies all outputs before publishing a selected packet.
 export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
   const errors: string[] = [];
   const require = (ok: boolean, message: string) => {
@@ -107,25 +107,13 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     const value = safeGet(safeGet(jobs, name), "steps");
     return Array.isArray(value) ? value.flatMap((step) => (isMapping(step) ? [step] : [])) : [];
   };
-  for (const name of [...COLLABORATION_PREPARATION_JOBS, "collaboration-build"]) {
-    const steps = list(name);
-    const normalizers = steps.filter(
-      (step) => safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse",
+  require(!list("collaboration-main-build").some((step) => {
+    const run = safeGet(step, "run");
+    return (
+      safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse" ||
+      (typeof run === "string" && /\btouch\b/.test(run))
     );
-    const normalize = normalizers[0];
-    const restoreAt = steps.findIndex(
-      (step) =>
-        usesPrefix(step, "actions/cache/restore@") &&
-        safeGet(safeGet(step, "with"), "path") === "target",
-    );
-    require(normalizers.length === 1 &&
-      normalize !== undefined &&
-      unmasked(normalize) &&
-      pyEq(Object.keys(normalize).sort(), ["name", "run"]) &&
-      safeGet(normalize, "run") === COLLABORATION_SOURCE_MTIME_RUN &&
-      steps.indexOf(normalize) <
-        restoreAt, "deterministic tracked source mtimes before any native target restore");
-  }
+  }), "long-term seed must retain checkout source times");
   for (const [index, name] of COLLABORATION_PREPARATION_JOBS.entries()) {
     const job = safeGet(jobs, name);
     require(isMapping(job), `${name} must exist`);
@@ -199,6 +187,27 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
       }) &&
       safeGet(check, "run") ===
         'test "$CACHE_HIT" = true', "cache miss or prefix match must fail closed");
+    const normalizers = steps.filter(
+      (step) => safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse",
+    );
+    const normalize = normalizers[0];
+    require(normalizers.length === 1 &&
+      normalize !== undefined &&
+      unmasked(normalize) &&
+      pyEq(Object.keys(normalize).sort(), ["name", "run"]) &&
+      safeGet(normalize, "run") === COLLABORATION_SOURCE_MTIME_RUN &&
+      steps.indexOf(normalize) > steps.indexOf(check as Mapping) &&
+      steps.indexOf(normalize) <
+        compileAt, "deterministic tracked source mtimes after exact current-run cache hit before compilation");
+    require(steps
+      .filter((step) => usesPrefix(step, "actions/cache"))
+      .every((step) => {
+        const path = safeGet(safeGet(step, "with"), "path");
+        return (
+          path === "target" ||
+          (typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git")
+        );
+      }), "no long-term native cache in normalized jobs");
     require(steps.filter(
       (step) =>
         usesPrefix(step, "actions/cache") && safeGet(safeGet(step, "with"), "path") === "target",
