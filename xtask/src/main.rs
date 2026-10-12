@@ -20,6 +20,8 @@ Commands:
                 Root-owned SQLite install lifetime controls (run as root)
   selected-library
                 Selected SQLite library controls (one build, exact filters)
+  task-scalar-qualification
+                Measure native Task scalar GNU runtime inputs
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry
@@ -38,6 +40,7 @@ enum Command {
     SchemaBaseline(Vec<OsString>),
     SelectedInstall(Vec<OsString>),
     SelectedLibrary(Vec<OsString>),
+    TaskScalarQualification(Vec<OsString>),
     SqliteBuild(Vec<OsString>),
     SqliteCi(Vec<OsString>),
 }
@@ -74,6 +77,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, CliEr
         Some("schema-baseline") => return Ok(Command::SchemaBaseline(args.collect())),
         Some("selected-install") => return Ok(Command::SelectedInstall(args.collect())),
         Some("selected-library") => return Ok(Command::SelectedLibrary(args.collect())),
+        Some("task-scalar-qualification") => {
+            return Ok(Command::TaskScalarQualification(args.collect()))
+        }
         Some("sqlite-build") => return Ok(Command::SqliteBuild(args.collect())),
         Some("sqlite-ci") => return Ok(Command::SqliteCi(args.collect())),
         _ => return Err(CliError::UnknownCommand(argument)),
@@ -104,6 +110,9 @@ fn run(command: Command) -> ExitCode {
         Command::SchemaBaseline(args) => exit_status(xtask::schema_baseline::main(args)),
         Command::SelectedInstall(args) => exit_status(xtask::selected_install::main(args)),
         Command::SelectedLibrary(args) => exit_status(xtask::selected_library::main(args)),
+        Command::TaskScalarQualification(args) => {
+            exit_status(xtask::task_scalar_qualification::main(args))
+        }
         Command::SqliteBuild(args) => exit_status(xtask::sqlite_build::main(args)),
         Command::SqliteCi(args) => exit_status(xtask::sqlite_ci::main(args)),
     }

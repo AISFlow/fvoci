@@ -73,6 +73,15 @@ jobs:
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Build and label the install image
         run: cargo xtask install-image build
+      - name: Measure product Task scalar runtime
+        run: cargo xtask task-scalar-qualification image-measure --image fvoci-rust-install:local --directory "$RUNNER_TEMP/task-scalar-runtime"
+      - name: Retain product Task scalar runtime measurement
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: task-scalar-product-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-scalar-runtime/runtime.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Save the install image
         run: cargo xtask install-image save fvoci-rust-install:local "$RUNNER_TEMP/install-image"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -17,3 +17,4 @@ pub mod sqlite;
 pub mod sqlite_build;
 pub mod sqlite_ci;
 pub mod sqlite_zip;
+pub mod task_scalar_qualification;

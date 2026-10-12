@@ -257,6 +257,15 @@ jobs:
           path: target
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-native-default-dev-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
+      - name: Measure native ARM64 Task scalar runtime
+        run: xtask/target/debug/xtask task-scalar-qualification measure > "$RUNNER_TEMP/task-scalar-runtime.json"
+      - name: Retain native ARM64 Task scalar runtime measurement
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: task-scalar-host-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-scalar-runtime.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Native server build and policy tests (ARM64)
         run: |
           cargo build --locked --offline --bins
