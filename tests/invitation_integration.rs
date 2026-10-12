@@ -1671,6 +1671,138 @@ mod sqlite_port {
         f.close().await;
     }
     #[tokio::test]
+    async fn sqlite_concurrent_invitation_accept_has_one_winner_and_rotates_pepper() {
+        use fvoci_server::auth::password::{hash_password, verify_password};
+        use fvoci_server::db::invitations::{
+            accept_invitation_backend, create_invitation_backend, AcceptInvitationRequest,
+            InvitationDbError,
+        };
+        use fvoci_server::db::workspace::WorkspaceRole;
+        let f = Fixture::start().await;
+        let (user, _, _) = f.member("guest").await;
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(f.ws.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let mut keys = Keyring {
+            active_id: "old".into(),
+            keys: std::collections::HashMap::from([
+                ("old".into(), vec![0xaa; 32]),
+                ("new".into(), vec![0xbb; 32]),
+            ]),
+        };
+        let password = "Synthetic-Invite-Rotation-2026!";
+        let stored = hash_password(password, &keys).await.unwrap();
+        sqlx::query("UPDATE users SET password_hash=?2 WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .bind(&stored)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        keys.active_id = "new".into();
+        let email = format!("{user}@example.invalid");
+        let license = fvoci_server::license::from_env();
+        let invite = create_invitation_backend(
+            &f.backend,
+            f.ws,
+            f.actor,
+            f.credential,
+            &email,
+            WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let defaults =
+            fvoci_server::settings::catalog::SettingsValues::defaults("FVOCI").defaults_user;
+        let request = || AcceptInvitationRequest {
+            email: None,
+            given_name: None,
+            family_name: None,
+            password: Some(password),
+            client_ip: None,
+            consents: &[],
+            defaults: &defaults,
+        };
+        // Both independent preflights complete before either writer can accept.
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let gate = |_: String| {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                Ok(())
+            }
+        };
+        let (a, b) = tokio::join!(
+            accept_invitation_backend(
+                &f.backend,
+                &license,
+                &keys,
+                &invite.accept_path_token,
+                request(),
+                gate
+            ),
+            accept_invitation_backend(
+                &f.backend,
+                &license,
+                &keys,
+                &invite.accept_path_token,
+                request(),
+                gate
+            )
+        );
+        let results = [a.unwrap(), b.unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(InvitationDbError::AlreadyAccepted)))
+                .count(),
+            1
+        );
+        let fresh = pool::connect_sqlite_app(&f.path, 1).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM invitations WHERE accepted_at IS NOT NULL"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE verb='invitation.accepted'"
+            )
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+            1
+        );
+        let role: String =
+            sqlx::query_scalar("SELECT role FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.ws.as_bytes().as_slice())
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(role, "member");
+        let rotated: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?1")
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_ne!(rotated, stored);
+        let verified = verify_password(Some(&rotated), password, &keys).await;
+        assert!(verified.ok && !verified.needs_pepper_rotation);
+        fresh.close().await;
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn sqlite_identity_invitation_commits_link_and_rechecks_issuer() {
         use fvoci_server::db::invitations::{
             accept_invitation_with_identity_backend, create_invitation_backend,
