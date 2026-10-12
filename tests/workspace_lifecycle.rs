@@ -2250,7 +2250,7 @@ mod sqlite_port {
             f.call(
                 "POST",
                 &format!("{ws}/documents"),
-                Some(json!({"commandId":Uuid::now_v7(),"title":"Denied"})),
+                Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"Denied"})),
                 &cookie
             )
             .await
@@ -2373,7 +2373,7 @@ mod sqlite_port {
             .owner(
                 "POST",
                 &format!("/api/v1/workspaces/{}/documents", f.ws),
-                Some(json!({"commandId":Uuid::now_v7(),"title":"Room"})),
+                Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":"Room"})),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{doc}");

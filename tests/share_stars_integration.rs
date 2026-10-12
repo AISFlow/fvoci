@@ -2325,18 +2325,16 @@ mod sqlite_port {
             self.call(method, path, body, &self.cookie).await
         }
         async fn document(&self, parent: Option<Uuid>) -> Uuid {
-            let id = Uuid::now_v7();
-            let path = if let Some(p) = parent {
-                let prefix: String = sqlx::query_scalar("SELECT path FROM documents WHERE id=?1")
-                    .bind(p.as_bytes().as_slice())
-                    .fetch_one(&self.pool)
-                    .await
-                    .unwrap();
-                format!("{prefix}.{}", id.simple())
-            } else {
-                id.simple().to_string()
-            };
-            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Visible',?3,?4,'a',1,'published',1,?5,?6)").bind(id.as_bytes().as_slice()).bind(self.ws.as_bytes().as_slice()).bind(path).bind(parent.map(|id|id.as_bytes().to_vec())).bind(self.actor.as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared text"}]}]}).to_string()).execute(&self.pool).await.unwrap();
+            let (status, row) = self
+                .owner(
+                    "POST",
+                    &format!("/api/v1/workspaces/{}/documents", self.ws),
+                    Some(json!({"commandId":Uuid::now_v7(),"parentId":parent,"title":"Visible"})),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{row}");
+            let id = Uuid::parse_str(row["id"].as_str().unwrap()).unwrap();
+            sqlx::query("UPDATE documents SET status='published',content_json=?2 WHERE id=?1").bind(id.as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Shared text"}]}]}).to_string()).execute(&self.pool).await.unwrap();
             id
         }
         async fn foreign(&self) -> Uuid {
