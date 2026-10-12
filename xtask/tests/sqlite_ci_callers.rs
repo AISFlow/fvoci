@@ -339,6 +339,7 @@ fn contract(root: &Path) -> Check {
             "rust",
             &[
                 "fast",
+                "fast-sqlite",
                 "native-arm64",
                 "postgres-build",
                 "postgres",
