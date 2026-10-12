@@ -976,9 +976,11 @@ mod remote_cancel_sqld_tests {
                 .is_some_and(
                     |requests| requests.iter().any(|request| request["batch"]["steps"]
                         .as_array()
-                        .is_some_and(|steps| steps
-                            .iter()
-                            .any(|step| step["stmt"]["sql"] == "ROLLBACK")))
+                        .is_some_and(|steps| steps.iter().any(|step| step["stmt"]["sql"]
+                            .as_str()
+                            .is_some_and(
+                                |sql| sql.trim().trim_end_matches(';').trim() == "ROLLBACK"
+                            ))))
                 )));
     }
 
@@ -1065,9 +1067,11 @@ mod remote_cancel_sqld_tests {
                 .is_some_and(
                     |requests| requests.iter().any(|request| request["batch"]["steps"]
                         .as_array()
-                        .is_some_and(|steps| steps
-                            .iter()
-                            .any(|step| step["stmt"]["sql"] == "ROLLBACK")))
+                        .is_some_and(|steps| steps.iter().any(|step| step["stmt"]["sql"]
+                            .as_str()
+                            .is_some_and(
+                                |sql| sql.trim().trim_end_matches(';').trim() == "ROLLBACK"
+                            ))))
                 )));
     }
 }
