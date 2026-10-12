@@ -739,7 +739,7 @@ mod remote_invitation_tests {
                 ("remote-existing", "remote-owner@example.invalid", false),
                 ("remote-unauthorized", "remote-unauthorized@example.invalid", false),
             ] {
-                let expires = if expired { Cell::Integer(0) } else { Cell::instant(Utc::now() + Duration::hours(1)).unwrap() };
+                let expires = if expired { Cell::Integer(0) } else { Cell::instant(crate::db::identity::stored_now() + Duration::hours(1)).unwrap() };
                 family.execute("INSERT INTO invitations(id,workspace_id,email,role,token_hash,invited_by,expires_at) VALUES(?1,?2,?3,'member',?4,?5,?6)", &[Cell::uuid(Uuid::now_v7()), Cell::uuid(workspace), Cell::text(email), Cell::text(hash), Cell::uuid(owner), expires]).await.unwrap();
             }
             tx.commit().await.unwrap();
