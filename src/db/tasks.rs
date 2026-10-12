@@ -5340,7 +5340,7 @@ pub async fn patch_task_meta_backend(
         if meta_changed {
             let start = next.start_date.map(|d| d.to_string());
             let due = next.due_date.map(|d| d.to_string());
-            family.execute("UPDATE tasks SET title=?3,type=?4,priority=?5,start_date=?6,due_date=?7,due_at=?8,estimate=?9,parent_id=?10,milestone_id=?11,recurrence=?12,archived_at=?13,estimate_unit=CASE WHEN ?14 THEN NULL ELSE estimate_unit END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::text(&next.title),Cell::text(&next.task_type),Cell::text(&next.priority),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),next.due_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_text(next.estimate.as_deref()),Cell::optional_uuid(next.parent_id),Cell::optional_uuid(next.milestone_id),next.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),next.archived_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::Integer(i64::from(input.estimate!=crate::tasks::patch::FieldUpdate::Unchanged))]).await?;
+            family.execute("UPDATE tasks SET title=?3,type=?4,priority=?5,start_date=?6,due_date=?7,due_at=?8,estimate=?9,parent_id=?10,milestone_id=?11,recurrence=?12,archived_at=?13,estimate_unit=CASE WHEN ?14 THEN NULL ELSE estimate_unit END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::text(&next.title),Cell::text(&next.task_type),Cell::text(&next.priority),Cell::optional_text(start.as_deref()),Cell::optional_text(due.as_deref()),next.due_at.map(family_pg_bound_instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_text(next.estimate.as_deref()),Cell::optional_uuid(next.parent_id),Cell::optional_uuid(next.milestone_id),next.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),next.archived_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::Integer(i64::from(input.estimate!=crate::tasks::patch::FieldUpdate::Unchanged))]).await?;
         }
         if status_changed {
             family_task_change(family,TaskChangeRecord {workspace_id:workspace,actor_user_id:actor,verb:"task.updated",target_type:"task",target_id:task,payload:json!({"taskId":task.to_string(),"projectId":next.project_id.to_string(),"from":before.status_id.to_string(),"to":next.status_id.to_string()}
@@ -5820,6 +5820,22 @@ pub async fn restore_task_backend(
 .await;
 
     finish_task_operation(tx, result).await
+}
+
+// Match the pinned SQLx PostgreSQL chrono binder before entering the lossless
+// family storage codec. Its elapsed microseconds truncate around the PG epoch.
+fn family_pg_bound_instant(value: DateTime<Utc>) -> Result<Cell, sqlx::Error> {
+    let epoch = DateTime::from_timestamp(946_684_800, 0).expect("valid PostgreSQL epoch");
+    let micros = value
+        .signed_duration_since(epoch)
+        .num_microseconds()
+        .ok_or_else(|| {
+            sqlx::Error::Protocol("task instant exceeds PostgreSQL microsecond range".into())
+        })?;
+    let stored = epoch
+        .checked_add_signed(chrono::Duration::microseconds(micros))
+        .ok_or_else(|| sqlx::Error::Protocol("task instant exceeds chrono range".into()))?;
+    Cell::instant(stored)
 }
 
 fn apply_task_field<T: Clone>(input: &crate::tasks::patch::FieldUpdate<T>, value: &mut Option<T>) {
@@ -9640,5 +9656,41 @@ mod task_timer_zone_tests {
             family_timer_midnight("Asia/Seoul", date(2026, 10, 12)).unwrap(),
             instant("2026-10-11T15:00:00Z")
         );
+    }
+}
+
+#[cfg(test)]
+mod task_patch_instant_tests {
+    use super::*;
+    #[test]
+    fn due_at_storage_matches_pinned_sqlx_chrono_binding_before_and_after_pg_epoch() {
+        for (raw, expected) in [
+            (
+                "2026-10-12T01:02:03.123456789Z",
+                "2026-10-12T01:02:03.123456Z",
+            ),
+            (
+                "1999-12-31T23:59:59.123456789Z",
+                "1999-12-31T23:59:59.123457Z",
+            ),
+        ] {
+            let input = DateTime::parse_from_rfc3339(raw)
+                .unwrap()
+                .with_timezone(&Utc);
+            let stored = family_pg_bound_instant(input).unwrap().datetime().unwrap();
+            assert_eq!(
+                stored,
+                DateTime::parse_from_rfc3339(expected)
+                    .unwrap()
+                    .with_timezone(&Utc)
+            );
+            let mut original = sqlx::postgres::PgArgumentBuffer::default();
+            let mut normalized = sqlx::postgres::PgArgumentBuffer::default();
+            <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(&input, &mut original)
+                .unwrap();
+            <DateTime<Utc> as sqlx::Encode<'_, Postgres>>::encode_by_ref(&stored, &mut normalized)
+                .unwrap();
+            assert_eq!(original.as_slice(), normalized.as_slice());
+        }
     }
 }

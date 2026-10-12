@@ -6646,6 +6646,39 @@ mod sqlite_task_port {
             json!({"title":"refused"}),
         )
         .await;
+        // SQLx PostgreSQL stores submicrosecond dueAt with its 2000 epoch
+        // truncation; match both sides of that epoch through the real route.
+        for (submitted, stored) in [
+            (
+                "2026-10-12T01:02:03.123456789Z",
+                "2026-10-12T01:02:03.123456Z",
+            ),
+            (
+                "1999-12-31T23:59:59.123456789Z",
+                "1999-12-31T23:59:59.123457Z",
+            ),
+        ] {
+            f.write(
+                "PATCH",
+                &task_path,
+                json!({"dueAt": submitted}),
+                StatusCode::OK,
+            )
+            .await;
+            let actual: i64 = sqlx::query_scalar("SELECT due_at FROM tasks WHERE id=?1")
+                .bind(Uuid::parse_str(task).unwrap().as_bytes().as_slice())
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+            assert_eq!(
+                actual,
+                chrono::DateTime::parse_from_rfc3339(stored)
+                    .unwrap()
+                    .timestamp_micros()
+            );
+        }
+        f.write("PATCH", &task_path, json!({"dueAt": null}), StatusCode::OK)
+            .await;
         let label = f
             .write(
                 "POST",
