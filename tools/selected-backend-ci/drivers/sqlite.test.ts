@@ -12,7 +12,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import process from "node:process";
 import {
   checkpointPrefix,
@@ -23,6 +23,7 @@ import {
   parseJson,
 } from "../io.ts";
 import { laneRetirement } from "../runtime.ts";
+import { discoverGroups } from "../../web-e2e/groups.ts";
 import type { Current } from "./binding.ts";
 import { restoreSpec, restoreBrowserTitle, validateRestoreReport } from "./binding.ts";
 import { runtimeError } from "./common.ts";
@@ -280,6 +281,13 @@ const lastLine = (fixture: World) =>
   JSON.parse(fixture.emitted.at(-1) as string) as Record<string, unknown>;
 
 describe("selected sqlite driver body", () => {
+  test("selected restore is absent from normal workspace browser discovery", () => {
+    expect(
+      discoverGroups()
+        .flat()
+        .some((spec) => basename(spec) === basename(restoreSpec)),
+    ).toBe(false);
+  });
   test("restore report requires the one exact case with no skips or retries", () => {
     expect(() => {
       validateRestoreReport(parseJson(JSON.stringify(restoreReport())));
@@ -337,6 +345,14 @@ describe("selected sqlite driver body", () => {
       expect(receipt.cleanup_errors).toEqual([]);
       expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
       expect(receipt.actual_browser_tests).toBe(flow === "off" ? 8 : 1);
+      const restoreCalls = fixture.calls.filter((args) => args.includes(restoreSpec));
+      expect(restoreCalls.length).toBe(flow === "on" ? 1 : 0);
+      if (flow === "on") {
+        const args = restoreCalls[0] as string[];
+        expect(args[args.indexOf("--config") + 1]).toBe(
+          "e2e-pending/revision-restore-playwright.config.ts",
+        );
+      }
       expect(receipt.actual_migration_rows).toEqual(realMigrations());
       expect(laneRetirement(fixture.run, "sqlite", flow, SOURCE, TREE, OWNER, 0).qualified).toBe(
         true,
