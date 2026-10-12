@@ -76,7 +76,7 @@ export const COLLABORATION_PREPARATION_JOBS = [
 ] as const;
 export function collaborationTargetKey(phase: "main" | "tests"): string {
   return (
-    `v1-web-selected-${phase}-ubuntu-26.04-` +
+    `v2-web-selected-${phase}-ubuntu-26.04-` +
     "${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-" +
     "${{ steps.sqlite.outputs.cache_identity }}"
   );
@@ -90,6 +90,11 @@ export const COLLABORATION_PREPARATION_RUNS = {
     "cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run\n",
 };
 
+export const COLLABORATION_SOURCE_MTIME_RUN =
+  "set -euo pipefail\n" +
+  'source_epoch="$(git show -s --format=%ct HEAD)"\n' +
+  'git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --\n';
+
 // These are unqualified Cargo caches, never selected-backend packets. The
 // original producer still executes every compiler stage and verifies its full
 // physical inputs before publishing any current-source executable.
@@ -102,6 +107,25 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     const value = safeGet(safeGet(jobs, name), "steps");
     return Array.isArray(value) ? value.flatMap((step) => (isMapping(step) ? [step] : [])) : [];
   };
+  for (const name of [...COLLABORATION_PREPARATION_JOBS, "collaboration-build"]) {
+    const steps = list(name);
+    const normalizers = steps.filter(
+      (step) => safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse",
+    );
+    const normalize = normalizers[0];
+    const restoreAt = steps.findIndex(
+      (step) =>
+        usesPrefix(step, "actions/cache/restore@") &&
+        safeGet(safeGet(step, "with"), "path") === "target",
+    );
+    require(normalizers.length === 1 &&
+      normalize !== undefined &&
+      unmasked(normalize) &&
+      pyEq(Object.keys(normalize).sort(), ["name", "run"]) &&
+      safeGet(normalize, "run") === COLLABORATION_SOURCE_MTIME_RUN &&
+      steps.indexOf(normalize) <
+        restoreAt, "deterministic tracked source mtimes before any native target restore");
+  }
   for (const [index, name] of COLLABORATION_PREPARATION_JOBS.entries()) {
     const job = safeGet(jobs, name);
     require(isMapping(job), `${name} must exist`);

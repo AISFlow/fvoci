@@ -528,6 +528,11 @@ jobs:
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Normalize tracked source mtimes for native cache reuse
+        run: |
+          set -euo pipefail
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --
       - name: Restore web gate Rust outputs
         id: cache_collaboration_main_seed
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -545,7 +550,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-web-selected-main-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-selected-main-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Save web gate Rust outputs
         if: github.ref == 'refs/heads/main' && steps.cache_collaboration_main_seed.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -617,12 +622,17 @@ jobs:
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Normalize tracked source mtimes for native cache reuse
+        run: |
+          set -euo pipefail
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --
       - name: Restore current native preparation
         id: current_native_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-web-selected-main-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-selected-main-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
           fail-on-cache-miss: true
       - name: Require exact current native preparation
         env:
@@ -639,7 +649,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-web-selected-tests-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-selected-tests-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
 
   collaboration-build:
     needs: [ci-plan, collaboration-main-build, collaboration-test-build]
@@ -708,12 +718,17 @@ jobs:
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Normalize tracked source mtimes for native cache reuse
+        run: |
+          set -euo pipefail
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --
       - name: Restore current native preparation
         id: current_native_cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target
-          key: v1-web-selected-tests-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-selected-tests-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-${{ steps.sqlite.outputs.cache_identity }}
           fail-on-cache-miss: true
       - name: Require exact current native preparation
         env:

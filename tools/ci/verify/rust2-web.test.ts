@@ -417,3 +417,31 @@ test("the budget scalar comes from the context text, not the file on disk", () =
   ]);
   expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": source }))).toEqual([]);
 });
+
+test("collaboration normalizes tracked source times before restoring native preparation", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of [
+    "collaboration-main-build",
+    "collaboration-test-build",
+    "collaboration-build",
+  ]) {
+    const list = steps(jobs, name);
+    const at = list.findIndex(
+      (step) => step["name"] === "Normalize tracked source mtimes for native cache reuse",
+    );
+    expect(at, name).toBeGreaterThan(-1);
+    const restoreAt = list.findIndex(
+      (step) => (step["with"] as Mapping | undefined)?.["path"] === "target",
+    );
+    expect(at, name).toBeLessThan(restoreAt);
+    for (const edit of ["true\n", "git ls-files -z | xargs -0 touch --\n"]) {
+      const bad = clone(jobs);
+      const normalizer = steps(bad, name)[at];
+      if (!normalizer) throw new Error("missing source mtime normalizer");
+      normalizer["run"] = edit;
+      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+        "deterministic tracked source mtimes",
+      );
+    }
+  }
+});
