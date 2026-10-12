@@ -7238,7 +7238,209 @@ mod sqlite_document_ops {
             drop(self.admission);
             std::fs::remove_dir_all(self.directory).unwrap();
         }
+
+        async fn flat_tree(&self, project_scope: bool) -> (Uuid, Uuid, Uuid) {
+            let root = self.create("Flat root", None).await;
+            let document = self.create("Flat document", Some(root)).await;
+            let child = self.create("Flat child", Some(document)).await;
+            if project_scope {
+                let project = Uuid::now_v7();
+                sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by,root_document_id) VALUES(?1,?2,'FLAT','Flat project','workspace',?3,?4)")
+                    .bind(project.as_bytes().as_slice())
+                    .bind(self.workspace.as_bytes().as_slice())
+                    .bind(self.actor.as_bytes().as_slice())
+                    .bind(root.as_bytes().as_slice())
+                    .execute(&self.pool).await.unwrap();
+                sqlx::query("UPDATE documents SET project_id=?2 WHERE workspace_id=?1")
+                    .bind(self.workspace.as_bytes().as_slice())
+                    .bind(project.as_bytes().as_slice())
+                    .execute(&self.pool)
+                    .await
+                    .unwrap();
+            }
+            (root, document, child)
+        }
     }
+
+    async fn flat_snapshot(observer: &sqlx::SqlitePool) -> (Vec<String>, i64, i64, i64) {
+        let rows = sqlx::query_scalar("SELECT json_object('id',hex(id),'title',title,'icon',icon,'status',status,'parent',hex(parent_id),'project',hex(project_id),'path',path,'sort',sort_key,'deleted',deleted_at,'updated',updated_at,'version',version,'body',content_json) FROM documents ORDER BY id")
+            .fetch_all(observer).await.unwrap();
+        let (events, audits, sequence) = sqlx::query_as("SELECT (SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),last_seq FROM event_sequence WHERE id=1")
+            .fetch_one(observer).await.unwrap();
+        (rows, events, audits, sequence)
+    }
+
+    #[tokio::test]
+    async fn sqlite_flat_document_metadata_http_commit_and_denials() {
+        for project_scope in [false, true] {
+            let f = Fixture::new().await;
+            let (_, document, _) = f.flat_tree(project_scope).await;
+            let uri = format!("/api/v1/documents/{document}");
+            let observer = pool::connect_sqlite_app(&f.directory.join("app.db"), 1)
+                .await
+                .unwrap();
+            let before = flat_snapshot(&observer).await;
+            for invalid in [
+                json!({"title":"bad\u{0}title"}),
+                json!({"icon":"bad\u{0}icon"}),
+                json!({"status":"draft\u{0}"}),
+            ] {
+                let (status, body, _, _) = json_request(
+                    f.app.clone(),
+                    "PATCH",
+                    &uri,
+                    Some(invalid),
+                    Some(&f.cookie),
+                    &[],
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+                assert_eq!(body["code"], "invalid_input");
+                assert_eq!(flat_snapshot(&observer).await, before);
+            }
+            let (status, body, _, _) = json_request(
+                f.app.clone(),
+                "PATCH",
+                &uri,
+                Some(json!({"title":"  Flat saved 😀  ","icon":"📄","status":"published"})),
+                Some(&f.cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "project={project_scope}: {body}");
+            assert_eq!(body["id"], document.to_string());
+            assert_eq!(body["title"], "Flat saved 😀");
+            assert_eq!(body["icon"], "📄");
+            assert_eq!(body["status"], "published");
+            assert_eq!(body["version"], if project_scope { 2 } else { 1 });
+            let stored: (String, String, String, i32) =
+                sqlx::query_as("SELECT title,icon,status,version FROM documents WHERE id=?1")
+                    .bind(document.as_bytes().as_slice())
+                    .fetch_one(&observer)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                stored,
+                (
+                    "Flat saved 😀".into(),
+                    "📄".into(),
+                    "published".into(),
+                    if project_scope { 2 } else { 1 }
+                )
+            );
+            let after = flat_snapshot(&observer).await;
+            assert_eq!(
+                (after.1, after.2, after.3),
+                (before.1 + 1, before.2 + 1, before.3 + 1)
+            );
+
+            sqlx::query("UPDATE memberships SET role='guest' WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.workspace.as_bytes().as_slice())
+                .bind(f.actor.as_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            for (method, input) in [("PATCH", Some(json!({"title":"denied"}))), ("DELETE", None)] {
+                let (status, body, _, _) =
+                    json_request(f.app.clone(), method, &uri, input, Some(&f.cookie), &[]).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {body}");
+                assert_eq!(body["code"], "not_found");
+                assert_eq!(flat_snapshot(&observer).await, after);
+            }
+            let foreign = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO workspaces(id,slug,name) VALUES(?1,'foreign-flat','Foreign flat')",
+            )
+            .bind(foreign.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE memberships SET workspace_id=?3,role='owner' WHERE workspace_id=?1 AND user_id=?2")
+                .bind(f.workspace.as_bytes().as_slice()).bind(f.actor.as_bytes().as_slice())
+                .bind(foreign.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            for (method, input) in [
+                ("PATCH", Some(json!({"title":"foreign denied"}))),
+                ("DELETE", None),
+            ] {
+                let (status, body, _, _) =
+                    json_request(f.app.clone(), method, &uri, input, Some(&f.cookie), &[]).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {body}");
+                assert_eq!(body["code"], "not_found");
+                assert_eq!(flat_snapshot(&observer).await, after);
+            }
+            observer.close().await;
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_flat_document_trash_http_reparent_and_readback() {
+        for project_scope in [false, true] {
+            let f = Fixture::new().await;
+            let (root, document, child) = f.flat_tree(project_scope).await;
+            let uri = format!("/api/v1/documents/{document}");
+            let observer = pool::connect_sqlite_app(&f.directory.join("app.db"), 1)
+                .await
+                .unwrap();
+            let before = flat_snapshot(&observer).await;
+            let (status, body, _, _) = json_request(
+                f.app.clone(),
+                "DELETE",
+                &format!("{uri}?children=%00"),
+                None,
+                Some(&f.cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["code"], "invalid_input");
+            assert_eq!(flat_snapshot(&observer).await, before);
+            let (status, body, _, _) = json_request(
+                f.app.clone(),
+                "DELETE",
+                &format!("{uri}?children=reparent"),
+                None,
+                Some(&f.cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "project={project_scope}: {body}");
+            assert_eq!(body, json!({"ok":true}));
+            let deleted: Option<i64> =
+                sqlx::query_scalar("SELECT deleted_at FROM documents WHERE id=?1")
+                    .bind(document.as_bytes().as_slice())
+                    .fetch_one(&observer)
+                    .await
+                    .unwrap();
+            assert!(deleted.is_some());
+            let stored: (Vec<u8>, String, Option<i64>) =
+                sqlx::query_as("SELECT parent_id,path,deleted_at FROM documents WHERE id=?1")
+                    .bind(child.as_bytes().as_slice())
+                    .fetch_one(&observer)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                stored,
+                (
+                    root.as_bytes().to_vec(),
+                    format!("{}.{}", root.simple(), child.simple()),
+                    None
+                )
+            );
+            let after = flat_snapshot(&observer).await;
+            assert_eq!(
+                (after.1, after.2, after.3),
+                (before.1 + 2, before.2 + 2, before.3 + 2)
+            );
+            let (status, body, _, _) =
+                json_request(f.app.clone(), "DELETE", &uri, None, Some(&f.cookie), &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(flat_snapshot(&observer).await, after);
+            observer.close().await;
+            f.finish().await;
+        }
+    }
+
     #[tokio::test]
     async fn sqlite_port_document_ops_http_children_backlinks_and_flat_lookup() {
         let f = Fixture::new().await;

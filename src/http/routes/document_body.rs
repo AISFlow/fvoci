@@ -1132,16 +1132,10 @@ async fn update_by_id(
         icon: body.icon.as_ref().map(|icon| icon.as_deref()),
         status: body.status.as_deref(),
     };
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
     let meta = match scope {
         DocumentScope::Wiki => db_result(
-            crate::db::documents::update_wiki_document_meta(
-                pool,
+            crate::db::documents::update_wiki_document_meta_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 auth.user_id,
                 auth.credential_id,
@@ -1152,8 +1146,8 @@ async fn update_by_id(
             .await,
         )?,
         DocumentScope::Project(project_id) => db_result(
-            crate::db::project_documents::update_project_document_meta(
-                pool,
+            crate::db::project_documents::update_project_document_meta_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 project_id,
                 document_id,
@@ -1185,16 +1179,10 @@ async fn remove_by_id(
     let children = crate::http::routes::documents::parse_trash_children(query.children.as_deref())?;
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let ip = peer_ip(peer.ip());
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
     match scope {
         DocumentScope::Wiki => db_result(
-            crate::db::documents::trash_wiki_document(
-                pool,
+            crate::db::documents::trash_wiki_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 auth.user_id,
                 auth.credential_id,
@@ -1205,8 +1193,8 @@ async fn remove_by_id(
             .await,
         )?,
         DocumentScope::Project(project_id) => db_result(
-            crate::db::project_documents::trash_project_document(
-                pool,
+            crate::db::project_documents::trash_project_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 project_id,
                 document_id,
