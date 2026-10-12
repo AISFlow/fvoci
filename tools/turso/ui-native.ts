@@ -13,7 +13,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { root as checkout, sha } from "../selected-backend-ci/io.ts";
-import { baselineFailureDiagnostic } from "./ui-audit.ts";
+import { baselineFailureDiagnostic, OFF, ON } from "./ui-audit.ts";
+import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import {
   fixtureInput,
   cleanEnv,
@@ -50,6 +51,10 @@ const FIXTURE_KEYS = [
   "FVOCI_E2E_TURSO_NAMESPACE",
   "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
+  // The member actor starts with a deliberately minimal environment. Retain
+  // the caller's admitted TLS trust file/directory from its private capsule.
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ];
 const nativeCode = /^(?:TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED)$/;
 
@@ -330,6 +335,35 @@ export async function browser(
       require(code === 0, "UI_ACTUAL_BROWSER_FAILED");
     } catch (error) {
       original = error;
+      // Never forward the browser log, error message, URL or attachments. The
+      // report is complete after wait observes exit; a missing/invalid report
+      // still produces a fixed diagnostic without replacing the failure.
+      let failedReport: unknown = null;
+      let source = "";
+      try {
+        if (regularReadable(report)) {
+          chmodSync(report, 0o600);
+          failedReport = privateRead(report, 64 * 1024 * 1024);
+        }
+        if ([ON, OFF].includes(spec))
+          source = readFileSync(join(workspace, "apps/web/e2e-pending", spec), "utf8");
+      } catch {
+        // Malformed private input never supplies invented details.
+      }
+      try {
+        scope.io.output.err(
+          diagnosticJson(
+            browserFailureDiagnostic(
+              failedReport,
+              spec,
+              spec === OFF ? "off" : grep === "selected normal main restart:" ? "restart" : "on",
+              source,
+            ),
+          ),
+        );
+      } catch {
+        // Diagnostic I/O cannot erase the original browser failure or cleanup.
+      }
     }
     try {
       await scope.finish(child);

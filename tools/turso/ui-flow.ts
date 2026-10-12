@@ -17,6 +17,7 @@ import {
   assertPreserved,
   attachment,
   maintenanceReceipts,
+  nativeReceiptsRetained,
   OFF,
   ON,
   rememberActor,
@@ -135,6 +136,7 @@ export async function executeUi(
     namespaces: [],
     actors: {},
     workspaces: {},
+    documents: {},
     servers: [],
     targetSha256: digest(get(environment, "FVOCI_LIBSQL_URL") as string),
     serverStarts: 0,
@@ -280,7 +282,7 @@ export async function executeUi(
           directory,
           browserEnv,
           spec,
-          flow === "on" ? "^selected normal main:" : undefined,
+          flow === "on" ? "selected normal main:" : undefined,
         );
         const cases = reportCases(report, spec, titles);
         receipt.counts[flow] = cases.length;
@@ -294,20 +296,24 @@ export async function executeUi(
             (owner === null || get(seed, "workspaceId") === get(owner, "workspaceId")) &&
             get(seed, "firstAck") !== get(seed, "finalAck"), "UI_NATIVE_SEED_MISMATCH");
           const documentId = get(seed, "document", "id") as string;
+          (audit.documents as Record<string, string>)[uuidHex(documentId)] = uuidHex(
+            get(seed, "workspaceId"),
+          );
           const query = { workspaceId: get(seed, "workspaceId"), documentIds: [documentId] };
           const observed = await steps.fixture(scope, manifest, "observe", env, query);
           const row = record(observed, "rows", documentId);
           audit.observedFences.push(...(list(row, "roomFences") as unknown[][]));
-          // Persist ACK IDs must name actual operation receipts; the observer
-          // already checks payload lengths, digests and tail.
-          const acked = (receipts: unknown[], ack: unknown) =>
-            receipts.some((r) => get(r, "op") === ack);
-          for (const ack of [get(seed, "firstAck"), get(seed, "finalAck")])
-            require(acked(list(row, "receipts"), ack), "UI_DURABLE_ACK_RECEIPT_MISSING");
+          // The browser matches each persist barrier request to its ACK. The
+          // server generates separate append operation IDs (room.rs); the
+          // primary observer checks their payload lengths, digests and tail.
+          // Both distinct edits must have durable operations, and every whole
+          // receipt observed here must survive the restart below.
+          const committedReceipts = list(row, "receipts");
+          require(committedReceipts.length >= 2, "UI_DURABLE_ACK_RECEIPT_MISSING");
           require(deepEquals(get(row, "content"), get(seed, "persisted", "contentJson"), true) &&
             deepEquals(
               get(row, "text"),
-              get(seed, "persisted", "text"),
+              get(seed, "persistedText"),
               true,
             ), "UI_NATIVE_CURRENT_BODY_MISMATCH");
           steps.write(join(directory, "native-before-restart.private.json"), observed);
@@ -345,7 +351,7 @@ export async function executeUi(
               restartDir,
               restartEnv,
               ON,
-              "^selected normal main restart:",
+              "selected normal main restart:",
             ),
             ON,
             [RESTART_TITLE],
@@ -358,8 +364,9 @@ export async function executeUi(
           audit.observedFences.push(...(list(fresh, "roomFences") as unknown[][]));
           require(deepEquals(get(fresh, "content"), get(row, "content"), true) &&
             deepEquals(get(fresh, "text"), get(row, "text"), true) &&
-            [get(seed, "firstAck"), get(seed, "finalAck")].every((ack) =>
-              acked(list(fresh, "receipts"), ack),
+            nativeReceiptsRetained(
+              committedReceipts,
+              list(fresh, "receipts"),
             ), "UI_FRESH_PRIMARY_RESTART_MISMATCH");
           steps.write(join(restartDir, "native-after-restart.private.json"), after);
         }
