@@ -7329,8 +7329,27 @@ mod sqlite_task_port {
     impl Flow {
         async fn snapshot(&self) -> Vec<String> {
             let mut result = Vec::new();
-            // Row content as well as side-effect counts catch partial refusals.
-            for sql in ["SELECT coalesce(json_group_array(json_object('id',hex(id),'next',next_number)),'[]') FROM (SELECT * FROM projects ORDER BY id)","SELECT coalesce(json_group_array(json_object('id',hex(id),'title',title,'status',hex(status_id),'parent',hex(parent_id),'milestone',hex(milestone_id),'estimate',estimate,'unit',estimate_unit,'deleted',deleted_at,'archived',archived_at,'updated',updated_at)), '[]') FROM (SELECT * FROM tasks ORDER BY id)","SELECT json_array((SELECT count(*) FROM tasks),(SELECT count(*) FROM labels),(SELECT count(*) FROM milestones),(SELECT count(*) FROM statuses),(SELECT count(*) FROM task_labels),(SELECT count(*) FROM task_assignees),(SELECT count(*) FROM task_dependencies),(SELECT count(*) FROM task_activity),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM time_entries),(SELECT count(*) FROM task_timer_runs),(SELECT count(*) FROM task_timer_segments),(SELECT count(*) FROM task_timer_audit),(SELECT count(*) FROM task_timer_commands))"] {result.push(sqlx::query_scalar(sql).fetch_one(&self.pool).await.unwrap());}
+            // Compare values, including updates that leave row counts unchanged.
+            for (table, columns) in [
+                ("projects", "id,next_number"),
+                ("tasks", "id,workspace_id,project_id,number,title,type,priority,status_id,sort_key,start_date,due_date,due_at,estimate,estimate_unit,parent_id,milestone_id,recurrence,deleted_at,archived_at,schema_version,content_json,version,created_by,created_at,updated_at,text,chosung"),
+                ("labels", "id,workspace_id,project_id,name,color,created_at,updated_at"),
+                ("milestones", "id,workspace_id,project_id,name,due_date,sort_key,created_at,updated_at"),
+                ("statuses", "id,workspace_id,project_id,workflow_id,name,category,sort_key,wip_limit,created_at,updated_at"),
+                ("task_assignees", "workspace_id,task_id,user_id"),
+                ("task_labels", "workspace_id,task_id,label_id"),
+                ("task_dependencies", "workspace_id,blocker_id,blocked_id,type,lag_days"),
+                ("time_entries", "id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note"),
+                ("task_timer_runs", "id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note"),
+                ("task_timer_segments", "id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id"),
+                ("task_timer_legacy_open", "time_entry_id,user_id,workspace_id,task_id"),
+                ("task_timer_commands", "user_id,request_id,request_hash,run_id,result,created_at,restored_from_archive"),
+            ] {
+                let values = columns.split(',').map(|name| format!("quote({name})")).collect::<Vec<_>>().join(",");
+                let sql = format!("SELECT coalesce(json_group_array(json_array({values})),'[]') FROM (SELECT * FROM {table} ORDER BY {columns})");
+                result.push(sqlx::query_scalar(&sql).fetch_one(&self.pool).await.unwrap());
+            }
+            result.push(sqlx::query_scalar("SELECT json_array((SELECT count(*) FROM task_activity),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_timer_audit))").fetch_one(&self.pool).await.unwrap());
             result
         }
         async fn refuse(&self, method: &str, path: &str, body: Value) {
