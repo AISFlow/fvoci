@@ -28,3 +28,27 @@ fn measure_reports_the_actual_native_runtime_and_rejects_extra_arguments() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_foreign_host_cannot_produce_an_arm_qualification_receipt() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "task-scalar-qualification",
+            "bootstrap",
+            "--image",
+            "never-started",
+            "--directory",
+            "never-created",
+            "--target-dir",
+            "never-built",
+            "--sqlite-inputs",
+            "never-read",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("requires native aarch64 execution"));
+}

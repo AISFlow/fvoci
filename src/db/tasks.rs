@@ -8470,6 +8470,7 @@ mod selected_task_projection_tests {
         let raw = include_str!("task_scalar_pg18_profile.json");
         let original: Value = serde_json::from_str(raw).unwrap();
         let profile = TaskScalarProfile::decode(raw).unwrap();
+        println!("FVOCI_SCALAR_DATA_IDENTITY={}", profile.data_identity);
         assert_eq!(profile.zones.len(), 487);
         assert_eq!(
             profile.data_identity,
