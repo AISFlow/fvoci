@@ -397,6 +397,78 @@ describe("preservation audit", () => {
     }
   });
 
+  test.each(["documents", "tasks"] as const)(
+    "OFF %s projection needs an exact new native resource allocation, including personal space",
+    (table) => {
+      for (const personal of [false, true]) {
+        const [original, after, audit] = counterRecords();
+        const target = "7".repeat(32);
+        const scope = personal ? "8".repeat(32) : must(workspace[1]);
+        const resourceHash = "6".repeat(64);
+        const prints = after.fingerprints as Record<string, Record_>;
+        const allocations = after.allocations as Record<string, Record<string, Record_>>;
+        if (personal) {
+          must(must(ops(after).users)[0])[2] = ["blob", scope];
+          must(ops(after).workspaces).push([
+            ["blob", scope],
+            ["text", "private-owned"],
+            ["text", "personal"],
+          ]);
+          must(prints.workspaces)["8".repeat(64)] = 1;
+          must(allocations.workspaces)["8".repeat(64)] = {
+            workspaces: [],
+            actors: [],
+            events: [],
+            self: scope,
+            consumer: null,
+          };
+        }
+        must(prints[table])[resourceHash] = 1;
+        must(allocations[table])[resourceHash] = {
+          workspaces: [scope],
+          actors: [actor[1]],
+          events: [],
+          self: target,
+          consumer: null,
+        };
+        const refs = must(must(allocations.events)["3".repeat(64)]);
+        refs.workspaces = [scope];
+        refs.actors = [];
+        refs.eventWitness = {
+          class: table === "documents" ? "document-projection" : "task-projection",
+          sequence: number(1),
+          target,
+        };
+        must(ops(after).events)[0] = [number(1), ["blob", scope], ["null"]];
+        assertPreserved(original, after, audit);
+        for (const field of ["self", "workspaces", "actors"]) {
+          const wrong = clone(after);
+          const resource = must(
+            must((wrong.allocations as Record<string, Record<string, Record_>>)[table])[
+              resourceHash
+            ],
+          );
+          resource[field] = field === "self" ? "9".repeat(32) : ["9".repeat(32)];
+          expect(() => {
+            assertPreserved(original, wrong, audit);
+          }, field).toThrow(UiError);
+        }
+        const noResource = clone(after);
+        delete must((noResource.allocations as Record<string, Record<string, Record_>>)[table])[
+          resourceHash
+        ];
+        expect(() => {
+          assertPreserved(original, noResource, audit);
+        }).toThrow();
+        const preexisting = clone(original);
+        must((preexisting.fingerprints as Record<string, Record_>)[table])[resourceHash] = 1;
+        expect(() => {
+          assertPreserved(preexisting, after, audit);
+        }).toThrow(UiError);
+      }
+    },
+  );
+
   test("background preflight keeps populated users but refuses old work", () => {
     const [original] = counterRecords();
     expect(startupBlockers(original)).toEqual([]);

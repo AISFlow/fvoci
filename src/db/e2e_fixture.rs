@@ -289,7 +289,7 @@ fn instance_config_witness(
     }))
 }
 
-// Narrow witnesses for the two current producers whose events intentionally
+// Narrow witnesses for the current producers whose events intentionally
 // omit a workspace or actor. The complete row remains bound by its fingerprint;
 // no payload or unrecognized verb is copied into the witness.
 fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
@@ -340,6 +340,20 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
         {
             "document-projection"
         }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Blob(workspace),
+            Cell::Null,
+        ) if verb == "task.updated"
+            && channel == "system"
+            && kind == "task"
+            && workspace.len() == 16
+            && payload == json!({"taskId":target.to_string(),"collab":true}) =>
+        {
+            "task-projection"
+        }
         _ => return Ok(Value::Null),
     };
     Ok(
@@ -379,7 +393,12 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
                 Cell::Blob(bytes) if bytes.len() == 16 => ids.push(hex::encode(bytes)),
                 _ => return Err(refused()),
             }
-        } else if name == "id" && matches!(table, "users" | "workspaces" | "events") {
+        } else if name == "id"
+            && matches!(
+                table,
+                "users" | "workspaces" | "events" | "documents" | "tasks"
+            )
+        {
             let bytes = cell.bytes()?;
             if bytes.len() != 16 {
                 return Err(refused());
@@ -923,7 +942,8 @@ mod tests {
     fn event_witness_accepts_only_exact_login_and_projection_producers() {
         let target = Uuid::from_u128(1);
         let workspace = Uuid::from_u128(2);
-        let columns = |projection: bool| {
+        let columns = |kind: &str| {
+            let projection = kind != "login";
             vec![
                 ("seq".into(), Cell::Integer(1)),
                 ("target_id".into(), Cell::uuid(target)),
@@ -945,10 +965,10 @@ mod tests {
                 ),
                 (
                     "verb".into(),
-                    Cell::text(if projection {
-                        "document.updated"
-                    } else {
-                        "auth.login"
+                    Cell::text(match kind {
+                        "document" => "document.updated",
+                        "task" => "task.updated",
+                        _ => "auth.login",
                     }),
                 ),
                 (
@@ -957,28 +977,28 @@ mod tests {
                 ),
                 (
                     "target_type".into(),
-                    Cell::text(if projection { "document" } else { "user" }),
+                    Cell::text(if projection { kind } else { "user" }),
                 ),
                 (
                     "payload".into(),
-                    Cell::json(&if projection {
-                        json!({"documentId":target.to_string(),"collab":true})
-                    } else {
-                        json!({"userId":target.to_string(),"method":"password"})
+                    Cell::json(&match kind {
+                        "document" => json!({"documentId":target.to_string(),"collab":true}),
+                        "task" => json!({"taskId":target.to_string(),"collab":true}),
+                        _ => json!({"userId":target.to_string(),"method":"password"}),
                     })
                     .unwrap(),
                 ),
             ]
         };
-        for projection in [false, true] {
-            let input = columns(projection);
+        for kind in ["login", "document", "task"] {
+            let input = columns(kind);
             let witness = event_witness(&input).unwrap();
             assert_eq!(
                 witness["class"],
-                if projection {
-                    "document-projection"
-                } else {
-                    "actor-login"
+                match kind {
+                    "document" => "document-projection",
+                    "task" => "task-projection",
+                    _ => "actor-login",
                 }
             );
             assert_eq!(witness["target"], hex::encode(target.as_bytes()));
