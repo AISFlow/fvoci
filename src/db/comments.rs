@@ -116,7 +116,7 @@ fn body_unit_len(body: &str) -> usize {
 
 fn normalize_body(body: &str) -> Result<String, CommentDbError> {
     let trimmed = body.trim();
-    if trimmed.is_empty() || body_unit_len(trimmed) > COMMENT_BODY_MAX {
+    if trimmed.is_empty() || trimmed.contains('\0') || body_unit_len(trimmed) > COMMENT_BODY_MAX {
         return Err(CommentDbError::InvalidInput);
     }
     Ok(trimmed.to_string())
@@ -866,7 +866,14 @@ pub async fn list_document_comments_backend(
         let OperationTx::SqliteFamily(family) = op else {
             unreachable!()
         };
-        family_comment_page(family, workspace_id, document_id, query).await
+        family_comment_page(
+            family,
+            workspace_id,
+            CommentWriteKind::Document,
+            document_id,
+            query,
+        )
+        .await
     }
     .await;
     match result {
@@ -920,14 +927,19 @@ fn family_comment_row(row: &FamilyRow) -> Result<CommentRow, sqlx::Error> {
 async fn family_comment_page(
     family: &mut crate::db::backend::FamilyTx,
     workspace: Uuid,
-    document: Uuid,
+    kind: CommentWriteKind,
+    target: Uuid,
     query: CommentListQuery,
 ) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
     family.require_tenant(workspace)?;
     if !(1..=100).contains(&query.limit) {
         return Ok(Err(CommentDbError::InvalidInput));
     }
-    let scope = comment_scope(workspace, "document", document);
+    let scope_kind = match kind {
+        CommentWriteKind::Document => "document",
+        CommentWriteKind::Task => "task",
+    };
+    let scope = comment_scope(workspace, scope_kind, target);
     let after = if let Some(cursor) = &query.cursor {
         if cursor.len() > 1024 {
             return Ok(Err(CommentDbError::InvalidInput));
@@ -938,27 +950,45 @@ async fn family_comment_page(
         };
         let rows = family
             .query(
-                "SELECT document_id FROM comments WHERE workspace_id=?1 AND id=?2",
+                "SELECT document_id,task_id FROM comments WHERE workspace_id=?1 AND id=?2",
                 &[Cell::uuid(workspace), Cell::uuid(id)],
             )
             .await?;
         let Some(anchor) = rows.first() else {
             return Ok(Err(CommentDbError::InvalidCursor));
         };
-        if anchor.cell(0)?.optional(Cell::id)? != Some(document) {
+        let column = match kind {
+            CommentWriteKind::Document => 0,
+            CommentWriteKind::Task => 1,
+        };
+        if anchor.cell(column)?.optional(Cell::id)? != Some(target) {
             return Ok(Err(CommentDbError::InvalidCursor));
         }
         Some(id)
     } else {
         None
     };
-    let rows = family.query(
-        "SELECT c.id,c.workspace_id,c.document_id,c.task_id,c.parent_id,c.created_by,c.body,c.resolved_at,c.reactions,c.created_at,c.updated_at
+    let sql = match kind {
+        CommentWriteKind::Document => "SELECT c.id,c.workspace_id,c.document_id,c.task_id,c.parent_id,c.created_by,c.body,c.resolved_at,c.reactions,c.created_at,c.updated_at
          FROM comments c WHERE c.workspace_id=?1 AND c.document_id=?2
          AND (?3 IS NULL OR (c.created_at,c.id)>(SELECT created_at,id FROM comments WHERE workspace_id=?1 AND id=?3))
          ORDER BY c.created_at ASC,c.id ASC LIMIT ?4",
-        &[Cell::uuid(workspace),Cell::uuid(document),Cell::optional_uuid(after),Cell::Integer(i64::from(query.limit)+1)],
-    ).await?;
+        CommentWriteKind::Task => "SELECT c.id,c.workspace_id,c.document_id,c.task_id,c.parent_id,c.created_by,c.body,c.resolved_at,c.reactions,c.created_at,c.updated_at
+         FROM comments c WHERE c.workspace_id=?1 AND c.task_id=?2
+         AND (?3 IS NULL OR (c.created_at,c.id)>(SELECT created_at,id FROM comments WHERE workspace_id=?1 AND id=?3))
+         ORDER BY c.created_at ASC,c.id ASC LIMIT ?4",
+    };
+    let rows = family
+        .query(
+            sql,
+            &[
+                Cell::uuid(workspace),
+                Cell::uuid(target),
+                Cell::optional_uuid(after),
+                Cell::Integer(i64::from(query.limit) + 1),
+            ],
+        )
+        .await?;
     let mut items = rows
         .iter()
         .map(family_comment_row)
@@ -1008,6 +1038,55 @@ pub async fn list_task_comments(
     let page = commit_comment!(comment_page(&mut tx, workspace_id, "task", task_id, query).await?);
     tx.commit().await?;
     Ok(Ok(page))
+}
+
+pub async fn list_task_comments_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    task_id: Uuid,
+    query: CommentListQuery,
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_task_comments(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            task_id,
+            query,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, false).await?
+        );
+        let target = commit_comment!(
+            family_comment_target(&mut op, workspace_id, None, Some(task_id)).await?
+        );
+
+        commit_comment!(
+            family_comment_access(
+                &mut op,
+                workspace_id,
+                actor_user_id,
+                &target,
+                ProjectPermission::View,
+                false
+            )
+            .await?
+        );
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        family_comment_page(family, workspace_id, CommentWriteKind::Task, task_id, query).await
+    }
+    .await;
+    finish_comment_operation(tx, result).await
 }
 
 pub async fn create_document_comment(
@@ -1226,6 +1305,66 @@ pub async fn list_project_document_comments(
     Ok(Ok(page))
 }
 
+pub async fn list_project_document_comments_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    query: CommentListQuery,
+) -> Result<Result<CommentListPage, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_project_document_comments(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            project_id,
+            document_id,
+            query,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, false).await?
+        );
+        let target = commit_comment!(
+            family_comment_target(&mut op, workspace_id, Some(document_id), None).await?
+        );
+        if !matches!(&target,ParentTarget::Document(doc) if doc.project_id==Some(project_id)) {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+        commit_comment!(
+            family_comment_access(
+                &mut op,
+                workspace_id,
+                actor_user_id,
+                &target,
+                ProjectPermission::View,
+                false
+            )
+            .await?
+        );
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        family_comment_page(
+            family,
+            workspace_id,
+            CommentWriteKind::Document,
+            document_id,
+            query,
+        )
+        .await
+    }
+    .await;
+    finish_comment_operation(tx, result).await
+}
+
 pub async fn create_project_document_comment(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1271,6 +1410,66 @@ pub async fn create_project_document_comment(
     Ok(Ok(created))
 }
 
+pub async fn create_project_document_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    project_and_document: (Uuid, Uuid),
+    input: CreateCommentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_project_document_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            project_and_document,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let (project_id, document_id) = project_and_document;
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?
+        );
+        let target = commit_comment!(
+            family_comment_target(&mut op, workspace_id, Some(document_id), None).await?
+        );
+        if !matches!(&target,ParentTarget::Document(doc) if doc.project_id==Some(project_id)) {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+        commit_comment!(
+            family_comment_access(
+                &mut op,
+                workspace_id,
+                actor_user_id,
+                &target,
+                ProjectPermission::Edit,
+                true
+            )
+            .await?
+        );
+        family_insert_comment(
+            &mut op,
+            workspace_id,
+            actor_user_id,
+            Some(document_id),
+            None,
+            input,
+            client_ip,
+        )
+        .await
+    }
+    .await;
+    finish_comment_operation(tx, result).await
+}
+
 pub async fn comment_write_kind(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1301,6 +1500,35 @@ pub async fn comment_write_kind(
     };
     tx.commit().await?;
     Ok(Ok(kind))
+}
+
+pub async fn comment_write_kind_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+) -> Result<Result<CommentWriteKind, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return comment_write_kind(pool, workspace_id, actor_user_id, session_id, comment_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, false).await?
+        );
+        let row = commit_comment!(family_fetch_comment(&mut op, workspace_id, comment_id)
+            .await?
+            .ok_or(CommentDbError::NotFound));
+        Ok(Ok(if row.document_id.is_some() {
+            CommentWriteKind::Document
+        } else {
+            CommentWriteKind::Task
+        }))
+    }
+    .await;
+    finish_comment_operation(tx, result).await
 }
 
 pub async fn create_task_comment(
@@ -1344,6 +1572,64 @@ pub async fn create_task_comment(
     };
     tx.commit().await?;
     Ok(Ok(created))
+}
+
+pub async fn create_task_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    task_id: Uuid,
+    input: CreateCommentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_task_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            task_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?
+        );
+        let target = commit_comment!(
+            family_comment_target(&mut op, workspace_id, None, Some(task_id)).await?
+        );
+
+        commit_comment!(
+            family_comment_access(
+                &mut op,
+                workspace_id,
+                actor_user_id,
+                &target,
+                ProjectPermission::Edit,
+                true
+            )
+            .await?
+        );
+        family_insert_comment(
+            &mut op,
+            workspace_id,
+            actor_user_id,
+            None,
+            Some(task_id),
+            input,
+            client_ip,
+        )
+        .await
+    }
+    .await;
+    finish_comment_operation(tx, result).await
 }
 
 pub async fn update_comment(
@@ -1409,6 +1695,47 @@ pub async fn update_comment(
     Ok(Ok(updated))
 }
 
+pub async fn update_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+    input: PatchCommentInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            comment_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?);
+        let comment=commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound));
+        commit_comment!(family_comment_author(&mut op,workspace_id,actor_user_id,&comment,ProjectPermission::Edit).await?);
+        if let Some(body)=input.body {
+            let body=commit_comment!(normalize_body(body));
+            if body!=comment.body {
+                let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+                family.execute("UPDATE comments SET body=?3,chosung=?4,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace_id),Cell::uuid(comment_id),Cell::text(&body),Cell::text(to_chosung(&body))]).await?;
+                family_comment_change(&mut op,workspace_id,actor_user_id,&comment,"comment.updated",true,client_ip).await?;
+            }
+        }
+        Ok(Ok(commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound))))
+    }.await;
+    finish_comment_operation(tx, result).await
+}
+
 pub async fn purge_comment(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1457,6 +1784,70 @@ pub async fn purge_comment(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn purge_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return purge_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            comment_id,
+            client_ip,
+        )
+        .await;
+    }
+
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(
+            family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?
+        );
+        let comment = commit_comment!(family_fetch_comment(&mut op, workspace_id, comment_id)
+            .await?
+            .ok_or(CommentDbError::NotFound));
+        commit_comment!(
+            family_comment_author(
+                &mut op,
+                workspace_id,
+                actor_user_id,
+                &comment,
+                ProjectPermission::Manage
+            )
+            .await?
+        );
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        family
+            .execute(
+                "DELETE FROM comments WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace_id), Cell::uuid(comment_id)],
+            )
+            .await?;
+        family_comment_change(
+            &mut op,
+            workspace_id,
+            actor_user_id,
+            &comment,
+            "comment.deleted",
+            true,
+            client_ip,
+        )
+        .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_comment_operation(tx, result).await
 }
 
 pub async fn resolve_comment(
@@ -1519,6 +1910,42 @@ pub async fn resolve_comment(
     Ok(Ok(updated))
 }
 
+pub async fn resolve_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return resolve_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            comment_id,
+            client_ip,
+        )
+        .await;
+    }
+
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?);
+        let comment=commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound));
+        if comment.parent_id.is_some(){return Ok(Err(CommentDbError::InvalidInput));}
+        let target=commit_comment!(family_comment_target(&mut op,workspace_id,comment.document_id,comment.task_id).await?);
+        commit_comment!(family_comment_access(&mut op,workspace_id,actor_user_id,&target,ProjectPermission::Edit,true).await?);
+        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+        family.execute("UPDATE comments SET resolved_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace_id),Cell::uuid(comment_id)]).await?;
+        family_comment_change(&mut op,workspace_id,actor_user_id,&comment,"comment.resolved",false,client_ip).await?;
+        Ok(Ok(commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound))))
+    }.await;
+    finish_comment_operation(tx, result).await
+}
+
 pub async fn unresolve_comment(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1578,6 +2005,44 @@ pub async fn unresolve_comment(
     };
     tx.commit().await?;
     Ok(Ok(updated))
+}
+
+pub async fn unresolve_comment_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return unresolve_comment(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            comment_id,
+            client_ip,
+        )
+        .await;
+    }
+
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?);
+        let comment=commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound));
+        if comment.parent_id.is_some(){return Ok(Err(CommentDbError::InvalidInput));}
+        let target=commit_comment!(family_comment_target(&mut op,workspace_id,comment.document_id,comment.task_id).await?);
+        commit_comment!(family_comment_access(&mut op,workspace_id,actor_user_id,&target,ProjectPermission::Edit,true).await?);
+        if comment.resolved_at.is_some(){
+            let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+            family.execute("UPDATE comments SET resolved_at=NULL,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace_id),Cell::uuid(comment_id)]).await?;
+            family_comment_change(&mut op,workspace_id,actor_user_id,&comment,"comment.updated",true,client_ip).await?;
+        }
+        Ok(Ok(commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound))))
+    }.await;
+    finish_comment_operation(tx, result).await
 }
 
 fn reactions_map(value: &Value) -> BTreeMap<String, Vec<Uuid>> {
@@ -1698,6 +2163,50 @@ pub async fn set_comment_reaction(
     Ok(Err(CommentDbError::Conflict))
 }
 
+pub async fn set_comment_reaction_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    comment_id: Uuid,
+    input: ReactionInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return set_comment_reaction(
+            pool,
+            workspace_id,
+            actor_user_id,
+            session_id,
+            comment_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    if !VALID_REACTIONS.contains(&input.emoji) {
+        return Ok(Err(CommentDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        commit_comment!(family_comment_actor(&mut op, workspace_id, actor_user_id, session_id, true).await?);
+        let comment=commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound));
+        let target=commit_comment!(family_comment_target(&mut op,workspace_id,comment.document_id,comment.task_id).await?);
+        commit_comment!(family_comment_access(&mut op,workspace_id,actor_user_id,&target,ProjectPermission::View,true).await?);
+        let mut next=reactions_map(&comment.reactions);
+        let mut ids=next.remove(input.emoji).unwrap_or_default();
+        if input.on {if !ids.contains(&actor_user_id){ids.push(actor_user_id);}}else{ids.retain(|id|*id!=actor_user_id);}
+        if !ids.is_empty(){next.insert(input.emoji.into(),ids);}
+        let OperationTx::SqliteFamily(family)=&mut op else {unreachable!()};
+        // The reserved writer serializes the read/modify/write; no CAS retry is needed.
+        family.execute("UPDATE comments SET reactions=?3,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace_id),Cell::uuid(comment_id),Cell::json(&reactions_to_json(&next))?]).await?;
+        if reactions_map(&comment.reactions)!=next {family_comment_change(&mut op,workspace_id,actor_user_id,&comment,"comment.updated",true,client_ip).await?;}
+        Ok(Ok(commit_comment!(family_fetch_comment(&mut op,workspace_id,comment_id).await?.ok_or(CommentDbError::NotFound))))
+    }.await;
+    finish_comment_operation(tx, result).await
+}
+
 pub fn comment_output(
     comment: &CommentRow,
     viewer_user_id: Uuid,
@@ -1728,6 +2237,259 @@ pub fn comment_output(
         }
     }
     (reactions, other_reaction_count)
+}
+
+// Family operations keep authorization and all side effects in the same
+// snapshot or reserved writer. The PostgreSQL entrypoints above stay unchanged.
+async fn finish_comment_operation<T>(
+    tx: crate::db::backend::DbTx,
+    result: Result<Result<T, CommentDbError>, sqlx::Error>,
+) -> Result<Result<T, CommentDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(value))
+        }
+        result => {
+            if let Err(cleanup) = tx.rollback().await {
+                let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                    Ok(Err(error)) => Some(Box::new(CommentWriteRefusal(error))),
+                    Err(error) => Some(Box::new(error)),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    original, cleanup,
+                ));
+            }
+            result
+        }
+    }
+}
+
+async fn family_comment_actor(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    write: bool,
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    op.set_tenant(workspace).await?;
+    let live = if write {
+        op.lock_membership_users(&[actor]).await?;
+        op.recheck_session(actor, credential).await?
+    } else {
+        op.session_is_live(actor, credential).await?
+    };
+    if !live || !op.workspace_is_live(workspace).await? {
+        return Ok(Err(CommentDbError::NotFound));
+    }
+    Ok(Ok(()))
+}
+
+async fn family_fetch_comment(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    comment: Uuid,
+) -> Result<Option<CommentRow>, sqlx::Error> {
+    let OperationTx::SqliteFamily(tx) = op else {
+        unreachable!()
+    };
+    tx.require_tenant(workspace)?;
+    tx.query("SELECT id,workspace_id,document_id,task_id,parent_id,created_by,body,resolved_at,reactions,created_at,updated_at FROM comments WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(comment)]).await?.first().map(family_comment_row).transpose()
+}
+
+async fn family_comment_target(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    document: Option<Uuid>,
+    task: Option<Uuid>,
+) -> Result<Result<ParentTarget, CommentDbError>, sqlx::Error> {
+    let OperationTx::SqliteFamily(tx) = op else {
+        unreachable!()
+    };
+    tx.require_tenant(workspace)?;
+    if let Some(document_id) = document {
+        let rows=tx.query("SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(document_id)]).await?;
+        if let Some(row) = rows.first() {
+            return Ok(Ok(ParentTarget::Document(DocumentTarget {
+                document_id,
+                project_id: row.cell(0)?.optional(Cell::id)?,
+            })));
+        }
+    } else if let Some(task_id) = task {
+        let rows=tx.query("SELECT project_id,archived_at FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task_id)]).await?;
+        if let Some(row) = rows.first() {
+            return Ok(Ok(ParentTarget::Task(TaskTarget {
+                task_id,
+                project_id: row.cell(0)?.id()?,
+                archived_at: row.cell(1)?.optional(Cell::datetime)?,
+            })));
+        }
+    }
+    Ok(Err(CommentDbError::NotFound))
+}
+
+async fn family_comment_access(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    target: &ParentTarget,
+    min: ProjectPermission,
+    write: bool,
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    let project = match target {
+        ParentTarget::Document(doc) => doc.project_id,
+        ParentTarget::Task(task) => Some(task.project_id),
+    };
+    if let Some(project) = project {
+        let permission = if write {
+            op.share_lock_project_permission(workspace, actor, project)
+                .await?
+        } else {
+            op.project_permission_by_id(workspace, actor, project)
+                .await?
+                .map(|permission| (permission, false))
+        };
+        let Some((permission, archived)) = permission else {
+            return Ok(Err(CommentDbError::NotFound));
+        };
+        if !permission.at_least(min) {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+        if write && archived {
+            return Ok(Err(CommentDbError::ProjectArchived));
+        }
+        if write && matches!(target,ParentTarget::Task(task) if task.archived_at.is_some()) {
+            return Ok(Err(CommentDbError::TaskArchived));
+        }
+    } else {
+        let ParentTarget::Document(doc) = target else {
+            unreachable!()
+        };
+        if !op
+            .document_permission(workspace, actor, doc.document_id, true)
+            .await?
+            .at_least(min)
+        {
+            return Ok(Err(CommentDbError::NotFound));
+        }
+    }
+    // BEGIN IMMEDIATE owns the writer before target and grant reads, so trash,
+    // archive, document moves and membership removal cannot race these checks.
+    Ok(Ok(()))
+}
+
+async fn family_comment_author(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    comment: &CommentRow,
+    min: ProjectPermission,
+) -> Result<Result<(), CommentDbError>, sqlx::Error> {
+    let target = commit_comment!(
+        family_comment_target(op, workspace, comment.document_id, comment.task_id).await?
+    );
+    commit_comment!(
+        family_comment_access(op, workspace, actor, &target, ProjectPermission::View, true).await?
+    );
+    if comment.created_by == actor {
+        return Ok(Ok(()));
+    }
+    family_comment_access(op, workspace, actor, &target, min, true).await
+}
+
+async fn family_comment_event(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    verb: &str,
+    target: (&str, Uuid),
+    payload: Value,
+    ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some(target.0.into()),
+        target_id: Some(target.1),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some(target.0.into()),
+        target_id: Some(target.1),
+        payload,
+        ip: ip.map(str::to_string),
+    })
+    .await
+}
+
+async fn family_comment_change(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    comment: &CommentRow,
+    verb: &str,
+    parent_event: bool,
+    ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let target = if parent_event {
+        if let Some(task) = comment.task_id {
+            ("task", task)
+        } else {
+            ("document", comment.document_id.expect("comment xor target"))
+        }
+    } else {
+        ("comment", comment.id)
+    };
+    family_comment_event(op,workspace,actor,verb,target,json!({"commentId":comment.id.to_string(),"documentId":comment.document_id.map(|id|id.to_string()),"taskId":comment.task_id.map(|id|id.to_string())}),ip).await
+}
+
+async fn family_insert_comment(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    document: Option<Uuid>,
+    task: Option<Uuid>,
+    input: CreateCommentInput<'_>,
+    ip: Option<&str>,
+) -> Result<Result<CommentRow, CommentDbError>, sqlx::Error> {
+    let body = commit_comment!(normalize_body(input.body));
+    let direct = commit_comment!(normalize_mentions(input.mentioned_user_ids));
+    let groups = commit_comment!(normalize_mentions(input.mentioned_group_ids));
+    let mut mentioned = direct.into_iter().collect::<BTreeSet<_>>();
+    if let Some(parent) = input.parent_id {
+        let parent = commit_comment!(family_fetch_comment(op, workspace, parent)
+            .await?
+            .ok_or(CommentDbError::NotFound));
+        if parent.document_id != document || parent.task_id != task {
+            return Ok(Err(CommentDbError::InvalidInput));
+        }
+    }
+    let OperationTx::SqliteFamily(tx) = op else {
+        unreachable!()
+    };
+    tx.require_tenant(workspace)?;
+    tx.require_writer()?;
+    for group in &groups {
+        for row in tx.query("SELECT user_id FROM group_members WHERE workspace_id=?1 AND group_id=?2 ORDER BY user_id",&[Cell::uuid(workspace),Cell::uuid(*group)]).await? {
+            mentioned.insert(row.cell(0)?.id()?);
+        }
+    }
+    let id = Uuid::now_v7();
+    tx.execute("INSERT INTO comments(id,workspace_id,document_id,task_id,parent_id,created_by,body,chosung) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[Cell::uuid(id),Cell::uuid(workspace),Cell::optional_uuid(document),Cell::optional_uuid(task),Cell::optional_uuid(input.parent_id),Cell::uuid(actor),Cell::text(&body),Cell::text(to_chosung(&body))]).await?;
+    family_comment_event(op,workspace,actor,"comment.created",("comment",id),json!({"commentId":id.to_string(),"documentId":document.map(|id|id.to_string()),"taskId":task.map(|id|id.to_string()),"mentionedUserIds":mentioned.into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),"mentionedGroupIds":groups.into_iter().map(|id|id.to_string()).collect::<Vec<_>>(),"parentId":input.parent_id.map(|id|id.to_string())}),ip).await?;
+    Ok(Ok(commit_comment!(family_fetch_comment(op, workspace, id)
+        .await?
+        .ok_or(CommentDbError::NotFound))))
 }
 
 #[cfg(all(test, feature = "db-tests"))]
@@ -2583,5 +3345,98 @@ mod selected_comment_write_tests {
         race_pool.close().await;
         f.pool.close().await;
         std::fs::remove_dir_all(&f.root).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_comment_port_tests {
+    use super::*;
+    use crate::db::backend::{DbTransaction, RemoteDatabase};
+    use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+    use futures_util::FutureExt;
+
+    async fn backend(driver: &LibsqlFinishFixture) -> Backend {
+        Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::new(2).unwrap(),
+        )))
+    }
+    fn input(body: &str) -> CreateCommentInput<'_> {
+        CreateCommentInput {
+            body,
+            parent_id: None,
+            mentioned_user_ids: &[],
+            mentioned_group_ids: &[],
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn official_sqld_comments_create_modify_resolve_react_delete_and_rollback() {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-comments-sqld-{}", Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let db = backend(&driver).await;
+        let result=std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&db).await.unwrap();
+            let workspace=Uuid::now_v7();let actor=Uuid::now_v7();let credential=Uuid::now_v7();let doc=Uuid::now_v7();
+            let project=Uuid::now_v7();let workflow=Uuid::now_v7();let status=Uuid::now_v7();let task=Uuid::now_v7();let project_doc=Uuid::now_v7();
+            let mut tx=db.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(f)=&mut tx else{unreachable!()};f.replace_system_context(true);
+            f.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'remote-comments@example.invalid','Author')",&[Cell::uuid(actor)]).await.unwrap();
+            f.execute("INSERT INTO workspaces(id,slug,name) VALUES(?1,'remote-comments','Remote comments')",&[Cell::uuid(workspace)]).await.unwrap();
+            f.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')",&[Cell::uuid(workspace),Cell::uuid(actor)]).await.unwrap();
+            f.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'remote-comment-credential',(unixepoch()+3600)*1000000)",&[Cell::uuid(credential),Cell::uuid(actor)]).await.unwrap();
+            f.execute("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'COM','Comments','workspace',?3)",&[Cell::uuid(project),Cell::uuid(workspace),Cell::uuid(actor)]).await.unwrap();
+            f.execute("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)",&[Cell::uuid(workflow),Cell::uuid(workspace),Cell::uuid(project)]).await.unwrap();
+            f.execute("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,'Todo','todo','V')",&[Cell::uuid(status),Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(workflow)]).await.unwrap();
+            f.execute("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,content_json,created_by) VALUES(?1,?2,?3,1,'Task',?4,'{}',?5)",&[Cell::uuid(task),Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(status),Cell::uuid(actor)]).await.unwrap();
+            for (document,project_id,number) in [(doc,None,1),(project_doc,Some(project),2)] {
+                f.execute("INSERT INTO documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,?3,'Document',?4,'V',?5,'published',2,?6,'{}')",&[Cell::uuid(document),Cell::uuid(workspace),Cell::optional_uuid(project_id),Cell::text(document.simple().to_string()),Cell::Integer(number),Cell::uuid(actor)]).await.unwrap();
+            }
+            tx.commit_with_cleanup().await.unwrap();
+            let roots=[
+                create_document_comment_backend(&db,workspace,actor,credential,doc,input("wiki 😀"),None).await.unwrap().unwrap(),
+                create_project_document_comment_backend(&db,workspace,actor,credential,(project,project_doc),input("project 😀"),None).await.unwrap().unwrap(),
+                create_task_comment_backend(&db,workspace,actor,credential,task,input("task 😀"),None).await.unwrap().unwrap(),
+            ];
+            for comment in &roots {
+                update_comment_backend(&db,workspace,actor,credential,comment.id,PatchCommentInput{body:Some("updated 😀")},None).await.unwrap().unwrap();
+                let resolved=resolve_comment_backend(&db,workspace,actor,credential,comment.id,None).await.unwrap().unwrap();assert!(resolved.resolved_at.is_some());
+                set_comment_reaction_backend(&db,workspace,actor,credential,comment.id,ReactionInput{emoji:"👍",on:true},None).await.unwrap().unwrap();
+                let fresh=backend(&driver).await;
+                let page=if let Some(document)=comment.document_id {
+                    if document==doc {list_document_comments_backend(&fresh,workspace,actor,credential,document,CommentListQuery{limit:50,cursor:None}).await}
+                    else{list_project_document_comments_backend(&fresh,workspace,actor,credential,project,document,CommentListQuery{limit:50,cursor:None}).await}
+                } else{list_task_comments_backend(&fresh,workspace,actor,credential,task,CommentListQuery{limit:50,cursor:None}).await}.unwrap().unwrap();
+                assert_eq!(page.items.len(),1);assert_eq!(page.items[0].body,"updated 😀");assert!(page.items[0].resolved_at.is_some());assert_eq!(page.items[0].reactions,json!({"👍":[actor]}));
+                assert!(matches!(purge_comment_backend(&fresh,Uuid::now_v7(),actor,credential,comment.id,None).await.unwrap(),Err(CommentDbError::NotFound)));
+                fresh.close().await.unwrap();
+                unresolve_comment_backend(&db,workspace,actor,credential,comment.id,None).await.unwrap().unwrap();
+            }
+            // A remote transaction error must not publish its event or row.
+            let mut tx=db.begin_write().await.unwrap();let DbTransaction::SqliteFamily(f)=&mut tx else{unreachable!()};f.set_tenant(workspace).unwrap();
+            let before=f.query("SELECT (SELECT count(*) FROM comments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT last_seq FROM event_sequence WHERE id=1)",&[]).await.unwrap();
+            f.execute("CREATE TRIGGER remote_comments_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'remote comment audit failure'); END",&[]).await.unwrap();tx.commit_with_cleanup().await.unwrap();
+            assert!(update_comment_backend(&db,workspace,actor,credential,roots[0].id,PatchCommentInput{body:Some("rolled back")},None).await.is_err());
+            let mut tx=db.begin_write().await.unwrap();let DbTransaction::SqliteFamily(f)=&mut tx else{unreachable!()};f.set_tenant(workspace).unwrap();
+            let after=f.query("SELECT (SELECT count(*) FROM comments),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT last_seq FROM event_sequence WHERE id=1)",&[]).await.unwrap();
+            for index in 0..4 {assert_eq!(before[0].cell(index).unwrap().integer().unwrap(),after[0].cell(index).unwrap().integer().unwrap());}
+            let body=f.query("SELECT body FROM comments WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(roots[0].id)]).await.unwrap();assert_eq!(body[0].cell(0).unwrap().string().unwrap(),"updated 😀");
+            f.execute("DROP TRIGGER remote_comments_fail_audit",&[]).await.unwrap();tx.commit_with_cleanup().await.unwrap();
+            for comment in roots {purge_comment_backend(&db,workspace,actor,credential,comment.id,None).await.unwrap().unwrap();}
+            let fresh=backend(&driver).await;
+            assert!(list_task_comments_backend(&fresh,workspace,actor,credential,task,CommentListQuery{limit:50,cursor:None}).await.unwrap().unwrap().items.is_empty());
+            fresh.close().await.unwrap();
+        }).catch_unwind().await;
+        db.close().await.unwrap();
+        let receipt = driver.finish().await.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
