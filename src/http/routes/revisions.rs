@@ -25,12 +25,11 @@ use crate::collab::room::{
     BodyWriteError, CapturedRevision, RevisionCaptureError, RevisionRestoreError,
 };
 use crate::db::revisions::{
-    authorize_revision_target, authorize_revision_target_backend,
-    create_manual_revision_with_room_proof, decode_revision_cursor,
-    get_revision as get_revision_for, get_revision_backend as get_selected_revision_for,
+    authorize_revision_target_backend, create_manual_revision_with_room_proof,
+    decode_revision_cursor, get_revision_backend as get_selected_revision_for,
     list_revisions_backend as list_revisions_for, load_persisted_target_source_backend,
-    resolve_restore, CreateRevisionInput, RestoreRevisionInput, RevisionDbError, RevisionDetail,
-    RevisionMeta, RevisionScope, RevisionTarget,
+    resolve_restore_backend, CreateRevisionInput, RestoreRevisionInput, RevisionDbError,
+    RevisionDetail, RevisionMeta, RevisionScope, RevisionTarget,
 };
 use crate::error::{AppError, ProblemCode, SESSION_COOKIE};
 use crate::http::authz::{require_request_auth, Access};
@@ -584,13 +583,8 @@ async fn restore_target_revision(
             revision_id: saved.revision_id.to_string(),
         }));
     }
-    let snap = resolve_restore(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/revisions.rs")
-            .map_err(internal)?,
+    let snap = resolve_restore_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -733,13 +727,8 @@ async fn preview_restore_target(
     }
     // The immutable source must belong to this exact route target. A preview
     // is for an editable restore; viewing history alone does not permit it.
-    resolve_restore(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/revisions.rs")
-            .map_err(internal)?,
+    resolve_restore_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -750,13 +739,8 @@ async fn preview_restore_target(
     .await
     .map_err(internal)?
     .map_err(map_revision_error)?;
-    let source = get_revision_for(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/revisions.rs")
-            .map_err(internal)?,
+    let source = get_selected_revision_for(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,
@@ -782,13 +766,8 @@ async fn preview_restore_target(
         _ => collab_unavailable(),
     })?;
     // Check route affiliation again after room startup/project work.
-    authorize_revision_target(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/revisions.rs")
-            .map_err(internal)?,
+    authorize_revision_target_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         credential_id,

@@ -1,3 +1,7 @@
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+use crate::db::tasks::{family_project_access, finish_task_operation};
+use crate::projects::ProjectPermission;
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -220,6 +224,70 @@ pub async fn create_milestone(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn create_milestone_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    name: &str,
+    due: Option<NaiveDate>,
+) -> Result<Result<MilestoneRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_milestone(pool, workspace, project, actor, credential, name, due).await;
+    }
+    if !milestone_name_is_valid(name) {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        let rows=family.query("SELECT sort_key FROM milestones WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY DESC LIMIT 1",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+
+        let last = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
+        let Ok(sort) = between(last.as_deref(), None) else {
+            return Ok(Err(ProjectDbError::InvalidAnchor));
+        };
+        let id = Uuid::now_v7();
+        let due = due.map(|d| d.to_string());
+        let rows=family.query("INSERT INTO milestones(id,workspace_id,project_id,name,due_date,sort_key) VALUES(?1,?2,?3,?4,?5,?6) RETURNING id,project_id,name,due_date,sort_key,created_at,updated_at",&[Cell::uuid(id),Cell::uuid(workspace),Cell::uuid(project),Cell::text(name.trim()),Cell::optional_text(due.as_deref()),Cell::text(sort)]).await?;
+
+        Ok(Ok(family_milestone_row(
+            rows.first().ok_or(sqlx::Error::RowNotFound)?,
+        )?))
+    }.await;
+    finish_task_operation(tx, result).await
+}
+fn family_milestone_row(r: &FamilyRow) -> Result<MilestoneRow, sqlx::Error> {
+    Ok(MilestoneRow {
+        id: r.cell(0)?.id()?,
+        project_id: r.cell(1)?.id()?,
+        name: r.cell(2)?.string()?,
+        due_date: r.cell(3)?.optional(Cell::date)?,
+        sort_key: r.cell(4)?.string()?,
+        created_at: r.cell(5)?.datetime()?,
+        updated_at: r.cell(6)?.datetime()?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn update_milestone(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -282,6 +350,56 @@ pub async fn update_milestone(
     Ok(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn update_milestone_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    milestone: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    name: Option<&str>,
+    due: Option<Option<NaiveDate>>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_milestone(
+            pool, workspace, project, milestone, actor, credential, name, due,
+        )
+        .await;
+    }
+    if (name.is_none() && due.is_none()) || name.is_some_and(|n| !milestone_name_is_valid(n)) {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        let date = due.flatten().map(|d| d.to_string());
+        if family.execute("UPDATE milestones SET name=COALESCE(?4,name),due_date=CASE WHEN ?5 THEN ?6 ELSE due_date END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND project_id=?2 AND id=?3",&[Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(milestone),Cell::optional_text(name.map(str::trim)),Cell::Integer(i64::from(due.is_some())),Cell::optional_text(date.as_deref())]).await?==0{return Ok(Err(ProjectDbError::MilestoneNotFound));
+    }
+        Ok(Ok(()))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
+}
+
 pub async fn purge_milestone(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -333,6 +451,71 @@ pub async fn purge_milestone(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn purge_milestone_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    milestone: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return purge_milestone(pool, workspace, project, milestone, actor, credential).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        if family
+            .query(
+                "SELECT id FROM milestones WHERE workspace_id=?1 AND project_id=?2 AND id=?3",
+                &[
+                    Cell::uuid(workspace),
+                    Cell::uuid(project),
+                    Cell::uuid(milestone),
+                ],
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(Err(ProjectDbError::MilestoneNotFound));
+        }
+
+        family.execute("UPDATE tasks SET milestone_id=NULL,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND milestone_id=?2",&[Cell::uuid(workspace),Cell::uuid(milestone)]).await?;
+
+        family
+            .execute(
+                "DELETE FROM milestones WHERE workspace_id=?1 AND project_id=?2 AND id=?3",
+                &[
+                    Cell::uuid(workspace),
+                    Cell::uuid(project),
+                    Cell::uuid(milestone),
+                ],
+            )
+            .await?;
+        Ok(Ok(()))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
 }
 
 pub async fn project_milestone_exists(

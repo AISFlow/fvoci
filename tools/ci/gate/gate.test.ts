@@ -27,7 +27,22 @@ import {
   gateJobId,
   type Plan,
   type Workflow,
+  validatePlanSchema,
 } from "./schema.ts";
+
+test("collaboration preparation and packet producer must be selected together", () => {
+  const complete = {
+    "collaboration-main-build": true,
+    "collaboration-test-build": true,
+    "collaboration-build": true,
+  };
+  expect(validatePlanSchema(plan("web", complete), "web")).toBeNull();
+  for (const name of Object.keys(complete)) {
+    expect(validatePlanSchema(plan("web", { ...complete, [name]: false }), "web")).toBe(
+      "PLAN_COLLABORATION_PREPARATION_SELECTION",
+    );
+  }
+});
 import { isBlank, strip } from "./text.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "fvoci-gate-"));

@@ -23,6 +23,7 @@ export const RUST_POSTGRES_RUNNER_ARCH: Readonly<Record<string, "x64" | "arm64">
 };
 export const RUST_INTEGRATION_MANUAL_TARGETS: ReadonlySet<string> = new Set([
   "collab_capacity_probe",
+  "revision_libsql_restore",
 ]);
 export const RUST_NATIVE_ARM64_STEP = "Native server build and policy tests (ARM64)";
 export const RUST_NATIVE_ARM64_RUN =

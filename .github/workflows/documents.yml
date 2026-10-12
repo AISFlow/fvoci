@@ -138,6 +138,13 @@ jobs:
           cp target/debug/document-extract "$RUNNER_TEMP/document-extract-production"
           cargo build --locked --offline --bin document-extract --features test-hang
           cp target/debug/document-extract "$RUNNER_TEMP/document-extract-test-hang"
+      - name: Restore pinned arm64 libclang packages
+        id: clang18_arm64_cache
+        if: runner.arch == 'ARM64'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-clang18-arm64
+          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.98.1-18.1.8-20ubuntu8-arm64
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -145,7 +152,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          # x64 keeps the signed primary archive; ARM installs only verified local packages.
           . /etc/os-release
           [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
           case "$(dpkg --print-architecture)" in
@@ -155,16 +162,45 @@ jobs:
               grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
               test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
               printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
               ;;
-            arm64) ;;
+            arm64)
+              # SHA-256 values from Ubuntu's signed resolute arm64 Packages index.
+              # Check hits too: a corrupt cache must fail before privileged installation.
+              command -v gcc ar curl >/dev/null
+              deb_dir="$RUNNER_TEMP/fvoci-clang18-arm64"
+              mkdir -p "$deb_dir"
+              debs=()
+              while read -r digest filename; do
+                package="$deb_dir/$filename"
+                if [[ ! -f "$package" ]]; then
+                  curl --fail --silent --show-error --location \
+                    "https://ports.ubuntu.com/ubuntu-ports/pool/universe/l/llvm-toolchain-18/$filename" \
+                    --output "$package"
+                fi
+                printf '%s  %s\n' "$digest" "$package" | sha256sum --check --strict
+                debs+=("$package")
+              done <<'PACKAGES'
+          061da069dfbb7f5e1215eebd06531e337927e64e7d5576c99f04fef27da0360a libclang-18-dev_18.1.8-20ubuntu8_arm64.deb
+          63b7319ce3056cf67894864141ca18ba3aa234a1c2743a299d11a8df24833d5c libclang-common-18-dev_18.1.8-20ubuntu8_arm64.deb
+          8451d5f5290f3a833bb301357c54936e932188ca125e08734071b08fb86b676e libclang1-18_18.1.8-20ubuntu8_arm64.deb
+          bcc3bb04c81c97b9157df50801ac36628866692bf681830913874eeef3208491 libllvm18_18.1.8-20ubuntu8_arm64.deb
+          PACKAGES
+              sudo apt-get install -y --no-download --no-install-recommends -- "${debs[@]}"
+              ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Save verified arm64 libclang packages
+        if: runner.arch == 'ARM64' && github.ref == 'refs/heads/main' && steps.clang18_arm64_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-clang18-arm64
+          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.98.1-18.1.8-20ubuntu8-arm64
       - name: Restore attachment product build outputs
         id: cache_native_extraction_15
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

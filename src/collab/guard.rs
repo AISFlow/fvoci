@@ -7,12 +7,12 @@ use crate::collab::config::FamilyRoomTimings;
 use crate::db::backend::Backend;
 use crate::db::collab::COLLAB_ROOM_SESSION_LOCK_NAMESPACE;
 use crate::db::collab::{
-    activate_family_document_writer, activate_family_task_writer,
+    activate_family_document_writer, activate_family_task_writer, append_collab_restore_kind,
     append_collab_update_on_conn_timed, append_family_document_room_update_timed,
-    append_family_task_room_update_timed, claim_writer_and_load_kind_backend,
-    release_family_document_room, release_family_task_room, renew_family_document_room,
-    renew_family_task_room, AppendCollabInput, AppendCollabResult, ClaimWriterResult,
-    CollabDbError, CollabDbStageTimings, CollabKind, FamilyNativeRoomFence,
+    append_family_room_restore, append_family_task_room_update_timed,
+    claim_writer_and_load_kind_backend, release_family_document_room, release_family_task_room,
+    renew_family_document_room, renew_family_task_room, AppendCollabInput, AppendCollabResult,
+    ClaimWriterResult, CollabDbError, CollabDbStageTimings, CollabKind, FamilyNativeRoomFence,
     FamilyRoomDeliveryFence,
 };
 use crate::db::context::lock_key_from_uuid;
@@ -282,6 +282,29 @@ impl BackendRoomGuard {
                     }
                 }
             }
+        }
+    }
+
+    pub(crate) async fn restore(
+        &mut self,
+        backend: &Backend,
+        kind: CollabKind,
+        input: AppendCollabInput<'_>,
+        restore: &crate::db::revisions::RestoreRevisionAppend,
+    ) -> Result<Result<(AppendCollabResult, Uuid), CollabDbError>, sqlx::Error> {
+        match self {
+            Self::Postgres(_) => {
+                append_collab_restore_kind(
+                    backend.postgres("native revision restore")?,
+                    kind,
+                    input,
+                    restore,
+                )
+                .await
+            }
+            Self::Family {
+                backend, current, ..
+            } => append_family_room_restore(backend, *current, kind, input, restore).await,
         }
     }
 

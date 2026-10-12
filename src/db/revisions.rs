@@ -1688,6 +1688,57 @@ pub async fn resolve_restore(
     Ok(Ok(y_snapshot))
 }
 
+pub async fn resolve_restore_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    scope: impl Into<RevisionScope>,
+    revision: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<Vec<u8>, RevisionDbError>, sqlx::Error> {
+    let scope = scope.into();
+    if let Backend::Postgres(pool) = backend {
+        return resolve_restore(
+            pool, workspace, actor, credential, scope, revision, client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        let source = match op
+            .off_revision_source(workspace, actor, credential, scope, revision)
+            .await?
+        {
+            Ok(source) => source,
+            Err(error) => return Ok(Err(error)),
+        };
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        let sql = match scope.target {
+            RevisionTarget::Document(_) => {
+                "SELECT 1 FROM document_states WHERE workspace_id=?1 AND document_id=?2"
+            }
+            RevisionTarget::Task(_) => {
+                "SELECT 1 FROM task_states WHERE workspace_id=?1 AND task_id=?2"
+            }
+        };
+        if family
+            .query(sql, &[Cell::uuid(workspace), Cell::uuid(scope.target.id())])
+            .await?
+            .is_empty()
+        {
+            return Ok(Err(RevisionDbError::NotFound));
+        }
+        Ok(Ok(source.y_snapshot))
+    }
+    .await;
+    finish_revision_authorization(tx, result).await
+}
+
 /// Captured restore intent; the tail is an opaque decimal string at HTTP only.
 #[derive(Debug, Clone, Copy)]
 pub struct RestoreRevisionInput {
@@ -1763,6 +1814,54 @@ pub async fn lookup_restored_revision(
     Ok(result)
 }
 
+pub async fn lookup_restored_revision_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: RestoreRevisionInput,
+) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return lookup_restored_revision(pool, workspace, actor, credential, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if let Err(error) = op
+            .authorize_revision_scope(workspace, actor, credential, input.scope, true)
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        op.lookup_restored_revision(workspace, actor, input).await
+    }
+    .await;
+    finish_revision_authorization(tx, result).await
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn lookup_restored_revision(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        input: RestoreRevisionInput,
+    ) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
+        let row: Option<RestoreReceiptRow> = match self {
+            Self::Postgres(tx) => {
+                return lookup_restored_revision_in_tx(tx, workspace, actor, input).await
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                tx.query("SELECT id,target_kind,target_id,created_by,restored_from_id,restore_base_tail_seq,restore_committed_tail_seq FROM revisions WHERE workspace_id=?1 AND restore_correlation_id=?2", &[Cell::uuid(workspace), Cell::uuid(input.correlation_id)]).await?
+                    .first().map(|row| -> Result<RestoreReceiptRow, sqlx::Error> { Ok((row.cell(0)?.id()?, row.cell(1)?.string()?, row.cell(2)?.id()?, row.cell(3)?.optional(Cell::id)?, row.cell(4)?.optional(Cell::id)?, row.cell(5)?.optional(Cell::integer)?, row.cell(6)?.optional(Cell::integer)?)) }).transpose()?
+            }
+        };
+        validate_restore_receipt(row, actor, input)
+    }
+}
+
 pub(crate) async fn lookup_restored_revision_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -1773,6 +1872,14 @@ pub(crate) async fn lookup_restored_revision_in_tx(
         "SELECT id, target_kind, target_id, created_by, restored_from_id, restore_base_tail_seq, restore_committed_tail_seq FROM fvoci.revisions WHERE workspace_id = $1 AND restore_correlation_id = $2",
     )
     .bind(workspace_id).bind(input.correlation_id).fetch_optional(&mut **tx).await?;
+    validate_restore_receipt(row, actor_user_id, input)
+}
+
+fn validate_restore_receipt(
+    row: Option<RestoreReceiptRow>,
+    actor_user_id: Uuid,
+    input: RestoreRevisionInput,
+) -> Result<Result<Option<RestoredRevision>, RevisionDbError>, sqlx::Error> {
     let Some((id, kind, target_id, actor, source, base, committed)) = row else {
         return Ok(Ok(None));
     };

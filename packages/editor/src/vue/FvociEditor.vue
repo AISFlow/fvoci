@@ -651,8 +651,8 @@ function settleNativeTextClick(view: EditorView, pos: number, event: MouseEvent)
 }
 
 /* Home/End's native default runs after keydown. A pending PM focus repair can
- * restore the old selection before keyup or selectionchange. Use the browser's
- * visual line navigation synchronously and record it in the same handler. */
+ * restore the old selection before keyup or selectionchange. Record visual
+ * line navigation synchronously; Ctrl uses the model's document boundaries. */
 function settleNativeLineBoundary(view: EditorView, event: KeyboardEvent): boolean {
   if (
     !event.isTrusted ||
@@ -662,12 +662,33 @@ function settleNativeLineBoundary(view: EditorView, event: KeyboardEvent): boole
     isMacOS() ||
     isiOS() ||
     event.altKey ||
-    event.ctrlKey ||
     event.metaKey ||
-    (event.key !== "Home" && event.key !== "End") ||
-    !nativeKeyboardSelection(view, event)
+    (event.key !== "Home" && event.key !== "End")
   )
     return false;
+  const current = nativeKeyboardSelection(view, event);
+  if (!current) return false;
+  if (event.ctrlKey) {
+    // Find text even beyond boundary atoms or inside nested blocks. This also
+    // avoids depending on Selection.modify's browser-specific documentboundary.
+    const doc = view.state.doc;
+    const start = event.key === "Home";
+    const boundary = TextSelection.findFrom(
+      doc.resolve(start ? 0 : doc.content.size),
+      start ? 1 : -1,
+      true,
+    );
+    if (!boundary) return false;
+    const selection = TextSelection.create(
+      doc,
+      event.shiftKey ? current.anchor : boundary.head,
+      boundary.head,
+    );
+    view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+    // PM may already hold this selection while the native caret has moved.
+    view.focus();
+    return true;
+  }
   const native = view.dom.ownerDocument.getSelection();
   if (typeof native?.modify !== "function") return false;
   native.modify(

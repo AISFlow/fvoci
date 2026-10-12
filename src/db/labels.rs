@@ -1,3 +1,7 @@
+use crate::db::backend::{Backend, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+use crate::db::tasks::{family_project_access, finish_task_operation};
+use crate::projects::ProjectPermission;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -25,7 +29,7 @@ pub struct LabelRow {
 
 pub fn label_name_is_valid(name: &str) -> bool {
     let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= LABEL_NAME_MAX
+    !trimmed.is_empty() && !name.contains('\0') && trimmed.chars().count() <= LABEL_NAME_MAX
 }
 
 pub fn label_color_is_valid(color: &str) -> bool {
@@ -87,8 +91,9 @@ pub async fn list_project_labels_backend(
             "SELECT id,project_id,name,color,created_at,updated_at FROM labels WHERE workspace_id=?1 AND project_id=?2 ORDER BY name,id",
             &[Cell::uuid(workspace),Cell::uuid(project)],
         ).await?;
-        Ok(Ok(rows.iter().map(|row| Ok(map_label_row(row.cell(0)?.id()?,row.cell(1)?.id()?,row.cell(2)?.string()?,row.cell(3)?.string()?,row.cell(4)?.datetime()?,row.cell(5)?.datetime()?)))
-            .collect::<Result<Vec<_>,sqlx::Error>>()?))
+        let mut labels = rows.iter().map(family_label_row).collect::<Result<Vec<_>,sqlx::Error>>()?;
+        crate::db::tasks::family_sort_names(&mut labels, |row| (&row.name, row.id))?;
+        Ok(Ok(labels))
     }.await;
     // A failed release is not a successful read. Preserve both the original
     // domain/driver refusal and the failed cleanup when there is one.
@@ -197,6 +202,59 @@ pub async fn list_workspace_labels(
         .collect()))
 }
 
+pub async fn list_workspace_labels_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<LabelRow>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_workspace_labels(pool, workspace, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor, credential).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace).await?
+            || op.membership_role(workspace, actor, false).await?.is_none()
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        let rows=family.query("SELECT id,project_id,name,color,created_at,updated_at FROM labels WHERE workspace_id=?1 ORDER BY name,id",&[Cell::uuid(workspace)]).await?;
+        let mut visible = Vec::new();
+        for row in rows {
+            let label = family_label_row(&row)?;
+            if op
+                .project_permission_by_id(workspace, actor, label.project_id)
+                .await?
+                .is_some_and(|p| p.at_least(ProjectPermission::View))
+            {
+                visible.push(label);
+            }
+        }
+
+        crate::db::tasks::family_sort_names(&mut visible, |row| (&row.name, row.id))?;
+        Ok(Ok(visible))
+    }.await;
+    finish_task_operation(tx, result).await
+}
+fn family_label_row(row: &FamilyRow) -> Result<LabelRow, sqlx::Error> {
+    Ok(map_label_row(
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.string()?,
+        row.cell(3)?.string()?,
+        row.cell(4)?.datetime()?,
+        row.cell(5)?.datetime()?,
+    ))
+}
+
 pub async fn create_label(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -237,6 +295,51 @@ pub async fn create_label(
     .await?;
     tx.commit().await?;
     Ok(Ok(map_label_row(row.0, row.1, row.2, row.3, row.4, row.5)))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_label_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    name: &str,
+    color: &str,
+) -> Result<Result<LabelRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_label(pool, workspace, project, actor, credential, name, color).await;
+    }
+    if !label_name_is_valid(name) || !label_color_is_valid(color) {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        let rows=family.query("INSERT INTO labels(id,workspace_id,project_id,name,color) VALUES(?1,?2,?3,?4,?5) RETURNING id,project_id,name,color,created_at,updated_at",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(project),Cell::text(name.trim()),Cell::text(color)]).await?;
+
+        Ok(Ok(family_label_row(
+            rows.first().ok_or(sqlx::Error::RowNotFound)?,
+        )?))
+    }.await;
+    finish_task_operation(tx, result).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -306,6 +409,58 @@ pub async fn update_label(
     Ok(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn update_label_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    label: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    name: Option<&str>,
+    color: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_label(
+            pool, workspace, project, label, actor, credential, name, color,
+        )
+        .await;
+    }
+    if (name.is_none() && color.is_none())
+        || name.is_some_and(|n| !label_name_is_valid(n))
+        || color.is_some_and(|c| !label_color_is_valid(c))
+    {
+        return Ok(Err(ProjectDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        if family.execute("UPDATE labels SET name=COALESCE(?4,name),color=COALESCE(?5,color),updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND project_id=?2 AND id=?3",&[Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(label),Cell::optional_text(name.map(str::trim)),Cell::optional_text(color)]).await?==0{return Ok(Err(ProjectDbError::LabelNotFound));
+    }
+        Ok(Ok(()))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
+}
+
 pub async fn purge_label(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -342,6 +497,56 @@ pub async fn purge_label(
     }
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn purge_label_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    label: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return purge_label(pool, workspace, project, label, actor, credential).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        if let Err(e) = family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::Edit,
+            true,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+        if family
+            .execute(
+                "DELETE FROM labels WHERE workspace_id=?1 AND project_id=?2 AND id=?3",
+                &[
+                    Cell::uuid(workspace),
+                    Cell::uuid(project),
+                    Cell::uuid(label),
+                ],
+            )
+            .await?
+            == 0
+        {
+            return Ok(Err(ProjectDbError::LabelNotFound));
+        }
+        Ok(Ok(()))
+    }
+    .await;
+    finish_task_operation(tx, result).await
 }
 
 /// Task list `labelId` filter: the label must belong to the listed project (the

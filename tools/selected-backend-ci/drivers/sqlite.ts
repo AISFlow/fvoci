@@ -32,7 +32,13 @@ import {
 } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
-import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
+import {
+  loadCurrent,
+  restoreSpec,
+  validateOffReport,
+  validateRestoreReport,
+  type Current,
+} from "./binding.ts";
 import {
   actor,
   assertNoEnvFile,
@@ -545,6 +551,31 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
         : "actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback",
   });
   if (flow === "on") {
+    // Retain the original one-test invocation and receipt. Restore is a
+    // separately counted, mandatory invocation on this same SQLite server.
+    const restoreArgs = browserArgs(
+      state.bun,
+      join(root, "node_modules/playwright/cli.js"),
+      restoreSpec,
+    );
+    restoreArgs[restoreArgs.indexOf("--config") + 1] =
+      "e2e-pending/revision-restore-playwright.config.ts";
+    const restoreReport = join(run, "restore-playwright-result.private.json");
+    const restoreResult = await seam.command(restoreArgs, {
+      log: join(run, "restore-browser.log"),
+      required: false,
+      env: { ...state.browserEnv, PLAYWRIGHT_JSON_OUTPUT_FILE: restoreReport },
+      cwd: web,
+    });
+    state.code = restoreResult.returncode;
+    if (state.code !== 0) {
+      recordFailure(state, state.code, undefined, join(run, "restore-browser.log"));
+      return;
+    }
+    chmodSync(restoreReport, 0o600);
+    validateRestoreReport(read(restoreReport));
+    receipt.sqlite_restore_browser = { exit: 0, actual_tests: 1, skipped: 0, retries: 0 };
+    receipt.sqlite_restore_report_sha256 = sha(restoreReport);
     receipt.phase = "restart";
     receipt.current_schema_server_restart = await seam.restart(
       restartContext(state, browserInputs, seam),

@@ -47,7 +47,7 @@ pub fn parse_iso_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> 
 
 pub fn title_is_valid(title: &str) -> bool {
     let trimmed = title.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 500
+    !trimmed.is_empty() && !title.contains('\0') && trimmed.chars().count() <= 500
 }
 
 pub fn task_type_is_valid(value: &str) -> bool {

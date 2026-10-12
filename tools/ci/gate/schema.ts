@@ -15,6 +15,8 @@ export const WORKFLOW_JOBS = {
     "web-native-checks",
     "workspace-browser-build",
     "workspace-browser-shard",
+    "collaboration-main-build",
+    "collaboration-test-build",
     "collaboration-build",
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -138,6 +140,12 @@ export function validatePlanSchema(plan: unknown, workflow: Workflow): string | 
   ) {
     return "PLAN_BROWSER_PRODUCER_SELECTION";
   }
+  if (
+    workflow === "web" &&
+    (selected("collaboration-main-build") !== selected("collaboration-build") ||
+      selected("collaboration-test-build") !== selected("collaboration-build"))
+  )
+    return "PLAN_COLLABORATION_PREPARATION_SELECTION";
   // Both container smokes run the image that install-image builds.
   if (
     workflow === "install" &&

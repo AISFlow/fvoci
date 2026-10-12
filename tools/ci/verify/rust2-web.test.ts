@@ -10,6 +10,7 @@ import {
   verifyWebBrowserBudgetJobs,
   verifyWebBuildHandoff,
   verifyWebBuildHandoffJobs,
+  verifyCollaborationPreparationJobs,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 
@@ -25,6 +26,63 @@ const byId = (id: string) => (step: Mapping) => step["id"] === id;
 const isDownload = (step: Mapping) => usesOf(step).startsWith("actions/download-artifact@");
 const unitStep = (jobs: Mapping) =>
   stepWith(jobs, "web-checks", (step) => step["name"] === "Web and editor unit regressions");
+
+test("collaboration preparation requires ordered exact current-run caches and complete compiles", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyCollaborationPreparationJobs(jobs)).toEqual([]);
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    const bad = clone(jobs);
+    Reflect.deleteProperty(bad, name);
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain("must exist");
+  }
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    for (const [key, value] of [
+      ["key", "foreign-run"],
+      ["restore-keys", "prefix-"],
+      ["fail-on-cache-miss", false],
+    ] as const) {
+      const bad = clone(jobs);
+      const restore = stepWith(
+        bad,
+        name,
+        (step) => step["name"] === "Restore current native preparation",
+      );
+      (restore["with"] as Mapping)[key] = value;
+      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+        "exact source/run/attempt/SQLite",
+      );
+    }
+  }
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    const bad = clone(jobs);
+    stepWith(bad, name, (step) => step["name"] === "Compile native preparation")["run"] = "true\n";
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "complete unmasked compiler",
+    );
+  }
+});
+
+test("current preparation cache hit check accepts true and refuses misses or prefix hits", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    const check = stepWith(
+      jobs,
+      name,
+      (step) => step["name"] === "Require exact current native preparation",
+    );
+    const run = check["run"];
+    expect(typeof run).toBe("string");
+    if (typeof run !== "string") throw new Error("missing cache hit check");
+    for (const value of ["true", "false", ""]) {
+      const result = Bun.spawnSync(["bash", "-euo", "pipefail", "-c", run], {
+        env: { PATH: "/usr/bin:/bin", CACHE_HIT: value },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(value === "true" ? 0 : 1);
+    }
+  }
+});
 
 test("real web.yml passes through the context entry points", () => {
   const ctx = loadContext(ROOT);
