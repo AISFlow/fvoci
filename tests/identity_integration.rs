@@ -6333,6 +6333,7 @@ mod sqlite_logout_regression {
         use fvoci_server::auth::token::hash_token;
         use fvoci_server::db::{api_tokens, identity};
         use fvoci_server::{http::router_with_identity, identity::Identity};
+        use serde_json::json;
         let (root, path, sqlite, auth, user, token) = family_fixture().await;
         let workspace: Vec<u8> =
             sqlx::query_scalar("SELECT workspace_id FROM memberships WHERE user_id=?1")
