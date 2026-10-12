@@ -1,0 +1,350 @@
+Package: libclang-18-dev
+Architecture: arm64
+Version: 1:18.1.8-20ubuntu8
+Depends: libstdc++-15-dev, libgcc-15-dev, libobjc-15-dev, libclang1-18 (= 1:18.1.8-20ubuntu8), libclang-common-18-dev (= 1:18.1.8-20ubuntu8)
+Filename: pool/universe/l/llvm-toolchain-18/libclang-18-dev_18.1.8-20ubuntu8_arm64.deb
+Size: 29093806
+SHA256: 061da069dfbb7f5e1215eebd06531e337927e64e7d5576c99f04fef27da0360a
+Description: Clang library - Development package
+
+Package: libstdc++-15-dev
+Architecture: arm64
+Version: 15.2.0-16ubuntu1
+Provides: libstdc++-dev
+Depends: gcc-15-base (= 15.2.0-16ubuntu1), libgcc-15-dev (= 15.2.0-16ubuntu1), libstdc++6 (>= 15.2.0-16ubuntu1), libc6-dev (>= 2.13-0ubuntu6)
+Filename: pool/main/g/gcc-15/libstdc++-15-dev_15.2.0-16ubuntu1_arm64.deb
+Size: 2871808
+SHA256: f3a53cb1834a15fda5b509332a0f473ca4f1f0dd9a04da355c939df449914f9b
+Description: GNU Standard C++ Library v3 (development files)
+
+Package: gcc-15-base
+Architecture: arm64
+Version: 15.2.0-16ubuntu1
+Breaks: gnat (<< 7)
+Filename: pool/main/g/gcc-15/gcc-15-base_15.2.0-16ubuntu1_arm64.deb
+Size: 39048
+SHA256: d49ef1f45b0b2c9437265502bef20a2b22895a8dafce02194c2acbed2f5c51eb
+Description: GCC, the GNU Compiler Collection (base package)
+
+Package: libgcc-15-dev
+Architecture: arm64
+Version: 15.2.0-16ubuntu1
+Replaces: libtsan2 (<< 12-20211113-2~)
+Depends: gcc-15-base (= 15.2.0-16ubuntu1), libgcc-s1 (>= 15.2.0-16ubuntu1), libgomp1 (>= 15.2.0-16ubuntu1), libitm1 (>= 15.2.0-16ubuntu1), libatomic1 (>= 15.2.0-16ubuntu1), libasan8 (>= 15.2.0-16ubuntu1), liblsan0 (>= 15.2.0-16ubuntu1), libtsan2 (>= 15.2.0-16ubuntu1), libubsan1 (>= 15.2.0-16ubuntu1), libhwasan0 (>= 15.2.0-16ubuntu1)
+Breaks: libtsan2 (<< 12-20211113-2~)
+Filename: pool/main/g/gcc-15/libgcc-15-dev_15.2.0-16ubuntu1_arm64.deb
+Size: 2600202
+SHA256: d088c97ff459ab243eb369666dfc43b92f278556e45d72c2def4d7657d728fe4
+Description: GCC support library (development files)
+
+Package: libgcc-s1
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Replaces: libgcc1 (<< 1:10)
+Provides: libgcc1 (= 1:16-20260322-1ubuntu1)
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.35)
+Breaks: libgcc-7-dev (<< 7.5.0-4), libgcc-8-dev (<< 8.3.0-27), libgcc-9-dev (<< 9.2.1-26)
+Filename: pool/main/g/gcc-16/libgcc-s1_16-20260322-1ubuntu1_arm64.deb
+Size: 61034
+SHA256: 106e53a42bebdc55f253d737a818991eba5b4f22c8b1a035a4202b133ade9743
+Description: GCC support library
+
+Package: gcc-16-base
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Breaks: gnat (<< 7)
+Filename: pool/main/g/gcc-16/gcc-16-base_16-20260322-1ubuntu1_arm64.deb
+Size: 38310
+SHA256: 7aaed4a4fb1d47792c66e1323a6662ee1b184fb7993aacaa1cc82ba55a1716e0
+Description: GCC, the GNU Compiler Collection (base package)
+
+Package: libc6
+Architecture: arm64
+Version: 2.43-2ubuntu2
+Replaces: libc6-lse
+Provides: libc6-lse
+Depends: libgcc-s1, libc-gconv-modules-extra (= 2.43-2ubuntu2)
+Conflicts: libc6-lse
+Breaks: base-files (<< 13.3~), dhcpcd (<< 1:10.1.0-7~), libamdhip64-5 (<< 5.7.1-5+b1), libhiprtc-builtins5 (<< 5.7.1-5+b1), librccl1 (<< 5.4.3-3build1), libswupdate0.1 (<< 2024.12.1+dfsg-1+b3), locales (<< 2.43), locales-all (<< 2.43), lua-swupdate (<< 2024.12.1+dfsg-1+b3), nscd (<< 2.43), pd-scaf (<< 1:0.14.1+darcs20180201-6build5), postgresql-15-pllua (<< 1:2.0.12-4), postgresql-17-pllua (<< 1:2.0.12-3+b2), python3-mrgingham (<< 1.25-1), python3-onnxruntime (<< 1.20.1+dfsg-2~), sysvinit (<< 3.09-2~), sysvinit-core (<< 3.09-2~), uwsgi-plugin-pypy3 (<< 0.0.2+b1)
+Filename: pool/main/g/glibc/libc6_2.43-2ubuntu2_arm64.deb
+Size: 1641006
+SHA256: 6be782d90425acbdf9b7523f791a69a0d3f8770be0750b5cce71d4cdc18397c0
+Description: GNU C Library: Shared libraries
+
+Package: libc-gconv-modules-extra
+Architecture: arm64
+Version: 2.43-2ubuntu2
+Replaces: libc6 (<< 2.42-1)
+Breaks: libc6 (<< 2.42-1)
+Filename: pool/main/g/glibc/libc-gconv-modules-extra_2.43-2ubuntu2_arm64.deb
+Size: 1382484
+SHA256: 928474717b93f8fedf4ec22072e3385084d4258af0bcb4b5b44f0bef267e21f3
+Description: GNU C Library: Non-essential gconv modules
+
+Package: libgomp1
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.38)
+Breaks: gcc-4.3 (<< 4.3.6-1), gcc-4.4 (<< 4.4.6-4), gcc-4.5 (<< 4.5.3-2)
+Filename: pool/main/g/gcc-16/libgomp1_16-20260322-1ubuntu1_arm64.deb
+Size: 153930
+SHA256: a9d1fc09eebccb7049b408ef51362ad6c44d0421570d47410af072b52d14481e
+Description: GCC OpenMP (GOMP) support library
+
+Package: libitm1
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34)
+Filename: pool/main/g/gcc-16/libitm1_16-20260322-1ubuntu1_arm64.deb
+Size: 27806
+SHA256: 190e0d37e04565c1ccd34869b3eb7af6600c9196689c102d43046ad370aef49c
+Description: GNU Transactional Memory Library
+
+Package: libatomic1
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.17)
+Filename: pool/main/g/gcc-16/libatomic1_16-20260322-1ubuntu1_arm64.deb
+Size: 11116
+SHA256: b9b2c94062924229201e25b694536119b153146abb8f464e31afa9e422d07d22
+Description: support library providing __atomic built-in functions
+
+Package: libasan8
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)
+Filename: pool/main/g/gcc-16/libasan8_16-20260322-1ubuntu1_arm64.deb
+Size: 2998866
+SHA256: ae30b45c86daf779ebaf53fcf9c37b091202cf547bab64c12895d377941e4547
+Description: AddressSanitizer -- a fast memory error detector
+
+Package: liblsan0
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)
+Filename: pool/main/g/gcc-16/liblsan0_16-20260322-1ubuntu1_arm64.deb
+Size: 1336400
+SHA256: b969830163936911594c3f60e1c525171ac78e46760e3734aa8197e13dfc6d74
+Description: LeakSanitizer -- a memory leak detector (runtime)
+
+Package: libtsan2
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)
+Filename: pool/main/g/gcc-16/libtsan2_16-20260322-1ubuntu1_arm64.deb
+Size: 2743696
+SHA256: ad3d232427bf5c2c3ba8e048db2d083f5eca14c9ef813630df0073b7f9fc8904
+Description: ThreadSanitizer -- a Valgrind-based detector of data races (runtime)
+
+Package: libubsan1
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34), libgcc-s1 (>= 3.3), libstdc++6 (>= 4.1.1)
+Filename: pool/main/g/gcc-16/libubsan1_16-20260322-1ubuntu1_arm64.deb
+Size: 1192592
+SHA256: a96cad95dc058f8b82951f3a0df373477e8aa0f5664569c7dcbc08891f951a71
+Description: UBSan -- undefined behaviour sanitizer (runtime)
+
+Package: libstdc++6
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Replaces: libstdc++6-16-dbg (<< 4.9.0-3)
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.38), libgcc-s1 (>= 4.5)
+Conflicts: scim (<< 1.4.2-1)
+Breaks: gcc-4.3 (<< 4.3.6-1), gcc-4.4 (<< 4.4.6-4), gcc-4.5 (<< 4.5.3-2)
+Filename: pool/main/g/gcc-16/libstdc++6_16-20260322-1ubuntu1_arm64.deb
+Size: 766458
+SHA256: 4ec527bc695f4221b97aee9ac0c2f4f068b514a810db5d18465a8636dc5b2948
+Description: GNU Standard C++ Library v3
+
+Package: libhwasan0
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)
+Filename: pool/main/g/gcc-16/libhwasan0_16-20260322-1ubuntu1_arm64.deb
+Size: 1668138
+SHA256: 1ebe901005e414249d062eb0cee54b1d0b17f777913c28d321a3dfd648561583
+Description: AddressSanitizer -- a fast memory error detector
+
+Package: libc6-dev
+Architecture: arm64
+Version: 2.43-2ubuntu2
+Provides: libc-dev (= 2.43-2ubuntu2)
+Depends: libc6 (= 2.43-2ubuntu2), libc-dev-bin (= 2.43-2ubuntu2), linux-libc-dev, rpcsvc-proto
+Conflicts: libc0.3-dev, libc6.1-dev
+Breaks: catch (<< 1.12.2-0.1), libc6-dev-arm64-cross (<< 2.43~), libmysqlclient-dev (<= 8.0.29-1)
+Filename: pool/main/g/glibc/libc6-dev_2.43-2ubuntu2_arm64.deb
+Size: 1844200
+SHA256: 26060610ffbcb3e7260d113e659dbedfe0bacd5dd116affa3bde72431184d328
+Description: GNU C Library: Development Libraries and Header Files
+
+Package: libc-dev-bin
+Architecture: arm64
+Version: 2.43-2ubuntu2
+Depends: libc6 (>> 2.43), libc6 (<< 2.44)
+Filename: pool/main/g/glibc/libc-dev-bin_2.43-2ubuntu2_arm64.deb
+Size: 22566
+SHA256: fade3c7adfe6b5b6591c8858b9890bd54ab6b10495c0c2abc4364e92cc482839
+Description: GNU C Library: Development binaries
+
+Package: linux-libc-dev
+Architecture: arm64
+Version: 7.0.0-14.14
+Replaces: linux-kernel-headers
+Provides: aufs-dev, linux-kernel-headers
+Conflicts: linux-kernel-headers
+Filename: pool/main/l/linux/linux-libc-dev_7.0.0-14.14_arm64.deb
+Size: 1521622
+SHA256: e86f6bbf7bebdc1958241b546ca9467c35fc29f57c01d4f0336c1908ca21f2fe
+Description: Linux Kernel Headers for development
+
+Package: rpcsvc-proto
+Architecture: arm64
+Version: 1.4.3-1build1
+Replaces: libc-dev-bin (<< 2.31-14), libc6-dev (<< 2.31-14)
+Depends: libc6 (>= 2.38)
+Breaks: libc-dev-bin (<< 2.31-14), libc6-dev (<< 2.31-14)
+Filename: pool/main/r/rpcsvc-proto/rpcsvc-proto_1.4.3-1build1_arm64.deb
+Size: 65578
+SHA256: 1d9b9424baee119a4c654e5c9d4a35638468996c74a6b493d07ad44693bf6f33
+Description: RPC protocol compiler and definitions
+
+Package: libobjc-15-dev
+Architecture: arm64
+Version: 15.2.0-16ubuntu1
+Depends: gcc-15-base (= 15.2.0-16ubuntu1), libgcc-15-dev (= 15.2.0-16ubuntu1), libobjc4 (>= 15.2.0-16ubuntu1)
+Filename: pool/universe/g/gcc-15/libobjc-15-dev_15.2.0-16ubuntu1_arm64.deb
+Size: 189378
+SHA256: 8eb75b8eba2244859f6bf6db1cb8f173e142d2376755859f58d6c8f2e2a3d889
+Description: Runtime library for GNU Objective-C applications (development files)
+
+Package: libobjc4
+Architecture: arm64
+Version: 16-20260322-1ubuntu1
+Depends: gcc-16-base (= 16-20260322-1ubuntu1), libc6 (>= 2.38), libgc1 (>= 1:7.2d), libgcc-s1 (>= 3.0)
+Filename: pool/universe/g/gcc-16/libobjc4_16-20260322-1ubuntu1_arm64.deb
+Size: 45526
+SHA256: 1ef2e5c2eea9de88f16509e2ebbc577cf4ff09d968a821e6a831c2abb944861d
+Description: Runtime library for GNU Objective-C applications
+
+Package: libgc1
+Architecture: arm64
+Version: 1:8.2.12-1
+Replaces: libgc1c2
+Depends: libc6 (>= 2.38), libstdc++6 (>= 4.1.1)
+Conflicts: libgc1c2
+Filename: pool/main/libg/libgc/libgc1_8.2.12-1_arm64.deb
+Size: 89552
+SHA256: 2d4b89a2ea6cb9e6552b0d8d7b224aa3bdb50c76b483a1458f85ebca51927567
+Description: conservative garbage collector for C and C++
+
+Package: libclang1-18
+Architecture: arm64
+Version: 1:18.1.8-20ubuntu8
+Depends: libc6 (>= 2.38), libllvm18, libstdc++6 (>= 11)
+Filename: pool/universe/l/llvm-toolchain-18/libclang1-18_18.1.8-20ubuntu8_arm64.deb
+Size: 7468396
+SHA256: 8451d5f5290f3a833bb301357c54936e932188ca125e08734071b08fb86b676e
+Description: C interface to the Clang library
+
+Package: libllvm18
+Architecture: arm64
+Version: 1:18.1.8-20ubuntu8
+Replaces: llvm-18-dev (<< 1:18.1.8-8)
+Depends: libc6 (>= 2.38), libedit2 (>= 2.11-20080614-0), libffi8 (>= 3.4), libgcc-s1 (>= 4.2), libstdc++6 (>= 12), libtinfo6 (>= 6), libxml2-16 (>= 2.14.1), libzstd1 (>= 1.5.5), zlib1g (>= 1:1.2.0)
+Breaks: llvm-18-dev (<< 1:18.1.8-8)
+Filename: pool/universe/l/llvm-toolchain-18/libllvm18_18.1.8-20ubuntu8_arm64.deb
+Size: 26120070
+SHA256: bcc3bb04c81c97b9157df50801ac36628866692bf681830913874eeef3208491
+Description: Modular compiler and toolchain technologies, runtime library
+
+Package: libedit2
+Architecture: arm64
+Version: 3.1-20251016-1
+Replaces: libedit-dev (<< 3.1-20180525-2~)
+Depends: libbsd0 (>= 0.1.3), libc6 (>= 2.42), libtinfo6 (>= 6)
+Filename: pool/main/libe/libedit/libedit2_3.1-20251016-1_arm64.deb
+Size: 96286
+SHA256: a184af2ab98ee85ed2b7616a995b93bd9d0b65c7552b4f799ee27ada2b52707f
+Description: BSD editline and history libraries
+
+Package: libbsd0
+Architecture: arm64
+Version: 0.12.2-2build2
+Depends: libc6 (>= 2.38), libmd0 (>= 1.0.3-2)
+Filename: pool/main/libb/libbsd/libbsd0_0.12.2-2build2_arm64.deb
+Size: 41882
+SHA256: 21ceca917fdee4d568dd616121be4b436801448d7f436ca1b8a7604ed6fd9f30
+Description: utility functions from BSD systems - shared library
+
+Package: libmd0
+Architecture: arm64
+Version: 1.1.0-2build4
+Depends: libc6 (>= 2.33)
+Filename: pool/main/libm/libmd/libmd0_1.1.0-2build4_arm64.deb
+Size: 23656
+SHA256: 20d4f22076064b7cbfc20b58fff9630aeeb19a78e16a54ce2b7557a22015cfc0
+Description: message digest functions from BSD systems - shared library
+
+Package: libtinfo6
+Architecture: arm64
+Version: 6.6+20251231-1
+Depends: libc6 (>= 2.42)
+Breaks: tmux (<< 3.3a-4)
+Filename: pool/main/n/ncurses/libtinfo6_6.6+20251231-1_arm64.deb
+Size: 107766
+SHA256: 9da3b65c7d025c0e8d08d438f35e70aadbc40596e6ae191d8b4399f263b62805
+Description: shared low-level terminfo library for terminal handling
+
+Package: libffi8
+Architecture: arm64
+Version: 3.5.2-4
+Replaces: libffi8ubuntu1 (<< 3.4.2-1)
+Provides: libffi8ubuntu1 (= 3.5.2-4)
+Depends: libc6 (>= 2.38)
+Breaks: libffi8ubuntu1 (<< 3.4.2-1)
+Filename: pool/main/libf/libffi/libffi8_3.5.2-4_arm64.deb
+Size: 24428
+SHA256: cfab73343f076b79df0f4a9d5430319fdb6153760d3e8c2964c448b49edad084
+Description: Foreign Function Interface library runtime
+
+Package: libxml2-16
+Architecture: arm64
+Version: 2.15.2+dfsg-0.1
+Depends: libc6 (>= 2.38), zlib1g (>= 1:1.2.2.3)
+Conflicts: w3c-dtd-xhtml
+Breaks: libxml-libxml-perl (<< 2.0207+dfsg+really+2.0134-3~)
+Filename: pool/main/libx/libxml2/libxml2-16_2.15.2+dfsg-0.1_arm64.deb
+Size: 605362
+SHA256: 2d2c8c56f50f5ae2371aec0dcf62a291db858bd11adaacbb29816557d0498e3c
+Description: GNOME XML library
+
+Package: zlib1g
+Architecture: arm64
+Version: 1:1.3.dfsg+really1.3.1-1ubuntu3
+Provides: libz1
+Depends: libc6 (>= 2.17)
+Conflicts: zlib1 (<= 1:1.0.4-7)
+Breaks: libxml2 (<< 2.7.6.dfsg-2), texlive-binaries (<< 2023.20230311.66589-8)
+Filename: pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu3_arm64.deb
+Size: 63806
+SHA256: 3f4ef035018933af69033a5391ba8cf7b793afbdd9d82c65de57cc4666156f5a
+Description: compression library - runtime
+
+Package: libzstd1
+Architecture: arm64
+Version: 1.5.7+dfsg-3
+Depends: libc6 (>= 2.34)
+Filename: pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-3_arm64.deb
+Size: 277154
+SHA256: af32dd47238a84108c46536baddb7f7b6b0ca7914707dfe1beb95f56ef3a37dd
+Description: fast lossless compression algorithm
+
+Package: libclang-common-18-dev
+Architecture: arm64
+Version: 1:18.1.8-20ubuntu8
+Filename: pool/universe/l/llvm-toolchain-18/libclang-common-18-dev_18.1.8-20ubuntu8_arm64.deb
+Size: 739232
+SHA256: 63b7319ce3056cf67894864141ca18ba3aa234a1c2743a299d11a8df24833d5c
+Description: Clang library - Common development package
+

@@ -152,7 +152,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
-          # x64 keeps the signed primary archive; ARM installs only verified local packages.
+          # x64 keeps the signed primary archive; ARM reuses verified large packages.
           . /etc/os-release
           [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
           case "$(dpkg --print-architecture)" in
@@ -187,7 +187,10 @@ jobs:
           8451d5f5290f3a833bb301357c54936e932188ca125e08734071b08fb86b676e libclang1-18_18.1.8-20ubuntu8_arm64.deb
           bcc3bb04c81c97b9157df50801ac36628866692bf681830913874eeef3208491 libllvm18_18.1.8-20ubuntu8_arm64.deb
           PACKAGES
-              sudo apt-get install -y --no-download --no-install-recommends -- "${debs[@]}"
+              # Let apt resolve any smaller Depends absent from this runner.
+              # The four large inputs stay local and are checked before apt runs.
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends -- "${debs[@]}"
               ;;
             *) exit 1 ;;
           esac
