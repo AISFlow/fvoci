@@ -457,6 +457,7 @@ pub struct RemoteDatabase {
     database: libsql::Database,
     max_connections: u32,
     admission: Arc<Semaphore>,
+    acquire_timeout: std::time::Duration,
     cleanup: Mutex<JoinSet<Result<(), sqlx::Error>>>,
     lifecycle: Mutex<RemoteLifecycle>,
     idle: Notify,
@@ -505,6 +506,7 @@ impl RemoteDatabase {
             database,
             max_connections: max.get(),
             admission: Arc::new(Semaphore::new(max.get() as usize)),
+            acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
             cleanup: Mutex::new(JoinSet::new()),
             lifecycle: Mutex::new(RemoteLifecycle {
                 closing: false,
@@ -516,6 +518,17 @@ impl RemoteDatabase {
             idle: Notify::new(),
             close_serial: tokio::sync::Mutex::new(()),
         }
+    }
+
+    #[cfg(all(test, feature = "db-tests"))]
+    fn from_test_driver_with_acquire_timeout(
+        database: libsql::Database,
+        max: std::num::NonZeroU32,
+        acquire_timeout: std::time::Duration,
+    ) -> Self {
+        let mut remote = Self::from_test_driver(database, max);
+        remote.acquire_timeout = acquire_timeout;
+        remote
     }
 
     pub async fn connect(
@@ -543,6 +556,7 @@ impl RemoteDatabase {
             database,
             max_connections: max_connections.max(1),
             admission: Arc::new(Semaphore::new(max_connections.max(1) as usize)),
+            acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
             cleanup: Mutex::new(JoinSet::new()),
             lifecycle: Mutex::new(RemoteLifecycle {
                 closing: false,
@@ -565,12 +579,18 @@ impl RemoteDatabase {
         off_body: bool,
     ) -> Result<RemoteTx, sqlx::Error> {
         self.reap_finished();
-        let permit = self
-            .admission
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| sqlx::Error::PoolClosed)?;
+        // OFF must wait for earlier streams to settle and exclude later ones,
+        // including ordinary reads. Tokio's fair semaphore reserves the same
+        // complete capacity used to size this database's admission. Its wait
+        // uses the existing sibling SQLx pools' acquire bound and error kind.
+        let permits = if off_body { self.max_connections } else { 1 };
+        let permit = tokio::time::timeout(
+            self.acquire_timeout,
+            self.admission.clone().acquire_many_owned(permits),
+        )
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
+        .map_err(|_| sqlx::Error::PoolClosed)?;
         {
             let mut state = self
                 .lifecycle
@@ -734,7 +754,7 @@ pub struct RemoteTx {
     tenant: Option<uuid::Uuid>,
     system_context: bool,
     connection: Option<libsql::Connection>,
-    pending: Option<tokio::task::JoinHandle<()>>,
+    pending: Option<tokio::task::JoinHandle<RemoteOperationOutcome>>,
     lease: Option<RemoteLease>,
     owner: Arc<RemoteDatabase>,
     // The pinned SDK may Close/reset its baton before returning a finish
@@ -745,6 +765,11 @@ pub struct RemoteTx {
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
+}
+enum RemoteOperationOutcome {
+    OperationSucceeded,
+    FinishSucceeded,
+    Failed,
 }
 impl RemoteTx {
     // The SDK rotates its baton only after reading a response. Dropping its
@@ -762,10 +787,17 @@ impl RemoteTx {
     {
         self.join_pending().await?;
         let connection = self.connection().clone();
+        let finishing = self.finish_started;
         let (send, receive) = tokio::sync::oneshot::channel();
         self.pending = Some(tokio::spawn(async move {
             let result = operation(connection).await;
+            let outcome = match (result.is_ok(), finishing) {
+                (true, true) => RemoteOperationOutcome::FinishSucceeded,
+                (true, false) => RemoteOperationOutcome::OperationSucceeded,
+                (false, _) => RemoteOperationOutcome::Failed,
+            };
             let _ = send.send(result);
+            outcome
         }));
         let result = receive.await;
         self.join_pending().await?;
@@ -864,11 +896,11 @@ impl RemoteTx {
                     let _ = entered.send(());
                     let _ = go.await;
                 }
-                let operation_failed = match pending {
-                    Some(task) => task.await.is_err(),
-                    None => false,
+                let operation = match pending {
+                    Some(task) => Some(task.await),
+                    None => None,
                 };
-                let result = if operation_failed {
+                let result = if operation.as_ref().is_some_and(Result::is_err) {
                     owner
                         .lifecycle
                         .lock()
@@ -877,7 +909,9 @@ impl RemoteTx {
                     Err(Arc::new(sqlx::Error::Protocol(
                         "owned remote operation task failed before cleanup".into(),
                     )))
-                } else if finish_started {
+                } else if finish_started
+                    && !matches!(operation, Some(Ok(RemoteOperationOutcome::FinishSucceeded)))
+                {
                     owner
                         .lifecycle
                         .lock()
@@ -886,6 +920,11 @@ impl RemoteTx {
                     // No post-finish SQL cleanup call was made. SDK Drop
                     // Close has no public outcome; missing proof is a distinct
                     // service state, never a fabricated attempt error.
+                    Ok(())
+                } else if finish_started {
+                    // The cancelled caller cannot receive an ACK, but this
+                    // exact owned task consumed an actual successful SDK
+                    // COMMIT/ROLLBACK result. No fresh SQL proves settlement.
                     Ok(())
                 } else {
                     connection
@@ -925,6 +964,206 @@ impl Drop for RemoteTx {
 #[cfg(all(test, feature = "db-tests"))]
 mod remote_cancel_sqld_tests {
     use super::*;
+    use std::future::Future;
+
+    fn family(tx: &mut DbTx) -> &mut FamilyTx {
+        match tx {
+            DbTransaction::SqliteFamily(family) => family,
+            _ => panic!("remote family required"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn normal_and_off_admission_expire_without_releasing_unsettled_operation() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-admission-expiry-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let remote = Arc::new(RemoteDatabase::from_test_driver_with_acquire_timeout(
+            database,
+            std::num::NonZeroU32::MIN,
+            std::time::Duration::ZERO,
+        ));
+        let backend = Backend::LibsqlRemote(remote.clone());
+        let mut predecessor = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let mut query = Box::pin(family(&mut predecessor).query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(predecessor);
+        for off in [false, true] {
+            let result = remote.begin_admitted(false, off).await;
+            assert!(matches!(result, Err(sqlx::Error::PoolTimedOut)));
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            assert_eq!(remote.admission.available_permits(), 0);
+            assert!(!remote.lifecycle.lock().unwrap().unconfirmed_finish);
+        }
+        gate.release_response();
+        let closed = backend.close().await;
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(closed.is_ok());
+        assert_eq!(backend.connection_stats().unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn off_admission_waits_for_owned_cleanup_and_excludes_later_requests() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-off-admission-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::new(2).unwrap(),
+        )));
+        let mut predecessor = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let mut query = Box::pin(family(&mut predecessor).query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(predecessor);
+        let mut off = Box::pin(backend.begin_off_body());
+        let waited = matches!(
+            std::future::poll_fn(|cx| { std::task::Poll::Ready(off.as_mut().poll(cx)) }).await,
+            std::task::Poll::Pending
+        );
+        gate.release_response();
+        let excluded = if waited {
+            let off = off.await.unwrap();
+            let mut later = Box::pin(backend.begin_read());
+            let excluded = matches!(
+                std::future::poll_fn(|cx| { std::task::Poll::Ready(later.as_mut().poll(cx)) })
+                    .await,
+                std::task::Poll::Pending
+            );
+            off.rollback().await.unwrap();
+            later.await.unwrap().rollback().await.unwrap();
+            excluded
+        } else {
+            false
+        };
+        let closed = backend.close().await;
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(closed.is_ok());
+        assert!(waited, "OFF must wait for actual predecessor cleanup instead of immediately refusing a healthy concurrent request");
+        assert!(
+            excluded,
+            "OFF must retain exclusive admission through its original finish"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn cancelled_successful_finish_retains_same_owned_sdk_result() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        for control in ["COMMIT", "ROLLBACK"] {
+            let root =
+                std::env::temp_dir().join(format!("fvoci-finish-cancel-{}", uuid::Uuid::now_v7()));
+            let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+            let database = driver.database().await.unwrap();
+            let remote = Arc::new(RemoteDatabase::from_test_driver(
+                database,
+                std::num::NonZeroU32::MIN,
+            ));
+            let backend = Backend::LibsqlRemote(remote.clone());
+            let mut tx = backend.begin_write().await.unwrap();
+            family(&mut tx)
+                .execute("CREATE TABLE finish_probe(value INTEGER)", &[])
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let mut tx = backend.begin_write().await.unwrap();
+            family(&mut tx)
+                .execute("INSERT INTO finish_probe VALUES (941)", &[])
+                .await
+                .unwrap();
+            let gate = driver.arm_query_response(control);
+            let mut finish = Box::pin(async move {
+                if control == "COMMIT" {
+                    tx.commit().await.map_err(|error| error.source)
+                } else {
+                    tx.rollback().await
+                }
+            });
+            tokio::select! {
+                response = gate.wait_upstream_response() => response.unwrap(),
+                _ = &mut finish => panic!("genuine sqld finish reply must remain gated"),
+            }
+            drop(finish);
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            gate.release_response();
+            // The original lease is released only after its owned operation
+            // and cleanup finish. No timer or alternate connection proves it.
+            let settled = remote.admission.clone().acquire_owned().await.unwrap();
+            drop(settled);
+            let observed = match backend.begin_off_body().await {
+                Ok(mut fresh) => {
+                    let rows = family(&mut fresh)
+                        .query("SELECT count(*) FROM finish_probe", &[])
+                        .await
+                        .unwrap();
+                    let count = rows[0].cell(0).unwrap().integer().unwrap();
+                    fresh.rollback().await.unwrap();
+                    Some(count)
+                }
+                Err(_) => None,
+            };
+            let closed = backend.close().await;
+            let receipt = driver.finish().await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(
+                receipt.sqld_reaped
+                    && receipt.proxy_joined
+                    && receipt.upstream_closed
+                    && receipt.proxy_closed
+            );
+            assert_eq!(
+                observed,
+                Some(i64::from(control == "COMMIT")),
+                "cancelled caller discarded an actually successful owned SDK finish"
+            );
+            assert!(
+                closed.is_ok(),
+                "actual successful finish must settle normally"
+            );
+            assert!(receipt
+                .exchanges
+                .iter()
+                .all(|exchange| exchange.upstream_status == Some(200)));
+        }
+    }
 
     #[tokio::test]
     #[ignore = "explicit pinned official sqld selection required"]
@@ -1619,6 +1858,7 @@ pub(crate) mod maintenance_claim_driver_tests {
                 database,
                 max_connections: 1,
                 admission: Arc::new(Semaphore::new(1)),
+                acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
                 cleanup: Mutex::new(JoinSet::new()),
                 lifecycle: Mutex::new(RemoteLifecycle {
                     closing: false,

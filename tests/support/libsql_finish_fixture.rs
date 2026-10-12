@@ -358,13 +358,23 @@ async fn forward(State(state): State<Forwarder>, request: Request) -> Response<B
         let mut armed = state.armed.lock().expect("fixture fault lock");
         let matches = armed.as_ref().is_some_and(|gate| match gate.query {
             None => has_commit,
-            Some(sql) => inspected["batch"]["steps"].as_array().is_some_and(|steps| {
-                steps.iter().any(|step| {
-                    step["stmt"]["sql"]
-                        .as_str()
-                        .is_some_and(|actual| actual.trim().trim_end_matches(';').trim() == sql)
-                })
-            }),
+            Some(sql) => {
+                let matches_batch = |batch: &Value| {
+                    batch["steps"].as_array().is_some_and(|steps| {
+                        steps.iter().any(|step| {
+                            step["stmt"]["sql"].as_str().is_some_and(|actual| {
+                                actual.trim().trim_end_matches(';').trim() == sql
+                            })
+                        })
+                    })
+                };
+                matches_batch(&inspected["batch"])
+                    || inspected["requests"].as_array().is_some_and(|requests| {
+                        requests
+                            .iter()
+                            .any(|request| matches_batch(&request["batch"]))
+                    })
+            }
         });
         if matches {
             armed.take()
