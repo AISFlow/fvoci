@@ -2585,7 +2585,7 @@ struct TaskScalarProfile {
 // Admission remains bound to the exact GNU version and locale archive; other
 // archives and architectures require separate qualification, never a fallback.
 const TASK_SCALAR_PROFILE_SHA256: &str =
-    "a5922390ade58f265bcb06e30450ad6d431d8bc4112d9626e2715ad818977ae3";
+    "daf54180e0a5fc1444752e6f8bcf7fbe8f67067d7e5ae27fbbc40cd6061255c9";
 
 impl TaskScalarProfile {
     fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
@@ -8484,6 +8484,7 @@ mod selected_task_projection_tests {
         let raw = include_str!("task_scalar_pg18_profile.json");
         let original: Value = serde_json::from_str(raw).unwrap();
         let profile = TaskScalarProfile::decode(raw).unwrap();
+        println!("FVOCI_SCALAR_DATA_IDENTITY={}", profile.data_identity);
         assert_eq!(profile.zones.len(), 487);
         assert_eq!(
             profile.data_identity,

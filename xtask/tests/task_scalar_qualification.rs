@@ -1,0 +1,54 @@
+use serde_json::Value;
+use std::process::Command;
+
+#[test]
+fn measure_reports_the_actual_native_runtime_and_rejects_extra_arguments() {
+    let executable = env!("CARGO_BIN_EXE_xtask");
+    let output = Command::new(executable)
+        .args(["task-scalar-qualification", "measure"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["arch"], std::env::consts::ARCH);
+    assert_eq!(
+        value["locale_archive_bytes"],
+        std::fs::metadata("/usr/lib/locale/locale-archive")
+            .unwrap()
+            .len()
+    );
+    assert_eq!(value["locale_archive_sha256"].as_str().unwrap().len(), 64);
+    // SAFETY: GNU returns a static NUL-terminated string.
+    let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+    assert_eq!(value["glibc_version"], version.to_str().unwrap());
+    let output = Command::new(executable)
+        .args(["task-scalar-qualification", "measure", "--unqualified"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_foreign_host_cannot_produce_an_arm_qualification_receipt() {
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "task-scalar-qualification",
+            "bootstrap",
+            "--image",
+            "never-started",
+            "--directory",
+            "never-created",
+            "--target-dir",
+            "never-built",
+            "--sqlite-inputs",
+            "never-read",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("requires native aarch64 execution"));
+}

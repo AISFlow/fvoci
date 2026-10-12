@@ -635,14 +635,6 @@ mod selected_project_read_tests {
         sqlx::query("INSERT INTO labels(id,workspace_id,project_id,name,color) VALUES(?1,?2,?3,'FOREIGN','gray')")
             .bind(Uuid::from_u128(1).as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice())
             .bind(other_project.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-        // The sealed scalar profile has no aarch64 runtime qualification yet.
-        #[cfg(target_arch = "aarch64")]
-        assert!(matches!(
-            list_project_labels_backend(&f.backend, f.workspace, project, f.user, credential).await,
-            Err(sqlx::Error::Protocol(message))
-                if message == "Task scalar runtime qualification unavailable"
-        ));
-        #[cfg(not(target_arch = "aarch64"))]
         assert_qualified_labels_read(&f, project, credential, earlier, first, last).await;
         let effects:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM labels),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
             .fetch_one(&f.pool).await.unwrap();
@@ -650,7 +642,6 @@ mod selected_project_read_tests {
         f.close().await;
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
     async fn assert_qualified_labels_read(
         f: &Fixture,
         project: Uuid,

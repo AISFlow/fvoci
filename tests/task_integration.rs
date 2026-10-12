@@ -7544,26 +7544,7 @@ mod sqlite_task_port {
             b
         }
         async fn read_scalar(&self, path: &str) {
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                self.read(path).await;
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                // Task scalar reads fail closed until this architecture has
-                // a sealed runtime receipt; keep testing the remaining flow.
-                let before = self.snapshot().await;
-                let (status, problem) =
-                    json_request(self.app.clone(), "GET", path, None, Some(&self.cookie)).await;
-                assert_eq!(
-                    status,
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "GET {path}: {problem}"
-                );
-                assert_eq!(problem["code"], "internal_error");
-                assert!(problem.get("items").is_none(), "no task rows disclosed");
-                assert_eq!(before, self.snapshot().await, "GET {path} has no effects");
-            }
+            self.read(path).await;
         }
         async fn read(&self, path: &str) -> Value {
             let (s, b) =

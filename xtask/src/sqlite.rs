@@ -49,7 +49,7 @@ pub fn archive_root() -> String {
 
 /// Every source, manifest and lockfile compiled into this binary. Adding a
 /// module to `src/` requires listing it here (checked by a test).
-const SOURCES: [(&str, &[u8]); 26] = [
+const SOURCES: [(&str, &[u8]); 27] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     ("Cargo.lock", include_bytes!("../Cargo.lock")),
     ("src/args.rs", include_bytes!("args.rs")),
@@ -109,6 +109,10 @@ const SOURCES: [(&str, &[u8]); 26] = [
     ("src/sqlite_build.rs", include_bytes!("sqlite_build.rs")),
     ("src/sqlite_ci.rs", include_bytes!("sqlite_ci.rs")),
     ("src/sqlite_zip.rs", include_bytes!("sqlite_zip.rs")),
+    (
+        "src/task_scalar_qualification.rs",
+        include_bytes!("task_scalar_qualification.rs"),
+    ),
 ];
 
 fn sources_sha256(role: &str) -> String {
