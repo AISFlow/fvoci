@@ -39,7 +39,8 @@ const editCatalog = (edit: (rows: Doc[], a16: Doc, c16: Doc) => void) => (workfl
   edit(rows, a16, c16);
   storeCatalog(workflow, rows);
 };
-const libraryStep = (workflow: Doc) => named(workflow.jobs.fast.steps, RUST_SELECTED_LIBRARY_STEP);
+const libraryStep = (workflow: Doc) =>
+  named(workflow.jobs["fast-sqlite"].steps, RUST_SELECTED_LIBRARY_STEP);
 const editLibraryRun = (from: string, to: string) => (workflow: Doc) => {
   const step = libraryStep(workflow);
   if (!step.run.includes(from)) throw new Error(`fixture text ${from} missing`);
@@ -57,12 +58,28 @@ const EXTRA_CACHE = "only the exact qualified target restore/save and safe Cargo
 
 const library: Mutation[] = (
   [
-    ["missing", (w: Doc) => w.jobs.fast.steps.splice(w.jobs.fast.steps.indexOf(libraryStep(w)), 1)],
-    ["duplicate", (w: Doc) => w.jobs.fast.steps.push({ ...libraryStep(w) })],
+    [
+      "missing",
+      (w: Doc) =>
+        w.jobs["fast-sqlite"].steps.splice(w.jobs["fast-sqlite"].steps.indexOf(libraryStep(w)), 1),
+    ],
+    ["duplicate", (w: Doc) => w.jobs["fast-sqlite"].steps.push({ ...libraryStep(w) })],
     ["skip", (w: Doc) => (libraryStep(w).if = "false")],
     ["masked", (w: Doc) => (libraryStep(w)["continue-on-error"] = true)],
     ["env", (w: Doc) => (libraryStep(w).env = { RUST_TEST_THREADS: "0" })],
-    ["job-env", (w: Doc) => (w.jobs.fast.env = { FVOCI_DATABASE_BACKEND: "libsql-remote" })],
+    [
+      "job-env",
+      (w: Doc) => (w.jobs["fast-sqlite"].env = { FVOCI_DATABASE_BACKEND: "libsql-remote" }),
+    ],
+    ["fast-job-env", (w: Doc) => (w.jobs.fast.env = { RUST_TEST_THREADS: "0" })],
+    [
+      "moved-back",
+      (w: Doc) => {
+        const step = libraryStep(w);
+        w.jobs["fast-sqlite"].steps.splice(w.jobs["fast-sqlite"].steps.indexOf(step), 1);
+        w.jobs.fast.steps.push(step);
+      },
+    ],
     ["wrong-target-dir", editLibraryRun("target/db-lib", "target/default")],
     ["no-target-dir", editLibraryRun(" --target-dir target/db-lib", "")],
     ["wrong-command", editLibraryRun("selected-library", "rust-binaries")],
@@ -87,15 +104,19 @@ const library: Mutation[] = (
       },
     ],
     [
-      "default-after-selected",
+      "default-in-sqlite-job",
       (w: Doc) => {
         const steps: Doc[] = w.jobs.fast.steps;
         const [plain] = steps.splice(
           steps.findIndex((step) => same(step, RUST_DEFAULT_LIBRARY_STEP)),
           1,
         );
-        steps.push(plain);
+        w.jobs["fast-sqlite"].steps.push(plain);
       },
+    ],
+    [
+      "duplicate-default",
+      (w: Doc) => w.jobs["fast-sqlite"].steps.push({ ...RUST_DEFAULT_LIBRARY_STEP }),
     ],
   ] as [string, (workflow: Doc) => void][]
 ).map(([name, mutate]) => ({ name: "library:" + name, mutate, needle: LIBRARY }));
@@ -536,6 +557,29 @@ const handoff: Mutation[] = (
 
 export const RUST1_MUTATIONS: readonly Mutation[] = [
   ...library,
+  ...["fast", "fast-sqlite"].map((job): Mutation => ({
+    name: `fast-budget:${job}`,
+    mutate: (w: Doc) => (w.jobs[job]["timeout-minutes"] = 20),
+    needle: "must retain its independent 19 minute budget",
+  })),
+  {
+    name: "fast-sqlite-cache:incomplete-source",
+    mutate: (w: Doc) => {
+      const cache = named(w.jobs["fast-sqlite"].steps, "Restore SQLite library build outputs");
+      cache.with.key = cache.with.key.replace("'src/**', ", "");
+    },
+    needle: "fast-sqlite server cache must retain exact pinned restore/save",
+  },
+  {
+    name: "fast-sqlite-cache:save-before-controls",
+    mutate: (w: Doc) => {
+      const list: Doc[] = w.jobs["fast-sqlite"].steps;
+      const save = named(list, "Save SQLite library build outputs after validation");
+      list.splice(list.indexOf(save), 1);
+      list.splice(list.indexOf(libraryStep(w)), 0, save);
+    },
+    needle: "fast-sqlite cache saves must follow all validation",
+  },
   ...budgetRows,
   ...budgetLimits,
   ...sqlite,

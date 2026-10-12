@@ -24,7 +24,7 @@ export const WORKFLOW_JOBS = {
     "collaboration-postgres-off",
     "collaboration-sqlite-off",
   ],
-  rust: ["fast", "native-arm64", "postgres-build", "postgres", "collaboration"],
+  rust: ["fast", "fast-sqlite", "native-arm64", "postgres-build", "postgres", "collaboration"],
   documents: ["native-extraction"],
   "collab-engine": ["native-collab-engine"],
   install: ["install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
