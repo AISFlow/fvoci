@@ -841,16 +841,27 @@ test("Web build-cache writers keep unique keys", () => {
   uniqueBuildCacheWriters(load("web"));
 });
 for (const path of ["target", "crates/collab-engine/target"])
-  test(`negative: browser build reuses the collaboration ${path} cache key`, () => {
+  test(`negative: Web build writers collide on the ${path} cache key`, () => {
     const workflow = load("web");
     const save = (name: string) =>
       oneStep(
         job(workflow, name),
         (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
       );
-    const ordinary = save("workspace-browser-build"),
-      selected = save(path === "target" ? "collaboration-test-build" : "collaboration-build");
+    const ordinary = save("workspace-browser-build");
+    // The normalized producer has no long-term helper cache. Keep testing the
+    // writer collision policy if another helper writer is introduced later.
+    const selected =
+      path === "target" ? save("collaboration-test-build") : structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
+    if (path !== "target") {
+      assert.ok(
+        !job(workflow, "collaboration-build").steps.some((step) => step.with?.path === path),
+      );
+      selected.with.key = "independent-helper-writer";
+      job(workflow, "collaboration-build").steps.push(selected);
+      uniqueBuildCacheWriters(workflow);
+    }
     ordinary.with.key = selected.with.key;
     expect(() => {
       uniqueBuildCacheWriters(workflow);

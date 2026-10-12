@@ -10,7 +10,9 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const JOBS: [&str; 9] = [
+pub const JOBS: [&str; 11] = [
+    "collaboration-main-build",
+    "collaboration-test-build",
     "collaboration-build",
     "collaboration-flow",
     "collaboration-install-on",
@@ -302,6 +304,15 @@ mod tests {
 
     fn reason(fake: &mut Fake, output: &str) -> String {
         scope(output, fake).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn native_preparation_jobs_are_admitted() {
+        for job in ["collaboration-main-build", "collaboration-test-build"] {
+            let mut fake = Fake::default();
+            fake.env.insert("GITHUB_JOB", job.to_owned());
+            assert_eq!(scope(OUTPUT, &mut fake).unwrap().context.job, job);
+        }
     }
 
     #[test]
