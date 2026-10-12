@@ -353,11 +353,16 @@ impl FamilyTx {
                 .execute(&mut *tx.tx)
                 .await
                 .map(|r| r.rows_affected()),
-            Self::Remote(tx) => tx
-                .connection()
-                .execute(statement, remote_params(args))
+            Self::Remote(tx) => {
+                let args = remote_params(args);
+                tx.run(move |connection| async move {
+                    connection
+                        .execute(statement, args)
+                        .await
+                        .map_err(remote_error)
+                })
                 .await
-                .map_err(remote_error),
+            }
         }
     }
     /// Only the migration registry supplies compiled, fixed DDL. This keeps
@@ -369,12 +374,16 @@ impl FamilyTx {
         self.require_writer()?;
         match self {
             Self::Local(tx) => sqlx::raw_sql(sql).execute(&mut *tx.tx).await.map(|_| ()),
-            Self::Remote(tx) => tx
-                .connection()
-                .execute_batch(sql)
+            Self::Remote(tx) => {
+                tx.run(move |connection| async move {
+                    connection
+                        .execute_batch(sql)
+                        .await
+                        .map(|_| ())
+                        .map_err(remote_error)
+                })
                 .await
-                .map(|_| ())
-                .map_err(remote_error),
+            }
         }
     }
     pub(crate) async fn query(
@@ -388,16 +397,19 @@ impl FamilyTx {
                 .await
                 .map(|rows| rows.into_iter().map(FamilyRow::Local).collect()),
             Self::Remote(tx) => {
-                let mut rows = tx
-                    .connection()
-                    .query(statement, remote_params(args))
-                    .await
-                    .map_err(remote_error)?;
-                let mut result = Vec::new();
-                while let Some(row) = rows.next().await.map_err(remote_error)? {
-                    result.push(FamilyRow::Remote(row));
-                }
-                Ok(result)
+                let args = remote_params(args);
+                tx.run(move |connection| async move {
+                    let mut rows = connection
+                        .query(statement, args)
+                        .await
+                        .map_err(remote_error)?;
+                    let mut result = Vec::new();
+                    while let Some(row) = rows.next().await.map_err(remote_error)? {
+                        result.push(FamilyRow::Remote(row));
+                    }
+                    Ok(result)
+                })
+                .await
             }
         }
     }
@@ -584,8 +596,9 @@ impl RemoteDatabase {
         let conn = self.database.connect().map_err(remote_error)?;
         // Own the cleanup guard before BEGIN can reach the server. Cancellation
         // never returns this connection/stream to another request.
-        let tx = RemoteTx {
+        let mut tx = RemoteTx {
             connection: Some(conn),
+            pending: None,
             lease: Some(lease),
             owner: self.clone(),
             write_reserved: write,
@@ -600,22 +613,27 @@ impl RemoteDatabase {
         } else {
             "PRAGMA foreign_keys=ON; BEGIN;"
         };
-        tx.connection()
-            .execute_batch(control)
-            .await
-            .map_err(remote_error)?;
-        let mut fk = tx
-            .connection()
-            .query("PRAGMA foreign_keys", ())
-            .await
-            .map_err(remote_error)?;
-        let enabled = fk
-            .next()
-            .await
-            .map_err(remote_error)?
-            .ok_or(sqlx::Error::RowNotFound)?
-            .get::<i64>(0)
-            .map_err(remote_error)?;
+        let enabled = tx
+            .run(move |connection| async move {
+                connection
+                    .execute_batch(control)
+                    .await
+                    .map_err(remote_error)?;
+                let mut fk = connection
+                    .query("PRAGMA foreign_keys", ())
+                    .await
+                    .map_err(remote_error)?;
+                let enabled = fk
+                    .next()
+                    .await
+                    .map_err(remote_error)?
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .get::<i64>(0)
+                    .map_err(remote_error)?;
+                while fk.next().await.map_err(remote_error)?.is_some() {}
+                Ok(enabled)
+            })
+            .await?;
         if enabled != 1 {
             return Err(sqlx::Error::Protocol(
                 "remote transaction foreign keys are disabled".into(),
@@ -709,12 +727,14 @@ impl RemoteDatabase {
     }
 }
 
-/// Connection is deliberately neither Clone nor exposed to concurrent callers.
+/// The transaction is never Clone or exposed to concurrent callers. Its SDK
+/// handle is shared only with its single owned operation and tracked cleanup.
 pub struct RemoteTx {
     write_reserved: bool,
     tenant: Option<uuid::Uuid>,
     system_context: bool,
     connection: Option<libsql::Connection>,
+    pending: Option<tokio::task::JoinHandle<()>>,
     lease: Option<RemoteLease>,
     owner: Arc<RemoteDatabase>,
     // The pinned SDK may Close/reset its baton before returning a finish
@@ -727,6 +747,49 @@ pub struct RemoteTx {
     )>,
 }
 impl RemoteTx {
+    // The SDK rotates its baton only after reading a response. Dropping its
+    // request future after the server accepted that baton loses the successor.
+    // Keep one operation owned until its response/rows are consumed;
+    // cancellation transfers its join to tracked cleanup. Main's existing
+    // shutdown deadline still bounds Backend::close.
+    async fn run<R, F>(
+        &mut self,
+        operation: impl FnOnce(libsql::Connection) -> F + Send + 'static,
+    ) -> Result<R, sqlx::Error>
+    where
+        R: Send + 'static,
+        F: std::future::Future<Output = Result<R, sqlx::Error>> + Send + 'static,
+    {
+        self.join_pending().await?;
+        let connection = self.connection().clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.pending = Some(tokio::spawn(async move {
+            let result = operation(connection).await;
+            let _ = send.send(result);
+        }));
+        let result = receive.await;
+        self.join_pending().await?;
+        result.map_err(|_| {
+            sqlx::Error::Protocol("owned remote operation ended without a result".into())
+        })?
+    }
+
+    async fn join_pending(&mut self) -> Result<(), sqlx::Error> {
+        let result = match self.pending.as_mut() {
+            Some(task) => task.await,
+            None => return Ok(()),
+        };
+        self.pending.take();
+        if let Err(error) = result {
+            self.finish_started = true;
+            self.owner.record_cleanup(Err(error));
+            return Err(sqlx::Error::Protocol(
+                "owned remote operation task failed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn connection(&self) -> &libsql::Connection {
         self.connection
             .as_ref()
@@ -734,20 +797,31 @@ impl RemoteTx {
     }
     async fn finish(mut self, control: &'static str) -> Result<(), sqlx::Error> {
         self.finish_started = true;
-        self.connection()
-            .execute_batch(control)
-            .await
-            .map_err(remote_error)?;
+        self.run(move |connection| async move {
+            connection
+                .execute_batch(control)
+                .await
+                .map(|_| ())
+                .map_err(remote_error)
+        })
+        .await?;
         self.connection.take();
         self.lease.take();
         Ok(())
     }
     async fn commit_with_cleanup(mut self) -> Result<(), CommitCleanupUnknown> {
         self.finish_started = true;
-        if let Err(error) = self.connection().execute_batch("COMMIT").await {
-            let source = CommitUnknown {
-                source: remote_error(error),
-            };
+        if let Err(error) = self
+            .run(|connection| async move {
+                connection
+                    .execute_batch("COMMIT")
+                    .await
+                    .map(|_| ())
+                    .map_err(remote_error)
+            })
+            .await
+        {
+            let source = CommitUnknown { source: error };
             // The SDK hides the original Close receipt on an error. Quarantine
             // and retain explicit uncertainty; never submit a possible NEW
             // stream ROLLBACK or observe as though original finish was proved.
@@ -775,6 +849,7 @@ impl RemoteTx {
         let connection = self.connection.take()?;
         let lease = self.lease.take();
         let finish_started = self.finish_started;
+        let pending = self.pending.take();
         let owner = self.owner.clone();
         #[cfg(test)]
         let pause = self.cleanup_pause.take();
@@ -789,7 +864,20 @@ impl RemoteTx {
                     let _ = entered.send(());
                     let _ = go.await;
                 }
-                let result = if finish_started {
+                let operation_failed = match pending {
+                    Some(task) => task.await.is_err(),
+                    None => false,
+                };
+                let result = if operation_failed {
+                    owner
+                        .lifecycle
+                        .lock()
+                        .expect("remote lifecycle mutex poisoned")
+                        .unconfirmed_finish = true;
+                    Err(Arc::new(sqlx::Error::Protocol(
+                        "owned remote operation task failed before cleanup".into(),
+                    )))
+                } else if finish_started {
                     owner
                         .lifecycle
                         .lock()
@@ -831,6 +919,156 @@ impl Drop for RemoteTx {
         // This quarantined stream is never reused. An explicit rollback reply
         // is tracked; failures stay failures and require service observation.
         let _ = self.enqueue_cleanup();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_cancel_sqld_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn panicked_operation_is_failed_settlement_without_new_rollback() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-operation-panic-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut tx = backend.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(FamilyTx::Remote(ref mut remote_tx)) = tx else {
+            panic!("remote required")
+        };
+        remote_tx.pending = Some(tokio::spawn(async {
+            panic!("controlled owned-operation panic")
+        }));
+        drop(tx);
+        let closed = backend.close().await;
+        let stats = backend.connection_stats().unwrap();
+        let Backend::LibsqlRemote(ref remote) = backend else {
+            panic!("remote required")
+        };
+        assert!(remote.lifecycle.lock().unwrap().unconfirmed_finish);
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            closed.is_err(),
+            "a panicked owner must never attest settlement"
+        );
+        assert_eq!(stats.size, 0);
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(!receipt
+            .exchanges
+            .iter()
+            .any(|exchange| exchange.request["requests"]
+                .as_array()
+                .is_some_and(
+                    |requests| requests.iter().any(|request| request["batch"]["steps"]
+                        .as_array()
+                        .is_some_and(|steps| steps
+                            .iter()
+                            .any(|step| step["stmt"]["sql"] == "ROLLBACK")))
+                )));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn cancelled_query_keeps_rotated_baton_until_owned_rollback() {
+        cancel_query(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn expired_close_keeps_unknown_operation_admission_until_settled() {
+        cancel_query(true).await;
+    }
+
+    async fn cancel_query(expired: bool) {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-query-cancel-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut tx = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let DbTransaction::SqliteFamily(ref mut family) = tx else {
+            panic!("remote family required")
+        };
+        let mut query = Box::pin(family.query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(tx);
+        if expired {
+            // Simulate an already expired caller-owned shutdown deadline;
+            // cancelling close must not abort its service-owned cleanup join.
+            assert!(
+                tokio::time::timeout_at(tokio::time::Instant::now(), backend.close())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            let Backend::LibsqlRemote(ref remote) = backend else {
+                panic!("remote required")
+            };
+            assert_eq!(remote.admission.available_permits(), 0);
+            assert!(remote.lifecycle.lock().unwrap().closing);
+            println!(
+                "TURSO_CANCELLED_QUERY close_deadline=EXPIRED settlement=UNKNOWN admission=HELD"
+            );
+        }
+        gate.release_response();
+        let closed = backend.close().await;
+        let stats = backend.connection_stats().unwrap();
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert_eq!(stats.size, 0, "owned cleanup must release stream admission");
+        assert!(
+            closed.is_ok(),
+            "cancelled query lost its rotated baton before rollback"
+        );
+        assert!(receipt
+            .exchanges
+            .iter()
+            .all(|exchange| exchange.upstream_status == Some(200)));
+        assert!(receipt
+            .exchanges
+            .iter()
+            .any(|exchange| exchange.request["requests"]
+                .as_array()
+                .is_some_and(
+                    |requests| requests.iter().any(|request| request["batch"]["steps"]
+                        .as_array()
+                        .is_some_and(|steps| steps
+                            .iter()
+                            .any(|step| step["stmt"]["sql"] == "ROLLBACK")))
+                )));
     }
 }
 
@@ -1538,6 +1776,7 @@ pub(crate) mod maintenance_claim_driver_tests {
                 tenant: None,
                 system_context: false,
                 connection: Some(owner.database.connect().unwrap()),
+                pending: None,
                 lease: Some(RemoteLease {
                     _permit: permit,
                     owner: owner.clone(),

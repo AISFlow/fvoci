@@ -57,6 +57,8 @@ pub struct Exchange {
 /// response, then release the gate to deliver a real transport error.
 pub struct CommitReplyGate(Arc<ReplyGate>);
 struct ReplyGate {
+    query: Option<&'static str>,
+    lose_reply: bool,
     received: AtomicBool,
     released: AtomicBool,
     response: Notify,
@@ -85,6 +87,9 @@ impl CommitReplyGate {
         }
     }
     pub fn release_lost_reply(&self) {
+        self.release_response();
+    }
+    pub fn release_response(&self) {
         self.0.released.store(true, Ordering::SeqCst);
         self.0.release.notify_waiters();
     }
@@ -231,7 +236,19 @@ impl LibsqlFinishFixture {
     }
 
     pub fn arm_commit_response_loss(&self) -> CommitReplyGate {
+        self.arm_response(None, true)
+    }
+
+    /// Pause one exact test query after sqld rotates its baton, then forward
+    /// the genuine successful reply unchanged when the caller releases it.
+    pub fn arm_query_response(&self, sql: &'static str) -> CommitReplyGate {
+        self.arm_response(Some(sql), false)
+    }
+
+    fn arm_response(&self, query: Option<&'static str>, lose_reply: bool) -> CommitReplyGate {
         let gate = Arc::new(ReplyGate {
+            query,
+            lose_reply,
             received: AtomicBool::new(false),
             released: AtomicBool::new(false),
             response: Notify::new(),
@@ -241,7 +258,7 @@ impl LibsqlFinishFixture {
         let mut armed = self.forwarder.armed.lock().expect("fixture fault lock");
         assert!(
             armed.is_none(),
-            "only one caller-owned COMMIT gate may be armed"
+            "only one caller-owned response gate may be armed"
         );
         *armed = Some(gate.clone());
         CommitReplyGate(gate)
@@ -337,10 +354,23 @@ async fn forward(State(state): State<Forwarder>, request: Request) -> Response<B
     // cursor/page bytes are forwarded unchanged to the maintained upstream.
     let inspected: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let (has_commit, has_close) = fixed_finish_markers(&inspected);
-    let fault = if has_commit {
-        state.armed.lock().expect("fixture fault lock").take()
-    } else {
-        None
+    let fault = {
+        let mut armed = state.armed.lock().expect("fixture fault lock");
+        let matches = armed.as_ref().is_some_and(|gate| match gate.query {
+            None => has_commit,
+            Some(sql) => inspected["batch"]["steps"].as_array().is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step["stmt"]["sql"]
+                        .as_str()
+                        .is_some_and(|actual| actual.trim().trim_end_matches(';').trim() == sql)
+                })
+            }),
+        });
+        if matches {
+            armed.take()
+        } else {
+            None
+        }
     };
     let ordinal = {
         let mut exchanges = state.exchanges.lock().expect("fixture exchange lock");
@@ -354,7 +384,7 @@ async fn forward(State(state): State<Forwarder>, request: Request) -> Response<B
             upstream_status: None,
             upstream_body: Vec::new(),
             upstream_error: None,
-            reply_lost: fault.is_some(),
+            reply_lost: fault.as_ref().is_some_and(|gate| gate.lose_reply),
         });
         ordinal
     };
@@ -409,12 +439,16 @@ async fn forward(State(state): State<Forwarder>, request: Request) -> Response<B
                 () = state.cancel.cancelled() => break,
             }
         }
-        Body::from_stream(futures_util::stream::iter([Err::<Bytes, _>(
-            std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "fixture cut reply after actual upstream response",
-            ),
-        )]))
+        if gate.lose_reply {
+            Body::from_stream(futures_util::stream::iter([Err::<Bytes, _>(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "fixture cut reply after actual upstream response",
+                ),
+            )]))
+        } else {
+            Body::from(bytes)
+        }
     } else {
         Body::from(bytes)
     };
