@@ -6635,6 +6635,8 @@ mod sqlite_task_port {
             pool: fresh.clone(),
             cookie: cookie.clone(),
             viewer: viewer_token.into(),
+            viewer_id: viewer,
+            viewer_credential: viewer_session,
             workspace,
             other_workspace,
         };
@@ -6802,7 +6804,8 @@ mod sqlite_task_port {
             StatusCode::OK,
         )
         .await;
-        let copies:Vec<(Vec<u8>,Option<String>,Option<String>,Option<String>)>=sqlx::query_as("SELECT id,start_date,due_date,recurrence FROM tasks WHERE workspace_id=?1 AND title='daily reading' ORDER BY number").bind(workspace.as_bytes().as_slice()).fetch_all(&fresh).await.unwrap();
+        type RecurrenceRow = (Vec<u8>, Option<String>, Option<String>, Option<String>);
+        let copies:Vec<RecurrenceRow>=sqlx::query_as("SELECT id,start_date,due_date,recurrence FROM tasks WHERE workspace_id=?1 AND title='daily reading' ORDER BY number").bind(workspace.as_bytes().as_slice()).fetch_all(&fresh).await.unwrap();
         assert_eq!(copies.len(), 2);
         assert!(copies[0].3.is_none());
         assert_eq!(copies[1].1.as_deref(), Some("2026-10-13"));
@@ -6929,6 +6932,8 @@ mod sqlite_task_port {
         }
         let current = f.read(&timer).await;
         let estimate = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"expected":current["estimate"],"minutes":45,"reason":"study plan"});
+        f.refuse("POST", &format!("{timer}/estimate"), estimate.clone())
+            .await;
         let (s, b) = json_request(
             app.clone(),
             "POST",
@@ -6953,6 +6958,8 @@ mod sqlite_task_port {
         assert_eq!(s, StatusCode::CONFLICT, "{b}");
         assert_eq!(before, f.snapshot().await);
         let manual = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"startedAt":"2026-10-12T02:00:00Z","endedAt":"2026-10-12T02:05:00Z","note":"manual","reason":"forgot timer"});
+        f.refuse("POST", &format!("{timer}/history"), manual.clone())
+            .await;
         let (s, m) = json_request(
             app.clone(),
             "POST",
@@ -6964,6 +6971,12 @@ mod sqlite_task_port {
         assert_eq!(s, StatusCode::OK, "{m}");
         let record = &m["record"];
         let correction = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"kind":"manual","expectedRevision":record["revision"],"expectedNote":record["note"],"expectedStartedAt":record["startedAt"],"expectedEndedAt":record["endedAt"],"startedAt":"2026-10-12T02:00:00Z","endedAt":"2026-10-12T02:04:00Z","note":"corrected","reason":"break"});
+        f.refuse(
+            "POST",
+            &format!("{timer}/records/{}/correct", record["id"].as_str().unwrap()),
+            correction.clone(),
+        )
+        .await;
         let (s, b) = json_request(
             app.clone(),
             "POST",
@@ -7060,6 +7073,20 @@ mod sqlite_task_port {
         assert_eq!(hidden["runId"], cleanup_run["runId"]);
         assert!(hidden["visibleRun"].is_null());
         let cleanup = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"runId":cleanup_run["runId"],"expectedVersion":1});
+        let mut other_owner = cleanup.clone();
+        other_owner["expectedActorId"] = json!(viewer);
+        other_owner["expectedSessionId"] = json!(viewer_session);
+        let before = f.snapshot().await;
+        let (s, b) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/me/task-timer/stop",
+            Some(other_owner),
+            Some(viewer_token),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(before, f.snapshot().await);
         let (s, b) = json_request(
             app.clone(),
             "POST",
@@ -7140,6 +7167,7 @@ mod sqlite_task_port {
             format!("/api/v1/workspaces/{workspace}/documents/{document}/study-plan/task");
         f.read(&plan_path).await;
         let plan = json!({"expectedActorId":actor,"expectedSessionId":credential,"requestId":Uuid::now_v7(),"projectId":project.id,"selfAssign":false,"minutes":20,"task":{"title":"study linked task"}});
+        f.refuse("POST", &plan_path, plan.clone()).await;
         let (s, p) = json_request(
             app.clone(),
             "POST",
@@ -7216,6 +7244,8 @@ mod sqlite_task_port {
             pool: fresh.clone(),
             cookie: cookie.clone(),
             viewer: viewer_token.into(),
+            viewer_id: viewer,
+            viewer_credential: viewer_session,
             workspace: personal,
             other_workspace,
         };
@@ -7291,6 +7321,8 @@ mod sqlite_task_port {
         pool: sqlx::SqlitePool,
         cookie: String,
         viewer: String,
+        viewer_id: Uuid,
+        viewer_credential: Uuid,
         workspace: Uuid,
         other_workspace: Uuid,
     }
@@ -7303,11 +7335,16 @@ mod sqlite_task_port {
         }
         async fn refuse(&self, method: &str, path: &str, body: Value) {
             let before = self.snapshot().await;
+            let mut viewer_body = body.clone();
+            if viewer_body.get("expectedActorId").is_some() {
+                viewer_body["expectedActorId"] = json!(self.viewer_id);
+                viewer_body["expectedSessionId"] = json!(self.viewer_credential);
+            }
             let (s, b) = json_request(
                 self.app.clone(),
                 method,
                 path,
-                Some(body.clone()),
+                Some(viewer_body),
                 Some(&self.viewer),
             )
             .await;
