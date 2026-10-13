@@ -15,20 +15,20 @@ const documentSchema = z.object({ id: z.string(), displayId: z.string() });
 const revisionsSchema = z.object({
   items: z.array(
     z.object({
-      id: z.string().uuid(),
+      id: z.guid(),
       reason: z.string(),
-      createdBy: z.string().uuid().nullable(),
+      createdBy: z.guid().nullable(),
     }),
   ),
 });
 const systemSessionHistorySchema = z.array(
-  z.object({ id: z.string().uuid(), reason: z.literal("session"), createdBy: z.null() }),
+  z.object({ id: z.guid(), reason: z.literal("session"), createdBy: z.null() }),
 );
 const revisionDetailSchema = revisionsSchema.shape.items.element.extend({
-  contentJson: z.unknown(),
+  contentJson: z.unknown().optional(),
   ySnapshot: z.string(),
 });
-const bodySchema = z.object({ contentJson: z.unknown() });
+const bodySchema = z.object({ contentJson: z.unknown().optional() });
 const meSchema = z.object({ userId: z.string(), sessionId: z.string() });
 
 async function setup(page: Page) {

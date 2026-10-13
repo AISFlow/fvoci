@@ -7,30 +7,28 @@ import { createE2eUser, login } from "./helpers";
 
 const owner = { email: "Admin@Example.COM", password: "supersecret1" };
 const resultSchema = z.object({
-  documentId: z.string().uuid(),
+  documentId: z.guid(),
   documentDisplayId: z.string(),
-  taskId: z.string().uuid().nullable(),
+  taskId: z.guid().nullable(),
   taskDisplayId: z.string().nullable(),
-  projectId: z.string().uuid().nullable(),
+  projectId: z.guid().nullable(),
   replayed: z.boolean(),
 });
-const workspaceSchema = z.object({ id: z.string().uuid(), slug: z.string() });
+const workspaceSchema = z.object({ id: z.guid(), slug: z.string() });
 const listSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), title: z.string() }).loose()) })
+  .loose();
 const originSchema = z.object({
   count: z.number(),
   items: z.array(
-    z
-      .object({ taskId: z.string(), documentId: z.string(), anchor: z.string().nullable() })
-      .passthrough(),
+    z.object({ taskId: z.string(), documentId: z.string(), anchor: z.string().nullable() }).loose(),
   ),
 });
 const backlinksSchema = z.object({
   items: z.array(
     z.object({
       id: z.string(),
-      from: z.object({ id: z.string(), title: z.string() }).passthrough(),
+      from: z.object({ id: z.string(), title: z.string() }).loose(),
     }),
   ),
 });
@@ -42,12 +40,12 @@ const taskSchema = z
     statusId: z.string(),
     assigneeIds: z.array(z.string()),
   })
-  .passthrough();
+  .loose();
 
 // A genuinely new committed connection uses exactly the run's restricted app
 // role. Credentials remain in the child environment and never enter evidence.
 function committed(workspaceId: string, select: string): unknown {
-  z.string().uuid().parse(workspaceId);
+  z.guid().parse(workspaceId);
   const url = new URL(process.env.DATABASE_APP_URL ?? "");
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   if (!container) throw new Error("isolated PostgreSQL container is required");
@@ -526,7 +524,7 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
   );
   expect(hierarchy.status()).toBe(200);
   const project = z
-    .object({ key: z.string(), rootDocumentId: z.string().uuid() })
+    .object({ key: z.string(), rootDocumentId: z.guid() })
     .parse(
       await (
         await page.request.get(`/api/v1/workspaces/${personal.id}/projects/${captured.projectId}`)
@@ -565,7 +563,7 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
     await saveBody(page);
     const endpoint = `/api/v1/workspaces/${personal.id}/${target.body}`;
     const before = z
-      .object({ contentJson: z.unknown() })
+      .object({ contentJson: z.unknown().optional() })
       .parse(await (await page.request.get(endpoint)).json()).contentJson;
     await page.locator('[data-editor-mode="markdown"]').click();
     const field = page.getByRole("textbox", { name: "Markdown 직접 편집" });
@@ -579,16 +577,18 @@ test("three actual editor hosts retain draft on Cancel, discard only on explicit
     await expect(page).toHaveURL(target.path);
     await expect(field).toHaveValue(draft);
     expect(
-      z.object({ contentJson: z.unknown() }).parse(await (await page.request.get(endpoint)).json())
-        .contentJson,
+      z
+        .object({ contentJson: z.unknown().optional() })
+        .parse(await (await page.request.get(endpoint)).json()).contentJson,
     ).toEqual(before);
     await page.locator(`a[href="${target.leave}"]`).first().click();
     await expect(warning).toBeVisible();
     await warning.getByRole("button", { name: "초안 버리고 이동", exact: true }).click();
     await expect(page).toHaveURL(target.leave);
     expect(
-      z.object({ contentJson: z.unknown() }).parse(await (await page.request.get(endpoint)).json())
-        .contentJson,
+      z
+        .object({ contentJson: z.unknown().optional() })
+        .parse(await (await page.request.get(endpoint)).json()).contentJson,
     ).toEqual(before);
     await testInfo.attach(`${target.host}-draft-retained`, {
       body: JSON.stringify({ host: target.host, before, published: false }),
@@ -684,8 +684,8 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
     nextCursor: z.string().nullable(),
     items: z.array(
       z.object({
-        taskId: z.string().uuid(),
-        documentId: z.string().uuid(),
+        taskId: z.guid(),
+        documentId: z.guid(),
         taskTitle: z.string(),
         anchor: z.string().nullable(),
       }),
@@ -755,9 +755,7 @@ test("51 real origins recover a missed hint without detail and preserve an in-fl
   const renamed = "Peer rename while stream refused";
   const rename = await page.request.patch(taskPath(nextTask.taskId), { data: { title: renamed } });
   expect(rename.status()).toBe(200);
-  const renamedRow = z
-    .object({ id: z.string().uuid(), title: z.string() })
-    .parse(await rename.json());
+  const renamedRow = z.object({ id: z.guid(), title: z.string() }).parse(await rename.json());
   expect(renamedRow).toEqual({ id: nextTask.taskId, title: renamed });
   expect(
     committed(

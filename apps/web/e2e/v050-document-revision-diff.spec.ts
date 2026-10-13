@@ -8,10 +8,10 @@ const revisionDetailSchema = z
     restoredFromId: z.string().nullable(),
     createdBy: z.string().nullable(),
     createdAt: z.string(),
-    contentJson: z.unknown(),
+    contentJson: z.unknown().optional(),
     ySnapshot: z.string(),
   })
-  .passthrough();
+  .loose();
 import {
   admin,
   blockAt,

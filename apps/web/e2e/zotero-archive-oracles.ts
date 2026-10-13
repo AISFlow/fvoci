@@ -23,7 +23,7 @@ export interface ZoteroArchiveIds {
 
 const connectorSchema = z
   .object({
-    id: z.string().uuid(),
+    id: z.guid(),
     state: z.string(),
     generation: z.string(),
     completedVersion: z.string(),
@@ -32,28 +32,28 @@ const connectorSchema = z
     retryAt: z.string().nullable(),
     reconciliationRequired: z.boolean(),
   })
-  .passthrough();
+  .loose();
 const referenceSchema = z
   .object({
-    id: z.string().uuid(),
-    connectorId: z.string().uuid(),
+    id: z.guid(),
+    connectorId: z.guid(),
     documentDisplayId: z.string(),
     itemKey: z.string(),
     remoteVersion: z.string(),
-    bibliography: z.unknown(),
+    bibliography: z.unknown().optional(),
     returnUrl: z.string(),
     availability: z.string(),
     collectionKeys: z.array(z.string()),
     links: z.array(
       z.object({
-        taskId: z.string().uuid().nullable(),
-        documentId: z.string().uuid().nullable(),
+        taskId: z.guid().nullable(),
+        documentId: z.guid().nullable(),
         anchor: z.string().nullable(),
         displayId: z.string(),
       }),
     ),
   })
-  .passthrough();
+  .loose();
 const librarySchema = z.object({
   connector: connectorSchema,
   references: z.array(referenceSchema),
@@ -73,8 +73,8 @@ const observerSchema = z
     rows: z.array(
       z
         .object({
-          id: z.string().uuid(),
-          documentId: z.string().uuid(),
+          id: z.guid(),
+          documentId: z.guid(),
           itemKey: z.string(),
           title: z.string(),
           availability: z.string(),
@@ -342,7 +342,7 @@ function expectParagraph(value: unknown, block: string, text: string) {
       content: z.array(
         z.object({
           type: z.literal("paragraph"),
-          attrs: z.object({ id: z.string() }).passthrough(),
+          attrs: z.object({ id: z.string() }).loose(),
           content: z.array(
             z.object({
               type: z.literal("text"),
@@ -371,15 +371,15 @@ export function expectAuthoredContent(
   },
   ids: ZoteroArchiveIds,
 ) {
-  const meta = z.object({ id: z.string().uuid(), title: z.string() }).parse(state.reference);
+  const meta = z.object({ id: z.guid(), title: z.string() }).parse(state.reference);
   expect(meta).toEqual({ id: ids.referenceId, title: "Authored astronomy 개인 의견" });
   expectParagraph(
-    z.object({ contentJson: z.unknown() }).parse(state.referenceBody).contentJson,
+    z.object({ contentJson: z.unknown().optional() }).parse(state.referenceBody).contentJson,
     "owned-commentary",
     SECOND_BODY,
   );
   expectParagraph(
-    z.object({ contentJson: z.unknown() }).parse(state.originBody).contentJson,
+    z.object({ contentJson: z.unknown().optional() }).parse(state.originBody).contentJson,
     "authored-commentary",
     "내가 쓴 의견과 비교 기록",
   );
@@ -388,12 +388,12 @@ export function expectAuthoredContent(
   for (const [index, text] of [FIRST_BODY, SECOND_BODY].entries()) {
     const detail = z
       .object({
-        id: z.string().uuid(),
-        targetId: z.string().uuid(),
+        id: z.guid(),
+        targetId: z.guid(),
         targetKind: z.literal("document"),
         reason: z.literal("manual"),
         ySnapshot: z.string().min(1),
-        contentJson: z.unknown(),
+        contentJson: z.unknown().optional(),
       })
       .parse(state.revisions[index]);
     expect(detail.id).toBe(ids.revisionIds[index]);
@@ -404,8 +404,8 @@ export function expectAuthoredContent(
     .object({
       items: z.array(
         z.object({
-          taskId: z.string().uuid(),
-          documentId: z.string().uuid(),
+          taskId: z.guid(),
+          documentId: z.guid(),
           taskTitle: z.string(),
         }),
       ),
@@ -438,9 +438,7 @@ export function expectPrivateZoteroDenied(
   ids: ZoteroArchiveIds,
 ) {
   expect(meStatus).toBe(200);
-  expect(z.object({ userId: z.string().uuid() }).parse(meReply).userId).not.toBe(
-    ids.destinationUserId,
-  );
+  expect(z.object({ userId: z.guid() }).parse(meReply).userId).not.toBe(ids.destinationUserId);
   // Existing /zotero and /zotero/libraries/{connectorId}, known restored IDs.
   expect(privateReadStatuses).toEqual([404, 404]);
 }

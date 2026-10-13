@@ -16,9 +16,9 @@ import { login } from "./helpers";
 // No retry or timeout change; workers 1, retries 0.
 const owner = { email: "Admin@Example.COM", password: "supersecret1" };
 const workspacesSchema = z.object({
-  items: z.array(z.object({ id: z.string().uuid(), kind: z.string(), slug: z.string() })),
+  items: z.array(z.object({ id: z.guid(), kind: z.string(), slug: z.string() })),
 });
-const projectsSchema = z.object({ items: z.array(z.object({ id: z.string().uuid() })) });
+const projectsSchema = z.object({ items: z.array(z.object({ id: z.guid() })) });
 const PROBE = "/api/v1/me/workspaces";
 // Observation window for a stall: longer than ordinary local GET latency,
 // shorter than the pool reopen backoff ceiling. Not a retry or a fix.

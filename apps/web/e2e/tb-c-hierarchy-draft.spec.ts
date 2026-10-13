@@ -12,21 +12,21 @@ import { admin, newSignedInPage, setupInstance, workspaceId } from "./workspace-
 
 const taskSchema = z
   .object({
-    id: z.string().uuid(),
+    id: z.guid(),
     number: z.number(),
     title: z.string(),
     type: z.string(),
-    parentId: z.string().uuid().nullable(),
-    statusId: z.string().uuid(),
+    parentId: z.guid().nullable(),
+    statusId: z.guid(),
     priority: z.string(),
     startDate: z.string().nullable(),
     dueDate: z.string().nullable(),
     dueAt: z.string().nullable(),
   })
-  .passthrough();
+  .loose();
 const detailSchema = taskSchema.extend({ canEdit: z.boolean() });
-const projectSchema = z.object({ id: z.string().uuid() });
-const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string().uuid() })) });
+const projectSchema = z.object({ id: z.guid() });
+const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.guid() })) });
 type Task = z.infer<typeof taskSchema>;
 let auth: Awaited<ReturnType<BrowserContext["storageState"]>>;
 test.beforeAll(async ({ browser, baseURL }) => {
@@ -375,7 +375,7 @@ test("real permission loss retires hierarchy; regrant never restores the old dra
       membershipRole: "guest",
     });
     const members = z
-      .object({ items: z.array(z.object({ email: z.string(), userId: z.string().uuid() })) })
+      .object({ items: z.array(z.object({ email: z.string(), userId: z.guid() })) })
       .parse(await (await signed.page.request.get(`${f.base}/members`)).json());
     const actorId = members.items.find((item) => item.email === actor.email)?.userId;
     if (!actorId) throw new Error("Fixture needs the editor membership");

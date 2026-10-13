@@ -11,9 +11,9 @@
     "file": "supplements/launder-1.7.1-LICENSE",
     "source": "https://raw.githubusercontent.com/apostrophecms/apostrophe/e9b0ab0849a5dfea0f75335fbdf99b5c6bf9e4b3/packages/apostrophe/LICENSE.md"
   },
-  "qrcode-generator@1.5.2": {
+  "qrcode-generator@2.0.4": {
     "file": "supplements/qrcode-generator-1.4.4-LICENSE",
-    "source": "https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/73b65678e76a6a196d941910dd40b87b53457e41/LICENSE"
+    "source": "https://raw.githubusercontent.com/kazuhikoarase/qrcode-generator/83b7e8fe3fddd3b0368dbafd6ce56995bd25e3c8/LICENSE"
   },
   "react-remove-scroll-bar@2.3.8": {
     "file": "supplements/react-remove-scroll-bar-2.3.8-LICENSE",

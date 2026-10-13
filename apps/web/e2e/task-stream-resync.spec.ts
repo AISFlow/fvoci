@@ -5,11 +5,11 @@ import { createE2eUser, login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const workspaceSlugListSchema = z
-  .object({ items: z.array(z.object({ slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ slug: z.string() }).loose()) })
+  .loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -21,34 +21,28 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const taskSchema = z.object({ id: z.string(), statusId: z.string() }).passthrough();
+  .loose();
+const taskSchema = z.object({ id: z.string(), statusId: z.string() }).loose();
 const taskListSchema = z
   .object({
-    items: z.array(
-      z.object({ id: z.string(), title: z.string(), statusId: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ id: z.string(), title: z.string(), statusId: z.string() }).loose()),
   })
-  .passthrough();
-const idSchema = z.object({ id: z.string(), name: z.string() }).passthrough();
+  .loose();
+const idSchema = z.object({ id: z.string(), name: z.string() }).loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const memberListSchema = z
   .object({
-    items: z.array(
-      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ email: z.string(), userId: z.string(), role: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 
 const owner = {
   email: "tsr-owner@example.com",

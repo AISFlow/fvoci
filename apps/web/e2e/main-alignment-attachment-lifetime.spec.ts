@@ -117,7 +117,7 @@ test("queued attachments survive complete loss/retry and cannot insert after can
     data: retryRequest.body,
   });
   expect(repeated.ok()).toBe(true);
-  expect((await readJson(repeated, z.object({ id: z.string() }).passthrough())).id).toBe(retryId);
+  expect((await readJson(repeated, z.object({ id: z.string() }).loose())).id).toBe(retryId);
 
   // A permanent part failure leaves an actionable local retry. Retrying gets
   // a fresh session and clears the temporary queue after the real transfer.

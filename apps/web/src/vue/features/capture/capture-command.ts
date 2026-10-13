@@ -4,15 +4,15 @@ export type PersonalInputBody = components["schemas"]["PersonalInputBody"];
 export type PersonalInputResult = components["schemas"]["PersonalInputOutput"];
 export type InputIntent = PersonalInputBody["intent"];
 const commandSchema = z.object({
-  actorId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
+  actorId: z.guid(),
+  workspaceId: z.guid(),
   body: z.object({
-    requestId: z.string().uuid(),
+    requestId: z.guid(),
     intent: z.enum(["quick", "note", "task"]),
     title: z.string(),
-    projectId: z.string().uuid().nullable().optional(),
+    projectId: z.guid().nullable().optional(),
     source: z
-      .object({ documentId: z.string().uuid(), anchor: z.string().nullable().optional() })
+      .object({ documentId: z.guid(), anchor: z.string().nullable().optional() })
       .nullable()
       .optional(),
   }),

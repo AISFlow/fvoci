@@ -200,6 +200,43 @@ test("result routes use the committed destination numbers", () => {
   ).toBeNull();
 });
 
+test("a stored command with any 8-4-4-4-12 hex ids stays recoverable unchanged", () => {
+  // Version and variant nibbles outside RFC 9562, which the stored ids were never checked for.
+  const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+  const s = storage();
+  const loose: PendingTransferCommand = {
+    actorId: id(1),
+    sessionId: id(2),
+    sourceWorkspaceId: id(3),
+    sourceTaskProjectId: id(4),
+    destinationSlug: "Team-한글",
+    destinationProjectKey: "PUB",
+    body: {
+      requestId: "0190a0c6-9a1e-0cc1-ca3b-0123456789AB",
+      confirmed: true,
+      previewDigest: "a".repeat(64),
+      selection: {
+        action: "move",
+        documentId: id(5),
+        expectedDocumentVersion: 3,
+        taskId: id(6),
+        expectedTaskVersion: 2,
+        destinationWorkspaceId: id(7),
+        destinationProjectId: id(8),
+        destinationStatusId: id(9),
+      },
+    },
+  };
+  const raw = JSON.stringify(loose);
+  s.setItem(`fvoci:personal-transfer:${id(1)}:${id(2)}`, raw);
+  const recovered = recoverTransfer(s, id(1), id(2));
+  expect(recovered).toEqual(loose);
+  // Re-persisting before an identical replay neither throws nor rewrites it.
+  if (!recovered) throw new Error("stored command lost");
+  rememberTransfer(s, recovered);
+  expect(s.getItem(`fvoci:personal-transfer:${id(1)}:${id(2)}`)).toBe(raw);
+});
+
 test("a command stored before sourceTaskProjectId existed stays recoverable unchanged", () => {
   const s = storage();
   const legacy = command();

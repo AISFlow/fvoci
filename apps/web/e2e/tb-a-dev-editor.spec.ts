@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createListener } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -25,6 +33,15 @@ import { createRustReadinessReader } from "../e2e-pending/tb-a-readiness";
 // Own a Rust process with the actual dev public origin; never rewrite Origin.
 const webRoot = path.resolve(import.meta.dirname, "..");
 let devURL: string;
+
+/** The exact Zod version a workspace package pins. */
+function pinnedZod(packageRoot: string): string {
+  const manifest = z
+    .object({ dependencies: z.object({ zod: z.string() }).loose() })
+    .loose()
+    .parse(JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")));
+  return manifest.dependencies.zod;
+}
 
 type DevRuntime = { start: (phase: string) => Promise<void>; stop: () => Promise<void> };
 const test = base.extend<object, { devRuntime: DevRuntime }>({
@@ -343,7 +360,7 @@ async function workspaceId(page: Page): Promise<string> {
 
 const resourceSchema = z.object({ id: z.string(), number: z.number() });
 const projectSchema = z.object({ id: z.string() });
-const bodySchema = z.object({ contentJson: z.unknown() });
+const bodySchema = z.object({ contentJson: z.unknown().optional() });
 
 async function editAndReadBack(
   browser: Browser,
@@ -448,7 +465,7 @@ for (const phase of ["cold", "restart"] as const) {
       await devRuntime.stop();
     });
 
-    test("editor UUID and web Zod 3 retain their runtime contracts", async ({ browser }) => {
+    test("editor and web each run the Zod their package pins", async ({ browser }) => {
       const context = await browser.newContext({ baseURL: devURL });
       try {
         const page = await context.newPage();
@@ -467,15 +484,18 @@ for (const phase of ["cold", "restart"] as const) {
         if (!webZodURL) throw new Error("transformed web Zod import missing");
         const contracts = await page.evaluate(
           async ({ uuidPath, editorZodURL, webZodURL }) => {
-            type ZodModule = { z: { uuid?: () => unknown; string: () => unknown } };
+            type Version = { major: number; minor: number; patch: number };
+            type ZodModule = { z: { core?: { version?: Version } } };
             type UuidModule = { uuid: { safeParse: (value: string) => { success: boolean } } };
+            // Zod 3 has no core version; it reads as null.
+            const version = ({ z: zod }: ZodModule) => {
+              const v = zod.core?.version;
+              return v ? `${String(v.major)}.${String(v.minor)}.${String(v.patch)}` : null;
+            };
             const uuid = (await import(uuidPath)) as UuidModule;
-            const editor = (await import(editorZodURL)) as ZodModule;
-            const web = (await import(webZodURL)) as ZodModule;
             return {
-              editorUuid: typeof editor.z.uuid,
-              webUuid: typeof web.z.uuid,
-              webString: typeof web.z.string,
+              editorZod: version((await import(editorZodURL)) as ZodModule),
+              webZod: version((await import(webZodURL)) as ZodModule),
               accepted: uuid.uuid.safeParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").success,
               rejected: uuid.uuid.safeParse("aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa").success,
             };
@@ -483,9 +503,8 @@ for (const phase of ["cold", "restart"] as const) {
           { uuidPath, editorZodURL, webZodURL },
         );
         expect(contracts).toEqual({
-          editorUuid: "function",
-          webUuid: "undefined",
-          webString: "function",
+          editorZod: pinnedZod(path.resolve(webRoot, "../../packages/editor")),
+          webZod: pinnedZod(webRoot),
           accepted: true,
           rejected: false,
         });

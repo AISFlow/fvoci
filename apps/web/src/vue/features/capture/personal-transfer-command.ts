@@ -63,7 +63,7 @@ export type TransferDestination = {
   projectKey: string;
   statusId: string | null;
 };
-const uuid = z.string().uuid();
+const uuid = z.guid();
 const commandSchema = z
   .object({
     actorId: uuid,

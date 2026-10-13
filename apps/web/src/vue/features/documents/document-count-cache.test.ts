@@ -15,7 +15,7 @@ const to = roomSource.indexOf("}));", from) + 4;
 assert.ok(from > 0 && to > from);
 const roomScript = ts.transpile(roomSource.slice(from, to), {
   target: ts.ScriptTarget.ES2022,
-  module: ts.ModuleKind.None,
+  module: ts.ModuleKind.ESNext,
 });
 
 const roomFactory = await evaluateTestFunction(
@@ -77,7 +77,7 @@ async function harness(name: string, includePatch = false) {
   assert.ok(from > 0 && to > from);
   const script = ts.transpile(source.slice(from, to), {
     target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.None,
+    module: ts.ModuleKind.ESNext,
   });
   const props = reactive({ workspaceId: "old-workspace", documentId: "old-document", slug: "old" });
   const projectId = shallowRef<string | null>(name.startsWith("Project") ? "old-project" : null);
@@ -442,7 +442,7 @@ async function localHarness(kind: "tags" | "restore") {
   const end = source.indexOf(kind === "tags" ? "const pending =" : "const items =");
   const script = ts.transpile(source.slice(start >= 0 ? start : baselineStart, end), {
     target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.None,
+    module: ts.ModuleKind.ESNext,
   });
   const props = reactive({
     workspaceId: "old-workspace",

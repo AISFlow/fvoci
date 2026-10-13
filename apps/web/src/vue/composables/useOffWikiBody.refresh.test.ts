@@ -23,7 +23,7 @@ const raw = ["./useOffWikiBodySlots.ts", "./useOffWikiBody.ts"]
   .join("\n")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replaceAll("export function", "function");
-const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
 class ProblemError extends Error {
   constructor(readonly status: number) {
     super(String(status));

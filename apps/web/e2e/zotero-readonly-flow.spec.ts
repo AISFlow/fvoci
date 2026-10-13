@@ -8,33 +8,27 @@ import { z } from "zod";
 
 import { ZOTERO_FIXTURE_KEY as key, expectConnectedSourceObserver } from "./zotero-archive-oracles";
 const root = path.resolve(import.meta.dirname, "../../..");
-const workspaceSchema = z.object({ id: z.string().uuid(), slug: z.string() });
-const meSchema = z.object({ userId: z.string().uuid() }).passthrough();
+const workspaceSchema = z.object({ id: z.guid(), slug: z.string() });
+const meSchema = z.object({ userId: z.guid() }).loose();
 const referenceSchema = z
   .object({
-    id: z.string().uuid(),
+    id: z.guid(),
     itemKey: z.string(),
     documentDisplayId: z.string(),
-    bibliography: z.object({ title: z.string() }).passthrough(),
+    bibliography: z.object({ title: z.string() }).loose(),
     availability: z.string(),
-    links: z.array(
-      z.object({ taskId: z.string().nullable(), displayId: z.string() }).passthrough(),
-    ),
+    links: z.array(z.object({ taskId: z.string().nullable(), displayId: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const librarySchema = z.object({
-  connector: z
-    .object({ id: z.string().uuid(), completedVersion: z.string(), state: z.string() })
-    .passthrough(),
+  connector: z.object({ id: z.guid(), completedVersion: z.string(), state: z.string() }).loose(),
   references: z.array(referenceSchema),
-  collections: z.array(
-    z.object({ key: z.string(), parentKey: z.string().nullable() }).passthrough(),
-  ),
+  collections: z.array(z.object({ key: z.string(), parentKey: z.string().nullable() }).loose()),
 });
 const inputSchema = z.object({
-  taskId: z.string().uuid(),
+  taskId: z.guid(),
   taskDisplayId: z.string(),
-  documentId: z.string().uuid(),
+  documentId: z.guid(),
 });
 class Fixture {
   private readonly pending: Array<{
@@ -114,7 +108,7 @@ test("Zotero read-only UI commits private metadata and links visible to a new cl
   browser,
 }, info) => {
   const fixture = new Fixture();
-  const { origin } = z.object({ origin: z.string().url() }).parse(await fixture.next());
+  const { origin } = z.object({ origin: z.url() }).parse(await fixture.next());
   const context = await browser.newContext({ baseURL: origin });
   const page = await context.newPage();
   const assetReads: Array<
@@ -215,7 +209,7 @@ test("Zotero read-only UI commits private metadata and links visible to a new cl
       row.getByRole("link", { name: authored.taskDisplayId, exact: true }),
     ).toBeVisible();
     const connectors = z
-      .object({ connectors: z.array(z.object({ id: z.string().uuid(), libraryType: z.string() })) })
+      .object({ connectors: z.array(z.object({ id: z.guid(), libraryType: z.string() })) })
       .parse(await (await context.request.get(`/api/v1/workspaces/${workspace.id}/zotero`)).json());
     const connector = connectors.connectors.find((item) => item.libraryType === "user");
     if (!connector) throw new Error("committed user library missing");
@@ -264,7 +258,7 @@ test("Zotero read-only UI commits private metadata and links visible to a new cl
     });
     expect(searchResponse.status()).toBe(200);
     const results = z
-      .object({ items: z.array(z.object({ id: z.string().uuid() }).passthrough()) })
+      .object({ items: z.array(z.object({ id: z.guid() }).loose()) })
       .parse(await searchResponse.json());
     expect(results.items.some((item) => item.id === committed.id)).toBe(true);
     const newPage = await second.newPage();
@@ -316,7 +310,7 @@ test("Zotero read-only UI commits private metadata and links visible to a new cl
     expect(after.connector.completedVersion).toBe("13");
     const note = z
       .object({ title: z.string() })
-      .passthrough()
+      .loose()
       .parse(
         await (
           await second.request.get(
@@ -329,7 +323,9 @@ test("Zotero read-only UI commits private metadata and links visible to a new cl
       `/api/v1/workspaces/${workspace.id}/documents/${authored.documentId}/body`,
     );
     expect(preserved.status()).toBe(200);
-    const preservedBody = z.object({ contentJson: z.unknown() }).parse(await preserved.json());
+    const preservedBody = z
+      .object({ contentJson: z.unknown().optional() })
+      .parse(await preserved.json());
     expect(preservedBody.contentJson).toEqual(authoredBody);
     const requests = z
       .object({ requests: z.array(z.tuple([z.string(), z.string()])) })

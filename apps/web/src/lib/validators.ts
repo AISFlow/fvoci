@@ -7,12 +7,12 @@ const nfkcString = z.string().transform((value) => value.normalize("NFKC"));
 const slugSchema = nfkcString.pipe(z.string().regex(slugPattern, "i18n:form.invalid"));
 
 export const loginInput = z.object({
-  email: z.string().trim().email("i18n:form.email"),
+  email: z.string().trim().check(z.email("i18n:form.email")),
   password: z.string().min(1, "i18n:form.too_small"),
 });
 
 export const setupInput = z.object({
-  email: z.string().trim().email("i18n:form.email"),
+  email: z.string().trim().check(z.email("i18n:form.email")),
   password: z.string().min(10, "i18n:form.too_small"),
   givenName: z.string().trim().min(1, "i18n:form.too_small"),
   familyName: z.string().nullable().optional(),
@@ -34,13 +34,13 @@ export const workspaceDeleteInput = z.object({
 });
 
 export const invitationCreateInput = z.object({
-  email: z.string().trim().email("i18n:form.email"),
+  email: z.string().trim().check(z.email("i18n:form.email")),
   role: z.enum(["owner", "admin", "member", "guest"]),
 });
 
 const optionalEmail = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
-  z.string().trim().email("i18n:form.email").optional(),
+  z.string().trim().check(z.email("i18n:form.email")).optional(),
 );
 
 const optionalGivenName = z.preprocess(
@@ -65,7 +65,7 @@ export const invitationAcceptInput = z.object({
 });
 
 export const passwordResetInput = z.object({
-  email: z.string().trim().email("i18n:form.email"),
+  email: z.string().trim().check(z.email("i18n:form.email")),
 });
 
 export const passwordResetConfirmInput = z.object({
@@ -113,7 +113,7 @@ export const webhookCreateInput = z.object({
 
 /** GitHub issue link form: a task UUID, an `owner/name` repo and a positive issue number. */
 export const githubIssueLinkForm = z.object({
-  taskId: z.string().trim().uuid("i18n:github.issue.invalid"),
+  taskId: z.string().trim().check(z.guid("i18n:github.issue.invalid")),
   repo: z
     .string()
     .trim()
@@ -126,11 +126,11 @@ export const githubIssueLinkForm = z.object({
 });
 
 export const magicLinkInput = z.object({
-  email: z.string().trim().email("i18n:form.email"),
+  email: z.string().trim().check(z.email("i18n:form.email")),
 });
 
 export const emailChangeInput = z.object({
-  newEmail: z.string().trim().email("i18n:form.email"),
+  newEmail: z.string().trim().check(z.email("i18n:form.email")),
 });
 
 // Password-less accounts set a first password without `currentPassword`.

@@ -2,6 +2,7 @@
   "extends": "./tsconfig.vue.json",
   "compilerOptions": {
     "noUncheckedIndexedAccess": true,
+    "types": ["node", "bun"],
     "rootDirs": ["../..", "../../node_modules/.cache/fvoci-vue-lint/types"]
   },
   "include": [

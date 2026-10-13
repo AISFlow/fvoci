@@ -5,11 +5,11 @@ import { createE2eUser, createTasksViaApi, login, logout } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const workspaceSlugListSchema = z
-  .object({ items: z.array(z.object({ slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ slug: z.string() }).loose()) })
+  .loose();
 const lookupSchema = z
   .object({
     items: z.array(
@@ -20,10 +20,10 @@ const lookupSchema = z
           displayId: z.string(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -35,29 +35,27 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const meSchema = z.object({ userId: z.string(), timezone: z.string() }).passthrough();
+  .loose();
+const meSchema = z.object({ userId: z.string(), timezone: z.string() }).loose();
 const projectSchema = z
   .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const taskPageSchema = z
   .object({
-    items: z.array(z.object({ id: z.string() }).passthrough()),
+    items: z.array(z.object({ id: z.string() }).loose()),
     nextCursor: z.string().nullable(),
-    statusCounts: z.array(z.object({ statusId: z.string(), count: z.number() }).passthrough()),
+    statusCounts: z.array(z.object({ statusId: z.string(), count: z.number() }).loose()),
   })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 

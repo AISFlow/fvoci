@@ -16,7 +16,7 @@ type FieldValues = Record<string, string | boolean>;
  */
 export function useZodForm<T extends FieldValues, O>(options: {
   /** A getter, so a schema that depends on props is read at submit time. */
-  schema: () => z.ZodType<O, z.ZodTypeDef, T>;
+  schema: () => z.ZodType<O, T>;
   defaults: () => T;
   /** Element ids in the order the fields appear, for focusing the first invalid one. */
   fieldIds: Partial<Record<keyof T & string, string>>;
