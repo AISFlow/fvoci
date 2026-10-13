@@ -357,15 +357,22 @@ const realNotFound = computed(
     lookupMiss.value ||
     task404.value,
 );
-// A refused task read, like the document view's refused metadata: the form
-// leaves and its retained OFF draft below is export only.
+// A refused task read with no form left on the page, like the document view's
+// refused metadata: its retained OFF draft below is export only. A form kept
+// from earlier data still owns its draft and refuses on its own requests.
 const taskRefused = computed(
   () =>
+    !(item.value && task.data.value && !realNotFound.value) &&
     Boolean(lookupTask.value) &&
     task.isError.value &&
     task.error.value instanceof ProblemError &&
     [401, 403, 404].includes(task.error.value.status),
 );
+// A lookup miss may be a project this tab still has cached as granted. A failed
+// read stays on the query, and the list below then trusts no project list.
+watch(lookupMiss, (missed) => {
+  if (missed) projects.refetch().catch(() => undefined);
+});
 // This tab's OFF drafts of the current actor and credential that this page can
 // no longer reach: the refused task, or any target of a project the fresh list
 // no longer grants. Local reads only: export, never send.
@@ -378,9 +385,10 @@ const retainedDrafts = computed(() => {
     !(realNotFound.value || taskRefused.value)
   )
     return [];
-  const granted = projects.isSuccess.value
-    ? new Set((projects.data.value?.items ?? []).map((row) => row.id))
-    : null;
+  const granted =
+    projects.isSuccess.value && !projects.isFetching.value
+      ? new Set((projects.data.value?.items ?? []).map((row) => row.id))
+      : null;
   return unreachableDrafts(
     listRetainedOffDrafts(actor.userId, actor.sessionId),
     workspace.value.id,
@@ -566,11 +574,11 @@ async function onTrash(): Promise<void> {
       :message="loadErrorMessage(workflow.error.value)"
       @retry="workflow.refetch()"
     />
-    <!-- A failed refetch keeps the last task data; an authoritative 401/403/404
-         or miss (e.g. the task moved to a team) must not leave that form
-         editable. Transient errors keep it, with any draft. -->
+    <!-- A failed refetch keeps the last task data; an authoritative 404/miss
+         (e.g. the task moved to a team) must not leave that form editable.
+         Transient errors keep it, with any draft. -->
     <TaskDetailView
-      v-if="item && task.data.value && !realNotFound && !taskRefused"
+      v-if="item && task.data.value && !realNotFound"
       :key="collabRoomName(workspace.id, 'task', task.data.value.id)"
       :slug="slug"
       :workspace-id="workspace.id"
