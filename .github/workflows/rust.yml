@@ -249,7 +249,7 @@ jobs:
           path: target/db-lib
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-lib-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
-      - name: Selected SQLite library controls (54 exact tests)
+      - name: Selected SQLite library controls (56 exact tests)
         run: |
           xtask/target/debug/xtask selected-library --target-dir target/db-lib
       - name: Save SQLite library build outputs after validation

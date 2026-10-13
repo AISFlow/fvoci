@@ -89,7 +89,7 @@ test("Rust SQLite controls have an independent budget without duplicating the de
   assert.ok(needs(job(rust, "rust-ci-gate")).includes("fast-sqlite"));
   assert.equal(sqlite.if, "needs.ci-plan.outputs.select_fast_sqlite == 'true'");
   assert.equal(
-    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (54 exact tests)")
+    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (56 exact tests)")
       .run,
     "xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
   );
