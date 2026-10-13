@@ -2133,7 +2133,7 @@ test("inputs() admits a fresh CARGO_HOME link left untracked in the checkout", (
     probe,
     `import { inputs } from ${JSON.stringify(join(copied, "build.ts"))};
 import { writeFileSync } from "node:fs";
-writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
+writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs(${JSON.stringify(join(base, "include"))})));`,
   );
   const result = spawnSync([process.execPath, probe], {
     cwd: repo,
@@ -2145,7 +2145,6 @@ writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
       PATH: `${join(base, "bin")}:/usr/bin:/bin`,
       LIBCLANG_PATH: join(base, "clang"),
       SQLITE3_LIB_DIR: join(base, "sqlite/lib"),
-      FVOCI_SELECTED_CI_SYSTEM_INCLUDE: join(base, "include"),
     },
     stdout: "pipe",
     stderr: "pipe",

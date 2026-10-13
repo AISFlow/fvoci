@@ -93,7 +93,8 @@ export function cargoInputs(cargo: string): Record<string, string> {
   );
   return external;
 }
-export function inputs(): Inputs {
+// Only the fixture probe passes systemInclude; every lane caller takes the default.
+export function inputs(systemInclude = "/usr/include"): Inputs {
   const tracked = Object.fromEntries(
     call(["git", "ls-files", "-z"])
       .split("\0")
@@ -123,8 +124,7 @@ export function inputs(): Inputs {
     join(root, "node_modules"),
     call(["rustc", "--print", "sysroot"]),
     env("LIBCLANG_PATH"),
-    // Lanes leave it unset; only the fixture probe swaps in a small directory.
-    process.env.FVOCI_SELECTED_CI_SYSTEM_INCLUDE ?? "/usr/include",
+    systemInclude,
     dirname(env("SQLITE3_LIB_DIR")),
   ])
     add(directory);
