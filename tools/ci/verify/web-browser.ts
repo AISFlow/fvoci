@@ -6,7 +6,7 @@ import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } fro
 import { join } from "node:path";
 import { rawBlockScalar } from "./raw-yaml.ts";
 import { get as safeGet } from "./load.ts";
-import { CACHE_PIN, gatedWorkflowJobs } from "./registry.ts";
+import { gatedWorkflowJobs } from "./registry.ts";
 import { readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
@@ -67,18 +67,74 @@ const RECEIPT_DOWNLOAD_WITH = {
   "merge-multiple": true,
   path: "${{ runner.temp }}/fvoci-closed-install",
 };
-export const DOWNLOAD_PIN = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
-const UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
+export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
+const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
 
 export const COLLABORATION_PREPARATION_JOBS = [
   "collaboration-main-build",
   "collaboration-test-build",
 ] as const;
-export function collaborationTargetKey(phase: "main" | "tests"): string {
+// Each phase hands its compiled target to the next job as a run-scoped
+// artifact: a cache entry can be evicted between save and restore in one run.
+// The former cache key's arch/toolchain/SHA/attempt/SQLite identity travels as
+// a producer output that the consumer must reproduce; the run ID is the
+// artifact's own scope.
+type NativePhase = "main" | "tests";
+export const COLLABORATION_NATIVE_IDENTITY =
+  "${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-" +
+  "${{ steps.sqlite.outputs.cache_identity }}";
+export const COLLABORATION_NATIVE_OUTPUTS = {
+  artifact_id: "${{ steps.publish_native.outputs.artifact-id }}",
+  target_sha256: "${{ steps.native.outputs.target_sha256 }}",
+  native_identity: COLLABORATION_NATIVE_IDENTITY,
+};
+const nativeArchive = (phase: NativePhase) => `"$RUNNER_TEMP/fvoci-native-${phase}/target.tar.zst"`;
+// tar keeps the file modes and mtimes Cargo relies on; the artifact zip does not.
+export function collaborationPackRun(phase: NativePhase): string {
   return (
-    `v2-web-selected-${phase}-ubuntu-26.04-` +
-    "${{ runner.arch }}-1.98.1-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}-" +
-    "${{ steps.sqlite.outputs.cache_identity }}"
+    "set -euo pipefail\n" +
+    `mkdir -m 0700 "$RUNNER_TEMP/fvoci-native-${phase}"\n` +
+    `tar --posix -cf - target | zstd -T0 --no-progress -o ${nativeArchive(phase)}\n` +
+    `sha256="$(sha256sum ${nativeArchive(phase)} | cut -d ' ' -f 1)"\n` +
+    `printf 'target_sha256=%s\\n' "$sha256" >> "$GITHUB_OUTPUT"\n`
+  );
+}
+export function collaborationUploadWith(phase: NativePhase): Mapping {
+  return {
+    name: `web-native-${phase}-\${{ github.run_attempt }}`,
+    path: `\${{ runner.temp }}/fvoci-native-${phase}/target.tar.zst`,
+    "compression-level": 0,
+    "if-no-files-found": "error",
+    "retention-days": 1,
+  };
+}
+export function collaborationRequireEnv(producer: string): Mapping {
+  return {
+    PRODUCER_RESULT: `\${{ needs.${producer}.result }}`,
+    PRODUCER_ARTIFACT: `\${{ needs.${producer}.outputs.artifact_id }}`,
+    PRODUCER_DIGEST: `\${{ needs.${producer}.outputs.target_sha256 }}`,
+    PRODUCER_IDENTITY: `\${{ needs.${producer}.outputs.native_identity }}`,
+    CURRENT_IDENTITY: COLLABORATION_NATIVE_IDENTITY,
+  };
+}
+export const COLLABORATION_REQUIRE_RUN =
+  "set -euo pipefail\n" +
+  '[[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]\n' +
+  '[[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\\.98\\.1-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]\n';
+export function collaborationDownloadWith(producer: string, phase: NativePhase): Mapping {
+  return {
+    "artifact-ids": `\${{ needs.${producer}.outputs.artifact_id }}`,
+    "merge-multiple": true,
+    path: `\${{ runner.temp }}/fvoci-native-${phase}`,
+  };
+}
+export function collaborationRestoreRun(phase: NativePhase): string {
+  return (
+    "set -euo pipefail\n" +
+    `archive=${nativeArchive(phase)}\n` +
+    `printf '%s  %s\\n' "$PRODUCER_DIGEST" "$archive" | sha256sum --check --strict --quiet -\n` +
+    'zstd -dc --no-progress -- "$archive" | tar -xf -\n' +
+    'rm -- "$archive"\n'
   );
 }
 export const COLLABORATION_PREPARATION_RUNS = {
@@ -132,6 +188,18 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
         "set -euo pipefail\n" +
           COLLABORATION_PREPARATION_RUNS[name], "complete unmasked compiler commands");
     const phase = index === 0 ? "main" : "tests";
+    const packs = steps.filter(
+      (step) => safeGet(step, "name") === "Pack current native preparation",
+    );
+    const pack = packs[0];
+    require(packs.length === 1 &&
+      pack !== undefined &&
+      unmasked(pack) &&
+      pyEq(Object.keys(pack).sort(), ["id", "name", "run"]) &&
+      safeGet(pack, "id") === "native" &&
+      steps.indexOf(pack) > steps.indexOf(compile as Mapping) &&
+      safeGet(pack, "run") ===
+        collaborationPackRun(phase), "pack the compiled target with its modes, mtimes and digest");
     const saves = steps.filter(
       (step) => safeGet(step, "name") === "Save current native preparation",
     );
@@ -139,40 +207,30 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     require(saves.length === 1 &&
       save !== undefined &&
       unmasked(save) &&
-      steps.indexOf(save) > steps.indexOf(compile as Mapping) &&
-      safeGet(save, "uses") === "actions/cache/save@" + CACHE_PIN &&
-      pyEq(safeGet(save, "with"), {
-        path: "target",
-        key: collaborationTargetKey(phase),
-      }), "save only successful current-run target cache");
-    require(!steps.some((step) =>
-      usesPrefix(step, "actions/upload-artifact@"),
-    ), "preparation cannot publish qualified packets");
+      steps.indexOf(save) > steps.indexOf(pack as Mapping) &&
+      safeGet(save, "id") === "publish_native" &&
+      safeGet(save, "uses") === UPLOAD_PIN &&
+      pyEq(
+        safeGet(save, "with"),
+        collaborationUploadWith(phase),
+      ), "save only the packed current-run target as a run-scoped artifact");
+    require(pyEq(
+      safeGet(job, "outputs"),
+      COLLABORATION_NATIVE_OUTPUTS,
+    ), "outputs the artifact ID, digest and arch/SHA/attempt/SQLite identity");
+    require(steps.filter((step) => usesPrefix(step, "actions/upload-artifact@")).length ===
+      1, "preparation cannot publish qualified packets");
   }
-  for (const [name, phase] of [
-    ["collaboration-test-build", "main"],
-    ["collaboration-build", "tests"],
+  for (const [name, producer, phase] of [
+    ["collaboration-test-build", "collaboration-main-build", "main"],
+    ["collaboration-build", "collaboration-test-build", "tests"],
   ] as const) {
     const steps = list(name);
-    const restores = steps.filter(
-      (step) => safeGet(step, "name") === "Restore current native preparation",
-    );
-    const restore = restores[0];
     const compileAt = steps.findIndex(
       (step) =>
         safeGet(step, "name") === "Compile native preparation" || safeGet(step, "id") === "prepare",
     );
-    require(restores.length === 1 &&
-      restore !== undefined &&
-      unmasked(restore) &&
-      steps.indexOf(restore) < compileAt &&
-      safeGet(restore, "id") === "current_native_cache" &&
-      safeGet(restore, "uses") === "actions/cache/restore@" + CACHE_PIN &&
-      pyEq(safeGet(restore, "with"), {
-        path: "target",
-        key: collaborationTargetKey(phase),
-        "fail-on-cache-miss": true,
-      }), "exact source/run/attempt/SQLite cache restore before compilation");
+    const sqliteAt = steps.findIndex((step) => safeGet(step, "id") === "sqlite");
     const checks = steps.filter(
       (step) => safeGet(step, "name") === "Require exact current native preparation",
     );
@@ -180,13 +238,38 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     require(checks.length === 1 &&
       check !== undefined &&
       unmasked(check) &&
-      steps.indexOf(check) > steps.indexOf(restore as Mapping) &&
-      steps.indexOf(check) < compileAt &&
-      pyEq(safeGet(check, "env"), {
-        CACHE_HIT: "${{ steps.current_native_cache.outputs.cache-hit }}",
+      pyEq(Object.keys(check).sort(), ["env", "name", "run"]) &&
+      pyEq(safeGet(check, "env"), collaborationRequireEnv(producer)) &&
+      safeGet(check, "run") === COLLABORATION_REQUIRE_RUN &&
+      sqliteAt >= 0 &&
+      steps.indexOf(check) >
+        sqliteAt, "producer must match this run's arch/SHA/attempt/SQLite identity after SQLite preparation");
+    const downloads = steps.filter((step) => usesPrefix(step, "actions/download-artifact@"));
+    const download = downloads[0];
+    require(downloads.length === 1 &&
+      download !== undefined &&
+      unmasked(download) &&
+      safeGet(download, "uses") === DOWNLOAD_PIN &&
+      pyEq(safeGet(download, "with"), collaborationDownloadWith(producer, phase)) &&
+      steps.indexOf(download) >
+        steps.indexOf(
+          check as Mapping,
+        ), "exact current-run producer artifact ID after the identity check");
+    const restores = steps.filter(
+      (step) => safeGet(step, "name") === "Restore current native preparation",
+    );
+    const restore = restores[0];
+    require(restores.length === 1 &&
+      restore !== undefined &&
+      unmasked(restore) &&
+      pyEq(Object.keys(restore).sort(), ["env", "name", "run"]) &&
+      pyEq(safeGet(restore, "env"), {
+        PRODUCER_DIGEST: `\${{ needs.${producer}.outputs.target_sha256 }}`,
       }) &&
-      safeGet(check, "run") ===
-        'test "$CACHE_HIT" = true', "cache miss or prefix match must fail closed");
+      safeGet(restore, "run") === collaborationRestoreRun(phase) &&
+      steps.indexOf(restore) > steps.indexOf(download as Mapping) &&
+      steps.indexOf(restore) <
+        compileAt, "digest-verified current-run artifact restore before compilation");
     const normalizers = steps.filter(
       (step) => safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse",
     );
@@ -196,23 +279,15 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
       unmasked(normalize) &&
       pyEq(Object.keys(normalize).sort(), ["name", "run"]) &&
       safeGet(normalize, "run") === COLLABORATION_SOURCE_MTIME_RUN &&
-      steps.indexOf(normalize) > steps.indexOf(check as Mapping) &&
+      steps.indexOf(normalize) > steps.indexOf(restore as Mapping) &&
       steps.indexOf(normalize) <
-        compileAt, "deterministic tracked source mtimes after exact current-run cache hit before compilation");
+        compileAt, "deterministic tracked source mtimes after exact current-run artifact restore before compilation");
     require(steps
       .filter((step) => usesPrefix(step, "actions/cache"))
       .every((step) => {
         const path = safeGet(safeGet(step, "with"), "path");
-        return (
-          path === "target" ||
-          (typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git")
-        );
+        return typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git";
       }), "no long-term native cache in normalized jobs");
-    require(steps.filter(
-      (step) =>
-        usesPrefix(step, "actions/cache") && safeGet(safeGet(step, "with"), "path") === "target",
-    ).length ===
-      (name === "collaboration-test-build" ? 2 : 1), "no alternate target restore or save");
   }
   return errors;
 }
@@ -417,9 +492,28 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
   const workflow = ctx.workflows[WEB_WORKFLOW_FILE];
   return [
     ...verifyWebBuildHandoffJobs(jobs),
+    ...verifyNoRunScopedCacheKeys(jobs),
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
   ];
+}
+
+// A run-scoped key can only carry outputs to a later job of the same run, and
+// GitHub may evict that entry before the consumer restores it.
+const RUN_SCOPED = /\bgithub\.run_(id|attempt)\b/;
+export function verifyNoRunScopedCacheKeys(jobs: Mapping): string[] {
+  return Object.entries(jobs).flatMap(([name, job]) => {
+    const steps = isMapping(job) ? get(job, "steps") : undefined;
+    const list: unknown[] = Array.isArray(steps) ? steps : [];
+    return list.some(
+      (step) =>
+        isMapping(step) &&
+        usesPrefix(step, "actions/cache") &&
+        RUN_SCOPED.test(JSON.stringify(get(step, "with") ?? null)),
+    )
+      ? [`web: ${name} must hand off run-scoped outputs by artifact, not by a cache key`]
+      : [];
+  });
 }
 
 // Rustup component metadata is prepared by the xtask helper, built from its own

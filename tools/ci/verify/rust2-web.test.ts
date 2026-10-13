@@ -1,5 +1,16 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextFromTexts } from "./load.ts";
 import type { Mapping } from "./py.ts";
@@ -11,6 +22,7 @@ import {
   verifyWebBuildHandoff,
   verifyWebBuildHandoffJobs,
   verifyCollaborationPreparationJobs,
+  verifyNoRunScopedCacheKeys,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 
@@ -27,60 +39,193 @@ const isDownload = (step: Mapping) => usesOf(step).startsWith("actions/download-
 const unitStep = (jobs: Mapping) =>
   stepWith(jobs, "web-checks", (step) => step["name"] === "Web and editor unit regressions");
 
-test("collaboration preparation requires ordered exact current-run caches and complete compiles", () => {
+const requireStep = (step: Mapping) => step["name"] === "Require exact current native preparation";
+const restoreStep = (step: Mapping) => step["name"] === "Restore current native preparation";
+const runOf = (step: Mapping): string => {
+  const run = step["run"];
+  if (typeof run !== "string") throw new Error("step has no run script");
+  return run;
+};
+
+test("collaboration preparation hands exact current-run targets over by artifact and compiles completely", () => {
   const jobs = realJobs("web.yml");
   expect(verifyCollaborationPreparationJobs(jobs)).toEqual([]);
+  const fails = (bad: Mapping, message: string) => {
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(message);
+  };
   for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
     const bad = clone(jobs);
     Reflect.deleteProperty(bad, name);
-    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain("must exist");
+    fails(bad, "must exist");
+  }
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    for (const [key, value] of [
+      ["name", "web-native-shared"],
+      ["path", "target"],
+      ["compression-level", 6],
+      ["if-no-files-found", "warn"],
+      ["retention-days", 7],
+    ] as const) {
+      const bad = clone(jobs);
+      const save = stepWith(
+        bad,
+        name,
+        (step) => step["name"] === "Save current native preparation",
+      );
+      (save["with"] as Mapping)[key] = value;
+      fails(bad, "save only the packed current-run target as a run-scoped artifact");
+    }
+    for (const output of ["artifact_id", "target_sha256", "native_identity"]) {
+      const bad = clone(jobs);
+      ((bad[name] as Mapping)["outputs"] as Mapping)[output] = "${{ github.run_id }}";
+      fails(bad, "outputs the artifact ID, digest and arch/SHA/attempt/SQLite identity");
+    }
+    const bad = clone(jobs);
+    stepWith(bad, name, byId("native"))["run"] = "true\n";
+    fails(bad, "pack the compiled target with its modes, mtimes and digest");
   }
   for (const name of ["collaboration-test-build", "collaboration-build"]) {
     for (const [key, value] of [
-      ["key", "foreign-run"],
-      ["restore-keys", "prefix-"],
-      ["fail-on-cache-miss", false],
+      ["artifact-ids", "${{ needs.foreign.outputs.artifact_id }}"],
+      ["name", "web-native-main-1"],
+      ["run-id", "1"],
+      ["merge-multiple", false],
     ] as const) {
       const bad = clone(jobs);
-      const restore = stepWith(
-        bad,
-        name,
-        (step) => step["name"] === "Restore current native preparation",
-      );
-      (restore["with"] as Mapping)[key] = value;
-      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-        "exact source/run/attempt/SQLite",
-      );
+      (stepWith(bad, name, isDownload)["with"] as Mapping)[key] = value;
+      fails(bad, "exact current-run producer artifact ID");
     }
+    const masked = clone(jobs);
+    stepWith(masked, name, isDownload)["continue-on-error"] = true;
+    fails(masked, "exact current-run producer artifact ID");
+    for (const key of ["PRODUCER_RESULT", "PRODUCER_IDENTITY", "CURRENT_IDENTITY"]) {
+      const bad = clone(jobs);
+      (stepWith(bad, name, requireStep)["env"] as Mapping)[key] = "${{ github.run_id }}";
+      fails(bad, "producer must match this run's arch/SHA/attempt/SQLite identity");
+    }
+    const unverified = clone(jobs);
+    stepWith(unverified, name, restoreStep)["run"] = 'zstd -dc -- "$1" | tar -xf -\n';
+    fails(unverified, "digest-verified current-run artifact restore before compilation");
   }
   for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
     const bad = clone(jobs);
     stepWith(bad, name, (step) => step["name"] === "Compile native preparation")["run"] = "true\n";
-    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-      "complete unmasked compiler",
-    );
+    fails(bad, "complete unmasked compiler");
   }
 });
 
-test("current preparation cache hit check accepts true and refuses misses or prefix hits", () => {
+test("the producer check admits only this run's attempt, SHA and SQLite identity", () => {
   const jobs = realJobs("web.yml");
+  const identity = `X64-1.98.1-${"a".repeat(40)}-1-${"b".repeat(64)}`;
+  const good = {
+    PRODUCER_RESULT: "success",
+    PRODUCER_ARTIFACT: "4242",
+    PRODUCER_DIGEST: "c".repeat(64),
+    PRODUCER_IDENTITY: identity,
+    CURRENT_IDENTITY: identity,
+  };
+  const noSqlite = identity.replace(/[0-9a-f]{64}$/, "");
+  const cases: [Record<string, string>, number][] = [
+    [good, 0],
+    [{ ...good, PRODUCER_RESULT: "skipped" }, 1],
+    [{ ...good, PRODUCER_ARTIFACT: "" }, 1],
+    [{ ...good, PRODUCER_DIGEST: "" }, 1],
+    [{ ...good, PRODUCER_IDENTITY: identity.replace("-1-", "-2-") }, 1],
+    [{ ...good, PRODUCER_IDENTITY: identity.replace(/b$/, "c") }, 1],
+    [{ ...good, PRODUCER_IDENTITY: identity.replace("a", "d") }, 1],
+    [{ ...good, PRODUCER_IDENTITY: noSqlite, CURRENT_IDENTITY: noSqlite }, 1],
+  ];
   for (const name of ["collaboration-test-build", "collaboration-build"]) {
-    const check = stepWith(
-      jobs,
-      name,
-      (step) => step["name"] === "Require exact current native preparation",
-    );
-    const run = check["run"];
-    expect(typeof run).toBe("string");
-    if (typeof run !== "string") throw new Error("missing cache hit check");
-    for (const value of ["true", "false", ""]) {
-      const result = Bun.spawnSync(["bash", "-euo", "pipefail", "-c", run], {
-        env: { PATH: "/usr/bin:/bin", CACHE_HIT: value },
+    const run = runOf(stepWith(jobs, name, requireStep));
+    for (const [env, code] of cases) {
+      const result = Bun.spawnSync(["bash", "-c", run], {
+        env: { PATH: "/usr/bin:/bin", ...env },
         stdout: "pipe",
         stderr: "pipe",
       });
-      expect(result.exitCode).toBe(value === "true" ? 0 : 1);
+      expect(result.exitCode, `${name} ${JSON.stringify(env)}`).toBe(code);
     }
+  }
+});
+
+// The artifact zip drops file modes; Cargo needs the build scripts' and test
+// binaries' modes and the outputs' mtimes back exactly as compiled.
+test("a packed target restores modes and mtimes only under the producer digest", () => {
+  const jobs = realJobs("web.yml");
+  const base = mkdtempSync(join(tmpdir(), "web-native-handoff-"));
+  try {
+    for (const [producer, consumer] of [
+      ["collaboration-main-build", "collaboration-test-build"],
+      ["collaboration-test-build", "collaboration-build"],
+    ] as const) {
+      const temp = join(base, `${producer}-temp`);
+      const source = join(base, producer);
+      const executable = "target/debug/build/x-1/build-script-build";
+      const depInfo = "target/debug/deps/x-1.d";
+      mkdirSync(temp);
+      mkdirSync(join(source, "target/debug/build/x-1"), { recursive: true });
+      mkdirSync(join(source, "target/debug/deps"), { recursive: true });
+      writeFileSync(join(source, executable), "#!/bin/sh\n");
+      chmodSync(join(source, executable), 0o755);
+      writeFileSync(join(source, depInfo), "x-1.d: src/lib.rs\n");
+      utimesSync(join(source, depInfo), 1_700_000_000.25, 1_700_000_000.25);
+      const output = join(temp, "github-output");
+      writeFileSync(output, "");
+      const env = { PATH: "/usr/bin:/bin", RUNNER_TEMP: temp, GITHUB_OUTPUT: output };
+      const pack = Bun.spawnSync(["bash", "-c", runOf(stepWith(jobs, producer, byId("native")))], {
+        cwd: source,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(pack.exitCode, pack.stderr.toString()).toBe(0);
+      const digest = /^target_sha256=([0-9a-f]{64})$/m.exec(readFileSync(output, "utf8"))?.[1];
+      if (digest === undefined) throw new Error("pack wrote no digest");
+      const restore = runOf(stepWith(jobs, consumer, restoreStep));
+      // The consumer downloads into the same RUNNER_TEMP path the producer packed.
+      for (const [value, code] of [
+        ["0".repeat(64), 1],
+        ["", 1],
+        [digest, 0],
+      ] as const) {
+        const work = join(base, `${consumer}-${String(code)}-${String(value.length)}`);
+        mkdirSync(work);
+        const result = Bun.spawnSync(["bash", "-c", restore], {
+          cwd: work,
+          env: { ...env, PRODUCER_DIGEST: value },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(code);
+        expect(existsSync(join(work, "target"))).toBe(code === 0);
+      }
+      const restored = join(base, `${consumer}-0-64`);
+      expect(statSync(join(restored, executable)).mode & 0o777).toBe(0o755);
+      expect(statSync(join(restored, depInfo), { bigint: true }).mtimeNs).toBe(
+        statSync(join(source, depInfo), { bigint: true }).mtimeNs,
+      );
+      expect(readFileSync(join(restored, executable), "utf8")).toBe("#!/bin/sh\n");
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("no web job hands outputs over through a run-scoped cache key", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyNoRunScopedCacheKeys(jobs)).toEqual([]);
+  for (const key of [
+    "v2-x-${{ github.run_id }}",
+    "v2-x-${{ github.run_attempt }}-${{ github.sha }}",
+  ]) {
+    const bad = clone(jobs);
+    steps(bad, "collaboration-test-build").push({
+      uses: "actions/cache/save@fixture",
+      with: { path: "target", key },
+    });
+    expect(verifyNoRunScopedCacheKeys(bad)).toEqual([
+      "web: collaboration-test-build must hand off run-scoped outputs by artifact, not by a cache key",
+    ]);
   }
 });
 
@@ -200,7 +345,7 @@ test("web current build handoff positive and fail closed", () => {
       (bad) =>
         void steps(bad, "collaboration-postgres-on").push({
           name: "Foreign download",
-          uses: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          uses: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
           with: {
             "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
             "merge-multiple": true,
@@ -418,7 +563,7 @@ test("the budget scalar comes from the context text, not the file on disk", () =
   expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": source }))).toEqual([]);
 });
 
-test("collaboration normalizes source times only after an exact current-run cache hit", () => {
+test("collaboration normalizes source times only after an exact current-run artifact restore", () => {
   const jobs = realJobs("web.yml");
   const normalizerName = "Normalize tracked source mtimes for native cache reuse";
   expect(
@@ -428,10 +573,10 @@ test("collaboration normalizes source times only after an exact current-run cach
     const list = steps(jobs, name);
     const at = list.findIndex((step) => step["name"] === normalizerName);
     expect(at, name).toBeGreaterThan(-1);
-    const checkAt = list.findIndex(
-      (step) => step["name"] === "Require exact current native preparation",
+    const restoreAt = list.findIndex(
+      (step) => step["name"] === "Restore current native preparation",
     );
-    expect(at, name).toBeGreaterThan(checkAt);
+    expect(at, name).toBeGreaterThan(restoreAt);
     expect(at, name).toBeLessThan(
       list.findIndex(
         (step) => step["name"] === "Compile native preparation" || step["id"] === "prepare",
@@ -446,14 +591,14 @@ test("collaboration normalizes source times only after an exact current-run cach
         "deterministic tracked source mtimes",
       );
     }
-    for (const before of [0, checkAt]) {
+    for (const before of [0, restoreAt]) {
       const bad = clone(jobs);
       const reordered = steps(bad, name);
       const [normalizer] = reordered.splice(at, 1);
       if (!normalizer) throw new Error("missing source mtime normalizer");
       reordered.splice(before, 0, normalizer);
       expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-        "after exact current-run cache hit",
+        "after exact current-run artifact restore",
       );
     }
   }
@@ -477,19 +622,23 @@ test("normalized collaboration jobs reject long-term native and helper fallback 
         (step) => (step["with"] as Mapping | undefined)?.["path"] === "crates/collab-engine/target",
       ),
     ).toBe(false);
-    for (const path of ["crates/collab-engine/target", "target\ncrates/collab-engine/target\n"]) {
+    for (const path of [
+      "target",
+      "crates/collab-engine/target",
+      "target\ncrates/collab-engine/target\n",
+    ]) {
       for (const fallback of [false, true]) {
         for (const before of [true, false]) {
           const bad = clone(jobs);
-          const restore = clone(
-            stepWith(bad, name, (step) => step["id"] === "current_native_cache"),
-          );
-          restore["name"] = "Restore old helper";
-          restore["id"] = "old_helper";
-          restore["with"] = {
-            path,
-            key: "old-source",
-            ...(fallback ? { "restore-keys": "old-" } : {}),
+          const restore: Mapping = {
+            name: "Restore old helper",
+            id: "old_helper",
+            uses: "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            with: {
+              path,
+              key: "old-source",
+              ...(fallback ? { "restore-keys": "old-" } : {}),
+            },
           };
           const list = steps(bad, name);
           list.splice(

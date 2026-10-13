@@ -267,8 +267,8 @@ describe("registry boundaries beyond the mutation table", () => {
 
   test("a cache step whose with is not a mapping is reported, not skipped", () => {
     const collab = String(texts["collab-engine.yml"]).replace(
-      "# v4\n        with:\n          path: ~/.cargo/registry\n          key: ",
-      "# v4\n        with:\n        x-key: ",
+      "# v6.1.0\n        with:\n          path: ~/.cargo/registry\n          key: ",
+      "# v6.1.0\n        with:\n        x-key: ",
     );
     expect(errors({ "collab-engine.yml": collab })).toContain(
       "collab-engine.yml: native-collab-engine cache with must be a mapping",

@@ -40,7 +40,7 @@ jobs:
       select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
       postgres_matrix: ${{ steps.plan.outputs.postgres_matrix }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -68,7 +68,7 @@ jobs:
     # 810s including setup, saves and post steps inside the unchanged 19m.
     timeout-minutes: 19
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
       - name: Record runner uid, gid and groups once
         run: id
@@ -84,7 +84,7 @@ jobs:
       - name: restore.sh env-file parsing and app password argv checks
         run: bash scripts/test-restore-env.sh
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -118,7 +118,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -131,13 +131,13 @@ jobs:
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
         id: default_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/default
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-default-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore clippy build outputs
         id: clippy_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/clippy
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-clippy-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
@@ -174,13 +174,13 @@ jobs:
       - run: cargo test --locked --offline --manifest-path vendor/markdown/Cargo.toml --target-dir target/default/vendor-markdown
       - name: Save server build outputs after validation
         if: steps.default_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/default
           key: ${{ steps.default_cache.outputs.cache-primary-key }}
       - name: Save clippy build outputs after validation
         if: steps.clippy_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/clippy
           key: ${{ steps.clippy_cache.outputs.cache-primary-key }}
@@ -194,10 +194,10 @@ jobs:
     # keep the same 19m budget independently of clippy and default tests.
     timeout-minutes: 19
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -231,7 +231,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -244,17 +244,17 @@ jobs:
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore SQLite library build outputs
         id: db_lib_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/db-lib
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-lib-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
-      - name: Selected SQLite library controls (54 exact tests)
+      - name: Selected SQLite library controls (56 exact tests)
         run: |
           xtask/target/debug/xtask selected-library --target-dir target/db-lib
       - name: Save SQLite library build outputs after validation
         if: steps.db_lib_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/db-lib
           key: ${{ steps.db_lib_cache.outputs.cache-primary-key }}
@@ -267,10 +267,10 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -300,7 +300,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -312,7 +312,7 @@ jobs:
             --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-native-default-dev-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
@@ -320,7 +320,7 @@ jobs:
       - name: Measure native ARM64 Task scalar runtime
         run: xtask/target/debug/xtask task-scalar-qualification measure > "$RUNNER_TEMP/task-scalar-runtime.json"
       - name: Retain native ARM64 Task scalar runtime measurement
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task-scalar-host-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/task-scalar-runtime.json
@@ -343,10 +343,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -380,7 +380,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -393,22 +393,22 @@ jobs:
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Save verified SQLite prefix
         if: steps.sqlite_prefix_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: ${{ steps.sqlite_prefix_cache.outputs.cache-primary-key }}
       - name: Restore server build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/db-tests
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore schema default build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/schema-default
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-schema-default-dev-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore production helper build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/collab-engine/target
           key: v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-dev-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/collab-engine/**', 'crates/vendor/**', '.cargo/**') }}
@@ -481,7 +481,7 @@ jobs:
           cd "$RUNNER_TEMP/rust-binaries" || exit 1
           sha256sum postgres.tar.zst helper.tar.zst
       - name: Upload postgres finished executables
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries/postgres.tar.zst
@@ -489,7 +489,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Upload helper finished executables
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries/helper.tar.zst
@@ -643,7 +643,7 @@ jobs:
           --health-cmd "wget -q -O /dev/null http://127.0.0.1:7700/health || exit 1"
           --health-interval 2s --health-timeout 3s --health-retries 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: PostgreSQL service major matches matrix
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
@@ -686,7 +686,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -698,7 +698,7 @@ jobs:
             --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Download required postgres executables for this SHA and architecture
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-postgres-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries
@@ -767,11 +767,11 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s --health-timeout 2s --health-retries 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore Cargo downloads
         id: cache_collaboration_3
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -805,7 +805,7 @@ jobs:
             --identity-only --github-output "$GITHUB_OUTPUT"
       - name: Restore prepared SQLite prefix
         id: sqlite_prefix_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
           key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
@@ -818,12 +818,12 @@ jobs:
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
       - name: Restore server build outputs
         id: cache_collaboration_4
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           key: v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Download required helper executables for this SHA and architecture
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-helper-${{ runner.arch }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rust-binaries
@@ -848,7 +848,7 @@ jobs:
         run: bash scripts/run-rust-collaboration-ci-tests.sh
       - name: Save Cargo downloads
         if: github.ref == 'refs/heads/main' && steps.cache_collaboration_3.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -856,7 +856,7 @@ jobs:
           key: v1-cargo-collaboration-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Save server build outputs
         if: github.ref == 'refs/heads/main' && steps.cache_collaboration_4.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           key: v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-collaboration-db-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
@@ -868,7 +868,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version

@@ -325,6 +325,13 @@ fn masked(block: &str) -> bool {
 }
 
 const IDENTITY: &str = "${{ steps.sqlite.outputs.cache_identity }}";
+/// The former run-scoped cache key's arch/toolchain/SHA/attempt/SQLite parts.
+const NATIVE_IDENTITY: &str = "${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}";
+/// (consumer, producer) of the web preparation target artifacts.
+const NATIVE_HANDOFFS: [(&str, &str); 2] = [
+    ("collaboration-test-build", "collaboration-main-build"),
+    ("collaboration-build", "collaboration-test-build"),
+];
 const COLLAB_LANES: [&str; 5] = [
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -444,6 +451,42 @@ fn contract(root: &Path) -> Check {
                     find(body, "id: browser")?,
                     what,
                 )?;
+            } else if let Some((_, producer)) = NATIVE_HANDOFFS
+                .iter()
+                .find(|(consumer, _)| workflow == "web" && consumer == name)
+            {
+                // The phase target arrives as this run's exact producer
+                // artifact, admitted only for this job's own SQLite identity.
+                excludes(body, "path: target", what)?;
+                contains(
+                    body,
+                    &format!("artifact-ids: ${{{{ needs.{producer}.outputs.artifact_id }}}}\n"),
+                    what,
+                )?;
+                contains(
+                    body,
+                    &format!(
+                        "PRODUCER_IDENTITY: ${{{{ needs.{producer}.outputs.native_identity }}}}\n"
+                    ),
+                    what,
+                )?;
+                contains(
+                    body,
+                    &format!("CURRENT_IDENTITY: {NATIVE_IDENTITY}\n"),
+                    what,
+                )?;
+                let require = find(
+                    body,
+                    "      - name: Require exact current native preparation",
+                )?;
+                let download = find(body, "      - name: Download this run")?;
+                less(find(body, "id: sqlite")?, require, what)?;
+                less(require, download, what)?;
+                less(
+                    download,
+                    find(body, "      - name: Restore current native preparation")?,
+                    what,
+                )?;
             } else {
                 less(find(body, "id: sqlite")?, find(body, "path: target")?, what)?;
                 let after = &body[find(body, "path: target")? + "path: target".len()..];
@@ -496,42 +539,47 @@ fn contract(root: &Path) -> Check {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
             }
+            let phase = match (workflow, *name) {
+                ("web", "collaboration-main-build") => Some("main"),
+                ("web", "collaboration-test-build") => Some("tests"),
+                _ => None,
+            };
+            if let Some(phase) = phase {
+                // New run-scoped, unqualified preparation output; it advances
+                // the phase as an artifact bound to this job's SQLite identity.
+                contains(
+                    body,
+                    &format!("      native_identity: {NATIVE_IDENTITY}\n"),
+                    what,
+                )?;
+                let step_named = |line: &str| {
+                    steps
+                        .iter()
+                        .copied()
+                        .find(|b| has_line(text_of(*b), line))
+                        .ok_or_else(|| format!("{what}: missing {line:?}"))
+                };
+                let compile = step_named("      - name: Compile native preparation")?;
+                let save = step_named("      - name: Save current native preparation")?;
+                for block in [compile, save] {
+                    ensure(!masked(text_of(block)), || {
+                        format!("{what}: current preparation must be unmasked")
+                    })?;
+                }
+                less_equal(ready.1, compile.0, what)?;
+                less_equal(compile.1, save.0, what)?;
+                contains(text_of(save), "uses: actions/upload-artifact@", what)?;
+                contains(
+                    text_of(save),
+                    &format!("name: web-native-{phase}-${{{{ github.run_attempt }}}}\n"),
+                    what,
+                )?;
+            }
             for block in &steps {
                 let step = text_of(*block);
                 if step.lines().any(is_target_path_line) {
                     less_equal(ready.1, block.0, what)?;
                     if step.contains("actions/cache/save@") {
-                        let phase = match (workflow, *name) {
-                            ("web", "collaboration-main-build") => Some("main"),
-                            ("web", "collaboration-test-build") => Some("tests"),
-                            _ => None,
-                        };
-                        if let Some(phase) = phase.filter(|_| {
-                            has_line(step, "      - name: Save current native preparation")
-                        }) {
-                            // New run-scoped, unqualified preparation output;
-                            // it advances the phase instead of replacing a seed.
-                            contains(step, &format!("key: v2-web-selected-{phase}-ubuntu-26.04-${{{{ runner.arch }}}}-1.98.1-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-${{{{ github.sha }}}}-{IDENTITY}"), what)?;
-                            ensure(!masked(step), || {
-                                format!("{what}: current preparation save must be unmasked")
-                            })?;
-                            let compile = *steps
-                                .iter()
-                                .find(|b| {
-                                    has_line(
-                                        text_of(**b),
-                                        "      - name: Compile native preparation",
-                                    )
-                                })
-                                .ok_or("missing native preparation compilation")?;
-                            ensure(!masked(text_of(compile)), || {
-                                format!("{what}: current preparation compile must be unmasked")
-                            })?;
-                            less_equal(compile.1, block.0, what)?;
-                            contains(step, "          path: target\n", what)?;
-                            excludes(step, "restore-keys:", what)?;
-                            continue;
-                        }
                         let primary = step.split("key: ${{ steps.").nth(1).and_then(|rest| {
                             rest.split_once(".outputs.cache-primary-key }}")
                                 .map(|(id, _)| id)
@@ -850,11 +898,28 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     for (name, old, new) in [
         ("collaboration-main-build", "id: sqlite", "id: missing-sqlite"),
         ("collaboration-test-build", "id: sqlite", "id: missing-sqlite"),
-        ("collaboration-main-build", "v2-web-selected-main-", "v2-web-selected-foreign-"),
-        ("collaboration-test-build", "v2-web-selected-tests-", "v2-web-selected-foreign-"),
+        ("collaboration-main-build", "name: web-native-main-", "name: web-native-foreign-"),
+        ("collaboration-test-build", "name: web-native-tests-", "name: web-native-foreign-"),
+        ("collaboration-main-build", "      native_identity: ${{ runner.arch }}", "      native_identity: ${{ runner.os }}"),
         ("collaboration-main-build", "name: Save current native preparation\n", "name: Save current native preparation\n        if: false\n"),
         ("collaboration-test-build", "name: Compile native preparation\n", "name: Compile native preparation\n        continue-on-error: true\n"),
+        ("collaboration-test-build", "CURRENT_IDENTITY: ${{ runner.arch }}", "CURRENT_IDENTITY: ${{ runner.os }}"),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
+        (
+            "collaboration-build",
+            "artifact-ids: ${{ needs.collaboration-test-build.outputs.artifact_id }}",
+            "artifact-ids: foreign",
+        ),
+        (
+            "collaboration-build",
+            "PRODUCER_IDENTITY: ${{ needs.collaboration-test-build.outputs.native_identity }}",
+            "PRODUCER_IDENTITY: ${{ needs.collaboration-main-build.outputs.native_identity }}",
+        ),
+        (
+            "collaboration-build",
+            "      - name: Download this run",
+            "      - uses: actions/cache/restore@fixture\n        with:\n          path: target\n          key: fixture\n      - name: Download this run",
+        ),
         ("collaboration-install-on", "id: sqlite", "id: missing-sqlite"),
         (
             "collaboration-install-on",

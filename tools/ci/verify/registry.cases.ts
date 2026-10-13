@@ -39,7 +39,8 @@ const WEB_GATE =
 const PLAN_LINE = "          bun tools/ci/plan.ts \\\n";
 const PIP =
   "          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt\n";
-const CHECKOUT = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n";
+const CHECKOUT =
+  "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n";
 const SETUP_BUN_PIN = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
 const OTHER_PIN = "oven-sh/setup-bun@" + "1".repeat(40);
 const SETUP_BUN =
@@ -1036,7 +1037,7 @@ function caseList(): MutationCase[] {
     "unpinned-uses",
     "documents.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "uses: actions/checkout@v4",
     ),
     "must pin a full commit SHA",
@@ -1045,8 +1046,8 @@ function caseList(): MutationCase[] {
     "short-sha-uses",
     "release.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-      "uses: actions/checkout@11d5960",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "uses: actions/checkout@3d3c42e",
     ),
     "must pin a full commit SHA",
   );
@@ -1054,7 +1055,7 @@ function caseList(): MutationCase[] {
     "local-uses",
     "install.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "uses: ./.github/actions/checkout",
     ),
     "must pin a full commit SHA",

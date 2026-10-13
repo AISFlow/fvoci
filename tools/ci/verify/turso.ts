@@ -30,7 +30,7 @@ export const TURSO_COMMANDS = {
 } as const;
 
 const CHECKOUT = {
-  uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+  uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   with: { ref: "${{ github.sha }}", "persist-credentials": false },
 };
 // Every job runs a Bun tool, so each one sets up the same pinned Bun.
