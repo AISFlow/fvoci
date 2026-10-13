@@ -1,12 +1,14 @@
 //! Streaming XML helpers over `quick-xml`. Only the five predefined entities
 //! and character references are resolved; DTD entities are never expanded, so
-//! entity-expansion bombs have nothing to expand.
+//! entity-expansion bombs have nothing to expand. The reader refuses input
+//! that is not UTF-8 as malformed.
 
 use std::borrow::Cow;
 
 use quick_xml::escape::resolve_predefined_entity;
+use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesRef, BytesStart, Event};
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 
 /// One event with namespace prefixes stripped from names.
 pub enum Xml<'a> {
@@ -17,7 +19,7 @@ pub enum Xml<'a> {
 }
 
 pub fn local(start: &BytesStart<'_>) -> Vec<u8> {
-    start.local_name().as_ref().to_vec()
+    start.local_name().as_ref().as_bytes().to_vec()
 }
 
 /// Attribute by local name (prefix ignored).
@@ -25,8 +27,8 @@ pub fn attr(start: &BytesStart<'_>, name: &[u8]) -> Option<String> {
     start
         .attributes()
         .flatten()
-        .find(|a| a.key.local_name().as_ref() == name)
-        .and_then(|a| a.unescape_value().ok().map(|v| v.into_owned()))
+        .find(|a| a.key.local_name().as_ref().as_bytes() == name)
+        .and_then(|a| value(&a))
 }
 
 /// Attribute by full qualified name (for `r:id` style keys).
@@ -34,16 +36,23 @@ pub fn attr_qualified(start: &BytesStart<'_>, name: &[u8]) -> Option<String> {
     start
         .attributes()
         .flatten()
-        .find(|a| a.key.as_ref() == name)
-        .and_then(|a| a.unescape_value().ok().map(|v| v.into_owned()))
+        .find(|a| a.key.as_ref().as_bytes() == name)
+        .and_then(|a| value(&a))
+}
+
+/// XML 1.0 attribute-value normalization: references resolved, a literal tab
+/// or line break reads as a space.
+fn value(a: &Attribute<'_>) -> Option<String> {
+    a.normalized_value(XmlVersion::Implicit1_0)
+        .ok()
+        .map(Cow::into_owned)
 }
 
 fn resolve_ref(r: &BytesRef<'_>) -> Option<String> {
     if let Ok(Some(c)) = r.resolve_char_ref() {
         return Some(c.to_string());
     }
-    let name = r.decode().ok()?;
-    resolve_predefined_entity(&name).map(str::to_string)
+    resolve_predefined_entity(r).map(str::to_string)
 }
 
 /// Walks every event of `xml`, calling `visit`. Stops at the first error or
@@ -62,19 +71,9 @@ pub fn walk<E>(
         match event {
             Event::Start(start) => visit(Xml::Start(start))?,
             Event::Empty(start) => visit(Xml::Empty(start))?,
-            Event::End(end) => visit(Xml::End(end.local_name().as_ref().to_vec()))?,
-            Event::Text(text) => {
-                let decoded = text
-                    .decode()
-                    .map_err(|err| malformed(format!("xml text: {err}")))?;
-                visit(Xml::Text(decoded))?
-            }
-            Event::CData(data) => {
-                let decoded = data
-                    .decode()
-                    .map_err(|err| malformed(format!("xml cdata: {err}")))?;
-                visit(Xml::Text(decoded))?
-            }
+            Event::End(end) => visit(Xml::End(end.local_name().as_ref().as_bytes().to_vec()))?,
+            Event::Text(text) => visit(Xml::Text(text.into_inner()))?,
+            Event::CData(data) => visit(Xml::Text(data.into_inner()))?,
             Event::GeneralRef(r) => {
                 if let Some(text) = resolve_ref(&r) {
                     visit(Xml::Text(Cow::Owned(text)))?

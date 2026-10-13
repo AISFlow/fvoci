@@ -980,15 +980,14 @@ const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationshi
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const EMPTY_TREE: &str = r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#;
 
-fn pack(title: Option<&str>, slides: &[Slide]) -> docx_zip::result::ZipResult<Vec<u8>> {
-    use docx_zip::write::SimpleFileOptions;
-    let mut zip = docx_zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options =
-        SimpleFileOptions::default().compression_method(docx_zip::CompressionMethod::Deflated);
-    let part = |zip: &mut docx_zip::ZipWriter<Cursor<Vec<u8>>>,
+fn pack(title: Option<&str>, slides: &[Slide]) -> zip::result::ZipResult<Vec<u8>> {
+    use zip::write::SimpleFileOptions;
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let part = |zip: &mut zip::ZipWriter<Cursor<Vec<u8>>>,
                 name: &str,
                 body: &str|
-     -> docx_zip::result::ZipResult<()> {
+     -> zip::result::ZipResult<()> {
         zip.start_file(name, options)?;
         zip.write_all(XML_HEAD.as_bytes())?;
         zip.write_all(body.as_bytes())?;
@@ -1178,7 +1177,7 @@ mod tests {
                 let mut f = zip.by_index(i).unwrap();
                 let mut s = String::new();
                 std::io::Read::read_to_string(&mut f, &mut s).unwrap();
-                (f.name().to_string(), s)
+                (f.name().unwrap().into_owned(), s)
             })
             .collect()
     }

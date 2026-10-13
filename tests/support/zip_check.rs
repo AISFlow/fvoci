@@ -50,7 +50,10 @@ pub fn verify_zip(bytes: &[u8]) -> Result<usize, String> {
         let mut file = archive
             .by_index(i)
             .map_err(|e| format!("entry #{i}: {e}"))?;
-        let name = file.name().to_owned();
+        let name = file
+            .name()
+            .map_err(|e| format!("entry #{i} name: {e}"))?
+            .into_owned();
         // On-disk central name: `name_raw()` is replaced by a 0x7075 extra.
         let (central_flags, central) = header_name(
             bytes,

@@ -85,7 +85,7 @@ url = "2"
 html5gum = { version = "=0.8.4", default-features = false }
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
-infer = "0.19"
+infer = "0.22"
 # Image previews (source magick-wasm preview set: PNG/APNG, JPEG, GIF, TIFF,
 # BMP, WebP), decoded only in the rlimited `--internal-image-preview` child.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }
@@ -93,9 +93,11 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 rusty-s3 = "0.8"
 # Same features rusty-s3 already enables: only used to call its signing
-# primitive (ListMultipartUploads) and to parse/serialize S3 XML.
+# primitive (ListMultipartUploads).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-quick-xml = { version = "0.38", features = ["serialize"] }
+# S3 XML bodies (serde) and the office child's OOXML/ODF reader. The
+# rhwp helper links the same 0.42; rusty-s3 0.8 still links 0.38.
+quick-xml = { version = "0.42", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
 # `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
 pdf-extract = "0.12"
@@ -106,9 +108,10 @@ markdown = { version = "=1.0.0", default-features = false }
 # rlimited `--internal-markdown` child (`tiptap-to-docx`). MIT. No default
 # features: `image` stays off while exports carry attachment names only.
 docx-rs = { version = "=0.4.22", default-features = false }
-# docx-rs stores its parts uncompressed; the writer re-deflates the package
-# with the zip version docx-rs already links (no further crates). MIT.
-docx-zip = { package = "zip", version = "=8.6.0", default-features = false, features = ["deflate"] }
+# Untrusted native archives are read with it, docx-rs's stored package is
+# re-deflated with it, and PPTX is written with it (tests read with it too).
+# docx-rs 0.4.22 still links its own zip 8.6. MIT.
+zip = { version = "=9.0.2", default-features = false, features = ["deflate"] }
 # Tiptap -> PDF (source @react-pdf/renderer), written only in the rlimited
 # `--internal-markdown` child (`tiptap-to-pdf`): krilla writes the PDF and
 # subsets the embedded Noto fonts, rustybuzz shapes each run, and
@@ -130,8 +133,7 @@ prometheus-client = { version = "=0.25.1", default-features = false }
 tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
-mailparse = "0.16"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+mailparse = "0.18"
 # Loopback TLS server for the vendored libsql connector tests: the rustls
 # version and features vendor/libsql-0.9.30 already builds (no aws-lc-rs).
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }

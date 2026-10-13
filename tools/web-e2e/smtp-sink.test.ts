@@ -310,13 +310,14 @@ describe("decodedText", () => {
   // Inputs the hand-written decoder got wrong (PR #400 review B2).
   test("plain body selection and charset parameters", async () => {
     const link = "https://example.invalid/reset-password?token=abc_-1";
+    // The line break before a boundary belongs to the delimiter (RFC 2046 5.1.1).
     expect(
       await decodedText(
         "Subject: multipart\nContent-Type: multipart/alternative; boundary=x\n\n--x\n" +
           `Content-Type: text/plain; charset=utf-8\n\n${link}\n--x\n` +
           "Content-Type: text/html; charset=utf-8\n\n<p>html</p>\n--x--",
       ),
-    ).toBe(`Subject: multipart\n\n${link}\n`);
+    ).toBe(`Subject: multipart\n\n${link}`);
     expect(
       await decodedText(
         "Subject: attachment\nContent-Type: text/plain; charset=utf-8\n" +
