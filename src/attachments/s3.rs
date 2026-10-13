@@ -396,7 +396,7 @@ impl S3Storage {
 
     /// Every still-open upload that could yet publish an object at `key`.
     ///
-    /// `rusty-s3` 0.8 has no `ListMultipartUploads` action, so this signs the
+    /// `rusty-s3` 0.10 has no `ListMultipartUploads` action, so this signs the
     /// bucket-level request with its public `signing::sign` primitive.
     pub async fn list_multipart_uploads(
         &self,
@@ -1083,6 +1083,121 @@ mod tests {
             S3Storage::new(vhost).unwrap().presign_origin().as_deref(),
             Some("https://fvoci.s3.example.test")
         );
+    }
+
+    /// Signatures, expiry and path encoding pinned from rusty-s3 0.8.1 at a
+    /// fixed time: a signer change shows up here, not as a 403 from S3.
+    #[test]
+    fn presigned_urls_match_the_pinned_signatures() {
+        let at = jiff::Timestamp::from_second(1_790_000_000).unwrap();
+        let mut with_public = settings("http://minio.internal:9000", true);
+        with_public.public_endpoint = Some("https://files.example.test/s3".into());
+        let storage = S3Storage::new(with_public).unwrap();
+        let public = storage.public_bucket.as_ref().unwrap();
+        let credentials = Some(&storage.credentials);
+
+        let mut part = public.upload_part(credentials, KEY, 3, "up-1");
+        part.headers_mut().insert("content-length", "5242880");
+        let part = part.sign_with_time(Duration::from_secs(900), &at);
+
+        let mut download = public.get_object(credentials, KEY);
+        let query = download.query_mut();
+        query.insert(
+            "response-content-disposition",
+            "attachment; filename=\"a b.txt\"",
+        );
+        query.insert("response-content-type", "application/octet-stream");
+        query.insert("response-cache-control", "private, no-store");
+        let download = download.sign_with_time(Duration::from_secs(60), &at);
+
+        let vhost = S3Storage::new(settings("https://s3.example.test/s3", false)).unwrap();
+        let head = vhost
+            .bucket
+            .head_object(Some(&vhost.credentials), KEY)
+            .sign_with_time(SIGN_TTL, &at);
+
+        let mut query = rusty_s3::Map::new();
+        query.insert("uploads", "");
+        query.insert("prefix", KEY);
+        query.insert("max-uploads", LIST_PAGE_SIZE.to_string());
+        let uploads = rusty_s3::signing::sign(
+            &at,
+            rusty_s3::Method::Get,
+            storage.bucket.base_url().clone(),
+            storage.credentials.key(),
+            storage.credentials.secret(),
+            storage.credentials.token(),
+            storage.bucket.region(),
+            SIGN_TTL.as_secs(),
+            query.iter(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(
+            part.as_str(),
+            "https://files.example.test/s3/fvoci/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=AKIDSECRETID%2F20260921%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Date=20260921T141320Z&X-Amz-Expires=900\
+             &X-Amz-SignedHeaders=content-length%3Bhost&partNumber=3&uploadId=up-1\
+             &X-Amz-Signature=d05cf5e509d5b4dbb0e7c5a1eee6695c2aeb748a993fed54f8d1b8619545e3f9"
+        );
+        assert_eq!(
+            head.as_str(),
+            "https://fvoci.s3.example.test/s3/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=AKIDSECRETID%2F20260921%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Date=20260921T141320Z&X-Amz-Expires=300&X-Amz-SignedHeaders=host\
+             &X-Amz-Signature=853a6ed9ceefbde27d6a21f296d7fbed01006fdc017d2e71d6991907a5afbebb"
+        );
+        assert_eq!(
+            uploads.as_str(),
+            "http://minio.internal:9000/fvoci/\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=AKIDSECRETID%2F20260921%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Date=20260921T141320Z&X-Amz-Expires=300&X-Amz-SignedHeaders=host\
+             &max-uploads=1000&prefix=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&uploads=\
+             &X-Amz-Signature=a346b3e5e2f5b145d1ec9db15015d41427de0413a06bcf7313fef7778732a8c0"
+        );
+        // The overrides hold spaces, whose query spelling is not what S3
+        // verifies: pin the path and the decoded parameters it signs.
+        assert_eq!(
+            download.path(),
+            "/s3/fvoci/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+        let mut pairs: Vec<(String, String)> = download.query_pairs().into_owned().collect();
+        pairs.sort();
+        let expected = [
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+            (
+                "X-Amz-Credential",
+                "AKIDSECRETID/20260921/us-east-1/s3/aws4_request",
+            ),
+            ("X-Amz-Date", "20260921T141320Z"),
+            ("X-Amz-Expires", "60"),
+            (
+                "X-Amz-Signature",
+                "fd7256a12cce5a11a417cbd83722006022a3a2c97e66dcb15b5d51d664fd09ba",
+            ),
+            ("X-Amz-SignedHeaders", "host"),
+            ("response-cache-control", "private, no-store"),
+            (
+                "response-content-disposition",
+                "attachment; filename=\"a b.txt\"",
+            ),
+            ("response-content-type", "application/octet-stream"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(pairs, expected);
+        // Since rusty-s3 0.10 the query is spelled as it was signed (RFC 3986,
+        // a space is `%20`); 0.8 form-encoded it, a space as `+`.
+        assert!(
+            download.as_str().contains(
+                "&response-content-disposition=attachment%3B%20filename%3D%22a%20b.txt%22&"
+            ),
+            "{download}"
+        );
+        assert!(!download.as_str().contains('+'), "{download}");
     }
 
     #[test]

@@ -91,9 +91,13 @@ infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
-rusty-s3 = "0.8"
-# Same features rusty-s3 already enables: only used to call its signing
-# primitive (ListMultipartUploads) and to parse/serialize S3 XML.
+# SigV4 signing (RustCrypto hmac/sha2) and the multipart XML actions; `full`
+# adds only DeleteObjects, GetBucketPolicy and EC2 credentials, unused here.
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
+# jiff: the features rusty-s3 enables, only to call its signing primitive
+# (ListMultipartUploads). quick-xml reads and writes the S3 XML rusty-s3 has
+# no action for (ListMultipartUploads, the CompleteMultipartUpload body and
+# error documents); rusty-s3 itself parses with instant-xml since 0.10.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 quick-xml = { version = "0.38", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
