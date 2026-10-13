@@ -4,8 +4,9 @@ mod events;
 mod hub;
 
 pub(crate) use events::{
-    initial_access_cursor_backend, poll_access_events_backend, workspace_stream_access_backend,
-    BackendAccessCursor,
+    initial_access_cursor_backend, poll_access_events_backend, poll_task_events_backend,
+    poll_workspace_task_events_backend, project_stream_access_backend,
+    workspace_stream_access_backend, BackendAccessCursor,
 };
 pub use events::{
     initial_cursor, poll_access_events, poll_task_events, poll_workspace_task_events,

@@ -2884,3 +2884,992 @@ async fn guest_collection_list_reads_the_acl_once() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+mod sqlite_port_data {
+    use super::*;
+    use fvoci_server::auth::{password::Keyring, service::SetupInstanceInput, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use std::sync::Arc;
+
+    async fn fixture() -> (
+        std::path::PathBuf,
+        sqlx::SqlitePool,
+        axum::Router,
+        String,
+        Uuid,
+        Uuid,
+    ) {
+        let root = std::env::temp_dir().join(format!("fvoci-data-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.as_path().join("data.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (user, ws, token) = auth
+            .setup_instance(
+                "Data-Oracle-2026!".into(),
+                SetupInstanceInput {
+                    email: "data@example.invalid".into(),
+                    given_name: "Data".into(),
+                    family_name: None,
+                    workspace_slug: "data-oracle".into(),
+                    workspace_name: "Data oracle".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let state = AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::Off,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.as_path().join("storage"))
+                .into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        };
+        (
+            root,
+            sqlite,
+            fvoci_server::http::router(state, None),
+            token,
+            user,
+            ws,
+        )
+    }
+
+    #[tokio::test]
+    async fn sqlite_collection_http_precision_new_connection_and_denials() {
+        let (root, sqlite, app, cookie, user, ws) = fixture().await;
+        let base = format!("/api/v1/workspaces/{ws}/collections");
+        let (status, body) = call(&app, "GET", &base, None, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "SQLite collection list: {body}");
+        let (status, collection) = call(
+            &app,
+            "POST",
+            &base,
+            Some(json!({"kind":"document","name":"Precision","projectId":null})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{collection}");
+        let id = collection["id"].as_str().unwrap();
+        let doc = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Oracle',?3,'a',1,'draft',2,?4,'{\"type\":\"doc\",\"content\":[]}')",
+        )
+        .bind(doc.as_bytes().as_slice())
+        .bind(ws.as_bytes().as_slice())
+        .bind(doc.simple().to_string())
+        .bind(user.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+        let (status, mut item) = call(
+            &app,
+            "POST",
+            &format!("{base}/{id}/items"),
+            Some(json!({"documentId":doc})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        for (kind, value, expected) in [
+            (
+                "number",
+                json!({"number":9007199254740991.0}),
+                json!({"number":9007199254740991i64}),
+            ),
+            (
+                "number",
+                json!({"number":0.000000000000000123456789}),
+                json!({"number":0.000000000000000123456789}),
+            ),
+            (
+                "date",
+                json!({"date":"2024-02-29"}),
+                json!({"date":"2024-02-29"}),
+            ),
+            (
+                "datetime",
+                json!({"datetime":"2026-11-01T05:30:00.123Z"}),
+                json!({"datetime":"2026-11-01T05:30:00.123Z"}),
+            ),
+            (
+                "datetime",
+                json!({"datetime":"2026-11-01T06:30:00.456Z"}),
+                json!({"datetime":"2026-11-01T06:30:00.456Z"}),
+            ),
+            (
+                "checkbox",
+                json!({"checkbox":false}),
+                json!({"checkbox":false}),
+            ),
+        ] {
+            let field =
+                create_field(&app, &cookie, ws, id, json!({"name":"Oracle", "type":kind})).await;
+            let (status, saved) = put_value(&app, &cookie, ws, id, &item, &field, value).await;
+            assert_eq!(status, StatusCode::OK, "{kind}: {saved}");
+            item["version"] = saved["version"].clone();
+            let fresh = pool::connect_sqlite_app(&root.as_path().join("data.sqlite"), 1)
+                .await
+                .unwrap();
+            let stored: (Option<String>, Option<String>, Option<i64>, Option<i64>) = sqlx::query_as("SELECT value_number,value_date,value_ts,value_bool FROM collection_values WHERE item_id=?1 AND field_id=?2")
+                .bind(Uuid::parse_str(item["id"].as_str().unwrap()).unwrap().as_bytes().as_slice())
+                .bind(Uuid::parse_str(field["id"].as_str().unwrap()).unwrap().as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+            if kind == "number" {
+                assert_eq!(
+                    stored.0.as_deref().unwrap(),
+                    if expected["number"].as_f64().unwrap() > 1.0 {
+                        "9007199254740991"
+                    } else {
+                        "0.000000000000000123456789"
+                    }
+                );
+            }
+            let (status, read) = call(
+                &app,
+                "GET",
+                &format!("/api/v1/workspaces/{ws}/documents/{doc}/collection-item"),
+                None,
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert_eq!(read["values"][field["id"].as_str().unwrap()], expected);
+            let credential: Vec<u8> = sqlx::query_scalar(
+                "SELECT id FROM sessions WHERE user_id=?1 AND revoked_at IS NULL",
+            )
+            .bind(user.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+            let fresh_read = fvoci_server::db::collections::item_for_target_backend(
+                &Backend::Sqlite(fresh.clone()),
+                ws,
+                &fvoci_server::db::collections::Actor {
+                    user_id: user,
+                    credential_id: Uuid::from_slice(&credential).unwrap(),
+                    client_ip: None,
+                },
+                fvoci_server::collections::AttachTarget::Document(doc),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                fresh_read
+                    .values
+                    .iter()
+                    .find(|(id, _)| id.to_string() == field["id"].as_str().unwrap())
+                    .unwrap()
+                    .1,
+                expected
+            );
+            fresh.close().await;
+            let (status, stale) = put_value(
+                &app,
+                &cookie,
+                ws,
+                id,
+                &json!({"id":item["id"],"version":1}),
+                &field,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        }
+        // Exact independent storage and query oracles, including both DST folds.
+        let points = create_field(
+            &app,
+            &cookie,
+            ws,
+            id,
+            json!({"name":"Points","type":"number"}),
+        )
+        .await;
+        let when = create_field(
+            &app,
+            &cookie,
+            ws,
+            id,
+            json!({"name":"When","type":"datetime"}),
+        )
+        .await;
+        let mut ids = Vec::new();
+        for (index, (number, instant, micros)) in [
+            (
+                -0.000000000000000123456789,
+                "2026-11-01T05:30:00.123456Z",
+                1793511000123456i64,
+            ),
+            (
+                9007199254740991.0,
+                "2026-11-01T06:30:00.654321Z",
+                1793514600654321i64,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let doc = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Query oracle',?3,'b',?4,'draft',2,?5,'{}')").bind(doc.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(index as i32+2).bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+            let (status, mut row) = call(
+                &app,
+                "POST",
+                &format!("{base}/{id}/items"),
+                Some(json!({"documentId":doc})),
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{row}");
+            let (status, saved) = put_value(
+                &app,
+                &cookie,
+                ws,
+                id,
+                &row,
+                &points,
+                json!({"number":number}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            row["version"] = saved["version"].clone();
+            let (status, saved) = put_value(
+                &app,
+                &cookie,
+                ws,
+                id,
+                &row,
+                &when,
+                json!({"datetime":instant}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT value_ts FROM collection_values WHERE item_id=?1 AND field_id=?2",
+            )
+            .bind(
+                Uuid::parse_str(row["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .bind(
+                Uuid::parse_str(when["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+            assert_eq!(stored, micros);
+            ids.push(row["id"].clone());
+        }
+        let(status,page)=query(&app,&cookie,ws,id,json!({"config":{"query":{"sort":[{"field":points["id"],"direction":"asc"}]}},"limit":1})).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["items"][0]["id"], ids[0]);
+        let(status,next)=query(&app,&cookie,ws,id,json!({"config":{"query":{"sort":[{"field":points["id"],"direction":"asc"}]}},"limit":1,"cursor":page["nextCursor"]})).await;
+        assert_eq!(status, StatusCode::OK, "{next}");
+        assert_eq!(next["items"][0]["id"], ids[1]);
+        let(status,calendar)=query(&app,&cookie,ws,id,json!({"config":{"dateBy":when["id"]},"window":{"from":"2026-11-01","to":"2026-11-02","timeZone":"America/New_York"}})).await;
+        assert_eq!(status, StatusCode::OK, "{calendar}");
+        assert_eq!(calendar["days"][0]["count"], 2, "{calendar}");
+        let (status, initial) =
+            put_value(&app, &cookie, ws, id, &item, &points, json!({"number":1.5})).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        item["version"] = initial["version"].clone();
+        let (status, cleared) = put_value(&app, &cookie, ws, id, &item, &points, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        item["version"] = cleared["version"].clone();
+        let cleared_client = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM collection_values WHERE item_id=?1 AND field_id=?2"
+            )
+            .bind(
+                Uuid::parse_str(item["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice()
+            )
+            .bind(
+                Uuid::parse_str(points["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice()
+            )
+            .fetch_one(&cleared_client)
+            .await
+            .unwrap(),
+            0
+        );
+        cleared_client.close().await;
+        let current: i32 = sqlx::query_scalar("SELECT version FROM collection_items WHERE id=?1")
+            .bind(
+                Uuid::parse_str(item["id"].as_str().unwrap())
+                    .unwrap()
+                    .as_bytes()
+                    .as_slice(),
+            )
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        item["version"] = json!(current);
+        let left = put_value(
+            &app,
+            &cookie,
+            ws,
+            id,
+            &item,
+            &points,
+            json!({"number":1.25}),
+        );
+        let right = put_value(&app, &cookie, ws, id, &item, &points, json!({"number":2.5}));
+        let (a, b) = tokio::join!(left, right);
+        assert!(
+            (a.0 == StatusCode::OK && b.0 == StatusCode::CONFLICT)
+                || (b.0 == StatusCode::OK && a.0 == StatusCode::CONFLICT),
+            "{a:?} {b:?}"
+        );
+        item["version"] = if a.0 == StatusCode::OK {
+            a.1["version"].clone()
+        } else {
+            b.1["version"].clone()
+        };
+        let field_path = format!("{base}/{id}/fields/{}", points["id"].as_str().unwrap());
+        let (status, patched) = call(
+            &app,
+            "PATCH",
+            &field_path,
+            Some(json!({"name":"Renamed","expectedVersion":1})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(patched["version"], 2);
+        let (status, stale) = call(
+            &app,
+            "PATCH",
+            &field_path,
+            Some(json!({"name":"Stale","expectedVersion":1})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        let views = format!("{base}/{id}/views");
+        let(status,view)=call(&app,"POST",&views,Some(json!({"name":"Calendar","type":"calendar","visibility":"shared","config":{"dateBy":when["id"]}})),&cookie).await;
+        assert_eq!(status, StatusCode::CREATED, "{view}");
+        let view_path = format!("{views}/{}", view["id"].as_str().unwrap());
+        let(status,patched)=call(&app,"PATCH",&view_path,Some(json!({"name":"Calendar saved","type":"calendar","visibility":"shared","config":{"dateBy":when["id"]},"expectedVersion":1})),&cookie).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        let (status, listed) = call(&app, "GET", &views, None, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["items"][0]["name"], "Calendar saved");
+        let (status, deleted) = call(&app, "DELETE", &view_path, None, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        let before_fields: i64 = sqlx::query_scalar("SELECT count(*) FROM collection_fields")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_data_audit BEFORE INSERT ON audit_log WHEN NEW.verb='collection_field.created' BEGIN SELECT RAISE(ABORT,'test audit refusal'); END").execute(&sqlite).await.unwrap();
+        let (status, failed) = call(
+            &app,
+            "POST",
+            &format!("{base}/{id}/fields"),
+            Some(json!({"name":"Rollback","type":"text"})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM collection_fields")
+                .fetch_one(&sqlite)
+                .await
+                .unwrap(),
+            before_fields
+        );
+        sqlx::query("DROP TRIGGER reject_data_audit")
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        let project = create_project(app.clone(), &cookie, ws, "PORT", "workspace").await;
+        let project_id = project["id"].as_str().unwrap();
+        let task_collection = project_collection(&app, &cookie, ws, project_id).await;
+        let task_collection_id = task_collection["id"].as_str().unwrap();
+        let task = create_task(
+            &app,
+            &cookie,
+            ws,
+            project_id,
+            json!({"title":"Collection task"}),
+        )
+        .await;
+        let task_item = item_of_task(&app, &cookie, ws, &task).await;
+        assert!(task_item["id"].is_string());
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let stored:(Vec<u8>,Vec<u8>,i32)=sqlx::query_as("SELECT id,collection_id,version FROM collection_items WHERE workspace_id=?1 AND task_id=?2").bind(ws.as_bytes().as_slice()).bind(Uuid::parse_str(&task).unwrap().as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        assert_eq!(
+            Uuid::from_slice(&stored.0).unwrap().to_string(),
+            task_item["id"].as_str().unwrap()
+        );
+        assert_eq!(
+            Uuid::from_slice(&stored.1).unwrap().to_string(),
+            task_collection_id
+        );
+        assert_eq!(stored.2, 1);
+        let before:(i64,i64,i64,i32)=sqlx::query_as("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),next_number FROM projects WHERE id=?1").bind(Uuid::parse_str(project_id).unwrap().as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_task_item BEFORE INSERT ON collection_items WHEN NEW.task_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'test materialization refusal'); END").execute(&fresh).await.unwrap();
+        let (status, failed) = call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/projects/{project_id}/tasks"),
+            Some(json!({"title":"Must rollback with collection item"})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+        assert_eq!(sqlx::query_as::<_,(i64,i64,i64,i32)>("SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM events),next_number FROM projects WHERE id=?1").bind(Uuid::parse_str(project_id).unwrap().as_bytes().as_slice()).fetch_one(&fresh).await.unwrap(),before);
+        sqlx::query("DROP TRIGGER reject_task_item")
+            .execute(&fresh)
+            .await
+            .unwrap();
+        fresh.close().await;
+
+        let (status, tasks) = query(
+            &app,
+            &cookie,
+            ws,
+            task_collection_id,
+            json!({"config":{"groupBy":"status"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{tasks}");
+        assert_eq!(tasks["items"][0]["taskId"], task);
+        let select = create_field(
+            &app,
+            &cookie,
+            ws,
+            id,
+            json!({"name":"Stage","type":"select","options":["Open","Closed"]}),
+        )
+        .await;
+        let (status, choice) = put_value(
+            &app,
+            &cookie,
+            ws,
+            id,
+            &item,
+            &select,
+            json!({"options":[select["options"][0]["id"]]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{choice}");
+        item["version"] = choice["version"].clone();
+        let (status, grouped) = query(
+            &app,
+            &cookie,
+            ws,
+            id,
+            json!({"config":{"groupBy":select["id"]}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{grouped}");
+        assert_eq!(grouped["groups"][0]["count"], 1);
+        let guest = Uuid::now_v7();
+        let session = Uuid::now_v7();
+        let guest_token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'guest-data@example.invalid','Guest')").bind(guest.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'guest')")
+            .bind(ws.as_bytes().as_slice())
+            .bind(guest.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(session.as_bytes().as_slice()).bind(guest.as_bytes().as_slice()).bind(&guest_token.hash).execute(&sqlite).await.unwrap();
+        let counts: (i64,i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM collections),(SELECT count(*) FROM collection_fields),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM audit_log)").fetch_one(&sqlite).await.unwrap();
+        for (method, path, body) in [
+            (
+                "POST",
+                base.clone(),
+                Some(json!({"kind":"document","name":"Refused","projectId":null})),
+            ),
+            ("GET", format!("{base}/{id}/fields"), None),
+            (
+                "POST",
+                format!("{base}/{id}/fields"),
+                Some(json!({"name":"Refused","type":"text"})),
+            ),
+            (
+                "PATCH",
+                field_path.clone(),
+                Some(json!({"name":"Refused","expectedVersion":2})),
+            ),
+            (
+                "POST",
+                format!("{base}/{id}/items"),
+                Some(json!({"documentId":doc})),
+            ),
+            (
+                "PUT",
+                format!("{base}/{id}/items/{}/values", item["id"].as_str().unwrap()),
+                Some(
+                    json!({"fieldId":points["id"],"expectedVersion":item["version"],"expectedFieldVersion":2,"value":null}),
+                ),
+            ),
+            (
+                "POST",
+                format!("{base}/{id}/query"),
+                Some(json!({"config":{}})),
+            ),
+            ("GET", views.clone(), None),
+            (
+                "POST",
+                views.clone(),
+                Some(json!({"name":"Refused","type":"table","visibility":"shared","config":{}})),
+            ),
+            ("DELETE", view_path.clone(), None),
+            (
+                "GET",
+                format!("/api/v1/workspaces/{ws}/documents/{doc}/collection-item"),
+                None,
+            ),
+        ] {
+            let (status, body) = call(&app, method, &path, body, &guest_token.token).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+        }
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        assert_eq!(sqlx::query_as::<_,(i64,i64,i64,i64)>("SELECT (SELECT count(*) FROM collections),(SELECT count(*) FROM collection_fields),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM audit_log)").fetch_one(&fresh).await.unwrap(),counts);
+        fresh.close().await;
+        let (status, pat) = call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-tokens"),
+            Some(json!({"name":"Collection read","scopes":["documents.read"]})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "API token create failed");
+        let mut request = Request::builder()
+            .uri(format!("{base}/{id}/fields"))
+            .header(
+                "authorization",
+                format!("Bearer {}", pat["token"].as_str().unwrap()),
+            )
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(project_harness::test_peer()));
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        let (status, invalid) = call(
+            &app,
+            "POST",
+            &base,
+            Some(json!({"kind":"document","name":"bad\u{0}name","projectId":null})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+        let (status, _) = call(
+            &app,
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/collections/{id}/fields",
+                Uuid::now_v7()
+            ),
+            None,
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn sqlite_collection_text_sort_uses_qualified_profile() {
+        let (root, db, app, cookie, user, ws) = fixture().await;
+        let base = format!("/api/v1/workspaces/{ws}/collections");
+        let mut cid = String::new();
+        for name in ["Zulu", "Äther"] {
+            let (status, created) = call(
+                &app,
+                "POST",
+                &base,
+                Some(json!({"name":name,"kind":"document","projectId":null})),
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            cid = created["id"].as_str().unwrap().into();
+        }
+        let (status, listed) = call(&app, "GET", &base, None, &cookie).await;
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(status, StatusCode::OK, "{listed}");
+            assert_eq!(listed["items"][0]["name"], "Äther");
+        }
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unqualified GNU locale must refuse: {listed}"
+        );
+        let field = create_field(
+            &app,
+            &cookie,
+            ws,
+            &cid,
+            json!({"name":"Locale","type":"text"}),
+        )
+        .await;
+        let mut expected = None;
+        for (index, text) in ["Zulu", "Äther"].into_iter().enumerate() {
+            let doc = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Locale',?3,'a',?5,'published',2,?4,'{}')").bind(doc.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(user.as_bytes().as_slice()).bind(index as i32+1).execute(&db).await.unwrap();
+            let (status, item) = call(
+                &app,
+                "POST",
+                &format!("{base}/{cid}/items"),
+                Some(json!({"documentId":doc})),
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{item}");
+            let (status, value) =
+                put_value(&app, &cookie, ws, &cid, &item, &field, json!({"text":text})).await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            if text == "Äther" {
+                expected = Some(item["id"].clone());
+            }
+        }
+        let (status, rows) = query(
+            &app,
+            &cookie,
+            ws,
+            &cid,
+            json!({"config":{"query":{"sort":[{"field":field["id"],"direction":"asc"}]}}}),
+        )
+        .await;
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(status, StatusCode::OK, "{rows}");
+            assert_eq!(rows["items"][0]["id"], expected.unwrap());
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = expected;
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unqualified custom text sort must refuse: {rows}"
+            );
+        }
+        drop(app);
+        db.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn sqlite_collection_datetime_before_pg_epoch_keeps_sqlx_binding() {
+        let (root, sqlite, app, cookie, user, ws) = fixture().await;
+        let mut docs = Vec::new();
+        for number in 1..=2 {
+            let doc = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Epoch',?3,'a',?4,'draft',2,?5,'{}')").bind(doc.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(number).bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+            docs.push(doc.to_string());
+        }
+        let (when, items, reads, days) =
+            pre_pg_epoch_datetimes(&app, &cookie, ws, [&docs[0], &docs[1]]).await;
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let mut stored = Vec::new();
+        for item in &items {
+            stored.push(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT value_ts FROM collection_values WHERE item_id=?1 AND field_id=?2",
+                )
+                .bind(
+                    Uuid::parse_str(item.as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .bind(
+                    Uuid::parse_str(when["id"].as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            );
+        }
+        fresh.close().await;
+        sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_pre_pg_epoch_datetimes(stored, reads, days);
+    }
+    // A view write addresses one row by ID; only the list orders names. LOCPATH
+    // refuses the GNU collation on every target, so a fresh child carries it.
+    #[tokio::test]
+    async fn sqlite_view_id_writes_skip_name_sort_in_unqualified_runtime() {
+        const CHILD: &str = "FVOCI_VIEW_LOCPATH_CHILD";
+        const SELECTOR: &str =
+            "sqlite_port_data::sqlite_view_id_writes_skip_name_sort_in_unqualified_runtime";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", SELECTOR, "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("LOCPATH", "/FVOCI-unqualified-test-locale")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
+        let (root, sqlite, app, cookie, _user, ws) = fixture().await;
+        let base = format!("/api/v1/workspaces/{ws}/collections");
+        let (status, collection) = call(
+            &app,
+            "POST",
+            &base,
+            Some(json!({"name":"Views","kind":"document","projectId":null})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{collection}");
+        let views = format!("{base}/{}/views", collection["id"].as_str().unwrap());
+        let mut paths = Vec::new();
+        for (name, visibility) in [("Mine", "private"), ("Team", "shared")] {
+            let (status, view) = call(
+                &app,
+                "POST",
+                &views,
+                Some(json!({"name":name,"type":"table","visibility":visibility,"config":{}})),
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{view}");
+            paths.push(format!("{views}/{}", view["id"].as_str().unwrap()));
+        }
+        let (status, listed) = call(&app, "GET", &views, None, &cookie).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{listed}");
+        // Another manager sees the shared view, never the owner's private one.
+        let admin = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'views-admin@example.invalid','Admin')").bind(admin.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'admin')")
+            .bind(ws.as_bytes().as_slice())
+            .bind(admin.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(admin.as_bytes().as_slice()).bind(&token.hash).execute(&sqlite).await.unwrap();
+        let mine = json!({"name":"Changed","type":"table","visibility":"private","config":{},"expectedVersion":1});
+        let (status, hidden) =
+            call(&app, "PATCH", &paths[0], Some(mine.clone()), &token.token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let (status, hidden) = call(&app, "DELETE", &paths[0], None, &token.token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let (status, patched) = call(&app, "PATCH", &paths[0], Some(mine.clone()), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(
+            (&patched["name"], &patched["version"]),
+            (&json!("Changed"), &json!(2))
+        );
+        let (status, stale) = call(&app, "PATCH", &paths[0], Some(mine), &cookie).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        let (status, deleted) = call(&app, "DELETE", &paths[1], None, &token.token).await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let rows: Vec<(String, String, i32)> =
+            sqlx::query_as("SELECT name,visibility,version FROM collection_views")
+                .fetch_all(&fresh)
+                .await
+                .unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE verb='collection_view.deleted' AND actor_user_id=?1").bind(admin.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        fresh.close().await;
+        sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(rows, vec![("Changed".into(), "private".into(), 2)]);
+        assert_eq!(audits, 1);
+    }
+}
+
+/// SQLx binds timestamptz as microseconds since 2000-01-01, truncated toward
+/// that epoch, so earlier sub-microsecond input moves later. The first value
+/// also crosses the UTC calendar day.
+async fn pre_pg_epoch_datetimes(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    docs: [&str; 2],
+) -> (Value, Vec<Value>, Vec<Value>, Value) {
+    let base = format!("/api/v1/workspaces/{ws}/collections");
+    let (status, collection) = call(
+        app,
+        "POST",
+        &base,
+        Some(json!({"kind":"document","name":"Epoch","projectId":null})),
+        cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{collection}");
+    let id = collection["id"].as_str().unwrap();
+    let when = create_field(
+        app,
+        cookie,
+        ws,
+        id,
+        json!({"name":"When","type":"datetime"}),
+    )
+    .await;
+    let (mut items, mut reads) = (Vec::new(), Vec::new());
+    for (doc, input) in docs.into_iter().zip([
+        "1999-12-31T23:59:59.999999999Z",
+        "1969-07-20T20:17:40.000999999Z",
+    ]) {
+        let (status, item) = call(
+            app,
+            "POST",
+            &format!("{base}/{id}/items"),
+            Some(json!({"documentId":doc})),
+            cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        let (status, saved) =
+            put_value(app, cookie, ws, id, &item, &when, json!({"datetime":input})).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (status, read) = call(
+            app,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/documents/{doc}/collection-item"),
+            None,
+            cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        reads.push(read["values"][when["id"].as_str().unwrap()].clone());
+        items.push(item["id"].clone());
+    }
+    let (status, calendar) = query(
+        app,
+        cookie,
+        ws,
+        id,
+        json!({"config":{"dateBy":when["id"]},"window":{"from":"1999-12-31","to":"2000-01-02","timeZone":"UTC"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{calendar}");
+    (when, items, reads, calendar["days"].clone())
+}
+
+fn assert_pre_pg_epoch_datetimes(stored: Vec<i64>, reads: Vec<Value>, days: Value) {
+    assert_eq!(stored, vec![946684800000000, -14182939999000]);
+    assert_eq!(
+        reads,
+        vec![
+            json!({"datetime":"2000-01-01T00:00:00.000Z"}),
+            json!({"datetime":"1969-07-20T20:17:40.001Z"}),
+        ]
+    );
+    assert_eq!(
+        days,
+        json!([
+            {"date":"1999-12-31","count":0},
+            {"date":"2000-01-01","count":1},
+            {"date":null,"count":0},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn collection_datetime_before_pg_epoch_keeps_sqlx_binding() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _user, ws) = setup_session(&harness).await;
+    let docs = [
+        create_wiki_doc(&app, &cookie, ws, "Epoch boundary").await,
+        create_wiki_doc(&app, &cookie, ws, "Before Unix epoch").await,
+    ];
+    let (when, items, reads, days) =
+        pre_pg_epoch_datetimes(&app, &cookie, ws, [&docs[0], &docs[1]]).await;
+    let admin = admin_pool(&harness).await;
+    let mut stored = Vec::new();
+    for item in &items {
+        stored.push(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT (extract(epoch FROM value_ts) * 1000000)::bigint \
+                 FROM fvoci.collection_values WHERE item_id = $1 AND field_id = $2",
+            )
+            .bind(Uuid::parse_str(item.as_str().unwrap()).unwrap())
+            .bind(Uuid::parse_str(when["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap(),
+        );
+    }
+    admin.close().await;
+    drop(app);
+    harness.cleanup().await;
+    assert_pre_pg_epoch_datetimes(stored, reads, days);
+}

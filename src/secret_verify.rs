@@ -197,6 +197,63 @@ pub async fn verify_sealed_secrets(
     Ok(report)
 }
 
+/// Post-restore verification through the configured driver. All ciphertext is
+/// read in one system snapshot, opened with the product's AAD, and never emitted.
+pub async fn verify_sealed_secrets_backend(
+    backend: &crate::db::backend::Backend,
+    keys: Option<&Keyring>,
+) -> Result<SecretsVerifyReport, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return verify_sealed_secrets(pool, keys).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_system().await?;
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        family.require_system_context()?;
+        let mut report = SecretsVerifyReport {
+            keyring_configured: keys.is_some(),
+            oidc_states: "skipped: single-use, expire within 10 minutes, fail closed per sign-in",
+            ..Default::default()
+        };
+        for row in family.query("SELECT user_id,totp_secret FROM user_mfa ORDER BY user_id", &[]).await? {
+            let id = row.cell(0)?.id()?;
+            check(keys, &mut report.user_mfa, &mut report.key_ids_in_use, id, &row.cell(1)?.string()?, &user_mfa_context(id));
+        }
+        for row in family.query("SELECT workspace_id,client_secret FROM workspace_oidc ORDER BY workspace_id", &[]).await? {
+            let id = row.cell(0)?.id()?;
+            check(keys, &mut report.workspace_oidc, &mut report.key_ids_in_use, id, &row.cell(1)?.string()?, &workspace_oidc_context(id));
+        }
+        for row in family.query("SELECT workspace_id,id,secret FROM webhooks ORDER BY id", &[]).await? {
+            let workspace = row.cell(0)?.id()?;
+            let id = row.cell(1)?.id()?;
+            check(keys, &mut report.webhooks, &mut report.key_ids_in_use, id, &row.cell(2)?.string()?, &webhook_secret_context(workspace,id));
+        }
+        for row in family.query("SELECT vapid_private_key FROM instance_config WHERE id=1", &[]).await? {
+            if let Some(sealed) = row.cell(0)?.optional(Cell::string)? {
+                check(keys, &mut report.vapid, &mut report.key_ids_in_use, Uuid::nil(), &sealed, vapid_context());
+            }
+        }
+        for row in family.query("SELECT connector_id,workspace_id,owner_user_id,sealed_key FROM zotero_credentials ORDER BY connector_id", &[]).await? {
+            let id = row.cell(0)?.id()?;
+            check(keys, &mut report.zotero, &mut report.key_ids_in_use, id, &row.cell(3)?.string()?, &crate::integrations::zotero::secret_context(row.cell(1)?.id()?,row.cell(2)?.id()?,id));
+        }
+        Ok(report)
+    }.await;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result
+                .err()
+                .map(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            cleanup,
+        ));
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

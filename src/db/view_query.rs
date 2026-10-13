@@ -717,6 +717,126 @@ pub(crate) async fn prepare_selected_task_view(
     }))
 }
 
+pub(crate) async fn prepare_selected_collection_view(
+    tx: &mut crate::db::backend::FamilyTx,
+    scope: ViewScope,
+    query: &ViewQuery,
+) -> Result<Result<SelectedTaskView, InvalidViewQuery>, sqlx::Error> {
+    use crate::db::codec::Cell;
+    if validate_view_scope(scope, query).is_err() {
+        return Ok(Err(InvalidViewQuery));
+    }
+    tx.require_tenant(scope.workspace_id)?;
+    for (table, id) in [
+        ("statuses", query.filters.status_id),
+        ("milestones", query.filters.milestone_id),
+        ("labels", query.filters.label_id),
+    ] {
+        if let Some(id) = id {
+            let Some(project) = scope.project_id else {
+                return Ok(Err(InvalidViewQuery));
+            };
+            let sql=match table {"statuses"=>"SELECT EXISTS(SELECT 1 FROM statuses WHERE workspace_id=?1 AND project_id=?2 AND id=?3)","milestones"=>"SELECT EXISTS(SELECT 1 FROM milestones WHERE workspace_id=?1 AND project_id=?2 AND id=?3)",_=>"SELECT EXISTS(SELECT 1 FROM labels WHERE workspace_id=?1 AND project_id=?2 AND id=?3)"};
+            if !tx
+                .query(
+                    sql,
+                    &[
+                        Cell::uuid(scope.workspace_id),
+                        Cell::uuid(project),
+                        Cell::uuid(id),
+                    ],
+                )
+                .await?
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .boolean()?
+            {
+                return Ok(Err(InvalidViewQuery));
+            }
+        }
+    }
+    if let Some(AssigneeFilter::User(user)) = query.filters.assignee_id {
+        if !tx.query("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=?1 AND u.id=?2 AND u.deleted_at IS NULL)",&[Cell::uuid(scope.workspace_id),Cell::uuid(user)]).await?.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.boolean()? {return Ok(Err(InvalidViewQuery));}
+    }
+    let ids = referenced_field_ids(query);
+    let rows = if ids.is_empty() {
+        Vec::new()
+    } else {
+        tx.query(
+            "SELECT f.id,f.type,f.version FROM collection_fields f JOIN collections c ON c.workspace_id=f.workspace_id AND c.id=f.collection_id WHERE f.workspace_id=?1 AND f.deleted_at IS NULL AND c.deleted_at IS NULL AND c.kind=?5 AND hex(f.id) IN (SELECT value FROM json_each(?2)) AND (?3 IS NULL OR c.id=?3) AND (?4 IS NULL OR c.project_id=?4) ORDER BY f.id",
+            &[Cell::uuid(scope.workspace_id), selected_ids(&ids), scope.collection_id.map(Cell::uuid).unwrap_or(Cell::Null), scope.project_id.map(Cell::uuid).unwrap_or(Cell::Null), Cell::text(match scope.kind { RootKind::Task => "task", RootKind::Document => "document" })],
+        ).await?
+    };
+    let catalog = rows
+        .iter()
+        .map(|row| {
+            Ok(CatalogField {
+                id: row.cell(0)?.id()?,
+                field_type: row.cell(1)?.string()?,
+                version: row.cell(2)?.int32()?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    if catalog.len() != ids.len() {
+        return Ok(Err(InvalidViewQuery));
+    }
+    let mut predicates = Vec::with_capacity(query.filters.custom.len());
+    for item in &query.filters.custom {
+        let kind = &catalog
+            .iter()
+            .find(|field| field.id == item.field_id)
+            .ok_or_else(|| sqlx::Error::Protocol("selected catalog field missing".into()))?
+            .field_type;
+        let policy = match resolve_custom_policy(kind, &item.operator) {
+            Ok(policy) => policy,
+            Err(error) => return Ok(Err(error)),
+        };
+        predicates.push((item.field_id, policy));
+    }
+    // Just as in compile_view_query, reference checks complete before scalar
+    // sort validation. Empty sets do not validate a nonexistent equality target.
+    for (field, policy) in &predicates {
+        if let CustomPolicy::Set {
+            people,
+            equals: Some(value),
+        } = policy
+        {
+            let args = [
+                Cell::uuid(scope.workspace_id),
+                Cell::uuid(*value),
+                Cell::uuid(*field),
+            ];
+            let rows = if *people {
+                tx.query("SELECT EXISTS(SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=?1 AND u.id=?2 AND u.deleted_at IS NULL)", &args[..2]).await?
+            } else {
+                tx.query("SELECT EXISTS(SELECT 1 FROM collection_options WHERE workspace_id=?1 AND id=?2 AND field_id=?3 AND deleted_at IS NULL)", &args).await?
+            };
+            if !rows
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .boolean()?
+            {
+                return Ok(Err(InvalidViewQuery));
+            }
+        }
+    }
+    let sort = effective_view_sort(scope.kind, &query.sort);
+    for entry in &sort {
+        if let SortField::Field(id) = entry.field {
+            if scalar_sort_column(&catalog, id).is_err() {
+                return Ok(Err(InvalidViewQuery));
+            }
+        }
+    }
+    Ok(Ok(SelectedTaskView {
+        catalog,
+        predicates,
+        sort,
+    }))
+}
+
 /// Exact UUID strings are bound JSON data, never interpolated into SQL.
 pub(crate) fn selected_ids(ids: &[Uuid]) -> crate::db::codec::Cell {
     crate::db::codec::Cell::Text(

@@ -7733,3 +7733,116 @@ mod sqlite_task_materialization {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+mod sqlite_data_port {
+    use super::sqlite_task_materialization::fixture;
+    use super::*;
+    use fvoci_server::db::pool;
+    #[tokio::test]
+    async fn sqlite_sse_live_task_delivery_and_membership_revocation() {
+        let (root, db, app, cookie, actor, ws) = fixture().await;
+        let project = create_project(app.clone(), &cookie, ws, "SSE", "workspace").await;
+        let project = project["id"].as_str().unwrap();
+        let path = format!("/api/v1/workspaces/{ws}/projects/{project}/stream");
+        let mut req = Request::builder()
+            .uri(&path)
+            .header("cookie", format!("fvoci_session={cookie}"))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(project_harness::test_peer()));
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: open"));
+        let (status, task) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/projects/{project}/tasks"),
+            Some(json!({"title":"SSE durable task"})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{task}");
+        let wire = timeout(Duration::from_secs(5), async {
+            let mut bytes = Vec::new();
+            while let Some(part) = stream.next().await {
+                bytes.extend_from_slice(&part.unwrap());
+                if bytes
+                    .windows(b"event: task".len())
+                    .any(|w| w == b"event: task")
+                {
+                    return bytes;
+                }
+            }
+            panic!("stream ended before task hint")
+        })
+        .await
+        .unwrap();
+        assert!(String::from_utf8_lossy(&wire).contains(task["id"].as_str().unwrap()));
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT title FROM tasks WHERE id=?1")
+                .bind(
+                    Uuid::parse_str(task["id"].as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice()
+                )
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            "SSE durable task"
+        );
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(ws.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        // Per-project streams recheck project access on delivery, while an
+        // empty producer poll checks only the credential (the existing PG contract).
+        // A later event from another writer must be withheld after revocation.
+        let mut event_tx = fresh.begin().await.unwrap();
+        sqlx::query("UPDATE event_sequence SET last_seq=last_seq+1 WHERE id=1")
+            .execute(&mut *event_tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events(id,workspace_id,verb,target_type,target_id,payload,seq) VALUES(?1,?2,'task.updated','task',?3,?4,(SELECT last_seq FROM event_sequence WHERE id=1))")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(ws.as_bytes().as_slice())
+            .bind(Uuid::parse_str(task["id"].as_str().unwrap()).unwrap().as_bytes().as_slice())
+            .bind(json!({"projectId":project,"taskId":task["id"]}).to_string())
+            .execute(&mut *event_tx).await.unwrap();
+        event_tx.commit().await.unwrap();
+        timeout(Duration::from_secs(5), async {
+            while let Some(part) = stream.next().await {
+                let data = part.unwrap();
+                assert!(!String::from_utf8_lossy(&data).contains("event: task"));
+            }
+        })
+        .await
+        .unwrap();
+        let mut req = Request::builder()
+            .uri(path)
+            .header("cookie", format!("fvoci_session={cookie}"))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(project_harness::test_peer()));
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        fresh.close().await;
+        db.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

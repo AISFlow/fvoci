@@ -153,19 +153,24 @@ fn map_recheck(
 }
 
 async fn ensure_still_authorized(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::backend::Backend,
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
 ) -> Result<(), ExportFailure> {
     map_recheck(
-        workspace_export::recheck_export_authorization(pool, workspace_id, user_id, session_id)
-            .await,
+        workspace_export::recheck_export_authorization_backend(
+            pool,
+            workspace_id,
+            user_id,
+            session_id,
+        )
+        .await,
     )
 }
 
 async fn ensure_attachment_delivery(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::backend::Backend,
     workspace_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
@@ -173,7 +178,7 @@ async fn ensure_attachment_delivery(
     task_id: Option<Uuid>,
 ) -> Result<(), ExportFailure> {
     map_recheck(
-        workspace_export::recheck_attachment_delivery(
+        workspace_export::recheck_attachment_delivery_backend(
             pool,
             workspace_id,
             user_id,
@@ -203,7 +208,7 @@ async fn write_json_element(
 
 async fn write_workspace_zip(
     writer: &mut ExportWriter,
-    pool: &sqlx::PgPool,
+    pool: &crate::db::backend::Backend,
     storage: &ObjectStorage,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -232,7 +237,7 @@ async fn write_workspace_zip(
     let mut first_doc = true;
     for doc in &snapshot.documents {
         // Fetch first so the delivery recheck is the last gate before the body is sent.
-        let body = workspace_export::fetch_document_body(pool, workspace_id, doc.id)
+        let body = workspace_export::fetch_document_body_backend(pool, workspace_id, doc.id)
             .await
             .map_err(|_| ExportFailure::Db)?;
         let Some(body) = body else {
@@ -240,7 +245,7 @@ async fn write_workspace_zip(
         };
         workspace_export::pause_document_delivery_barrier_if_armed(doc.id).await;
         map_recheck(
-            workspace_export::recheck_document_delivery(
+            workspace_export::recheck_document_delivery_backend(
                 pool,
                 workspace_id,
                 user_id,
@@ -271,7 +276,7 @@ async fn write_workspace_zip(
     let mut first_task = true;
     for task in &snapshot.tasks {
         map_recheck(
-            workspace_export::recheck_task_delivery(
+            workspace_export::recheck_task_delivery_backend(
                 pool,
                 workspace_id,
                 user_id,
@@ -304,12 +309,12 @@ async fn write_workspace_zip(
     writer.data(Bytes::from_static(b"[\n")).await?;
     let mut first_comment = true;
     for comment in &snapshot.comments {
-        let body = workspace_export::fetch_comment_body(pool, workspace_id, comment.id)
+        let body = workspace_export::fetch_comment_body_backend(pool, workspace_id, comment.id)
             .await
             .map_err(|_| ExportFailure::Db)?
             .ok_or(ExportFailure::Auth)?;
         map_recheck(
-            workspace_export::recheck_comment_delivery(
+            workspace_export::recheck_comment_delivery_backend(
                 pool,
                 workspace_id,
                 user_id,
@@ -458,16 +463,11 @@ pub async fn workspace_export(
 
     let inflight_guard = ExportInflightGuard::acquire(user_id)?;
 
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/workspaces/export.rs")
-        .map_err(internal)?
-        .clone();
-    let loaded = workspace_export::load_export_snapshot(&pool, workspace_id, user_id, session_id)
-        .await
-        .map_err(internal)?;
+    let pool = state.auth.db.pool.clone();
+    let loaded =
+        workspace_export::load_export_snapshot_backend(&pool, workspace_id, user_id, session_id)
+            .await
+            .map_err(internal)?;
     let snapshot = match loaded {
         Ok(snapshot) => snapshot,
         Err(WorkspaceExportDbError::NotFound | WorkspaceExportDbError::Forbidden) => {
