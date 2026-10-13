@@ -50,8 +50,9 @@ const runOf = (step: Mapping): string => {
 test("collaboration preparation hands exact current-run targets over by artifact and compiles completely", () => {
   const jobs = realJobs("web.yml");
   expect(verifyCollaborationPreparationJobs(jobs)).toEqual([]);
-  const fails = (bad: Mapping, message: string) =>
+  const fails = (bad: Mapping, message: string) => {
     expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(message);
+  };
   for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
     const bad = clone(jobs);
     Reflect.deleteProperty(bad, name);
@@ -187,7 +188,7 @@ test("a packed target restores modes and mtimes only under the producer digest",
         ["", 1],
         [digest, 0],
       ] as const) {
-        const work = join(base, `${consumer}-${code}-${value.length}`);
+        const work = join(base, `${consumer}-${String(code)}-${String(value.length)}`);
         mkdirSync(work);
         const result = Bun.spawnSync(["bash", "-c", restore], {
           cwd: work,
