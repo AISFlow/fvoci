@@ -984,6 +984,17 @@ async fn mark_personal_workspace_deleted(
         .await?;
     crate::db::context::restore_system(tx, &previous).await?;
     crate::db::api_tokens::remove_by_workspace(tx, workspace_id).await?;
+    // As in workspace trash: every live project goes with the workspace
+    // stamp. The memberships delete cascades every user grant, and the
+    // deferred project_members_private_lead_check_del only exempts deleted
+    // projects, so a private project led by its owner would otherwise refuse
+    // the commit and the sweep would retry this erasure forever.
+    sqlx::query(
+        "UPDATE fvoci.projects SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
         .bind(workspace_id)
         .execute(&mut **tx)
@@ -1197,15 +1208,27 @@ impl OperationTx<'_, '_> {
             let live = tx.query("SELECT 1 FROM workspaces WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
             if !live.is_empty() {
                 tx.set_tenant(workspace)?;
+                // Every live project goes with the workspace stamp, as on
+                // PostgreSQL, before the memberships delete drops its leads.
+                let stamp = Cell::instant(crate::db::identity::stored_now())?;
                 for sql in [
                     "DELETE FROM invitations WHERE workspace_id=?1",
                     "DELETE FROM ics_tokens WHERE workspace_id=?1",
                     "DELETE FROM api_tokens WHERE workspace_id=?1",
-                    "DELETE FROM memberships WHERE workspace_id=?1",
                 ] {
                     tx.execute(sql, &[Cell::uuid(workspace)]).await?;
                 }
-                tx.execute("UPDATE workspaces SET deleted_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
+                tx.execute(
+                    "UPDATE projects SET deleted_at=?2,updated_at=?2 WHERE workspace_id=?1 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace), stamp.clone()],
+                )
+                .await?;
+                tx.execute(
+                    "DELETE FROM memberships WHERE workspace_id=?1",
+                    &[Cell::uuid(workspace)],
+                )
+                .await?;
+                tx.execute("UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace), stamp]).await?;
                 self.maintenance_account_record(AccountRecord {
                     verb: "workspace.deleted",
                     actor_user_id: None,
