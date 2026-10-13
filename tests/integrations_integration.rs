@@ -60,6 +60,8 @@ enum Reply {
     Status(u16),
     Redirect(String),
     Slow(Duration),
+    /// Answers 200 only after the test calls `notify_one` on the gate.
+    Hold(Arc<tokio::sync::Notify>),
     Endless,
 }
 
@@ -118,6 +120,10 @@ async fn receive(AxState(receiver): AxState<Receiver>, request: Request<Body>) -
         Reply::Redirect(location) => (StatusCode::FOUND, [("location", location)]).into_response(),
         Reply::Slow(delay) => {
             tokio::time::sleep(delay).await;
+            StatusCode::OK.into_response()
+        }
+        Reply::Hold(release) => {
+            release.notified().await;
             StatusCode::OK.into_response()
         }
         Reply::Endless => {
@@ -252,12 +258,15 @@ async fn raw_post(
     (status, serde_json::from_slice(&bytes).unwrap_or(json!({})))
 }
 
+/// How long `wait_until` observes before it fails.
+const OBSERVATION_BOUND: Duration = Duration::from_secs(15);
+
 async fn wait_until<F, Fut>(what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + OBSERVATION_BOUND;
     while Instant::now() < deadline {
         if check().await {
             return;
@@ -2570,15 +2579,22 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
         &["project.created"],
     )
     .await;
-    // The tarpit answers after 60 s; the request budget is 10 s (source).
-    receiver.script("/tarpit", &[Reply::Slow(Duration::from_secs(60))]);
+    // The tarpit holds the request until the explicit release below, so events,
+    // not elapsed time, decide the result. The request budget exceeds the
+    // observation bound: a budget that ended first would record the held
+    // attempt as a timeout and leave the ordering undecided. The budget's own
+    // timeout is covered by
+    // `webhook_retries_with_source_backoff_and_stops_on_client_errors`.
+    const HELD_REQUEST_BUDGET: Duration = Duration::from_secs(OBSERVATION_BOUND.as_secs() * 4);
+    let release = Arc::new(tokio::sync::Notify::new());
+    receiver.script("/tarpit", &[Reply::Hold(release.clone())]);
     let member = add_workspace_user(&admin, workspace_id, "member", "n").await;
 
     let pool = project_harness::app_pool(&harness).await;
     let delivery = Delivery::start(
         &pool,
         outbound,
-        Duration::from_secs(10),
+        HELD_REQUEST_BUDGET,
         vec![fvoci_server::notifications::notifications_consumer()],
     );
     let project = create_project(app.clone(), &cookie, workspace_id, "SLOW", "workspace").await;
@@ -2588,7 +2604,7 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
     })
     .await;
 
-    // While that request is held, a notification is produced promptly.
+    // While that request is held, a notification is produced.
     let project_id = project["id"].as_str().unwrap();
     let (status, task, _) = call(
         &app,
@@ -2609,7 +2625,6 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let started = Instant::now();
     wait_until("member notification", || {
         let admin = admin.clone();
         let user = member.user_id;
@@ -2625,15 +2640,27 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
         }
     })
     .await;
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "notification waited {:?} behind the webhook send",
-        started.elapsed()
-    );
     // The webhook attempt is still in flight (claimed, not yet recorded).
     let rows = deliveries(&admin, hook_id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].status.as_str(), rows[0].attempt), ("pending", 0));
+
+    // Releasing the receiver completes that same held attempt.
+    release.notify_one();
+    wait_until("held delivery recorded", || {
+        let admin = admin.clone();
+        async move {
+            deliveries(&admin, hook_id).await
+                == vec![DeliveryRow {
+                    status: "delivered".into(),
+                    attempt: 1,
+                    http_status: Some(200),
+                    next_in_secs: None,
+                }]
+        }
+    })
+    .await;
+    assert_eq!(receiver.count(), 1);
 
     delivery.stop().await;
     pool.close().await;
