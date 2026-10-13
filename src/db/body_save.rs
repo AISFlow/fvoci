@@ -2094,6 +2094,8 @@ mod sqlite_native_tests {
         .await
         .unwrap();
         let mut tx = f.backend.begin_off_body().await.unwrap();
+        // Same tenant binding as renew_family_task_room before the named fence call.
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(!tx
             .operation()
             .renew_family_task_room_fence(claim.fence, lease)
@@ -2498,7 +2500,7 @@ mod sqlite_native_tests {
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
         assert_eq!(counts(&f).await, before);
-        sqlx::query("UPDATE projects SET archived_at=1 WHERE workspace_id=?1 AND id=?2")
+        sqlx::query("UPDATE projects SET status='archived' WHERE workspace_id=?1 AND id=?2")
             .bind(f.workspace.as_bytes().as_slice())
             .bind(project.as_bytes().as_slice())
             .execute(&f.pool)
