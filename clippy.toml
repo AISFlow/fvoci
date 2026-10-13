@@ -1,11 +1,15 @@
-# reqwest is built with `rustls-no-provider`: a client that does not get
+# reqwest is built with `rustls-no-provider`. A client that does not get
 # FVOCI's TLS config (src/http_client.rs: ring, bundled Mozilla roots)
-# panics when it is built. Only that module may call these.
+# panics when it is built, but only while no process-wide rustls provider is
+# installed. sqlx installs ring once it connects to PostgreSQL with
+# `sslmode=verify-ca`; from then on such a client builds and trusts the
+# operating system store, `SSL_CERT_FILE` or `SSL_CERT_DIR` instead of the
+# bundled roots. Only that module may call these.
 # `reqwest::Client::default` and `reqwest::ClientBuilder::default` are not
 # listed: clippy 1.98 resolves a path only to an inherent method or to the
 # whole `Default::default` trait method, never to one type's `Default` impl.
-# Calling either builds a client without that config, which panics at run
-# time when the client is built.
+# Building a client with either is banned by convention only, and clippy
+# does not catch it.
 disallowed-methods = [
     { path = "reqwest::Client::new", reason = "use fvoci_server::http_client::client()" },
     { path = "reqwest::Client::builder", reason = "use fvoci_server::http_client::builder()" },

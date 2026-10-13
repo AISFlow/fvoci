@@ -8,7 +8,12 @@
 //! which sqlx, lettre and libsql rely on, and the verifier would change which
 //! certificate authorities outbound requests trust. With
 //! `rustls-no-provider`, a reqwest client built without this config panics
-//! (FVOCI installs no process-wide provider), so every client starts here.
+//! only while no process-wide rustls provider is installed. FVOCI installs
+//! none, but sqlx installs ring once it connects to PostgreSQL with
+//! `sslmode=verify-ca`. From then on such a client builds and trusts the
+//! operating system store, `SSL_CERT_FILE` or `SSL_CERT_DIR` instead of the
+//! bundled roots. So every client starts here: clippy.toml rejects the
+//! constructors it can name, and the `Default` ones are left to review.
 //!
 //! Each client gets its own config, so its own TLS session cache, as reqwest
 //! built one per client before. Callers add their own redirect, proxy and
