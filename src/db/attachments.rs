@@ -10037,7 +10037,11 @@ mod stored_reference_tests {
             .unwrap();
         }
         sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,status,created_by) VALUES($1,$2,'REF','Reference','private','archived',$3)").bind(project).bind(workspace).bind(owner).execute(&admin).await.unwrap();
-        sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'viewer')").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(viewer).execute(&admin).await.unwrap();
+        // A private project keeps a lead (deferred trigger), so removing the
+        // viewer's membership below commits.
+        for (user, role) in [(owner, "lead"), (viewer, "viewer")] {
+            sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(user).bind(role).execute(&admin).await.unwrap();
+        }
         sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES($1,$2,$3,'Reference',$4,'V',1,'published',2,$5,'{\"type\":\"doc\",\"content\":[]}')").bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(owner).execute(&admin).await.unwrap();
         sqlx::query("INSERT INTO fvoci.attachments(id,workspace_id,document_id,uploader_id,status,name,size_bytes,reserved_size_bytes,storage_key,completed_at) VALUES($1,$2,$3,$4,'stored','reference.bin',10,10,$5,now())").bind(id).bind(workspace).bind(document).bind(owner).bind(&key).execute(&admin).await.unwrap();
         sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '30 days')").bind(credential).bind(viewer).bind(&session.hash).execute(&admin).await.unwrap();
