@@ -8,8 +8,8 @@ import { createE2eUser, login, watchCspViolations } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const projectSchema = z
   .object({
     id: z.string(),
@@ -17,7 +17,7 @@ const projectSchema = z
     name: z.string(),
     rootDocumentId: z.string().nullable(),
   })
-  .passthrough();
+  .loose();
 const taskSchema = z
   .object({
     id: z.string(),
@@ -26,23 +26,21 @@ const taskSchema = z
     dueDate: z.union([z.string(), z.null()]),
     dueAt: z.union([z.string(), z.null()]),
   })
-  .passthrough();
+  .loose();
 const meSchema = z
   .object({ userId: z.string(), timezone: z.string(), weekStartsOn: z.number() })
-  .passthrough();
+  .loose();
 const layoutSchema = z
   .object({
-    scale: z.object({ pxPerDay: z.number() }).passthrough(),
-    columns: z.array(z.object({ date: z.string(), offDuty: z.boolean() }).passthrough()),
+    scale: z.object({ pxPerDay: z.number() }).loose(),
+    columns: z.array(z.object({ date: z.string(), offDuty: z.boolean() }).loose()),
     bars: z.array(
-      z
-        .object({ id: z.string(), x: z.number(), width: z.number(), lane: z.number() })
-        .passthrough(),
+      z.object({ id: z.string(), x: z.number(), width: z.number(), lane: z.number() }).loose(),
     ),
     paths: z.array(z.array(z.number())),
   })
-  .passthrough();
-const timezoneSchema = z.object({ userId: z.string(), timezone: z.string() }).passthrough();
+  .loose();
+const timezoneSchema = z.object({ userId: z.string(), timezone: z.string() }).loose();
 const datePatchSchema = z
   .object({
     startDate: z.string(),
@@ -54,17 +52,15 @@ const datePatchSchema = z
         dueDate: z.string().nullable(),
         dueAt: z.string().nullable(),
       })
-      .passthrough(),
+      .loose(),
   })
-  .passthrough();
-const errorSchema = z.object({ code: z.string() }).passthrough();
+  .loose();
+const errorSchema = z.object({ code: z.string() }).loose();
 const memberListSchema = z
   .object({
-    items: z.array(
-      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ email: z.string(), userId: z.string(), role: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 

@@ -21,9 +21,9 @@ import {
 } from "./workspace-wiki-vue-editor";
 
 const schema = getSchema(createFvociExtensions());
-const detailSchema = z.object({ contentJson: z.unknown() }).passthrough();
-const revisionSchema = z.object({ id: z.string() }).passthrough();
-const errorSchema = z.object({ code: z.string() }).passthrough();
+const detailSchema = z.object({ contentJson: z.unknown().optional() }).loose();
+const revisionSchema = z.object({ id: z.string() }).loose();
+const errorSchema = z.object({ code: z.string() }).loose();
 
 // Compare all supported IDs, references, attrs, mark sets, nesting and UTF-16
 // text through the product schema. Added defaults/object-key order are not loss.

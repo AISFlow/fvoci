@@ -343,7 +343,7 @@ async function workspaceId(page: Page): Promise<string> {
 
 const resourceSchema = z.object({ id: z.string(), number: z.number() });
 const projectSchema = z.object({ id: z.string() });
-const bodySchema = z.object({ contentJson: z.unknown() });
+const bodySchema = z.object({ contentJson: z.unknown().optional() });
 
 async function editAndReadBack(
   browser: Browser,

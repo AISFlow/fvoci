@@ -5,11 +5,11 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const attachmentSchema = z
-  .object({ preview: z.object({ width: z.number(), height: z.number() }).passthrough().nullable() })
-  .passthrough();
+  .object({ preview: z.object({ width: z.number(), height: z.number() }).loose().nullable() })
+  .loose();
 
 const owner = {
   email: "owner@example.com",

@@ -4,10 +4,10 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
 
 const owner = {
   email: "Admin@Example.COM",

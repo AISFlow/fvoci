@@ -81,6 +81,26 @@ await test("draft schemas mirror the server limits", () => {
   assert.equal(op.safeParse({ ...empty, businessInfoUrl: "javascript:alert(1)" }).success, false);
 });
 
+await test("businessInfoUrl is checked as typed, never trimmed into an https: URL", () => {
+  const op = SETTINGS_CATALOG.operator.schema;
+  const empty = {
+    businessName: null,
+    representative: null,
+    registrationNumber: null,
+    mailOrderNumber: null,
+    address: null,
+    phone: null,
+    supportEmail: null,
+    businessInfoUrl: null,
+    hostingProvider: null,
+  };
+  assert.equal(op.safeParse({ ...empty, businessInfoUrl: " https://example.com" }).success, false);
+  assert.equal(op.safeParse({ ...empty, businessInfoUrl: "not a url" }).success, false);
+  const trailing = op.safeParse({ ...empty, businessInfoUrl: "https://example.com " });
+  assert.equal(trailing.success, true);
+  assert.equal(trailing.data?.businessInfoUrl, "https://example.com ");
+});
+
 await test("attachmentTransfer accepts only the two modes the server knows", () => {
   const schema = SETTINGS_CATALOG.attachmentTransfer.schema;
   assert.equal(schema.safeParse({ mode: "proxy" }).success, true);

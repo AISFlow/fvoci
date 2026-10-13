@@ -32,9 +32,9 @@ import {
 } from "./zotero-archive-oracles";
 
 test.describe.configure({ mode: "serial" });
-const ids = z.object({ id: z.string().uuid() }).passthrough();
+const ids = z.object({ id: z.guid() }).loose();
 const workspaces = z.object({
-  items: z.array(z.object({ id: z.string().uuid(), slug: z.string() }).passthrough()),
+  items: z.array(z.object({ id: z.guid(), slug: z.string() }).loose()),
 });
 
 // A real refused ordinary-project flow. It does not replace the required
@@ -64,9 +64,7 @@ test("native archive shows limits and refuses an unsupported member grant withou
     data: { key: "NATIVE", name: "독립 기대값 프로젝트 🧪", visibility: "private" },
   });
   expect(projectResponse.status()).toBe(201);
-  const project = ids
-    .extend({ rootDocumentId: z.string().uuid() })
-    .parse(await projectResponse.json());
+  const project = ids.extend({ rootDocumentId: z.guid() }).parse(await projectResponse.json());
   // Task time, dependencies, saved views and recurring tasks are supported
   // models now; a second person's project grant (team/multi-author) is still
   // refused.
@@ -77,8 +75,8 @@ test("native archive shows limits and refuses an unsupported member grant withou
   const members = await page.request.get(`/api/v1/workspaces/${workspace.id}/members`);
   expect(members.ok()).toBe(true);
   const member = z
-    .object({ items: z.array(z.object({ email: z.string(), userId: z.string() }).passthrough()) })
-    .passthrough()
+    .object({ items: z.array(z.object({ email: z.string(), userId: z.string() }).loose()) })
+    .loose()
     .parse(await members.json())
     .items.find((item) => item.email === "native-member@example.com");
   if (!member) throw new Error("ordinary second member missing");
@@ -206,9 +204,9 @@ const forbiddenArchiveKeys = (keys: Iterable<string>): string[] =>
   );
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
-const idOf = z.object({ id: z.string().regex(UUID) }).passthrough();
-const meSchema = z.object({ userId: z.string().regex(UUID) }).passthrough();
-const workspaceMeta = z.object({ id: z.string().regex(UUID), slug: z.string() }).passthrough();
+const idOf = z.object({ id: z.string().regex(UUID) }).loose();
+const meSchema = z.object({ userId: z.string().regex(UUID) }).loose();
+const workspaceMeta = z.object({ id: z.string().regex(UUID), slug: z.string() }).loose();
 const projectSchema = z
   .object({
     id: z.string().regex(UUID),
@@ -218,7 +216,7 @@ const projectSchema = z
     rootDocumentId: z.string().regex(UUID),
     createdBy: z.string(),
   })
-  .passthrough();
+  .loose();
 const documentMeta = z
   .object({
     id: z.string().regex(UUID),
@@ -226,13 +224,13 @@ const documentMeta = z
     title: z.string(),
     parentId: z.string().nullable(),
   })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string().regex(UUID),
-    statuses: z.array(z.object({ id: z.string().regex(UUID), name: z.string() }).passthrough()),
+    statuses: z.array(z.object({ id: z.string().regex(UUID), name: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const taskSchema = z
   .object({
     id: z.string().regex(UUID),
@@ -247,14 +245,20 @@ const taskSchema = z
     assigneeIds: z.array(z.string()),
     labelIds: z.array(z.string()),
   })
-  .passthrough();
+  .loose();
 const revisionList = z.object({
-  items: z.array(z.object({ id: z.string().regex(UUID), reason: z.string() }).passthrough()),
+  items: z.array(z.object({ id: z.string().regex(UUID), reason: z.string() }).loose()),
 });
 const revisionDetail = z
-  .object({ id: z.string().regex(UUID), contentJson: z.unknown(), ySnapshot: z.string() })
-  .passthrough();
-const activityChange = z.object({ field: z.string(), from: z.unknown(), to: z.unknown() }).strict();
+  .object({
+    id: z.string().regex(UUID),
+    contentJson: z.unknown().optional(),
+    ySnapshot: z.string(),
+  })
+  .loose();
+const activityChange = z
+  .object({ field: z.string(), from: z.unknown().optional(), to: z.unknown().optional() })
+  .strict();
 const activityList = z.object({
   items: z.array(
     z
@@ -264,7 +268,7 @@ const activityList = z.object({
         kind: z.string().optional(),
         changes: z.array(activityChange).optional(),
       })
-      .passthrough(),
+      .loose(),
   ),
 });
 const commentSchema = z
@@ -274,13 +278,13 @@ const commentSchema = z
     createdBy: z.string(),
     body: z.string(),
     resolvedAt: z.string().nullable(),
-    reactions: z.record(z.object({ count: z.number(), reactedByMe: z.boolean() })),
+    reactions: z.record(z.string(), z.object({ count: z.number(), reactedByMe: z.boolean() })),
   })
-  .passthrough();
-const commentList = z.object({ items: z.array(commentSchema) }).passthrough();
+  .loose();
+const commentList = z.object({ items: z.array(commentSchema) }).loose();
 const labelSchema = z
   .object({ id: z.string().regex(UUID), name: z.string(), color: z.string() })
-  .passthrough();
+  .loose();
 const uploadSchema = z.object({
   attachmentId: z.string().regex(UUID),
   partSizeBytes: z.number(),
@@ -299,17 +303,17 @@ const preflightSchema = z
     revisionCount: z.number(),
     complete: z.boolean(),
   })
-  .passthrough();
+  .loose();
 const collectionSchema = z
   .object({ id: z.string().regex(UUID), name: z.string(), version: z.number() })
-  .passthrough();
+  .loose();
 const itemLookupSchema = z
   .object({
     item: z
       .object({ id: z.string().regex(UUID), collectionId: z.string(), taskId: z.string() })
-      .passthrough(),
+      .loose(),
   })
-  .passthrough();
+  .loose();
 // Raw stored comments of one document and one task, oldest first.
 const commentsSelect = (document: string, task: string) =>
   `SELECT coalesce(jsonb_agg(jsonb_build_object('id', id, 'parent', parent_id, 'by', created_by,
@@ -336,7 +340,7 @@ const jobSchema = z
     projectId: z.string().nullable().optional(),
     diagnostic: z.string().nullable().optional(),
   })
-  .passthrough();
+  .loose();
 
 type TiptapJson = {
   type: string;
@@ -389,7 +393,7 @@ ROLLBACK;`,
       role: z.string(),
       superuser: z.boolean(),
       bypassRls: z.boolean(),
-      value: z.unknown(),
+      value: z.unknown().optional(),
     })
     .parse(JSON.parse(result.stdout));
   expect(witness).toMatchObject({ role: app.username, superuser: false, bypassRls: false });
@@ -448,7 +452,7 @@ const nativeRow = z.object({
       actor: z.string(),
     }),
   ),
-  content: z.unknown(),
+  content: z.unknown().optional(),
   text: z.string(),
 });
 type NativeRow = z.infer<typeof nativeRow>;
@@ -1421,7 +1425,7 @@ test("native archive restores an ordinary private project into a separate instal
     ] as const) {
       const meta = await okJson(
         page.request.get(`/api/v1/workspaces/${ws}/attachments/${fileId}`),
-        z.object({ id: z.string(), name: z.string(), sizeBytes: z.number() }).passthrough(),
+        z.object({ id: z.string(), name: z.string(), sizeBytes: z.number() }).loose(),
       );
       expect([meta.id, meta.name, meta.sizeBytes]).toEqual([fileId, literal.name, literal.size]);
       const bytes = await page.request.get(
@@ -1867,7 +1871,7 @@ test("native archive restores an ordinary private project into a separate instal
         complete: z.literal(true),
         entries: z.record(z.string(), z.object({ size: z.number(), sha256: z.string() })),
       })
-      .passthrough()
+      .loose()
       .parse(JSON.parse(await entryText(zip, "manifest.json")));
     // The manifest digests every entry except itself (graph.json included).
     expect(names).toEqual(["manifest.json", ...Object.keys(manifest.entries)].sort());
@@ -1925,17 +1929,17 @@ test("native archive restores an ordinary private project into a separate instal
       .object({
         source_workspace_id: z.string(),
         source_actor_id: z.string(),
-        project: z.object({ id: z.string() }).passthrough(),
-        documents: z.array(z.object({ id: z.string() }).passthrough()),
-        tasks: z.array(z.object({ id: z.string() }).passthrough()),
-        activity: z.array(z.object({ id: z.string() }).passthrough()),
-        revisions: z.array(z.object({ id: z.string() }).passthrough()),
-        collections: z.array(z.object({ id: z.string() }).passthrough()),
-        collection_items: z.array(z.object({ id: z.string() }).passthrough()),
+        project: z.object({ id: z.string() }).loose(),
+        documents: z.array(z.object({ id: z.string() }).loose()),
+        tasks: z.array(z.object({ id: z.string() }).loose()),
+        activity: z.array(z.object({ id: z.string() }).loose()),
+        revisions: z.array(z.object({ id: z.string() }).loose()),
+        collections: z.array(z.object({ id: z.string() }).loose()),
+        collection_items: z.array(z.object({ id: z.string() }).loose()),
         labels: z.array(z.unknown()),
         task_labels: z.array(z.unknown()),
       })
-      .passthrough()
+      .loose()
       .parse(JSON.parse(graphText));
     expect(graph.source_workspace_id).toBe(expected.sourceWorkspaceId);
     expect(graph.source_actor_id).toBe(expected.sourceActorId);
@@ -2096,7 +2100,7 @@ test("native archive restores an ordinary private project into a separate instal
                 .object({
                   entries: z.record(z.string(), z.object({ size: z.number(), sha256: z.string() })),
                 })
-                .passthrough()
+                .loose()
                 .parse(JSON.parse(Buffer.from(bytes).toString("utf8")));
               edited.entries[stateName] = { size: changed.length, sha256: sha256(changed) };
               bytes = Buffer.from(JSON.stringify(edited), "utf8");
@@ -2160,10 +2164,7 @@ test("native archive restores an ordinary private project into a separate instal
         let restoreRequestId = "";
         dpage.on("request", (request) => {
           if (request.method() === "POST" && request.url().endsWith("/native-archive/restore")) {
-            const body = z
-              .object({ requestId: z.string() })
-              .passthrough()
-              .parse(request.postDataJSON());
+            const body = z.object({ requestId: z.string() }).loose().parse(request.postDataJSON());
             restoreRequestId = body.requestId;
           }
         });
@@ -2359,7 +2360,7 @@ test("native archive restores an ordinary private project into a separate instal
                   documentId: z.string(),
                   anchor: z.string().nullable(),
                 })
-                .passthrough(),
+                .loose(),
             ),
           }),
         );
@@ -2672,7 +2673,7 @@ const singleParagraph = (block: string, text: string) => ({
   type: "doc",
   content: [{ type: "paragraph", attrs: { id: block }, content: [{ type: "text", text }] }],
 });
-const bodySchema = z.object({ contentJson: z.unknown() }).passthrough();
+const bodySchema = z.object({ contentJson: z.unknown().optional() }).loose();
 function expectSingleParagraph(body: unknown, block: string, text: string): void {
   const doc = z
     .object({
@@ -2681,15 +2682,13 @@ function expectSingleParagraph(body: unknown, block: string, text: string): void
         z
           .object({
             type: z.literal("paragraph"),
-            attrs: z.object({ id: z.string() }).passthrough(),
-            content: z.tuple([
-              z.object({ type: z.literal("text"), text: z.string() }).passthrough(),
-            ]),
+            attrs: z.object({ id: z.string() }).loose(),
+            content: z.tuple([z.object({ type: z.literal("text"), text: z.string() }).loose()]),
           })
-          .passthrough(),
+          .loose(),
       ]),
     })
-    .passthrough()
+    .loose()
     .parse(body);
   expect([doc.content[0].attrs.id, doc.content[0].content[0].text]).toEqual([block, text]);
 }
@@ -2784,10 +2783,10 @@ test("native archive restores a real W6 Zotero producer closure into a separate 
       const reference = z
         .object({
           references: z.tuple([
-            z.object({ id: z.string().regex(UUID), localVersion: z.string() }).passthrough(),
+            z.object({ id: z.string().regex(UUID), localVersion: z.string() }).loose(),
           ]),
         })
-        .passthrough()
+        .loose()
         .parse(imported).references[0];
       const requestId = randomUUID();
       const captured = await okJson(
@@ -2801,7 +2800,7 @@ test("native archive restores a real W6 Zotero producer closure into a separate 
             projectId: z.string().regex(UUID),
             replayed: z.literal(false),
           })
-          .passthrough(),
+          .loose(),
       );
       const doc = (id: string, suffix = "") => `/api/v1/workspaces/${ws}/documents/${id}${suffix}`;
       await okJson(
@@ -2947,13 +2946,11 @@ test("native archive restores a real W6 Zotero producer closure into a separate 
     expect(graphText.includes(ZOTERO_FIXTURE_KEY)).toBe(false);
     const graph = z
       .object({
-        documents: z.array(
-          z.object({ id: z.string(), project_id: z.string().nullable() }).passthrough(),
-        ),
+        documents: z.array(z.object({ id: z.string(), project_id: z.string().nullable() }).loose()),
         personal_input_commands: z.array(z.record(z.string(), z.unknown())),
         origins: z.array(z.record(z.string(), z.unknown())),
       })
-      .passthrough()
+      .loose()
       .parse(JSON.parse(graphText));
     expect(
       graph.documents
@@ -3278,12 +3275,12 @@ test("native archive restores a real W6 Zotero producer closure into a separate 
               z
                 .object({
                   id: z.string(),
-                  links: z.array(z.object({ taskId: z.string().nullable() }).passthrough()),
+                  links: z.array(z.object({ taskId: z.string().nullable() }).loose()),
                 })
-                .passthrough(),
+                .loose(),
             ),
           })
-          .passthrough()
+          .loose()
           .parse(
             await okJson(
               apage.request.get(`/api/v1/workspaces/${dws}/zotero/libraries/${ids.connectorId}`),
@@ -3578,24 +3575,24 @@ test("native archive restores document tag search filters into a separate instal
   const titles = [`${token} 태그 문서`, `${token} 태그 없는 문서`];
   const tagSchema = z
     .object({
-      id: z.string().uuid(),
-      workspaceId: z.string().uuid(),
+      id: z.guid(),
+      workspaceId: z.guid(),
       name: z.string(),
       color: z.string(),
     })
-    .passthrough();
+    .loose();
   const tagsSchema = z.object({ items: z.array(tagSchema) });
   const searchSchema = z.object({
     items: z.array(
       z
         .object({
-          id: z.string().uuid(),
+          id: z.guid(),
           type: z.string(),
           title: z.string(),
-          workspaceId: z.string().uuid(),
+          workspaceId: z.guid(),
           snippet: z.array(z.object({ text: z.string(), match: z.boolean() })).nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
     nextCursor: z.string().nullable(),
   });
@@ -3605,11 +3602,11 @@ test("native archive restores document tag search filters into a separate instal
         .object({
           id: z.string(),
           kind: z.literal("document"),
-          documentId: z.string().uuid(),
-          workspaceId: z.string().uuid(),
-          projectId: z.string().uuid(),
+          documentId: z.guid(),
+          workspaceId: z.guid(),
+          projectId: z.guid(),
         })
-        .passthrough(),
+        .loose(),
     ),
   });
   const source = await browser.newContext({ baseURL });
@@ -4014,8 +4011,8 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
   const passed = (group: string) => {
     groups.push(group);
   };
-  const identity = meSchema.extend({ sessionId: z.string().uuid() });
-  const rows = z.array(z.record(z.unknown()));
+  const identity = meSchema.extend({ sessionId: z.guid() });
+  const rows = z.array(z.record(z.string(), z.unknown()));
   const graphSchema = z.object({
     documents: rows,
     tasks: rows,
@@ -4048,11 +4045,11 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
         data: { requestId: randomUUID(), intent: "task", title: "W8 D 같은 ID 이동 한글" },
       }),
       z.object({
-        documentId: z.string().uuid(),
-        taskId: z.string().uuid(),
+        documentId: z.guid(),
+        taskId: z.guid(),
         documentDisplayId: z.string(),
         taskDisplayId: z.string(),
-        projectId: z.string().uuid(),
+        projectId: z.guid(),
       }),
     );
     const team = (await okJson(page.request.get("/api/v1/me/workspaces"), workspaces)).items.find(
@@ -4151,7 +4148,7 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
       operation: "start",
       expectedVersion: 0,
     };
-    const timerResult = z.object({ runId: z.string().uuid(), version: z.number().int() });
+    const timerResult = z.object({ runId: z.guid(), version: z.number().int() });
     const started = await okJson(
       page.request.post(originalTimerPath, { data: startBody }),
       timerResult,
@@ -4251,13 +4248,13 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
     const moveBytes = Buffer.from(JSON.stringify(moveBody));
     const transferResult = z
       .object({
-        workspaceId: z.string().uuid(),
-        projectId: z.string().uuid(),
-        documentId: z.string().uuid(),
-        taskId: z.string().uuid(),
+        workspaceId: z.guid(),
+        projectId: z.guid(),
+        documentId: z.guid(),
+        taskId: z.guid(),
         replayed: z.boolean(),
       })
-      .passthrough();
+      .loose();
     const moveResponse = await page.request.post(transferPath, {
       data: moveBytes,
       headers: { "content-type": "application/json" },
@@ -4567,11 +4564,11 @@ test("native archive restores a same-ID personal MOVE graph after a lost restore
       expect(changedBytes.equals(archive)).toBe(false);
       const restoreBody = z
         .object({
-          requestId: z.string().uuid(),
-          destinationActorId: z.string().uuid(),
+          requestId: z.guid(),
+          destinationActorId: z.guid(),
           confirm: z.literal(true),
         })
-        .passthrough()
+        .loose()
         .parse(JSON.parse(sentBytes.toString("utf8")));
       const mismatch = await fpage.request.post(restorePath, {
         data: {

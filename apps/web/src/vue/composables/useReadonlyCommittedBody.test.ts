@@ -10,7 +10,7 @@ import { useReadonlyCommittedBody, type ReadonlyBodyScope } from "./useReadonlyC
 
 const fixtureRoot = new URL("../../../../../crates/collab-engine/fixtures/", import.meta.url);
 const expected = z
-  .object({ structured: z.object({ prosemirror_json: z.unknown() }) })
+  .object({ structured: z.object({ prosemirror_json: z.unknown().optional() }) })
   .parse(JSON.parse(readFileSync(new URL("expectations.json", fixtureRoot), "utf8")))
   .structured.prosemirror_json;
 function fixture() {
@@ -49,15 +49,13 @@ const markedProjection = z
       z
         .object({
           content: z.array(
-            z
-              .object({ marks: z.array(z.object({ type: z.string() }).passthrough()) })
-              .passthrough(),
+            z.object({ marks: z.array(z.object({ type: z.string() }).loose()) }).loose(),
           ),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 function markedFixture() {
   const doc = tiptapJsonToYDoc({
     type: "doc",
@@ -119,7 +117,9 @@ test("actual SDK null-prototype mark attrs match JSON-parsed own data with uncha
         content: z.array(
           z.object({
             content: z.array(
-              z.object({ marks: z.array(z.object({ type: z.string(), attrs: z.unknown() })) }),
+              z.object({
+                marks: z.array(z.object({ type: z.string(), attrs: z.unknown().optional() })),
+              }),
             ),
           }),
         ),
@@ -285,7 +285,7 @@ test("supported content order is exact while mark order alone may differ", async
     f.scope.doc.getXmlFragment("prosemirror").push([tail]);
     const stored = z
       .object({ content: z.array(z.unknown()) })
-      .passthrough()
+      .loose()
       .parse(structuredClone(yDocToTiptapJson(f.scope.doc)));
     stored.content.reverse();
     expect(

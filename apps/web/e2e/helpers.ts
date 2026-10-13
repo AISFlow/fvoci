@@ -155,7 +155,7 @@ export async function readJson<T>(
 ): Promise<T> {
   return schema.parse(await response.json());
 }
-const idSchema = z.object({ id: z.string() }).passthrough();
+const idSchema = z.object({ id: z.string() }).loose();
 const numberedSchema = idSchema.extend({ number: z.number() });
 const itemSchema = numberedSchema.extend({ title: z.string() });
 const workspaceSchema = idSchema.extend({ slug: z.string(), name: z.string() });
@@ -173,72 +173,70 @@ const documentSchema = itemSchema.extend({
 const tagSchema = idSchema.extend({ name: z.string() });
 export const flowSchemas = {
   unknown: z.unknown(),
-  items: z.object({ items: z.array(z.unknown()) }).passthrough(),
+  items: z.object({ items: z.array(z.unknown()) }).loose(),
   push: z
     .object({
       endpoint: z.string(),
-      keys: z.object({ p256dh: z.string(), auth: z.string() }).passthrough(),
+      keys: z.object({ p256dh: z.string(), auth: z.string() }).loose(),
     })
-    .passthrough(),
-  password: z.object({ currentPassword: z.string() }).passthrough(),
-  pending: z.object({ pending: z.array(z.unknown()) }).passthrough(),
-  mfa: z.object({ mfaToken: z.string() }).passthrough(),
-  stars: z
-    .object({ items: z.array(z.object({ targetId: z.string() }).passthrough()) })
-    .passthrough(),
+    .loose(),
+  password: z.object({ currentPassword: z.string() }).loose(),
+  pending: z.object({ pending: z.array(z.unknown()) }).loose(),
+  mfa: z.object({ mfaToken: z.string() }).loose(),
+  stars: z.object({ items: z.array(z.object({ targetId: z.string() }).loose()) }).loose(),
   trash: z
     .object({
-      items: z.array(z.object({ id: z.string(), title: z.string() }).passthrough()),
+      items: z.array(z.object({ id: z.string(), title: z.string() }).loose()),
     })
-    .passthrough(),
+    .loose(),
   consents: z
     .object({
       members: z.array(
         z
           .object({
             userId: z.string(),
-            consents: z.array(z.object({ kind: z.string(), version: z.number() }).passthrough()),
+            consents: z.array(z.object({ kind: z.string(), version: z.number() }).loose()),
           })
-          .passthrough(),
+          .loose(),
       ),
     })
-    .passthrough(),
+    .loose(),
   id: idSchema,
   numbered: numberedSchema,
   item: itemSchema,
   workspace: workspaceSchema,
   workspaces: z
     .object({ items: z.array(workspaceSchema.extend({ documentCount: z.number() })) })
-    .passthrough(),
+    .loose(),
   project: projectSchema,
-  projects: z.object({ items: z.array(projectSchema) }).passthrough(),
+  projects: z.object({ items: z.array(projectSchema) }).loose(),
   document: documentSchema,
   createdDocument: documentSchema.extend({ displayId: z.string() }),
-  documents: z.object({ items: z.array(documentSchema) }).passthrough(),
-  tasks: z.object({ items: z.array(itemSchema) }).passthrough(),
+  documents: z.object({ items: z.array(documentSchema) }).loose(),
+  tasks: z.object({ items: z.array(itemSchema) }).loose(),
   search: z
     .object({ items: z.array(idSchema.extend({ title: z.string(), type: z.string() })) })
-    .passthrough(),
+    .loose(),
   tag: tagSchema,
-  tags: z.object({ items: z.array(tagSchema) }).passthrough(),
+  tags: z.object({ items: z.array(tagSchema) }).loose(),
   members: z
-    .object({ items: z.array(z.object({ userId: z.string(), email: z.string() }).passthrough()) })
-    .passthrough(),
-  groups: z.object({ items: z.array(tagSchema) }).passthrough(),
-  setup: z.object({ needed: z.boolean() }).passthrough(),
-  user: z.object({ userId: z.string(), givenName: z.string(), email: z.string() }).passthrough(),
-  error: z.object({ code: z.string() }).passthrough(),
-  body: z.object({ contentJson: z.unknown() }).passthrough(),
+    .object({ items: z.array(z.object({ userId: z.string(), email: z.string() }).loose()) })
+    .loose(),
+  groups: z.object({ items: z.array(tagSchema) }).loose(),
+  setup: z.object({ needed: z.boolean() }).loose(),
+  user: z.object({ userId: z.string(), givenName: z.string(), email: z.string() }).loose(),
+  error: z.object({ code: z.string() }).loose(),
+  body: z.object({ contentJson: z.unknown().optional() }).loose(),
   share: idSchema.extend({ url: z.string() }),
   upload: z
     .object({
       attachmentId: z.string(),
       partSizeBytes: z.number(),
-      parts: z.array(z.object({ partNumber: z.number(), url: z.string() }).passthrough()),
+      parts: z.array(z.object({ partNumber: z.number(), url: z.string() }).loose()),
     })
-    .passthrough(),
+    .loose(),
   token: idSchema.extend({ token: z.string(), workspaceId: z.string() }),
-  tokens: z.object({ items: z.array(idSchema) }).passthrough(),
+  tokens: z.object({ items: z.array(idSchema) }).loose(),
   notifications: z
     .object({
       items: z.array(
@@ -246,24 +244,24 @@ export const flowSchemas = {
           verb: z.string(),
           displayId: z.string().nullable(),
           readAt: z.string().nullable(),
-          payload: z.object({ title: z.string().optional() }).passthrough().nullable(),
+          payload: z.object({ title: z.string().optional() }).loose().nullable(),
         }),
       ),
     })
-    .passthrough(),
-  count: z.object({ count: z.number() }).passthrough(),
-  prefs: z.object({ inApp: z.boolean(), mailDigest: z.boolean() }).passthrough(),
-  version: z.object({ version: z.number() }).passthrough(),
+    .loose(),
+  count: z.object({ count: z.number() }).loose(),
+  prefs: z.object({ inApp: z.boolean(), mailDigest: z.boolean() }).loose(),
+  version: z.object({ version: z.number() }).loose(),
   instance: z
     .object({
       values: z
         .object({
-          branding: z.object({ name: z.string() }).passthrough(),
-          features: z.object({ ai: z.boolean() }).passthrough(),
+          branding: z.object({ name: z.string() }).loose(),
+          features: z.object({ ai: z.boolean() }).loose(),
           webPushPublicKey: z.string().nullable(),
           operator: z.record(z.string(), z.string().nullable()),
         })
-        .passthrough(),
+        .loose(),
     })
-    .passthrough(),
+    .loose(),
 };

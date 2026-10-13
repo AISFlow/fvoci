@@ -6,9 +6,9 @@ import { createE2eUser, login, logout, watchCspViolations } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
 const fieldListSchema = z
   .object({
     items: z.array(
@@ -28,21 +28,19 @@ const fieldListSchema = z
                 label: z.string(),
                 deletedAt: z.union([z.string(), z.null()]),
               })
-              .passthrough(),
+              .loose(),
           ),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const fieldSchema = z
   .object({
     id: z.string(),
@@ -55,20 +53,18 @@ const fieldSchema = z
     options: z.array(
       z
         .object({ id: z.string(), label: z.string(), deletedAt: z.union([z.string(), z.null()]) })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const workflowStatusIdsSchema = z
-  .object({ id: z.string(), statuses: z.array(z.object({ id: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ id: z.string(), statuses: z.array(z.object({ id: z.string() }).loose()) })
+  .loose();
 const memberListSchema = z
   .object({
-    items: z.array(
-      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ email: z.string(), userId: z.string(), role: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 const slug = "psvue";

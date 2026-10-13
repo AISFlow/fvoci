@@ -19,9 +19,7 @@
     "paths": {
       "@/*": ["src/*"],
       "yjs": ["../../node_modules/yjs"],
-      "@hocuspocus/provider": ["../../node_modules/@hocuspocus/provider"],
-      "zod/v3": ["./node_modules/zod/v3/index.d.cts"],
-      "zod/v4/core": ["./node_modules/zod/v4/core/index.d.cts"]
+      "@hocuspocus/provider": ["../../node_modules/@hocuspocus/provider"]
     }
   },
   "include": ["src"],

@@ -5,12 +5,12 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const projectSchema = z
   .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
-  .passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+  .loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
 const lookupSchema = z
   .object({
     items: z.array(
@@ -21,19 +21,17 @@ const lookupSchema = z
           displayId: z.string(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
-const meSchema = z.object({ userId: z.string(), timezone: z.string() }).passthrough();
+  .loose();
+const meSchema = z.object({ userId: z.string(), timezone: z.string() }).loose();
 
 test.describe.configure({ mode: "serial" });
 

@@ -5,8 +5,8 @@ import { createE2eUser, login, logout } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const lookupSchema = z
   .object({
     items: z.array(
@@ -17,10 +17,10 @@ const lookupSchema = z
           displayId: z.string(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -32,18 +32,16 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const memberListSchema = z
   .object({
-    items: z.array(
-      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ email: z.string(), userId: z.string(), role: z.string() }).loose()),
   })
-  .passthrough();
-const taskSchema = z.object({ type: z.string(), parentId: z.string().nullable() }).passthrough();
+  .loose();
+const taskSchema = z.object({ type: z.string(), parentId: z.string().nullable() }).loose();
 
 const owner = {
   email: "Admin@Example.COM",

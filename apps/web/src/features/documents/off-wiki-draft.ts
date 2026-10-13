@@ -24,7 +24,7 @@ export type DraftDestination = {
 };
 type FrozenDistinct = { projectId: string | null; body: OffDraftCreateBody };
 const liveUuid = (value: unknown) =>
-  z.string().uuid().safeParse(value).success && value !== "00000000-0000-0000-0000-000000000000";
+  z.guid().safeParse(value).success && value !== "00000000-0000-0000-0000-000000000000";
 type StoredDraft = {
   format: 1;
   owner: OffWikiOwner;
@@ -179,10 +179,9 @@ export class OffWikiDraft {
               !isTiptapDoc(request.contentJson) ||
               new TextEncoder().encode(JSON.stringify(request.contentJson)).length > 1024 * 1024 ||
               typeof request.title !== "string" ||
-              (request.parentId !== null &&
-                !z.string().uuid().safeParse(request.parentId).success) ||
+              (request.parentId !== null && !z.guid().safeParse(request.parentId).success) ||
               (saved.distinct.projectId !== null &&
-                !z.string().uuid().safeParse(saved.distinct.projectId).success)
+                !z.guid().safeParse(saved.distinct.projectId).success)
             )
               throw new Error("Distinct draft command owner/input mismatch");
           }

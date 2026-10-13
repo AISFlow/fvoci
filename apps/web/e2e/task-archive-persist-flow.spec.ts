@@ -6,14 +6,14 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const bodySchema = z
-  .object({ contentJson: z.unknown(), archivedAt: z.string().nullable() })
-  .passthrough();
+  .object({ contentJson: z.unknown().optional(), archivedAt: z.string().nullable() })
+  .loose();
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
-const archivePatchSchema = z.object({ archived: z.boolean().optional() }).passthrough().nullable();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
+const archivePatchSchema = z.object({ archived: z.boolean().optional() }).loose().nullable();
 
 test.describe.configure({ mode: "serial" });
 

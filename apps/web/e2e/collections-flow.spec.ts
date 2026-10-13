@@ -5,19 +5,17 @@ import { createTasksViaApi, login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
-const nameListSchema = z
-  .object({ items: z.array(z.object({ name: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
+const nameListSchema = z.object({ items: z.array(z.object({ name: z.string() }).loose()) }).loose();
 const projectListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), key: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), key: z.string() }).loose()) })
+  .loose();
 const workflowSchema = z
-  .object({ statuses: z.array(z.object({ id: z.string(), category: z.string() }).passthrough()) })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
+  .object({ statuses: z.array(z.object({ id: z.string(), category: z.string() }).loose()) })
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
 const fieldListSchema = z
   .object({
     items: z.array(
@@ -25,34 +23,34 @@ const fieldListSchema = z
         .object({
           id: z.string(),
           key: z.string(),
-          options: z.array(z.object({ id: z.string(), label: z.string() }).passthrough()),
+          options: z.array(z.object({ id: z.string(), label: z.string() }).loose()),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const taskNumberSchema = z.object({ number: z.number() }).passthrough();
+  .loose();
+const taskNumberSchema = z.object({ number: z.number() }).loose();
 const viewListSchema = z
   .object({
-    items: z.array(z.object({ name: z.string(), config: z.unknown() }).passthrough()),
+    items: z.array(z.object({ name: z.string(), config: z.unknown().optional() }).loose()),
   })
-  .passthrough();
+  .loose();
 const viewConfigListSchema = z
-  .object({ items: z.array(z.object({ config: z.unknown() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ config: z.unknown().optional() }).loose()) })
+  .loose();
 const namedWorkflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()),
+    statuses: z.array(z.object({ id: z.string(), name: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const fieldSchema = z
   .object({
     id: z.string(),
     version: z.number(),
-    options: z.array(z.object({ id: z.string(), label: z.string() }).passthrough()),
+    options: z.array(z.object({ id: z.string(), label: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const collectionQuerySchema = z
   .object({
     items: z.array(
@@ -63,25 +61,25 @@ const collectionQuerySchema = z
           statusId: z.string().nullable(),
           dueDate: z.string().nullable(),
           dueAt: z.string().nullable(),
-          values: z.record(z.unknown()),
+          values: z.record(z.string(), z.unknown()),
           version: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const queryBodySchema = z
   .object({
     group: z.string().nullable().optional(),
     cursor: z.string().nullable().optional(),
   })
-  .passthrough();
-const cursorBodySchema = z.object({ cursor: z.string().nullable().optional() }).passthrough();
-const meSchema = z.object({ timezone: z.string() }).passthrough();
+  .loose();
+const cursorBodySchema = z.object({ cursor: z.string().nullable().optional() }).loose();
+const meSchema = z.object({ timezone: z.string() }).loose();
 const statusIdListSchema = z
-  .object({ statuses: z.array(z.object({ id: z.string() }).passthrough()) })
-  .passthrough();
-const versionedSchema = z.object({ id: z.string(), version: z.number() }).passthrough();
+  .object({ statuses: z.array(z.object({ id: z.string() }).loose()) })
+  .loose();
+const versionedSchema = z.object({ id: z.string(), version: z.number() }).loose();
 
 test.describe.configure({ mode: "serial" });
 

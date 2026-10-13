@@ -30,7 +30,7 @@ type AdmissionOwner = {
 
 const taskSchema = z
   .object({
-    id: z.string().uuid(),
+    id: z.guid(),
     number: z.number(),
     version: z.number(),
     startDate: z.string().nullable(),
@@ -39,10 +39,10 @@ const taskSchema = z
     title: z.string(),
     statusId: z.string(),
   })
-  .passthrough();
-const projectSchema = z.object({ id: z.string().uuid() }).passthrough();
-const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string().uuid() })) });
-const problemSchema = z.object({ code: z.string() }).passthrough();
+  .loose();
+const projectSchema = z.object({ id: z.guid() }).loose();
+const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.guid() })) });
+const problemSchema = z.object({ code: z.string() }).loose();
 let adminAuth: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
 test.describe.configure({ mode: "serial" });
 test.beforeAll(async ({ browser, baseURL }) => setupInstance(browser, baseURL));
@@ -121,7 +121,7 @@ function readTaskBodyDb(workspace: string, task: string) {
   ) as unknown;
   const witness = z
     .object({
-      contentJson: z.unknown(),
+      contentJson: z.unknown().optional(),
       version: z.number(),
       role: z.string(),
       superuser: z.boolean(),
@@ -713,7 +713,7 @@ for (const archivedTarget of [false, true]) {
         const originalCanonicalResponse = await page.request.get(parentEndpoint);
         expect(originalCanonicalResponse.status()).toBe(200);
         const originalCanonical = z
-          .object({ contentJson: z.unknown(), version: z.number() })
+          .object({ contentJson: z.unknown().optional(), version: z.number() })
           .parse(await originalCanonicalResponse.json());
         const originalDb = readTaskBodyDb(workspace, parent.id);
         expect(originalDb).toMatchObject(originalCanonical);
@@ -805,7 +805,7 @@ for (const archivedTarget of [false, true]) {
         const record = z
           .object({
             record: z.object({
-              id: z.string().uuid(),
+              id: z.guid(),
               startedAt: z.string(),
               endedAt: z.string(),
               note: z.literal("UI restored REST entry"),
@@ -885,7 +885,7 @@ for (const archivedTarget of [false, true]) {
         const canonicalResponse = await page.request.get(parentEndpoint);
         expect(canonicalResponse.status()).toBe(200);
         const canonical = z
-          .object({ contentJson: z.unknown(), version: z.number() })
+          .object({ contentJson: z.unknown().optional(), version: z.number() })
           .parse(await canonicalResponse.json());
         await testInfo.attach("w3-task-held-auth-causal-native-updates.json", {
           body: JSON.stringify({
@@ -1062,7 +1062,7 @@ for (const archivedTarget of [false, true]) {
         const savedTask = await page.request.get(parentEndpoint);
         expect(savedTask.status()).toBe(200);
         const committed = z
-          .object({ contentJson: z.unknown() })
+          .object({ contentJson: z.unknown().optional() })
           .parse(await savedTask.json()).contentJson;
         expect(JSON.stringify(committed)).toContain("실제 재인증 태스크 본문");
         const appConnection = process.env.DATABASE_APP_URL;
@@ -1109,7 +1109,8 @@ for (const archivedTarget of [false, true]) {
           const response = await client.request.get(parentEndpoint);
           expect(response.status()).toBe(200);
           expect(
-            z.object({ contentJson: z.unknown() }).parse(await response.json()).contentJson,
+            z.object({ contentJson: z.unknown().optional() }).parse(await response.json())
+              .contentJson,
           ).toEqual(committed);
         } finally {
           await newest.close();
@@ -1459,7 +1460,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       const initial = await page.request.patch(f.endpoint, { data: { archived: true } });
       expect(initial.status()).toBe(200);
       const originalBody = z
-        .object({ contentJson: z.unknown(), version: z.number() })
+        .object({ contentJson: z.unknown().optional(), version: z.number() })
         .parse(await (await page.request.get(f.endpoint)).json());
       const workspace = f.base.split("/").at(-1);
       if (!workspace) throw new Error("Missing workspace");
@@ -1918,7 +1919,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         const response = await page.request.get(f.endpoint);
         expect(response.status()).toBe(200);
         const committed = z
-          .object({ contentJson: z.unknown() })
+          .object({ contentJson: z.unknown().optional() })
           .parse(await response.json()).contentJson;
         expect(JSON.stringify(committed)).toContain("자연스러운 태스크 재인증 한글");
         const connection = process.env.DATABASE_APP_URL;
@@ -1965,7 +1966,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           const saved = await newest.request.get(f.endpoint);
           expect(saved.status()).toBe(200);
           expect(
-            z.object({ contentJson: z.unknown() }).parse(await saved.json()).contentJson,
+            z.object({ contentJson: z.unknown().optional() }).parse(await saved.json()).contentJson,
           ).toEqual(committed);
         } finally {
           await fresh.close();
@@ -1975,7 +1976,9 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         const response = await page.request.get(f.endpoint);
         expect(response.status()).toBe(200);
         expect(
-          z.object({ contentJson: z.unknown(), version: z.number() }).parse(await response.json()),
+          z
+            .object({ contentJson: z.unknown().optional(), version: z.number() })
+            .parse(await response.json()),
         ).toEqual(originalBody);
       }
       await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
