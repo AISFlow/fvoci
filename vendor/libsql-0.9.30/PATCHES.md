@@ -30,9 +30,10 @@ pinned upstream VCS root; the published archive omitted that file. Its SHA-256
 is `cecf589818a56c2da8a0a6cc82c8a215c9770988c033b6016c2b74bf79f38152`.
 The crate version stays 0.9.30. Feature names are unchanged. The `tls` feature
 now depends on rustls 0.23.45, tokio-rustls 0.26.5, and rustls-native-certs
-0.7.3 (ring, no aws-lc-rs) instead of hyper-rustls 0.25. `Cargo.toml.orig`,
-the vendored upstream `Cargo.lock`, and dev-dependencies are untouched. The
-root `Cargo.lock` is the resolution fvoci-server builds.
+0.7.3 or later compatible releases (ring, no aws-lc-rs) instead of
+hyper-rustls 0.25. `Cargo.toml.orig`, the vendored upstream `Cargo.lock`, and
+dev-dependencies are untouched. The root `Cargo.lock` is the resolution
+fvoci-server builds and holds the exact versions.
 
 Source adoption only: SDK compilation and five Rust controls, actual remote
 FK failure and original-stream cleanup are NOTRUN. ROOT owns product patch
