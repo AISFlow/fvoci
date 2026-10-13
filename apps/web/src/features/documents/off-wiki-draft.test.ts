@@ -9,6 +9,9 @@ import {
   loadBody,
   ownerKey,
   readRetainedDraft,
+  unreachableDrafts,
+  type OffWikiOwner,
+  type RetainedOffDraft,
 } from "./off-wiki-draft";
 import type { BodySaveCommand, BodySaveResult, VersionedBody } from "./versioned-body-api";
 
@@ -886,5 +889,30 @@ describe("retired dirty OFF draft policy", () => {
     const moved = persisted.slots.get(ownerKey(owner)) ?? "";
     persisted.slots.set(ownerKey({ ...owner, actorId: "B" }), moved);
     expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
+  });
+  test("an item page reaches only its refused task and the lost projects of its workspace", () => {
+    const draft = (patch: Partial<OffWikiOwner>): RetainedOffDraft => ({
+      owner: { ...owner, ...patch },
+      markdown: "draft",
+      excerpt: "draft",
+    });
+    const lostDocument = draft({ targetId: "lost-document", projectId: "lost" });
+    const lostTask = draft({ targetId: "lost-task", projectId: "lost", kind: "task" });
+    const refused = draft({ targetId: "refused", projectId: "granted", kind: "task" });
+    const reachable = draft({ targetId: "reachable", projectId: "granted", kind: "task" });
+    const reachableDocument = draft({ targetId: "refused", projectId: "granted" });
+    const wiki = draft({ targetId: "wiki" });
+    const elsewhere = draft({ workspaceId: "other", targetId: "refused", projectId: "lost" });
+    const all = [lostDocument, lostTask, refused, reachable, reachableDocument, wiki, elsewhere];
+    const granted = new Set(["granted"]);
+    expect(unreachableDrafts(all, "workspace", granted, null)).toEqual([lostDocument, lostTask]);
+    expect(unreachableDrafts(all, "workspace", granted, "refused")).toEqual([
+      lostDocument,
+      lostTask,
+      refused,
+    ]);
+    // Without a fresh project list only the refused task itself is offered.
+    expect(unreachableDrafts(all, "workspace", null, "refused")).toEqual([refused]);
+    expect(unreachableDrafts(all, "workspace", null, null)).toEqual([]);
   });
 });

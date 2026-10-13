@@ -5,6 +5,7 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { unreachableDrafts } from "@/features/documents/off-wiki-draft";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { invalidateTaskCaches } from "@/features/tasks/task-cache";
 import {
@@ -32,8 +33,10 @@ import AppLink from "../components/AppLink.vue";
 import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
+import { listRetainedOffDrafts } from "../composables/useOffWikiBody";
 import { useTaskStream } from "../composables/useTaskStream";
 import ProjectDocumentView from "../features/documents/ProjectDocumentView.vue";
+import RetainedDraftList from "../features/documents/RetainedDraftList.vue";
 import TaskDetailView from "../features/tasks/TaskDetailView.vue";
 import { leaveTo } from "../session/navigation";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
@@ -354,6 +357,37 @@ const realNotFound = computed(
     lookupMiss.value ||
     task404.value,
 );
+// A refused task read, like the document view's refused metadata: the form
+// leaves and its retained OFF draft below is export only.
+const taskRefused = computed(
+  () =>
+    Boolean(lookupTask.value) &&
+    task.isError.value &&
+    task.error.value instanceof ProblemError &&
+    [401, 403, 404].includes(task.error.value.status),
+);
+// This tab's OFF drafts of the current actor and credential that this page can
+// no longer reach: the refused task, or any target of a project the fresh list
+// no longer grants. Local reads only: export, never send.
+const retainedDrafts = computed(() => {
+  const actor = session.me.value;
+  if (
+    !workspace.value ||
+    !actor?.userId ||
+    !actor.sessionId ||
+    !(realNotFound.value || taskRefused.value)
+  )
+    return [];
+  const granted = projects.isSuccess.value
+    ? new Set((projects.data.value?.items ?? []).map((row) => row.id))
+    : null;
+  return unreachableDrafts(
+    listRetainedOffDrafts(actor.userId, actor.sessionId),
+    workspace.value.id,
+    granted,
+    taskRefused.value ? (lookupTask.value?.id ?? null) : null,
+  );
+});
 
 const taskReadOnly = computed(
   () =>
@@ -500,6 +534,7 @@ async function onTrash(): Promise<void> {
       @retry="projects.refetch()"
     />
     <p v-if="realNotFound" role="alert" class="task-form__alert">{{ t("task.error.notFound") }}</p>
+    <RetainedDraftList :drafts="retainedDrafts" class="task-home__note" />
     <ProjectDocumentView
       v-if="projectDocument && project"
       :key="collabRoomName(workspace.id, 'document', projectDocument.id)"
@@ -531,11 +566,11 @@ async function onTrash(): Promise<void> {
       :message="loadErrorMessage(workflow.error.value)"
       @retry="workflow.refetch()"
     />
-    <!-- A failed refetch keeps the last task data; an authoritative 404/miss
-         (e.g. the task moved to a team) must not leave that form editable.
-         Transient errors keep it, with any draft. -->
+    <!-- A failed refetch keeps the last task data; an authoritative 401/403/404
+         or miss (e.g. the task moved to a team) must not leave that form
+         editable. Transient errors keep it, with any draft. -->
     <TaskDetailView
-      v-if="item && task.data.value && !realNotFound"
+      v-if="item && task.data.value && !realNotFound && !taskRefused"
       :key="collabRoomName(workspace.id, 'task', task.data.value.id)"
       :slug="slug"
       :workspace-id="workspace.id"

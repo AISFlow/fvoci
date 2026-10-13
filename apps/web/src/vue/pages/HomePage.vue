@@ -9,7 +9,8 @@ import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
-import { listRetainedOffDrafts, useRetainedDraftExport } from "../composables/useOffWikiBody";
+import { listRetainedOffDrafts } from "../composables/useOffWikiBody";
+import RetainedDraftList from "../features/documents/RetainedDraftList.vue";
 import AuthenticatedLegalNav from "../features/legal/AuthenticatedLegalNav.vue";
 import EmptyWorkspace from "../features/workspace/EmptyWorkspace.vue";
 import WorkspaceCreateDialog from "../features/workspace/WorkspaceCreateDialog.vue";
@@ -43,7 +44,6 @@ const retainedDrafts = computed(() => {
     (draft) => !granted.has(draft.owner.workspaceId),
   );
 });
-const { note: draftExportNote, run: exportDraft } = useRetainedDraftExport();
 const leaving = computed(
   () => setup.data.value?.needed === true || (ready.value && me.isError.value),
 );
@@ -114,28 +114,7 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
         {{ t("common.dismiss") }}
       </button>
     </div>
-    <section
-      v-if="retainedDrafts.length > 0"
-      class="border-b border-default px-4 py-2 text-sm"
-      data-testid="off-draft-retained-list"
-    >
-      <p class="break-keep">{{ t("doc.off.retainedList") }}</p>
-      <div
-        v-for="draft in retainedDrafts"
-        :key="`${draft.owner.workspaceId}:${draft.owner.targetId}:${draft.owner.projectId ?? ''}:${draft.owner.kind ?? 'document'}`"
-        class="mt-2 flex flex-wrap items-center gap-2"
-        data-testid="off-draft-retained"
-      >
-        <span class="min-w-0 break-all text-muted">{{ draft.excerpt }}</span>
-        <UButton size="sm" @click="exportDraft(draft, 'copy')">{{
-          t("doc.off.copyDraft")
-        }}</UButton>
-        <UButton size="sm" @click="exportDraft(draft, 'download')">{{
-          t("doc.off.downloadDraft")
-        }}</UButton>
-      </div>
-      <p v-if="draftExportNote" role="status" class="mt-2">{{ draftExportNote }}</p>
-    </section>
+    <RetainedDraftList :drafts="retainedDrafts" class="border-b border-default px-4 py-2 text-sm" />
     <div
       v-if="items.length > 0 && (logoutError || navigation.error.value)"
       role="alert"

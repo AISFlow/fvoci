@@ -182,6 +182,23 @@ export function listRetainedDrafts(
   }
   return drafts;
 }
+/** The retained drafts of one workspace an item page can no longer reach: the
+ * task whose own read was refused, or any target of a project the fresh list no
+ * longer grants. Without that list only the refused task qualifies; a target
+ * missing from a granted project cannot be told apart without the server. */
+export function unreachableDrafts(
+  drafts: readonly RetainedOffDraft[],
+  workspaceId: string,
+  grantedProjects: ReadonlySet<string> | null,
+  refusedTaskId: string | null,
+): RetainedOffDraft[] {
+  return drafts.filter(
+    ({ owner }) =>
+      owner.workspaceId === workspaceId &&
+      ((owner.kind === "task" && owner.targetId === refusedTaskId) ||
+        (!!grantedProjects && !!owner.projectId && !grantedProjects.has(owner.projectId))),
+  );
+}
 export function encodeUpdate(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
