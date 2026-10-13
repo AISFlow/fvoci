@@ -2098,8 +2098,10 @@ test("inputs() admits a fresh CARGO_HOME link left untracked in the checkout", (
   const base = realpathSync(directory());
   const repo = join(base, "repo");
   const copied = join(repo, "tools/selected-backend-ci");
-  for (const d of ["bin", "sysroot", "compiler/include", "clang", "sqlite/lib"])
+  for (const d of ["bin", "sysroot", "compiler/include", "clang", "sqlite/lib", "include"])
     mkdirSync(join(base, d), { recursive: true });
+  // The host /usr/include would make the probe's time follow the runner's header count.
+  writeFileSync(join(base, "include/stdio.h"), "header");
   mkdirSync(copied, { recursive: true });
   mkdirSync(join(repo, "node_modules"));
   for (const name of ["build.ts", "admission.ts", "io.ts", "types.ts"])
@@ -2134,7 +2136,7 @@ test("inputs() admits a fresh CARGO_HOME link left untracked in the checkout", (
     probe,
     `import { inputs } from ${JSON.stringify(join(copied, "build.ts"))};
 import { writeFileSync } from "node:fs";
-writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
+writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs(${JSON.stringify(join(base, "include"))})));`,
   );
   const result = spawnSync([process.execPath, probe], {
     cwd: repo,
@@ -2163,4 +2165,6 @@ writeFileSync(${JSON.stringify(output)}, JSON.stringify(inputs()));`,
   expect(Object.keys(recorded.external).filter((p) => p.startsWith(repo))).toEqual([
     join(repo, "node_modules/real.js"),
   ]);
+  expect(recorded.external[join(base, "include/stdio.h")]).toBe(digest("header"));
+  expect(Object.keys(recorded.external).filter((p) => p.startsWith("/usr/include/"))).toEqual([]);
 });
