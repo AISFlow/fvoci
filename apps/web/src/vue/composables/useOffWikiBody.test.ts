@@ -11,6 +11,7 @@ import {
   OffWikiDraft,
   decodeUpdate,
   encodeUpdate,
+  listRetainedDrafts,
   loadBody,
   ownerKey,
   readRetainedDraft,
@@ -94,8 +95,10 @@ async function settle() {
   await Vue.nextTick();
   await Promise.resolve();
 }
-function harness() {
+/** `owner` stands in for a host's owner getter; by default `scope` drives it. */
+function harness(owner?: () => OffWikiOwner | null) {
   const scope = Vue.shallowRef<OffWikiOwner | null>({ ...original });
+  const currentOwner = owner ?? (() => scope.value);
   const enabled = Vue.ref(true),
     authRetired = Vue.ref(false);
   const reads: { scope: OffWikiOwner; pending: ReturnType<typeof deferred<VersionedBody>> }[] = [];
@@ -111,13 +114,14 @@ function harness() {
     projectId: string | null;
     pending: ReturnType<typeof deferred<OffDraftCreateResponse>>;
   }[] = [];
-  const effects = Vue.effectScope();
-  const factory = runInNewContext(`${script}\nuseOffWikiBody`, {
+  let effects = Vue.effectScope();
+  const composable = runInNewContext(`${script}\n({ useOffWikiBody, listRetainedOffDrafts })`, {
     ...Vue,
     Y,
     OffWikiDraft,
     decodeUpdate,
     encodeUpdate,
+    listRetainedDrafts,
     loadBody,
     ownerKey,
     readRetainedDraft,
@@ -127,6 +131,10 @@ function harness() {
     inject: () => authRetired,
     window: {
       sessionStorage: {
+        get length() {
+          return slots.size;
+        },
+        key: (index: number) => [...slots.keys()][index] ?? null,
         getItem: (key: string) => slots.get(key) ?? null,
         setItem: (key: string, value: string) => slots.set(key, value),
         removeItem: (key: string) => slots.delete(key),
@@ -144,7 +152,7 @@ function harness() {
     ) => {
       const pending = deferred<VersionedBody>();
       reads.push({
-        scope: { ...required(scope.value), workspaceId, targetId, projectId, kind },
+        scope: { ...required(currentOwner()), workspaceId, targetId, projectId, kind },
         pending,
       });
       return pending.promise;
@@ -169,16 +177,35 @@ function harness() {
       creates.push({ body, projectId, pending });
       return pending.promise;
     },
-  }) as typeof import("./useOffWikiBody").useOffWikiBody;
-  const body = required(
-    effects.run(() =>
-      factory(
-        () => scope.value,
-        () => enabled.value,
+  }) as Pick<typeof import("./useOffWikiBody"), "useOffWikiBody" | "listRetainedOffDrafts">;
+  const mount = () =>
+    required(
+      effects.run(() =>
+        composable.useOffWikiBody(
+          () => currentOwner(),
+          () => enabled.value,
+        ),
       ),
-    ),
-  );
-  return { body, reads, writes, creates, scope, enabled, authRetired, effects, slots };
+    );
+  const h = {
+    body: mount(),
+    reads,
+    writes,
+    creates,
+    scope,
+    enabled,
+    authRetired,
+    effects,
+    slots,
+    listRetainedOffDrafts: composable.listRetainedOffDrafts,
+    /** The host unmounts and mounts again in this page: one module, a new composable. */
+    remount() {
+      h.effects.stop();
+      effects = h.effects = Vue.effectScope();
+      h.body = mount();
+    },
+  };
+  return h;
 }
 describe("OFF wiki HTTP lifetime", () => {
   test("distinct creation unknown finish has no observer and retries exact body while keeping mine", async () => {
@@ -1118,10 +1145,183 @@ describe("retired dirty OFF draft lifetime", () => {
       expect(
         h.body.retainedFor({ ...original, actorId: "B", credentialId: "session-B" }),
       ).toBeNull();
+      // Another target keeps it in this page's memory for its own owner only.
       h.scope.value = { ...original, targetId: "other" };
-      expect(h.body.retainedFor(original)).toBeNull();
+      expect(h.body.retainedFor(original)?.markdown).toContain("only in memory");
+      expect(
+        h.body.retainedFor({ ...original, actorId: "B", credentialId: "session-B" }),
+      ).toBeNull();
       expect(h.slots.size).toBe(0);
       h.effects.stop();
     }
   });
+});
+
+describe("a draft the tab storage refused (memory only)", () => {
+  function type(h: ReturnType<typeof harness>, text: string) {
+    const draft = required(h.body.draft.value);
+    const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(1, text);
+  }
+  async function memoryDraft(h = harness()) {
+    required(h.reads[0]).pending.resolve(source(original));
+    await settle();
+    h.slots.set = () => {
+      throw new Error("quota");
+    };
+    type(h, " only in memory");
+    expect(h.body.storageError.value).toBeInstanceOf(Error);
+    return h;
+  }
+  async function deniedMemoryDraft() {
+    const h = await memoryDraft();
+    const saving = h.body.save();
+    required(h.writes.at(-1)).pending.reject(new ProblemError(404));
+    expect(await saving).toBe(false);
+    return h;
+  }
+  function expectRestoredFromMemory(h: ReturnType<typeof harness>) {
+    expect(JSON.stringify(required(h.body.draft.value).mine)).toContain("only in memory");
+    expect(h.body.restored.value).toBe(true);
+    expect(JSON.stringify(h.body.restoredComparison.value?.mine)).toContain("only in memory");
+    // Still refused by the tab storage: the warning stays with the restored draft.
+    expect(h.body.storageError.value).toBeInstanceOf(Error);
+    expect(h.slots.size).toBe(0);
+  }
+  test("P1 export only says the draft is not kept in this tab", async () => {
+    const h = await deniedMemoryDraft();
+    expect(h.body.doc.value).toBeNull();
+    expect(h.body.retained.value?.markdown).toContain("only in memory");
+    expect(h.body.retained.value).toMatchObject({ unstored: true });
+    expect(h.slots.size).toBe(0);
+    h.effects.stop();
+  });
+  test("P2 a retry that is still refused keeps the memory-only export", async () => {
+    const h = await deniedMemoryDraft();
+    const loading = h.body.load();
+    required(h.reads.at(-1)).pending.reject(new ProblemError(404));
+    await loading;
+    expect(h.body.retained.value?.markdown).toContain("only in memory");
+    expect(h.body.retained.value).toMatchObject({ unstored: true });
+    expect(h.body.retainedFor(original)?.markdown).toContain("only in memory");
+    expect(h.writes).toHaveLength(1);
+    h.effects.stop();
+  });
+  test("P3 a retry after access returns restores the memory-only draft as an offer", async () => {
+    const h = await deniedMemoryDraft();
+    const loading = h.body.load();
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    await loading;
+    await settle();
+    expectRestoredFromMemory(h);
+    expect(h.body.retained.value).toBeNull();
+    expect(h.writes).toHaveLength(1);
+    // Only the explicit discard drops it; nothing is offered again.
+    const discarding = h.body.discard();
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    expect(await discarding).toBe(true);
+    h.scope.value = null;
+    h.scope.value = { ...original };
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    await settle();
+    expect(h.body.restored.value).toBe(false);
+    expect(JSON.stringify(required(h.body.draft.value).mine)).not.toContain("only in memory");
+    expect(h.body.retainedFor(original)).toBeNull();
+    h.effects.stop();
+  });
+  test("P4 a refused document meta, then its return, restores the memory-only draft", async () => {
+    const h = await memoryDraft();
+    // The view drops the owner when its document meta is refused.
+    h.scope.value = null;
+    expect(h.body.retainedFor(original)?.markdown).toContain("only in memory");
+    expect(h.body.retainedFor(original)).toMatchObject({ unstored: true });
+    // Access returns: the meta read succeeds and the view restores the owner.
+    h.scope.value = { ...original };
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    await settle();
+    expectRestoredFromMemory(h);
+    expect(h.writes).toHaveLength(0);
+    h.effects.stop();
+  });
+  test("a remount in this page restores the memory-only draft to its own owner only", async () => {
+    const h = await memoryDraft();
+    h.remount();
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    await settle();
+    expectRestoredFromMemory(h);
+    expect(h.listRetainedOffDrafts("A", "session-A")).toMatchObject([
+      { owner: original, unstored: true },
+    ]);
+    // Another actor in this page, even remounted, never sees or lists it.
+    const other = { ...original, actorId: "B", credentialId: "session-B" };
+    h.scope.value = other;
+    h.remount();
+    required(h.reads.at(-1)).pending.resolve(source(other));
+    await settle();
+    expect(h.body.restored.value).toBe(false);
+    expect(JSON.stringify(required(h.body.draft.value).mine)).not.toContain("only in memory");
+    expect(h.body.retainedFor(other)).toBeNull();
+    expect(h.listRetainedOffDrafts("B", "session-B")).toEqual([]);
+    expect(h.listRetainedOffDrafts("A", "session-B")).toEqual([]);
+    expect(h.writes).toHaveLength(0);
+    h.effects.stop();
+  });
+});
+
+test("actual TaskDetailView drops the OFF owner on a refused task read: nothing is saved after it", async () => {
+  const { descriptor, errors } = parse(
+    readFileSync(new URL("../features/tasks/TaskDetailView.vue", import.meta.url), "utf8"),
+  );
+  expect(errors).toEqual([]);
+  const setup = ts.createSourceFile(
+    "TaskDetailView.vue",
+    required(descriptor.scriptSetup).content,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let ownerText = "";
+  for (const statement of setup.statements)
+    if (ts.isVariableStatement(statement))
+      for (const entry of statement.declarationList.declarations)
+        if (
+          entry.name.getText(setup) === "offBody" &&
+          entry.initializer &&
+          ts.isCallExpression(entry.initializer)
+        )
+          ownerText = required(entry.initializer.arguments[0]).getText(setup);
+  const props = Vue.reactive({
+    workspaceId: original.workspaceId,
+    projectId: "project",
+    task: { id: original.targetId },
+    refused: false,
+  });
+  const me = {
+    data: Vue.ref({ userId: original.actorId, sessionId: original.credentialId }),
+    error: Vue.ref(null),
+  };
+  const owner = runInNewContext(ts.transpile(`(${ownerText})`), {
+    me,
+    props,
+    ProblemError,
+  }) as () => OffWikiOwner | null;
+  const task = { ...original, projectId: "project", kind: "task" as const };
+  expect(owner()).toEqual(task);
+  const h = harness(owner);
+  required(h.reads[0]).pending.resolve(source(task));
+  await settle();
+  const paragraph = required(h.body.draft.value)
+    .doc.getXmlFragment("prosemirror")
+    .get(0) as Y.XmlElement;
+  (paragraph.get(0) as Y.XmlText).insert(1, " refused task");
+  // The item page saw this task's own read refused while its form stays.
+  props.refused = true;
+  expect(owner()).toBeNull();
+  await settle();
+  expect(h.body.doc.value).toBeNull();
+  expect(await h.body.save()).toBe(false);
+  expect(h.writes).toHaveLength(0);
+  expect(h.body.retainedFor(task)?.markdown).toContain("refused task");
+  expect(h.body.retainedFor({ ...task, actorId: "B", credentialId: "session-B" })).toBeNull();
+  h.effects.stop();
 });
