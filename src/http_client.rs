@@ -20,9 +20,14 @@ use std::sync::Arc;
 // clippy.toml disallows the bare constructors everywhere else.
 #[allow(clippy::disallowed_methods)]
 pub fn builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().tls_backend_preconfigured(tls_config(rustls::RootCertStore {
+    reqwest::Client::builder().tls_backend_preconfigured(tls_config(public_roots()))
+}
+
+/// The bundled Mozilla roots (`webpki-roots`) every client trusts.
+fn public_roots() -> rustls::RootCertStore {
+    rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    }))
+    }
 }
 
 /// `reqwest::Client::new()` with FVOCI's TLS configuration and no further
@@ -169,6 +174,26 @@ mod tests {
             next = error.source();
         }
         None
+    }
+
+    /// The subject of ISRG Root X1 (Let's Encrypt) as a trust anchor holds
+    /// it, without the outer SEQUENCE: C=US, O=Internet Security Research
+    /// Group, CN=ISRG Root X1.
+    const ISRG_ROOT_X1: &[u8] = b"\x31\x0b\x30\x09\x06\x03\x55\x04\x06\x13\x02US\
+        \x31\x29\x30\x27\x06\x03\x55\x04\x0a\x13\x20Internet Security Research Group\
+        \x31\x15\x30\x13\x06\x03\x55\x04\x03\x13\x0cISRG Root X1";
+
+    /// The refusal test below passes with no roots at all, so the store
+    /// itself is checked here.
+    #[test]
+    fn trusts_the_bundled_mozilla_roots() {
+        let roots = public_roots();
+        assert!(!roots.is_empty());
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        assert!(roots
+            .roots
+            .iter()
+            .any(|anchor| anchor.subject.as_ref() == ISRG_ROOT_X1));
     }
 
     #[tokio::test]
