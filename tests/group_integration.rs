@@ -1,6 +1,8 @@
 #![cfg(feature = "db-tests")]
 #![allow(dead_code)]
 
+#[path = "support/libsql_finish_fixture.rs"]
+mod libsql_fixture;
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
@@ -1709,6 +1711,61 @@ mod sqlite_port {
     use fvoci_server::db::{backend::Backend, migrate, pool, Db};
     use fvoci_server::http::{router, state::AppState};
     use std::sync::Arc;
+    fn state(backend: Backend, root: &std::path::Path) -> AppState {
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(backend),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::Off,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            streams: AppState::fresh_streams(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            quota: Default::default(),
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+        }
+    }
+    /// First-instance setup through the product route; returns the session cookie.
+    async fn setup_owner(app: &axum::Router) -> String {
+        let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        headers
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string()
+    }
     struct Fixture {
         root: std::path::PathBuf,
         path: std::path::PathBuf,
@@ -1728,51 +1785,8 @@ mod sqlite_port {
             migrate::run_sqlite_migrations(&path).await.unwrap();
             let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
             let backend = Backend::Sqlite(sqlite.clone());
-            let auth=Arc::new(AuthService{db:Db::from_backend(backend.clone()),password_keys:Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()});
-            let state = AppState {
-                realtime_mode: fvoci_server::config::RealtimeMode::Off,
-                native_engine: None,
-                auth,
-                branding_name: "FVOCI".into(),
-                public_origin: "http://localhost".into(),
-                cookie_secure: false,
-                rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
-                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
-                upload: fvoci_server::attachments::UploadLimits {
-                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
-                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
-                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
-                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
-                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
-                    ),
-                },
-                collab: None,
-                meili: None,
-                search_embedder: None,
-                streams: AppState::fresh_streams(),
-                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
-                quota: Default::default(),
-                markdown: None,
-                import_wake: None,
-                import_extractor_available: false,
-                preview_extract: None,
-            };
-
-            let app = router(state, None);
-            let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
-            assert_eq!(status, StatusCode::CREATED);
-            let cookie = headers
-                .get(axum::http::header::SET_COOKIE)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .split_once('=')
-                .unwrap()
-                .1
-                .to_string();
+            let app = router(state(backend.clone(), &root), None);
+            let cookie = setup_owner(&app).await;
             let bytes: Vec<u8> =
                 sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
                     .fetch_one(&sqlite)
@@ -2008,6 +2022,159 @@ mod sqlite_port {
         );
         assert_eq!(f.count("groups").await, 0);
         f.close().await;
+    }
+
+    /// Writes that have no NUL input validator; PostgreSQL refuses each one at
+    /// its text bind (SQLSTATE 22021).
+    fn nul_text_requests(ws: Uuid) -> [(&'static str, String, Value); 3] {
+        [
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws}/groups"),
+                json!({"name": "Team\u{0}A"}),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/{ws}"),
+                json!({"name": "Renamed\u{0}A"}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws}/api-tokens"),
+                json!({"name": "token\u{0}A", "scopes": ["tasks.read"]}),
+            ),
+        ]
+    }
+
+    /// What each of those requests answers on PostgreSQL 16-18 today.
+    fn postgres_nul_refusal() -> (StatusCode, Value) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"type":"about:blank","title":"internal error","status":500,"code":"internal_error"}),
+        )
+    }
+
+    #[tokio::test]
+    async fn nul_text_without_validator_matches_postgres_and_stores_nothing() {
+        type Stored = (i64, i64, i64, i64, String);
+        async fn pg_stored(admin: &sqlx::PgPool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.groups),(SELECT count(*) FROM fvoci.api_tokens),(SELECT count(*) FROM fvoci.events),(SELECT count(*) FROM fvoci.audit_log),(SELECT name FROM fvoci.workspaces WHERE id=$1)")
+                .bind(ws)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_stored(pool: &sqlx::SqlitePool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM groups),(SELECT count(*) FROM api_tokens),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT name FROM workspaces WHERE id=?1)")
+                .bind(ws.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, _, ws) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let refused = sqlx::query_scalar::<_, String>("SELECT $1::text")
+            .bind("a\u{0}b")
+            .fetch_one(&admin)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused
+                .as_database_error()
+                .and_then(|e| e.code())
+                .as_deref(),
+            Some("22021")
+        );
+        let before = pg_stored(&admin, ws).await;
+        let mut postgres = Vec::new();
+        for (method, path, body) in nul_text_requests(ws) {
+            postgres
+                .push(json_request(app.clone(), method, &path, Some(body), Some(&cookie)).await);
+        }
+        assert_eq!(pg_stored(&admin, ws).await, before);
+        assert!(
+            postgres.iter().all(|r| *r == postgres_nul_refusal()),
+            "{postgres:?}"
+        );
+        admin.close().await;
+        harness.cleanup().await;
+
+        let f = Fixture::start().await;
+        let before = sqlite_stored(&f.pool, f.ws).await;
+        let mut sqlite = Vec::new();
+        for (method, path, body) in nul_text_requests(f.ws) {
+            sqlite.push(f.owner(method, &path, Some(body)).await);
+        }
+        assert_eq!(sqlite, postgres);
+        assert_eq!(sqlite_stored(&f.pool, f.ws).await, before);
+        f.close().await;
+    }
+
+    /// The same requests through the remote libSQL driver against the pinned
+    /// official sqld: the PostgreSQL response, and nothing stored remotely.
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn remote_nul_text_without_validator_matches_postgres_and_stores_nothing() {
+        use fvoci_server::db::backend::RemoteDatabase;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-nul-text-sqld-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let driver = libsql_fixture::LibsqlFinishFixture::start(&sqld, &root.join("sqld"))
+            .await
+            .unwrap();
+        let connection = driver.database().await.unwrap().connect().unwrap();
+        for step in migrate::compiled_sqlite_steps() {
+            let tx = connection
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .unwrap();
+            tx.execute_batch(step.sql).await.unwrap();
+            tx.execute("INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000)",
+                libsql::params![i64::from(step.version), migrate::SQLITE_LINEAGE, step.sha256]).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::new(4).unwrap(),
+        )));
+        migrate::assert_sqlite_schema_current(&backend)
+            .await
+            .unwrap();
+        let app = router(state(backend.clone(), &root), None);
+        let cookie = setup_owner(&app).await;
+        async fn stored(connection: &libsql::Connection) -> (Vec<i64>, String, Uuid) {
+            let mut rows = connection
+                .query("SELECT (SELECT count(*) FROM groups),(SELECT count(*) FROM api_tokens),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT name FROM workspaces WHERE slug='groups'),(SELECT id FROM workspaces WHERE slug='groups')", ())
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            let counts = (0..4).map(|i| row.get::<i64>(i).unwrap()).collect();
+            let id: Vec<u8> = row.get(5).unwrap();
+            (counts, row.get(4).unwrap(), Uuid::from_slice(&id).unwrap())
+        }
+        let before = stored(&connection).await;
+        for (method, path, body) in nul_text_requests(before.2) {
+            let response = project_harness::json_request(
+                app.clone(),
+                method,
+                &path,
+                Some(body),
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(response, postgres_nul_refusal(), "{method} {path}");
+        }
+        assert_eq!(stored(&connection).await, before);
+        drop(app);
+        drop(connection);
+        backend.close().await.unwrap();
+        let receipt = driver.finish().await.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // This binary runs in PostgreSQL shard b, which supplies FVOCI_COLLAB_ENGINE.
