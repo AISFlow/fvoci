@@ -274,6 +274,18 @@ async function exportsOnly(page: Page, row: Locator, draft: string): Promise<voi
   expect(readFileSync(await download.path(), "utf8")).toContain(draft);
 }
 
+/** A context signed in with its own credential: logging it out retires only
+ * this session, never the one saved in beforeAll that later tests reuse. */
+async function ownSession(
+  browser: Browser,
+  baseURL: string,
+  who: { email: string; password: string },
+): Promise<{ context: BrowserContext; page: Page }> {
+  const session = await actor(browser, baseURL, { email: "fresh login" });
+  await signIn(session.page, who);
+  return session;
+}
+
 async function switchAccount(page: Page, who: { email: string; password: string }) {
   // Same tab: the logged-out actor's slots stay in this sessionStorage.
   await page.getByRole("button", { name: "로그아웃", exact: true }).click();
@@ -462,7 +474,7 @@ test("(e) project access loss: the item page offers the document and task drafts
   offApp,
 }) => {
   const owner = await actor(browser, offApp.baseUrl, admin);
-  const peer = await actor(browser, offApp.baseUrl, projectUser);
+  const peer = await ownSession(browser, offApp.baseUrl, projectUser);
   try {
     const project = await privateProject(owner.page, `PL${suffix.toUpperCase()}`);
     await projectAccess(owner.page, project, true);
@@ -526,7 +538,7 @@ test("(f) a task read refused after a granted lookup offers its draft for export
   offApp,
 }) => {
   const owner = await actor(browser, offApp.baseUrl, admin);
-  const peer = await actor(browser, offApp.baseUrl, projectUser);
+  const peer = await ownSession(browser, offApp.baseUrl, projectUser);
   try {
     const project = await privateProject(owner.page, `PT${suffix.toUpperCase()}`);
     await projectAccess(owner.page, project, true);
