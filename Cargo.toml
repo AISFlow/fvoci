@@ -108,9 +108,10 @@ markdown = { version = "=1.0.0", default-features = false }
 # rlimited `--internal-markdown` child (`tiptap-to-docx`). MIT. No default
 # features: `image` stays off while exports carry attachment names only.
 docx-rs = { version = "=0.4.22", default-features = false }
-# docx-rs stores its parts uncompressed; the writer re-deflates the package
-# with the zip version docx-rs already links (no further crates). MIT.
-docx-zip = { package = "zip", version = "=8.6.0", default-features = false, features = ["deflate"] }
+# Untrusted native archives are read with it, docx-rs's stored package is
+# re-deflated with it, and PPTX is written with it (tests read with it too).
+# docx-rs 0.4.22 still links its own zip 8.6. MIT.
+zip = { version = "=9.0.2", default-features = false, features = ["deflate"] }
 # Tiptap -> PDF (source @react-pdf/renderer), written only in the rlimited
 # `--internal-markdown` child (`tiptap-to-pdf`): krilla writes the PDF and
 # subsets the embedded Noto fonts, rustybuzz shapes each run, and
@@ -133,7 +134,6 @@ tokio-tungstenite = "=0.29.0"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
 mailparse = "0.16"
-zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
 db-tests = []

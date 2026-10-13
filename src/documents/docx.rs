@@ -91,12 +91,11 @@ pub fn write_docx(doc: &ExportDoc) -> Result<Vec<u8>, DocxError> {
 /// `docx-rs` writes every part `Stored`; Word files are normally deflated
 /// (the TS output is ~1/100 the size on text-heavy bodies). Same parts, same
 /// order, compressed.
-fn deflate_package(stored: &[u8]) -> docx_zip::result::ZipResult<Vec<u8>> {
-    use docx_zip::write::SimpleFileOptions;
-    let mut archive = docx_zip::ZipArchive::new(Cursor::new(stored))?;
-    let mut out = docx_zip::ZipWriter::new(Cursor::new(Vec::with_capacity(stored.len() / 4)));
-    let options =
-        SimpleFileOptions::default().compression_method(docx_zip::CompressionMethod::Deflated);
+fn deflate_package(stored: &[u8]) -> zip::result::ZipResult<Vec<u8>> {
+    use zip::write::SimpleFileOptions;
+    let mut archive = zip::ZipArchive::new(Cursor::new(stored))?;
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::with_capacity(stored.len() / 4)));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for i in 0..archive.len() {
         let mut part = archive.by_index(i)?;
         // OPC has no directory parts; copied with `start_file`, docx-rs's
@@ -105,7 +104,7 @@ fn deflate_package(stored: &[u8]) -> docx_zip::result::ZipResult<Vec<u8>> {
         if part.is_dir() {
             continue;
         }
-        out.start_file(part.name().to_string(), options)?;
+        out.start_file(part.name()?.into_owned(), options)?;
         std::io::copy(&mut part, &mut out)?;
     }
     Ok(out.finish()?.into_inner())
@@ -677,7 +676,7 @@ mod tests {
         assert!(rels.contains("https://e.com/?a=1&amp;b=2\""), "{rels}");
         // OPC parts only: a directory entry would extract as an empty file.
         for i in 0..zip.len() {
-            let name = zip.by_index(i).unwrap().name().to_string();
+            let name = zip.by_index(i).unwrap().name().unwrap().into_owned();
             assert!(!name.ends_with('/'), "{name}");
         }
     }
