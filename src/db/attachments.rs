@@ -1586,6 +1586,26 @@ pub async fn attachment_extract_text(
     Ok(text)
 }
 
+pub async fn attachment_extract_text_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_extract_text(pool, workspace_id, attachment_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        family.query("SELECT extract_text FROM attachments WHERE workspace_id=?1 AND id=?2 AND status='stored'", &[Cell::uuid(workspace_id), Cell::uuid(attachment_id)]).await?.first().map(|row| row.cell(0)?.string()).transpose()
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
 /// Parent kind of an attachment, for API-token scope checks before an
 /// operation runs (source `authorizeTarget`). The parent never changes after
 /// insert, so reading it ahead of the operation's own transaction is sound.
@@ -1788,6 +1808,67 @@ pub async fn attachment_edit_context(
         mime: att.mime,
         editable,
     }))
+}
+
+pub async fn attachment_edit_context_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<AttachmentEditContext, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_edit_context(
+            pool,
+            workspace_id,
+            attachment_id,
+            actor_user_id,
+            session_id,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        let Some(att) = op.upload_row(workspace_id, attachment_id).await? else {
+            return Ok(Err(AttachmentDbError::NotFound));
+        };
+        let access = match op
+            .upload_parent_access(workspace_id, actor_user_id, att.parent(), false)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if !access.permission.at_least(ProjectPermission::View) {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if att.status != "stored" {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        if att.scan_status == "infected" {
+            return Ok(Err(AttachmentDbError::Infected));
+        }
+        let editable = is_hwp_attachment(&att.name, &att.mime)
+            && access.permission.at_least(ProjectPermission::Edit)
+            && access.writable.is_ok();
+        Ok(Ok(AttachmentEditContext {
+            source_attachment_id: att.id,
+            name: att.name,
+            mime: att.mime,
+            editable,
+        }))
+    }
+    .await;
+    tx.rollback().await?;
+    result
 }
 
 /// Retry delay for a journal row whose object is busy or failed to delete

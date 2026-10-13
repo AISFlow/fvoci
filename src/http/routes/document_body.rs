@@ -38,11 +38,14 @@ use crate::collab::derived_body::{
 use crate::collab::room::BodyWriteError;
 use crate::collab::seed::{SeedEngine, SeedError};
 use crate::db::document_ops::{
-    authorize_document, authorize_document_backend, commit_duplicate, list_document_backlinks,
-    list_project_ancestors, load_duplicate_sources, DocumentScope, DuplicateBody, SourceBody,
+    authorize_document_backend, commit_duplicate_backend as commit_duplicate,
+    list_document_backlinks_backend as list_document_backlinks,
+    list_project_ancestors_backend as list_project_ancestors,
+    load_duplicate_sources_backend as load_duplicate_sources, DocumentScope, DuplicateBody,
+    SourceBody,
 };
-use crate::db::documents::{list_wiki_tree, DocumentDbError, TreeNode};
-use crate::db::project_documents::list_project_document_tree;
+use crate::db::documents::{list_wiki_tree_backend as list_wiki_tree, DocumentDbError, TreeNode};
+use crate::db::project_documents::list_project_document_tree_backend as list_project_document_tree;
 use crate::documents::blocks::{replace_node_by_id, BlockNode};
 use crate::documents::markdown_helper::{MarkdownError, MarkdownHelper};
 use crate::error::{AppError, ProblemCode};
@@ -548,13 +551,8 @@ async fn patch_block(
     .await?;
     revision_write_limit(state, auth.user_id).await?;
     db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+        authorize_document_backend(
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -611,13 +609,8 @@ async fn patch_block(
         }
     }
     let meta = db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+        authorize_document_backend(
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -712,14 +705,9 @@ async fn children(
         workspace_id,
     )
     .await?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     db_result(
-        authorize_document(
+        authorize_document_backend(
             pool,
             workspace_id,
             auth.user_id,
@@ -741,6 +729,7 @@ async fn children(
                 project_id,
                 auth.user_id,
                 auth.credential_id,
+                None,
             )
             .await,
         )?,
@@ -800,12 +789,7 @@ async fn backlinks(
     .await?;
     let items = db_result(
         list_document_backlinks(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -880,12 +864,7 @@ async fn ancestors_project(
     .await?;
     let items = db_result(
         list_project_ancestors(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+            &state.auth.db.pool,
             workspace_id,
             project_id,
             auth.user_id,
@@ -922,7 +901,7 @@ fn parse_duplicate_input(bytes: &[u8]) -> Result<(Option<String>, bool), Documen
         None => None,
         Some(title) => {
             let trimmed = title.trim();
-            if !crate::db::documents::title_is_valid(trimmed) {
+            if trimmed.contains('\0') || !crate::db::documents::title_is_valid(trimmed) {
                 return Err(AppError::from_code(ProblemCode::InvalidInput).into());
             }
             Some(trimmed.to_string())
@@ -994,12 +973,7 @@ pub(crate) async fn duplicate(
 ) -> Result<Response, DocumentApiError> {
     let (title, include_children) = parse_duplicate_input(bytes)?;
     check_origin(headers, &state.public_origin)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     let sources = db_result(
         load_duplicate_sources(
             pool,
@@ -1101,13 +1075,8 @@ async fn locate(
     document_id: Uuid,
 ) -> Result<(RequestAuth, Uuid, DocumentScope), DocumentApiError> {
     let auth = require_request_auth(state, headers, jar, Access::Session, None).await?;
-    let located = crate::db::document_ops::locate_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/document_body.rs")
-            .map_err(internal)?,
+    let located = crate::db::document_ops::locate_document_backend(
+        &state.auth.db.pool,
         auth.user_id,
         document_id,
     )
@@ -1131,13 +1100,8 @@ async fn get_by_id(
 ) -> Result<Json<DocumentMetaResponse>, DocumentApiError> {
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let meta = db_result(
-        authorize_document(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/document_body.rs")
-                .map_err(internal)?,
+        authorize_document_backend(
+            &state.auth.db.pool,
             workspace_id,
             auth.user_id,
             auth.credential_id,
@@ -1168,16 +1132,10 @@ async fn update_by_id(
         icon: body.icon.as_ref().map(|icon| icon.as_deref()),
         status: body.status.as_deref(),
     };
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
     let meta = match scope {
         DocumentScope::Wiki => db_result(
-            crate::db::documents::update_wiki_document_meta(
-                pool,
+            crate::db::documents::update_wiki_document_meta_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 auth.user_id,
                 auth.credential_id,
@@ -1188,8 +1146,8 @@ async fn update_by_id(
             .await,
         )?,
         DocumentScope::Project(project_id) => db_result(
-            crate::db::project_documents::update_project_document_meta(
-                pool,
+            crate::db::project_documents::update_project_document_meta_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 project_id,
                 document_id,
@@ -1221,16 +1179,10 @@ async fn remove_by_id(
     let children = crate::http::routes::documents::parse_trash_children(query.children.as_deref())?;
     let (auth, workspace_id, scope) = locate(&state, &headers, &jar, document_id).await?;
     let ip = peer_ip(peer.ip());
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/document_body.rs")
-        .map_err(internal)?;
     match scope {
         DocumentScope::Wiki => db_result(
-            crate::db::documents::trash_wiki_document(
-                pool,
+            crate::db::documents::trash_wiki_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 auth.user_id,
                 auth.credential_id,
@@ -1241,8 +1193,8 @@ async fn remove_by_id(
             .await,
         )?,
         DocumentScope::Project(project_id) => db_result(
-            crate::db::project_documents::trash_project_document(
-                pool,
+            crate::db::project_documents::trash_project_document_backend(
+                &state.auth.db.pool,
                 workspace_id,
                 project_id,
                 document_id,

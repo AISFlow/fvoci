@@ -196,11 +196,11 @@ pub fn format_display_id(prefix: &str, number: i32) -> String {
 
 pub fn title_is_valid(title: &str) -> bool {
     let trimmed = title.trim();
-    !trimmed.is_empty() && utf16_len(trimmed) <= DOCUMENT_TITLE_MAX
+    !trimmed.is_empty() && !trimmed.contains('\0') && utf16_len(trimmed) <= DOCUMENT_TITLE_MAX
 }
 
 pub fn icon_is_valid(icon: &str) -> bool {
-    utf16_len(icon) <= DOCUMENT_ICON_MAX
+    !icon.contains('\0') && utf16_len(icon) <= DOCUMENT_ICON_MAX
 }
 
 pub fn status_is_valid(status: &str) -> bool {
@@ -1682,6 +1682,37 @@ pub async fn update_wiki_document_meta(
     }
 }
 
+pub async fn update_wiki_document_meta_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    patch: UpdateDocumentMetaInput<'_>,
+    ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_wiki_document_meta(pool, workspace, actor, credential, document, patch, ip)
+            .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let super::backend::DbTx::SqliteFamily(family) = &mut tx else { unreachable!() };
+        if let Err(error) = family_doctree_write(family,workspace,actor,credential,document,true).await? {
+            return Ok(Err(error));
+        }
+        family.execute("UPDATE documents SET title=coalesce(?3,title),icon=CASE WHEN ?4 THEN ?5 ELSE icon END,status=coalesce(?6,status),updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(document),Cell::optional_text(patch.title),Cell::Integer(i64::from(patch.icon.is_some())),Cell::optional_text(patch.icon.flatten()),Cell::optional_text(patch.status)]).await?;
+        let mut payload = json!({"documentId":document.to_string()});
+        if let Some(title)=patch.title { payload["title"]=json!(title); }
+        if let Some(icon)=patch.icon { payload["icon"]=json!(icon); }
+        if let Some(status)=patch.status { payload["status"]=json!(status); }
+        let mut op=OperationTx::SqliteFamily(family);
+        op.record_document_event_and_audit(workspace,actor,"document.updated",document,payload,ip).await?;
+        Ok(op.document_row(workspace,document).await?.map(|r|row_to_meta(r,false)).ok_or(DocumentDbError::NotFound))
+    }.await;
+    finish_doctree_write(tx, result).await
+}
+
 pub(crate) async fn fetch_document_row(
     tx: &mut Transaction<'_, Postgres>,
     workspace_id: Uuid,
@@ -1699,6 +1730,128 @@ pub(crate) async fn fetch_document_row(
     .bind(document_id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+// The family writer serializes authority, tree changes and their event/audit effects.
+// Reuse the credential check so sessions and API tokens have identical authority.
+struct FamilyDoctreeDocument {
+    id: Uuid,
+    parent: Option<Uuid>,
+    project: Option<Uuid>,
+    path: String,
+    deleted: Option<DateTime<Utc>>,
+}
+
+async fn family_doctree_document(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    document: Uuid,
+) -> Result<Option<FamilyDoctreeDocument>, sqlx::Error> {
+    tx.require_tenant(workspace)?;
+    let rows = tx.query("SELECT id,parent_id,project_id,path,deleted_at FROM documents WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+    rows.first()
+        .map(|r| {
+            Ok(FamilyDoctreeDocument {
+                id: r.cell(0)?.id()?,
+                parent: r.cell(1)?.optional(Cell::id)?,
+                project: r.cell(2)?.optional(Cell::id)?,
+                path: r.cell(3)?.string()?,
+                deleted: r.cell(4)?.optional(Cell::datetime)?,
+            })
+        })
+        .transpose()
+}
+
+async fn family_doctree_write(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    live: bool,
+) -> Result<Result<FamilyDoctreeDocument, DocumentDbError>, sqlx::Error> {
+    let mut op = OperationTx::SqliteFamily(tx);
+    op.set_tenant(workspace).await?;
+    op.lock_membership_users(&[actor]).await?;
+    if !op.recheck_session(actor, credential).await? {
+        return Ok(Err(DocumentDbError::Forbidden));
+    }
+    op.lock_tree(workspace).await?;
+    if !op.workspace_is_live(workspace).await?
+        || !permission_can_edit(
+            op.document_permission(workspace, actor, document, live)
+                .await?,
+        )
+    {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    let Some(row) = family_doctree_document(tx, workspace, document).await? else {
+        return Ok(Err(DocumentDbError::NotFound));
+    };
+    if row.project.is_some() || (live && row.deleted.is_some()) {
+        return Ok(Err(DocumentDbError::NotFound));
+    }
+    Ok(Ok(row))
+}
+
+async fn family_doctree_siblings(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    parent: Option<Uuid>,
+) -> Result<Vec<TreeNode>, sqlx::Error> {
+    tx.require_tenant(workspace)?;
+    tx.query("SELECT id,workspace_id,parent_id,project_id,title,icon,path,sort_key,number,status FROM documents WHERE workspace_id=?1 AND parent_id IS ?2 AND project_id IS NULL AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY", &[Cell::uuid(workspace),Cell::optional_uuid(parent)]).await?.iter().map(|r|family_tree_row(r).map(tree_node_from_row)).collect()
+}
+
+async fn family_doctree_subtree(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    path: &str,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    tx.require_tenant(workspace)?;
+    tx.query("SELECT id,path FROM documents WHERE workspace_id=?1 AND (path=?2 OR substr(path,1,length(?2)+1)=?2||'.')", &[Cell::uuid(workspace),Cell::text(path)]).await?.iter().map(|r|Ok((r.cell(0)?.id()?,r.cell(1)?.string()?))).collect()
+}
+
+async fn family_doctree_move_subtree(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    document: &FamilyDoctreeDocument,
+    parent: Option<Uuid>,
+    new_path: &str,
+    project: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    tx.require_writer()?;
+    let subtree = family_doctree_subtree(tx, workspace, &document.path).await?;
+    for (id, path) in subtree {
+        let path = format!("{new_path}{}", &path[document.path.len()..]);
+        tx.execute("UPDATE documents SET path=?3,parent_id=CASE WHEN id=?4 THEN ?5 ELSE parent_id END,project_id=?6,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(id),Cell::text(path),Cell::uuid(document.id),Cell::optional_uuid(parent),Cell::optional_uuid(project)]).await?;
+    }
+    Ok(())
+}
+
+async fn finish_doctree_write<T>(
+    tx: super::backend::DbTx,
+    result: Result<Result<T, DocumentDbError>, sqlx::Error>,
+) -> Result<Result<T, DocumentDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+            Ok(Ok(value))
+        }
+        Ok(Err(error)) => {
+            tx.rollback().await?;
+            Ok(Err(error))
+        }
+        Err(error) => match tx.rollback().await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(super::backend::rollback_cleanup_unknown(
+                Some(Box::new(error)),
+                cleanup,
+            )),
+        },
+    }
 }
 
 fn family_document_row(row: &FamilyRow) -> Result<DocumentRow, sqlx::Error> {
@@ -2466,6 +2619,56 @@ pub async fn move_wiki_document(
     }
 }
 
+pub async fn move_wiki_document_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    new_parent: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return move_wiki_document(pool, workspace, actor, credential, document, new_parent, ip)
+            .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let super::backend::DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+        let doc=match family_doctree_write(family,workspace,actor,credential,document,true).await? { Ok(doc)=>doc, Err(e)=>return Ok(Err(e)) };
+        let Some(parent)=family_doctree_document(family,workspace,new_parent).await? else { return Ok(Err(DocumentDbError::NotFound)); };
+        if parent.deleted.is_some() { return Ok(Err(DocumentDbError::NotFound)); }
+        if let Some(project)=parent.project {
+            let rows=family.query("SELECT status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+            let status=rows.first().map(|r|r.cell(0)?.string()).transpose()?;
+            if status.is_none() || status.as_deref()==Some("archived") || !OperationTx::SqliteFamily(family).project_permission_by_id(workspace,actor,project).await?.is_some_and(permission_can_edit) {
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+        }
+        if parent.path==doc.path || parent.path.starts_with(&format!("{}.",doc.path)) {
+            return Ok(Err(DocumentDbError::Cycle));
+        }
+        let subtree=family_doctree_subtree(family,workspace,&doc.path).await?;
+        let relative=subtree.iter().map(|(_,p)|depth_of(p)-depth_of(&doc.path)).max().unwrap_or(0);
+        if depth_of(&parent.path)+1+relative>MAX_TREE_DEPTH { return Ok(Err(DocumentDbError::DepthLimit)); }
+        if let Some(project)=parent.project {
+            for (id,_) in &subtree {
+                // Move number and affiliation together to avoid wiki namespace collisions.
+                let rows=family.query("UPDATE projects SET next_number=next_number+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND next_number<2147483647 RETURNING next_number-1", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+                let number=rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.int32()?;
+                family.execute("UPDATE documents SET number=?3,project_id=?4,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(*id),Cell::Integer(i64::from(number)),Cell::uuid(project)]).await?;
+            }
+        }
+        let new_path=format!("{}.{}",parent.path,to_path_label(document));
+        family_doctree_move_subtree(family,workspace,&doc,Some(new_parent),&new_path,parent.project).await?;
+        let payload=json!({"documentId":document.to_string(),"newParentId":new_parent.to_string(),"newPath":new_path,"oldParentId":doc.parent.map(|i|i.to_string()),"oldPath":doc.path,"oldProjectId":doc.project.map(|i|i.to_string()),"newProjectId":parent.project.map(|i|i.to_string())});
+        let mut op=OperationTx::SqliteFamily(family);
+        op.record_document_event_and_audit(workspace,actor,"document.moved",document,payload,ip).await?;
+        Ok(op.document_row(workspace,document).await?.map(|r|row_to_meta(r,false)).ok_or(DocumentDbError::NotFound))
+    }.await;
+    finish_doctree_write(tx, result).await
+}
+
 pub async fn reorder_wiki_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2558,6 +2761,33 @@ pub async fn reorder_wiki_document(
         Some(row) => Ok(Ok(row_to_meta(row, false))),
         None => Ok(Err(DocumentDbError::NotFound)),
     }
+}
+
+pub async fn reorder_wiki_document_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    after: Option<Uuid>,
+    ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return reorder_wiki_document(pool, workspace, actor, credential, document, after, ip)
+            .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let super::backend::DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+        let doc=match family_doctree_write(family,workspace,actor,credential,document,true).await? { Ok(doc)=>doc, Err(e)=>return Ok(Err(e)) };
+        let siblings=family_doctree_siblings(family,workspace,doc.parent).await?;
+        let key=match resolve_reorder_sort_key(&siblings,document,after) { Ok(key)=>key, Err(e)=>return Ok(Err(e)) };
+        family.execute("UPDATE documents SET sort_key=?3,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(document),Cell::text(&key)]).await?;
+        let mut op=OperationTx::SqliteFamily(family);
+        op.record_document_event_and_audit(workspace,actor,"document.moved",document,json!({"documentId":document.to_string(),"kind":"reorder","afterId":after.map(|i|i.to_string()),"newSortKey":key}),ip).await?;
+        Ok(op.document_row(workspace,document).await?.map(|r|row_to_meta(r,false)).ok_or(DocumentDbError::NotFound))
+    }.await;
+    finish_doctree_write(tx, result).await
 }
 
 pub async fn trash_wiki_document(
@@ -2766,6 +2996,61 @@ pub async fn trash_wiki_document(
     Ok(Ok(()))
 }
 
+pub async fn trash_wiki_document_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    children: TrashChildrenMode,
+    ip: Option<&str>,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return trash_wiki_document(pool, workspace, actor, credential, document, children, ip)
+            .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let super::backend::DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+        let doc=match family_doctree_write(family,workspace,actor,credential,document,true).await? { Ok(doc)=>doc, Err(e)=>return Ok(Err(e)) };
+        let now=crate::db::tasks::family_clock(family).await?;
+        let mut trash=vec![document];
+        if children==TrashChildrenMode::Reparent {
+            let direct=family_doctree_siblings(family,workspace,Some(document)).await?;
+            let parent=match doc.parent {
+                Some(id)=>{
+                    let Some(parent)=family_doctree_document(family,workspace,id).await? else { return Ok(Err(DocumentDbError::NotFound)); };
+                    if parent.deleted.is_some() { return Ok(Err(DocumentDbError::NotFound)); }
+                    Some(parent)
+                },
+                None=>None,
+            };
+            let siblings=family_doctree_siblings(family,workspace,doc.parent).await?;
+            let mut last=siblings.iter().rev().find(|n|n.id!=document).map(|n|n.sort_key.clone());
+            for child in direct {
+                let Some(child)=family_doctree_document(family,workspace,child.id).await? else { continue; };
+                let path=parent.as_ref().map(|p|format!("{}.{}",p.path,to_path_label(child.id))).unwrap_or_else(||to_path_label(child.id));
+                let project=parent.as_ref().and_then(|p|p.project);
+                family_doctree_move_subtree(family,workspace,&child,doc.parent,&path,project).await?;
+                let key=match between(last.as_deref(),None) { Ok(key)=>key, Err(_)=>return Ok(Err(DocumentDbError::InvalidSortKey)) };
+                family.execute("UPDATE documents SET sort_key=?3,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(child.id),Cell::text(&key)]).await?;
+                last=Some(key);
+                OperationTx::SqliteFamily(family).record_document_event_and_audit(workspace,actor,"document.moved",child.id,json!({"documentId":child.id.to_string(),"newParentId":doc.parent.map(|i|i.to_string()),"newPath":path,"oldParentId":child.parent.map(|i|i.to_string()),"oldPath":child.path,"oldProjectId":null,"newProjectId":project.map(|i|i.to_string())}),ip).await?;
+            }
+        } else {
+            trash=family_doctree_subtree(family,workspace,&doc.path).await?.into_iter().map(|(id,_)|id).collect();
+        }
+        for id in trash {
+            let changed=family.execute("UPDATE documents SET deleted_at=?3,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL AND project_id IS NULL", &[Cell::uuid(workspace),Cell::uuid(id),Cell::instant(now)?]).await?;
+            if changed>0 {
+                OperationTx::SqliteFamily(family).record_document_event_and_audit(workspace,actor,"document.trashed",id,json!({"documentId":id.to_string()}),ip).await?;
+            }
+        }
+        Ok(Ok(()))
+    }.await;
+    finish_doctree_write(tx, result).await
+}
+
 pub async fn list_trashed_wiki_documents(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2836,6 +3121,49 @@ pub async fn list_trashed_wiki_documents(
     }
     tx.commit().await?;
     Ok(Ok(visible))
+}
+
+pub async fn list_trashed_wiki_documents_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<TrashNode>, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_trashed_wiki_documents(pool, workspace, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op=tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor,credential).await? { return Ok(Err(DocumentDbError::Forbidden)); }
+        if !op.workspace_is_live(workspace).await? || op.membership_role(workspace,actor,false).await?.is_none() { return Ok(Err(DocumentDbError::NotFound)); }
+        let OperationTx::SqliteFamily(family)=&mut op else { unreachable!() };
+        let rows=family.query("SELECT id,title,deleted_at,project_id FROM documents WHERE workspace_id=?1 AND deleted_at IS NOT NULL AND deleted_at>unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000-?2*86400000000 ORDER BY deleted_at DESC,id DESC", &[Cell::uuid(workspace),Cell::Integer(i64::from(TRASH_RETENTION_DAYS))]).await?;
+        let mut permissions=HashMap::new();
+        let mut visible=Vec::new();
+        for row in rows {
+            let id=row.cell(0)?.id()?;
+            let project=row.cell(3)?.optional(Cell::id)?;
+            let permission=match project {
+                Some(project)=>match permissions.get(&project) {
+                    Some(p)=>*p,
+                    None=>{
+                        let p=op.project_permission_by_id(workspace,actor,project).await?.unwrap_or(ProjectPermission::None);
+                        permissions.insert(project,p);
+                        p
+                    },
+                },
+                None=>op.document_permission(workspace,actor,id,false).await?,
+            };
+            if permission_can_view(permission) {
+                visible.push(TrashNode { id,title:row.cell(1)?.string()?,deleted_at:row.cell(2)?.datetime()?,project_id:project });
+            }
+        }
+        Ok(Ok(visible))
+    }.await;
+    tx.rollback().await?;
+    result
 }
 
 pub async fn restore_wiki_document(
@@ -2934,6 +3262,34 @@ pub async fn restore_wiki_document(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn restore_wiki_document_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    document: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return restore_wiki_document(pool, workspace, actor, credential, document, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let super::backend::DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+        let doc=match family_doctree_write(family,workspace,actor,credential,document,false).await? { Ok(doc)=>doc, Err(e)=>return Ok(Err(e)) };
+        let Some(deleted)=doc.deleted else { return Ok(Err(DocumentDbError::NotFound)); };
+        let rows=family.query("SELECT ?1<=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000-?2*86400000000", &[Cell::instant(deleted)?,Cell::Integer(i64::from(TRASH_RETENTION_DAYS))]).await?;
+        if rows.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.integer()?!=0 { return Ok(Err(DocumentDbError::NotFound)); }
+        if let Some(parent)=doc.parent {
+            if family_doctree_document(family,workspace,parent).await?.is_none_or(|p|p.deleted.is_some()) { return Ok(Err(DocumentDbError::TrashedParent)); }
+        }
+        family.execute("UPDATE documents SET deleted_at=NULL,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NOT NULL", &[Cell::uuid(workspace),Cell::uuid(document)]).await?;
+        OperationTx::SqliteFamily(family).record_document_event_and_audit(workspace,actor,"document.restored",document,json!({"documentId":document.to_string()}),ip).await?;
+        Ok(Ok(()))
+    }.await;
+    finish_doctree_write(tx, result).await
 }
 
 pub fn between(a: Option<&str>, b: Option<&str>) -> Result<String, FractionalError> {
@@ -3044,5 +3400,72 @@ mod tests {
             empty_document_json(),
             json!({"type":"doc","content":[{"type":"paragraph"}]})
         );
+    }
+}
+/// Explicit official sqld selection, outside the registered remote cohorts.
+#[cfg(all(test, feature = "db-tests"))]
+mod doctree_sdk_tests {
+    use super::*;
+    use crate::db::backend::{DbTx, RemoteDatabase};
+    use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+    use futures_util::FutureExt;
+    use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+
+    async fn backend(driver: &LibsqlFinishFixture) -> Backend {
+        Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            NonZeroU32::new(1).unwrap(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn selected_doctree_sdk_meta_move_sort_trash_restore_and_refusal() {
+        let sqld = PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("doctree-sdk-{}", Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let db = backend(&driver).await;
+        let body=std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&db).await.unwrap();
+            let workspace=Uuid::now_v7(); let actor=Uuid::now_v7(); let credential=Uuid::now_v7();
+            let mut tx=db.begin_write().await.unwrap();
+            let DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+            family.execute("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'doctree-sdk','Doctree SDK','personal')", &[Cell::uuid(workspace)]).await.unwrap();
+            family.execute("INSERT INTO users(id,email,given_name,personal_workspace_id) VALUES(?1,'doctree-sdk@example.invalid','Doctree SDK',?2)", &[Cell::uuid(actor),Cell::uuid(workspace)]).await.unwrap();
+            family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(workspace),Cell::uuid(actor)]).await.unwrap();
+            family.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'synthetic-doctree-sdk',unixepoch()*1000000+3600000000)", &[Cell::uuid(credential),Cell::uuid(actor)]).await.unwrap();
+            tx.commit().await.unwrap();
+            let mut docs=Vec::new();
+            for title in ["Parent","Child"] {
+                docs.push(create_wiki_document_command_backend(&db,workspace,actor,credential,Uuid::now_v7(),CreateDocumentInput { parent_id:None,title,icon:None },None).await.unwrap().unwrap());
+            }
+            let (parent,doc)=(docs[0].id,docs[1].id);
+            update_wiki_document_meta_backend(&db,workspace,actor,credential,doc,UpdateDocumentMetaInput { title:Some("SDK saved"),icon:Some(Some("📄")),status:Some("published") },None).await.unwrap().unwrap();
+            move_wiki_document_backend(&db,workspace,actor,credential,doc,parent,None).await.unwrap().unwrap();
+            reorder_wiki_document_backend(&db,workspace,actor,credential,doc,None,None).await.unwrap().unwrap();
+            trash_wiki_document_backend(&db,workspace,actor,credential,doc,TrashChildrenMode::Trash,None).await.unwrap().unwrap();
+            let fresh=backend(&driver).await;
+            assert_eq!(list_trashed_wiki_documents_backend(&fresh,workspace,actor,credential).await.unwrap().unwrap().len(),1);
+            restore_wiki_document_backend(&fresh,workspace,actor,credential,doc,None).await.unwrap().unwrap();
+            let read=get_wiki_document_backend(&fresh,workspace,actor,credential,doc).await.unwrap().unwrap();
+            assert_eq!(read.title,"SDK saved"); assert_eq!(read.parent_id,Some(parent)); assert_eq!(read.icon.as_deref(),Some("📄"));
+            assert!(matches!(trash_wiki_document_backend(&fresh,Uuid::now_v7(),actor,credential,doc,TrashChildrenMode::Trash,None).await.unwrap(),Err(DocumentDbError::NotFound)));
+            let mut tx=db.begin_write().await.unwrap();
+            let DbTx::SqliteFamily(family)=&mut tx else { unreachable!() };
+            family.execute("UPDATE sessions SET revoked_at=1 WHERE id=?1", &[Cell::uuid(credential)]).await.unwrap();
+            tx.commit().await.unwrap();
+            assert!(matches!(trash_wiki_document_backend(&fresh,workspace,actor,credential,doc,TrashChildrenMode::Trash,None).await.unwrap(),Err(DocumentDbError::Forbidden)));
+            fresh.close().await.unwrap();
+        }).catch_unwind().await;
+        let close = db.close().await;
+        let finish = driver.finish().await;
+        if let Err(primary) = body {
+            eprintln!("doctree SDK cleanup close={close:?} fixture={finish:?}");
+            std::panic::resume_unwind(primary);
+        }
+        close.unwrap();
+        assert!(finish.unwrap().sqld_reaped);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

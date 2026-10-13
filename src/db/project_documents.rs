@@ -892,6 +892,66 @@ pub async fn update_project_document_meta(
     }
 }
 
+pub async fn update_project_document_meta_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: UpdateDocumentMetaInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<DocumentMeta, DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_project_document_meta(
+            pool,
+            workspace_id,
+            project_id,
+            document_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        op.lock_membership_users(&[actor_user_id]).await?;
+        if !op.recheck_session(actor_user_id, session_id).await? {
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+        if let Err(e) = op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, super::document_ops::DocumentScope::Project(project_id), ProjectPermission::Edit).await? {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        family
+            .execute(
+                r#"
+UPDATE documents SET title=coalesce(?3,title),icon=CASE WHEN ?4 THEN ?5 ELSE icon END,status=coalesce(?6,status),version=version+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL
+"#,
+                &[Cell::uuid(workspace_id), Cell::uuid(document_id), Cell::optional_text(input.title), Cell::Integer(i64::from(input.icon.is_some())), Cell::optional_text(input.icon.flatten()), Cell::optional_text(input.status)],
+            )
+            .await?;
+        let mut payload = json!({"documentId":document_id.to_string(),"projectId":project_id.to_string()});
+        if let Some(title) = input.title {
+            payload["title"] = json!(title);
+        }
+        if let Some(icon) = input.icon {
+            payload["icon"] = json!(icon);
+        }
+        if let Some(status) = input.status {
+            payload["status"] = json!(status);
+        }
+        op.record_document_event_and_audit(workspace_id, actor_user_id, "document.updated", document_id, payload, client_ip).await?;
+        op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, super::document_ops::DocumentScope::Project(project_id), ProjectPermission::View).await
+    }
+    .await;
+    super::document_ops::finish_document_operation(tx, result).await
+}
+
 pub async fn move_project_document(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1274,6 +1334,126 @@ pub async fn trash_project_document(
     }
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn trash_project_document_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    children: TrashChildrenMode,
+    client_ip: Option<&str>,
+) -> Result<Result<(), DocumentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return trash_project_document(
+            pool,
+            workspace_id,
+            project_id,
+            document_id,
+            actor_user_id,
+            session_id,
+            children,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        op.lock_membership_users(&[actor_user_id]).await?;
+        if !op.recheck_session(actor_user_id, session_id).await? {
+            return Ok(Err(DocumentDbError::Forbidden));
+        }
+        op.lock_tree(workspace_id).await?;
+        let meta = match op.authorize_document_current_scope((workspace_id, document_id), actor_user_id, session_id, super::document_ops::DocumentScope::Project(project_id), ProjectPermission::Edit).await? {
+            Ok(meta) => meta,
+            Err(e) => return Ok(Err(e)),
+        };
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let projects = family.query("SELECT root_document_id FROM projects WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace_id), Cell::uuid(project_id)]).await?;
+        if projects.first().map(|row| row.cell(0)?.optional(Cell::id)).transpose()?.flatten() == Some(document_id) {
+            return Ok(Err(DocumentDbError::RootDocumentTrash));
+        }
+        let ids = if children == TrashChildrenMode::Reparent {
+            let Some(parent) = meta.parent_id else {
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            let Some((affiliation, parent_path, None)) = op.wiki_parent(workspace_id, parent).await? else {
+                return Ok(Err(DocumentDbError::NotFound));
+            };
+            if affiliation != Some(project_id) {
+                return Ok(Err(DocumentDbError::NotFound));
+            }
+            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+            let siblings = family
+                .query(
+                    r#"
+SELECT sort_key FROM documents WHERE workspace_id=?1 AND project_id=?2 AND parent_id=?3 AND deleted_at IS NULL AND id<>?4 ORDER BY sort_key COLLATE BINARY DESC LIMIT 1
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(project_id), Cell::uuid(parent), Cell::uuid(document_id)],
+                )
+                .await?;
+            let mut last = siblings.first().map(|row| row.cell(0)?.string()).transpose()?;
+            let children = family
+                .query(
+                    r#"
+SELECT id,path FROM documents WHERE workspace_id=?1 AND project_id=?2 AND parent_id=?3 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(project_id), Cell::uuid(document_id)],
+                )
+                .await?;
+            for child in children {
+                let id = child.cell(0)?.id()?;
+                let old_path = child.cell(1)?.string()?;
+                let path = format!("{parent_path}.{}", super::documents::to_path_label(id));
+                let Ok(sort) = between(last.as_deref(), None) else {
+                    return Ok(Err(DocumentDbError::InvalidSortKey));
+                };
+                let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+                family
+                    .execute(
+                        r#"
+UPDATE documents SET path=?4||substr(path,length(?3)+1),parent_id=CASE WHEN id=?2 THEN ?5 ELSE parent_id END,sort_key=CASE WHEN id=?2 THEN ?6 ELSE sort_key END,project_id=?7,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND (path=?3 OR substr(path,1,length(?3)+1)=?3||'.')
+"#,
+                        &[Cell::uuid(workspace_id), Cell::uuid(id), Cell::text(&old_path), Cell::text(&path), Cell::uuid(parent), Cell::text(&sort), Cell::uuid(project_id)],
+                    )
+                    .await?;
+                last = Some(sort);
+                op.record_document_event_and_audit(workspace_id, actor_user_id, "document.moved", id, json!({"documentId":id.to_string(),"newParentId":parent.to_string(),"newPath":path,"oldParentId":document_id.to_string(),"oldPath":old_path,"oldProjectId":project_id.to_string(),"newProjectId":project_id.to_string()}), client_ip).await?;
+            }
+            vec![document_id]
+        } else {
+            family
+                .query(
+                    r#"
+SELECT id FROM documents WHERE workspace_id=?1 AND project_id=?2 AND deleted_at IS NULL AND (path=?3 OR substr(path,1,length(?3)+1)=?3||'.')
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(project_id), Cell::text(meta.path)],
+                )
+                .await?
+                .iter()
+                .map(|row| row.cell(0)?.id())
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for id in ids {
+            let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+            family
+                .execute(
+                    r#"
+UPDATE documents SET deleted_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL
+"#,
+                    &[Cell::uuid(workspace_id), Cell::uuid(id)],
+                )
+                .await?;
+            op.record_document_event_and_audit(workspace_id, actor_user_id, "document.trashed", id, json!({"documentId":id.to_string(),"projectId":project_id.to_string()}), client_ip).await?;
+        }
+        Ok(Ok(()))
+    }
+    .await;
+    super::document_ops::finish_document_operation(tx, result).await
 }
 
 /// Source `restoreDocument` with project affiliation. A parent still in the
