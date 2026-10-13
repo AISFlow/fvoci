@@ -821,6 +821,80 @@ test("(h) a wiki document moved into a project offers its draft back at its new 
   }
 });
 
+test("(i) a move the full tab storage refuses keeps the old slot for export only until there is room", async ({
+  browser,
+  offApp,
+}) => {
+  const owner = await actor(browser, offApp.baseUrl, admin);
+  // No logout here: the saved session needs no new login.
+  const peer = await actor(browser, offApp.baseUrl, projectUser);
+  try {
+    const project = await workspaceProject(owner.page, `MQ${suffix.toUpperCase()}`);
+    const target = await document(owner.page, "이동 보관 거부");
+    const sent = sends(peer.page);
+    await openOff(peer.page, target);
+    const draft = `refused move 초안 ${suffix}`;
+    await typeDraft(peer.page, draft);
+    await leave(peer.page);
+    const response = await owner.page.request.post(
+      `/api/v1/workspaces/${workspaceId}/documents/${target.id}/move`,
+      { data: { newParentId: project.rootDocumentId } },
+    );
+    expect(response.status()).toBe(200);
+    const meta = (await response.json()) as { id: string; number: number; projectId: string };
+    expect(meta).toMatchObject({ id: target.id, projectId: project.id });
+    const moved: Target = {
+      id: target.id,
+      url: `/w/${workspaceSlug}/${project.key}-${String(meta.number)}`,
+      body: `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${target.id}/body/versioned`,
+    };
+    const kept = await slots(peer.page);
+    expect(kept).toHaveLength(1);
+    // Fill this tab's storage to its real quota: the slot no longer fits under its new key.
+    await peer.page.evaluate(() => {
+      let chunk = "x".repeat(1 << 20);
+      for (let index = 0; chunk.length > 0;) {
+        try {
+          sessionStorage.setItem(`e2e-fill-${String(index)}`, chunk);
+          index++;
+        } catch {
+          chunk = chunk.slice(0, chunk.length >> 1);
+        }
+      }
+    });
+    const movedAt = sent.length;
+    await openOff(peer.page, moved);
+    // The old slot stays in the tab storage; the refused new key holds nothing.
+    expect(await slots(peer.page)).toEqual(kept);
+    const unmoved = peer.page.getByTestId("off-draft-unmoved");
+    await expect(unmoved.getByRole("alert").first()).toContainText("옮기지 않았습니다");
+    await expect(peer.page.getByTestId("off-draft-restored")).toHaveCount(0);
+    await expect(editor(peer.page)).not.toContainText(draft);
+    const row = unmoved.getByTestId("off-draft-retained");
+    await expect(row).toHaveCount(1);
+    await exportsOnly(peer.page, row, draft);
+    // Exporting kept the slot, and nothing went to the server.
+    expect(await slots(peer.page)).toEqual(kept);
+    expect(sent.slice(movedAt)).toEqual([]);
+    // With room again, reopening moves the draft: only the new key is left.
+    await peer.page.evaluate(() => {
+      for (const key of Object.keys(sessionStorage))
+        if (key.startsWith("e2e-fill-")) sessionStorage.removeItem(key);
+    });
+    await openOff(peer.page, moved);
+    await expect(peer.page.getByTestId("off-draft-restored")).toBeVisible();
+    await expect(editor(peer.page)).toHaveText(draft);
+    await expect(peer.page.getByTestId("off-draft-unmoved")).toHaveCount(0);
+    const now = await slots(peer.page);
+    expect(now).toHaveLength(1);
+    expect(now).not.toEqual(kept);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
+    expect(await bodyText(owner.page, moved)).not.toContain(draft);
+  } finally {
+    await Promise.all([owner.context.close(), peer.context.close()]);
+  }
+});
+
 test("(b) membership revoke: zero sends, reopen shows the denial with export only", async ({
   browser,
   offApp,

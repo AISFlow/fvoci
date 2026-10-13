@@ -1362,3 +1362,102 @@ test("a moved target offers its draft back under its new owner and never sends t
       expect(JSON.stringify(request)).not.toContain(displayId);
   h.effects.stop();
 });
+
+describe("a move the tab storage refuses at the new address", () => {
+  const wiki: OffWikiOwner = { ...original, displayId: "WIKI-7" };
+  const moved: OffWikiOwner = {
+    ...original,
+    projectId: "11111111-2222-4333-8444-555555555555",
+    displayId: "KEY-3",
+  };
+  /** A draft left in the tab storage at the wiki address; then the storage
+   * refuses every write, or (`quota`) any write past the room it has now, and
+   * the target opens at its project address. */
+  async function refusedMove(quota: boolean) {
+    const scope = Vue.shallowRef<OffWikiOwner | null>(wiki);
+    const h = harness(() => scope.value);
+    required(h.reads[0]).pending.resolve(source(wiki));
+    await settle();
+    const paragraph = required(h.body.draft.value)
+      .doc.getXmlFragment("prosemirror")
+      .get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(1, " moved under quota");
+    scope.value = null;
+    await settle();
+    const slot = required(h.slots.get(ownerKey(wiki)));
+    const set = h.slots.set.bind(h.slots);
+    const remove = h.slots.delete.bind(h.slots);
+    const used = () =>
+      [...h.slots].reduce((sum, [key, value]) => sum + key.length + value.length, 0);
+    const room = used();
+    h.slots.set = (key: string, value: string) => {
+      const prior = h.slots.has(key) ? key.length + required(h.slots.get(key)).length : 0;
+      if (!quota || used() - prior + key.length + value.length > room)
+        throw new Error("QuotaExceededError");
+      return set(key, value);
+    };
+    // Each removal of the old slot, with whether the storage held the new key then.
+    const oldRemovals: boolean[] = [];
+    h.slots.delete = (key: string) => {
+      if (key === ownerKey(wiki)) oldRemovals.push(h.slots.has(ownerKey(moved)));
+      return remove(key);
+    };
+    scope.value = moved;
+    required(h.reads.at(-1)).pending.resolve(source(moved));
+    await settle();
+    return { h, scope, slot, set, oldRemovals };
+  }
+  test("the old slot stays in the tab storage and nothing is adopted into memory", async () => {
+    for (const quota of [false, true]) {
+      const { h, slot, oldRemovals } = await refusedMove(quota);
+      expect(oldRemovals).toEqual([]);
+      expect(h.slots.get(ownerKey(wiki))).toBe(slot);
+      expect(h.slots.has(ownerKey(moved))).toBe(false);
+      // The new address opens the server body; no memory-only copy stands in.
+      expect(h.body.restored.value).toBe(false);
+      expect(JSON.stringify(required(h.body.draft.value).mine)).not.toContain("moved under quota");
+      const listed = h.listRetainedOffDrafts("A", "session-A");
+      expect(listed.map((draft) => draft.owner)).toEqual([wiki]);
+      expect(listed[0]?.unstored).toBeUndefined();
+      h.effects.stop();
+    }
+  });
+  test("the new address shows the old slot for export only and sends nothing", async () => {
+    const { h, slot } = await refusedMove(false);
+    expect(h.body.unmoved.value?.owner).toEqual(wiki);
+    expect(h.body.unmoved.value?.markdown).toContain("moved under quota");
+    // The old slot is kept in the tab, so it is not a memory-only export.
+    expect(h.body.unmoved.value?.unstored).toBeUndefined();
+    // Edits at the new address stay apart and carry the ordinary warning.
+    const paragraph = required(h.body.draft.value)
+      .doc.getXmlFragment("prosemirror")
+      .get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(1, " typed after the move");
+    expect(h.body.storageError.value).toBeInstanceOf(Error);
+    // Discarding them neither drops nor adopts the old slot.
+    const discarding = h.body.discard();
+    required(h.reads.at(-1)).pending.resolve(source(moved));
+    expect(await discarding).toBe(true);
+    expect(h.slots.get(ownerKey(wiki))).toBe(slot);
+    expect(h.body.restored.value).toBe(false);
+    expect(h.body.unmoved.value?.markdown).toContain("moved under quota");
+    expect([h.writes.length, h.creates.length]).toEqual([0, 0]);
+    h.effects.stop();
+  });
+  test("with room again, reopening adopts it and drops the old slot only after the new key is stored", async () => {
+    const { h, scope, set, oldRemovals } = await refusedMove(true);
+    h.slots.set = set;
+    scope.value = null;
+    scope.value = moved;
+    required(h.reads.at(-1)).pending.resolve(source(moved));
+    await settle();
+    expect(oldRemovals).toEqual([true]);
+    expect(h.slots.has(ownerKey(wiki))).toBe(false);
+    expect(h.slots.has(ownerKey(moved))).toBe(true);
+    expect(h.body.restored.value).toBe(true);
+    expect(JSON.stringify(required(h.body.draft.value).mine)).toContain("moved under quota");
+    expect(h.body.unmoved.value).toBeNull();
+    expect([h.writes.length, h.creates.length]).toEqual([0, 0]);
+    h.effects.stop();
+  });
+});
