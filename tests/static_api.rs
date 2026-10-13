@@ -125,6 +125,27 @@ async fn static_router_serves_index_and_asset() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // tower-http 0.7 `ServeFile` sends a strong ETag and evaluates
+    // `If-None-Match` (304) and `If-Match` (412) against it.
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    for (name, value, status) in [
+        ("if-none-match", etag.as_str(), StatusCode::NOT_MODIFIED),
+        ("if-match", "\"other\"", StatusCode::PRECONDITION_FAILED),
+        ("if-match", etag.as_str(), StatusCode::OK),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets.txt")
+                    .header(name, value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{name}: {value}");
+    }
 
     let response = app
         .clone()
