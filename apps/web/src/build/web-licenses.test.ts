@@ -28,7 +28,7 @@ await test("applyBrowserLicenseSupplements fills only when upstream text is abse
   const entries: LicenseEntry[] = [
     {
       name: "qrcode-generator",
-      version: "1.4.4",
+      version: "2.0.4",
       identifier: "MIT",
     },
     {
@@ -100,7 +100,7 @@ await test("finalizeBrowserOpenSourceNotice appends FVOCI LICENSE and editor fon
     },
     {
       name: "qrcode-generator",
-      version: "1.4.4",
+      version: "2.0.4",
       identifier: "MIT",
     },
   ]);
