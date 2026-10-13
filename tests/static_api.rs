@@ -125,6 +125,27 @@ async fn static_router_serves_index_and_asset() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // tower-http 0.7 `ServeFile` sends a strong ETag and evaluates
+    // `If-None-Match` (304) and `If-Match` (412) against it.
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    for (name, value, status) in [
+        ("if-none-match", etag.as_str(), StatusCode::NOT_MODIFIED),
+        ("if-match", "\"other\"", StatusCode::PRECONDITION_FAILED),
+        ("if-match", etag.as_str(), StatusCode::OK),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets.txt")
+                    .header(name, value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{name}: {value}");
+    }
 
     let response = app
         .clone()
@@ -790,7 +811,10 @@ fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
 /// allowed address, and a listed peer is not refused by a foreign XFF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_allow_list_uses_tcp_peer_not_forwarded_for() {
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = fvoci_server::http_client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     for (allow, forwarded, expected) in [
         ("127.0.0.1/32", None, 200),
         ("127.0.0.1/32", Some("203.0.113.9"), 200),

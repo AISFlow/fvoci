@@ -2331,7 +2331,7 @@ pub(crate) mod maintenance_claim_driver_tests {
                 .expect("actual SDK describe reached its original stream");
             request["baton"].as_str().unwrap().to_owned()
         };
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client();
         let describe = |request: Value| {
             client
                 .post(format!("{}/v3/pipeline", f.endpoint))
@@ -2444,7 +2444,7 @@ pub(crate) mod maintenance_claim_driver_tests {
             assert_eq!(control_sql(sql), None);
         }
         let f = Fixture::new().await;
-        let malformed = reqwest::Client::new()
+        let malformed = crate::http_client::client()
             .post(format!("{}/v3/pipeline", f.endpoint))
             .body("{")
             .send()

@@ -131,7 +131,7 @@ impl MeiliConfig {
             url: url.trim_end_matches('/').to_string(),
             api_key,
             index_uid,
-            http: reqwest::Client::builder()
+            http: crate::http_client::builder()
                 .timeout(Duration::from_millis(MEILI_OP_TIMEOUT_MS))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()

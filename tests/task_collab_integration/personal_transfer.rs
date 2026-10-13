@@ -347,7 +347,7 @@ async fn personal_transfer_same_ids_real_rls_triggers_and_repeat() {
     let baseline:(Uuid,Uuid,Value)=sqlx::query_as("SELECT i.id,a.id,a.changes FROM fvoci.collection_items i JOIN fvoci.task_activity a ON a.workspace_id=i.workspace_id AND a.task_id=i.task_id WHERE i.workspace_id=$1 AND i.task_id=$2").bind(source).bind(task).fetch_one(&mut conn).await.unwrap();sqlx::query("COMMIT").execute(&mut conn).await.unwrap();drop(conn);
     // Receive actual status then discard successful body. A fresh connection
     // establishes commit before exact repeated/concurrent product commands.
-    let response=reqwest::Client::new().post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();assert_eq!(response.status(),StatusCode::OK);drop(response);
+    let response=fvoci_server::http_client::client().post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();assert_eq!(response.status(),StatusCode::OK);drop(response);
     let committed=counts(&run,actor.workspace_id,doc,task).await;assert_eq!((committed.0,committed.1,committed.2,committed.3,committed.4,committed.5),(1,1,1,1,1,1));
     let replay_path=path(source);
     let a=session_call(addr,Method::POST,&replay_path,&actor.session_token,Some(body.clone()));let b=session_call(addr,Method::POST,&replay_path,&actor.session_token,Some(body.clone()));let(a,b)=tokio::join!(a,b);
@@ -1239,7 +1239,7 @@ async fn personal_transfer_copy_current_native_content_has_new_blocks_and_preser
         assert!(preview["dispositions"].as_array().unwrap().contains(&json!({"item":"history","outcome":"retained_private","count":observed})),"{preview}");
         assert!(preview["dispositions"].as_array().unwrap().contains(&json!({"item":"activity","outcome":"not_included","count":preview["activityCount"]})),"{preview}");
         assert_eq!(transfer_graph(&run,source).await,before,"preview seeds no source state and changes no history");
-        let client=reqwest::Client::new();
+        let client=fvoci_server::http_client::client();
         let response=client.post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);drop(response);
         let(status,copied)=session_call(addr,Method::POST,&path(source),&actor.session_token,Some(body.clone())).await;

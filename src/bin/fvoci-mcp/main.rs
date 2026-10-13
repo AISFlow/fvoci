@@ -244,7 +244,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 }
 
 async fn run(env: Env) -> Result<(), String> {
-    let http = reqwest::Client::builder()
+    let http = fvoci_server::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("fvoci-mcp/", env!("CARGO_PKG_VERSION")))

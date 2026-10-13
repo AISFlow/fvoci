@@ -67,7 +67,7 @@ async fn call(
     cred: Cred<'_>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let mut req = client
         .request(method, format!("http://{addr}{path}"))
         .header("origin", PUBLIC_ORIGIN);

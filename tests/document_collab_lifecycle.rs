@@ -155,7 +155,7 @@ where
 }
 
 async fn http_trash(addr: SocketAddr, session_token: &str, workspace_id: Uuid, document_id: Uuid) {
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let url =
         format!("http://{addr}/api/v1/workspaces/{workspace_id}/documents/{document_id}/trash");
     let resp = client
@@ -179,7 +179,7 @@ async fn http_move(
     document_id: Uuid,
     new_parent_id: Uuid,
 ) {
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let url =
         format!("http://{addr}/api/v1/workspaces/{workspace_id}/documents/{document_id}/move");
     let resp = client
@@ -202,7 +202,7 @@ async fn http_create_project(
     session_token: &str,
     workspace_id: Uuid,
 ) -> (Uuid, Uuid) {
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let url = format!("http://{addr}/api/v1/workspaces/{workspace_id}/projects");
     let resp = client
         .post(url)
@@ -459,7 +459,7 @@ async fn collab_http_json(
     token: &str,
     body: Option<serde_json::Value>,
 ) -> (reqwest::StatusCode, serde_json::Value) {
-    let mut req = reqwest::Client::new()
+    let mut req = fvoci_server::http_client::client()
         .request(method, format!("http://{addr}{path}"))
         .header("origin", crate::support::PUBLIC_ORIGIN)
         .header("cookie", format!("fvoci_session={token}"));

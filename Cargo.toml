@@ -34,7 +34,7 @@ required-features = ["extract-native-tests"]
 [dependencies]
 argon2 = "0.6"
 axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1", "ws"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 base64 = "0.23"
 collab-engine = { path = "crates/collab-engine", default-features = false }
 document-extract-client = { path = "crates/document-extract-client" }
@@ -54,7 +54,12 @@ rand = "0.10"
 regex = "1"
 ring = "0.17"
 spki = { version = "=0.8.1", features = ["pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# reqwest 0.13 `rustls` means aws-lc-rs and the platform verifier; FVOCI keeps
+# 0.12's ring and bundled Mozilla roots by handing every client the config
+# src/http_client.rs builds (`rustls-no-provider`, so no second provider).
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -75,7 +80,7 @@ totp-rs = { version = "=6.0.0", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util", "io-std", "process", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "fs", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "=0.1.25"
@@ -91,12 +96,16 @@ infer = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
-rusty-s3 = "0.8"
-# Same features rusty-s3 already enables: only used to call its signing
-# primitive (ListMultipartUploads).
+# SigV4 signing (RustCrypto hmac/sha2) and the multipart XML actions; `full`
+# adds only DeleteObjects, GetBucketPolicy and EC2 credentials, unused here.
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
+# jiff: the features rusty-s3 enables, only to call its signing primitive
+# (ListMultipartUploads). quick-xml reads and writes the S3 XML rusty-s3 has
+# no action for (ListMultipartUploads, the CompleteMultipartUpload body and
+# error documents); rusty-s3 itself parses with instant-xml since 0.10.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 # S3 XML bodies (serde) and the office child's OOXML/ODF reader. The
-# rhwp helper links the same 0.42; rusty-s3 0.8 still links 0.38.
+# rhwp helper links the same 0.42.
 quick-xml = { version = "0.42", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
 # `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
@@ -131,7 +140,7 @@ prometheus-client = { version = "=0.25.1", default-features = false }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "form", "json", "rustls-no-provider"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
 mailparse = "0.18"
 # Loopback TLS server for the vendored libsql connector tests: the rustls

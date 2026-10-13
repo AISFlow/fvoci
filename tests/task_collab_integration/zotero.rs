@@ -309,7 +309,7 @@ async fn zotero_historical_source_has_one_reference_authored_revisions_and_task_
             // Mode22's literal one-item source is independent of the other
             // fixture's pagination expansion and rejects unrequested keys.
             upstream.model.many.store(1, Ordering::SeqCst);
-            let negative = reqwest::Client::new()
+            let negative = fvoci_server::http_client::client()
                 .get(format!("http://{}/users/42/items?itemKey=EFGH4567", upstream.addr))
                 .send().await.unwrap();
             assert_eq!(negative.status(), StatusCode::BAD_REQUEST);
@@ -667,7 +667,7 @@ async fn zotero_real_search_keeps_private_bibliography_out_of_pat_results_and_sn
         assert_eq!(status,StatusCode::OK,"{value}");assert_eq!(value["contentJson"],authored,"metadata refresh preserves actual native authored body");
         let(status,value)=call(server.addr,Method::GET,&search_path(&owner,"astronmy",false).await,Cred::Bearer(&pat),None).await;
         assert_eq!(status,StatusCode::OK,"{value}");assert!(value["items"].as_array().unwrap().iter().any(|item|item["id"]==document.to_string()));assert!(!value.to_string().contains("Revised synthetic bibliography"));
-        let response=reqwest::Client::new().delete(format!("{}/indexes/{}",meili.url,meili.index_uid)).bearer_auth(meili.api_key()).send().await.unwrap();assert!(response.status().is_success());
+        let response=fvoci_server::http_client::client().delete(format!("{}/indexes/{}",meili.url,meili.index_uid)).bearer_auth(meili.api_key()).send().await.unwrap();assert!(response.status().is_success());
         let task:Value=response.json().await.unwrap();fvoci_server::search::meili::wait_meili_tasks(&meili,&[task["taskUid"].as_u64().unwrap()]).await.unwrap();
         outsider.pool.close().await;cleanup(db,upstream,server,owner).await;
     }).await;

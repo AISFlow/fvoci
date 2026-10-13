@@ -2304,7 +2304,7 @@ async fn presign_backend(ttls: PresignTtls) -> ObjectStorage {
 }
 
 fn browser() -> reqwest::Client {
-    reqwest::Client::builder()
+    fvoci_server::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()

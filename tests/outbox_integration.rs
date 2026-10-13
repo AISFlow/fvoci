@@ -2232,7 +2232,10 @@ async fn probes_report_real_database_and_outbox_lag() {
         .await
         .unwrap();
     });
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = fvoci_server::http_client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     let get = |path: &'static str| {
         let client = client.clone();
         async move {
@@ -2416,7 +2419,10 @@ async fn metrics_see_outbox_lag_and_xmin_stall_behind_an_xid_holder() {
         .await
         .unwrap();
     });
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = fvoci_server::http_client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     let scrape = || {
         let client = client.clone();
         async move {

@@ -190,7 +190,7 @@ async fn http(
     cookie: &str,
     body: Option<Value>,
 ) -> Value {
-    let mut req = reqwest::Client::new()
+    let mut req = fvoci_server::http_client::client()
         .request(method, format!("{base}{path}"))
         .header("cookie", format!("fvoci_session={cookie}"))
         .header("origin", PUBLIC_ORIGIN);

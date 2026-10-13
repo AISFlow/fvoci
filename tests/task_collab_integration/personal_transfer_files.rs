@@ -26,7 +26,7 @@ async fn upload_task_file(
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let attachment = created["attachmentId"].as_str().unwrap().to_string();
     let part_size = created["partSizeBytes"].as_u64().unwrap() as usize;
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let mut parts = Vec::new();
     for part in created["parts"].as_array().unwrap() {
         let number = part["partNumber"].as_u64().unwrap() as usize;
@@ -76,7 +76,7 @@ async fn download(
     workspace: Uuid,
     attachment: Uuid,
 ) -> (StatusCode, Vec<u8>) {
-    let response = reqwest::Client::new()
+    let response = fvoci_server::http_client::client()
         .get(format!(
             "http://{addr}/api/v1/workspaces/{workspace}/attachments/{attachment}/download"
         ))

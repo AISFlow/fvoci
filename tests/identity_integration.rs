@@ -4937,7 +4937,7 @@ struct KcSso {
 }
 
 fn kc_http() -> reqwest::Client {
-    reqwest::Client::builder()
+    fvoci_server::http_client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -5072,7 +5072,7 @@ fn kc_login_form_action(html: &str) -> Option<String> {
 impl KcBrowser {
     fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: fvoci_server::http_client::builder()
                 .no_proxy()
                 .cookie_store(true)
                 .redirect(reqwest::redirect::Policy::none())

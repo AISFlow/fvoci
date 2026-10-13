@@ -2735,7 +2735,7 @@ async fn start_capped_proxy(
 ) -> (CappedProxy, String, tokio::task::JoinHandle<()>) {
     let proxy = CappedProxy {
         upstream,
-        client: reqwest::Client::new(),
+        client: fvoci_server::http_client::client(),
         max_request_bytes,
         read_timeout: Arc::new(std::sync::Mutex::new(Duration::from_secs(30))),
         lose_next_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2903,7 +2903,7 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let (origin, origin_task) = serve_on_loopback(app).await;
     let (proxy, edge, edge_task) = start_capped_proxy(origin, PROXY_CAP).await;
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
 
     // Larger than one proxied request can carry; not a multiple of the part size.
     let mut payload = vec![0u8; 4 * PART + 12_345];
@@ -3256,7 +3256,7 @@ async fn proxy_read_timeout_answers_524_without_publishing() {
 
     let (origin, origin_task) = serve_on_loopback(app.clone()).await;
     let (proxy, edge, edge_task) = start_capped_proxy(origin, 1024 * 1024).await;
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let ws = format!("/api/v1/workspaces/{workspace_id}");
     let complete_path = format!("{ws}/attachments/{attachment_id}/complete");
 

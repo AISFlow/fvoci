@@ -168,7 +168,7 @@ impl LibsqlFinishFixture {
             let proxy = listener.local_addr()?;
             let forwarder = Forwarder {
                 upstream,
-                client: reqwest::Client::builder()
+                client: fvoci_server::http_client::builder()
                     .redirect(reqwest::redirect::Policy::none())
                     .no_proxy()
                     .build()?,

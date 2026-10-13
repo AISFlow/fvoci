@@ -146,7 +146,7 @@ async fn http_json(
     token: &str,
     body: Option<Value>,
 ) -> (reqwest::StatusCode, Value) {
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let mut req = client
         .request(method, format!("http://{addr}{path}"))
         .header("origin", PUBLIC_ORIGIN)
@@ -4686,7 +4686,7 @@ async fn manual_task_revision_refuses_token_owner_suspended_while_waiting() {
             );
             let secret = created.token.clone();
             let post = tokio::spawn(async move {
-                let response = reqwest::Client::new()
+                let response = fvoci_server::http_client::client()
                     .post(url)
                     .header("origin", PUBLIC_ORIGIN)
                     .header("authorization", format!("Bearer {secret}"))
