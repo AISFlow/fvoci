@@ -26,7 +26,8 @@ use crate::api::dto::{
 };
 use crate::auth::scopes::ApiTokenScope;
 use crate::db::integrations::{
-    create_webhook, list_webhooks, remove_webhook, IntegrationDbError, NewWebhook, WebhookRow,
+    create_webhook_backend, list_webhooks_backend, remove_webhook_backend, IntegrationDbError,
+    NewWebhook, WebhookRow,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
@@ -138,20 +139,10 @@ async fn list_webhooks_route(
         workspace_id,
     )
     .await?;
-    let rows = list_webhooks(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_db_error)?;
+    let rows = list_webhooks_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_db_error)?;
     Ok(Json(WebhookListResponse {
         items: rows.into_iter().map(webhook_output).collect(),
     }))
@@ -184,7 +175,11 @@ async fn create_webhook_route(
     .await?;
     let url = parse_target_url(&body.url, integrations.outbound.policy())
         .map_err(|_| AppError::with_source(ProblemCode::InvalidInput, "/url"))?;
-    if body.events.iter().any(|e| e.is_empty() || e.len() > 100) {
+    if body
+        .events
+        .iter()
+        .any(|e| e.is_empty() || e.len() > 100 || e.contains('\0'))
+    {
         return Err(AppError::with_source(ProblemCode::InvalidInput, "/events"));
     }
     let events = normalize_events(&body.events)
@@ -198,13 +193,8 @@ async fn create_webhook_route(
     let sealed = secret_box::seal(keys, &secret, &webhook_secret_context(workspace_id, id))
         .map_err(|_| AppError::internal())?;
     let ip = peer_ip(peer.ip());
-    let row = create_webhook(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    let row = create_webhook_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -252,13 +242,8 @@ async fn remove_webhook_route(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    remove_webhook(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    remove_webhook_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -285,20 +270,11 @@ async fn get_github_route(
         workspace_id,
     )
     .await?;
-    let installation_id = github::get_installation(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_db_error)?;
+    let installation_id =
+        github::get_installation_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await
+            .map_err(internal)?
+            .map_err(map_db_error)?;
     Ok(Json(GithubInstallOutput { installation_id }))
 }
 
@@ -322,19 +298,9 @@ async fn install_github_route(
     let Some(config) = integrations.github.as_ref() else {
         return Err(AppError::from_code(ProblemCode::InvalidInput));
     };
-    if !github::check_manager(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?
+    if !github::check_manager_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+        .await
+        .map_err(internal)?
     {
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
@@ -345,13 +311,8 @@ async fn install_github_route(
     // The state is single use and bound to this admin session (the callback
     // must come back with the same session cookie).
     let nonce = github::new_install_nonce();
-    github::begin_install(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    github::begin_install_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -384,13 +345,8 @@ async fn remove_github_route(
     )
     .await?;
     let ip = peer_ip(peer.ip());
-    github::remove_installation(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    github::remove_installation_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -425,13 +381,8 @@ async fn link_issue_route(
             "/issueNumber",
         ));
     };
-    let linked = github::link_issue(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    let linked = github::link_issue_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -498,13 +449,8 @@ async fn github_callback_route(
             return Err(invalid());
         }
     }
-    github::complete_install(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    github::complete_install_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -539,13 +485,8 @@ async fn github_webhook_route(
         )
     })?;
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    match github::handle_webhook(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    match github::handle_webhook_backend(
+        &state.auth.db.pool,
         config,
         &body,
         header("x-hub-signature-256"),
@@ -587,19 +528,9 @@ async fn ai_admit(
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    if !ai::is_member(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        session_id,
-    )
-    .await
-    .map_err(internal)?
+    if !ai::is_member_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+        .await
+        .map_err(internal)?
     {
         return Err(AppError::from_code(ProblemCode::NotFound));
     }
@@ -621,13 +552,8 @@ async fn ai_document(
     session_id: Uuid,
     document_id: Uuid,
 ) -> Result<(String, String), AppError> {
-    let (title, content_json) = ai::viewable_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    let (title, content_json) = ai::viewable_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -703,13 +629,8 @@ async fn ai_suggest_links_route(
     check_origin(&headers, &state.public_origin)?;
     let (user_id, session_id) =
         ai_admit(&state, &integrations, &headers, &jar, workspace_id).await?;
-    ai::viewable_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
+    ai::viewable_document_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,
@@ -718,19 +639,10 @@ async fn ai_suggest_links_route(
     .await
     .map_err(internal)?
     .ok_or_else(|| AppError::from_code(ProblemCode::NotFound))?;
-    let visible = ai::visible_documents(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/integrations.rs")
-            .map_err(internal)?,
-        workspace_id,
-        user_id,
-        body.document_id,
-    )
-    .await
-    .map_err(internal)?;
+    let visible =
+        ai::visible_documents_backend(&state.auth.db.pool, workspace_id, user_id, body.document_id)
+            .await
+            .map_err(internal)?;
     Ok(Json(AiSuggestLinksOutput {
         document_ids: visible.iter().map(|(id, _)| id.to_string()).collect(),
         documents: visible

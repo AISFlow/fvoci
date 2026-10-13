@@ -1044,6 +1044,80 @@ pub async fn purge_settled_deliveries_backend(
     Ok(deleted)
 }
 
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_integration_sdk_tests {
+    use super::*;
+    use crate::db::backend::{DbTx, RemoteDatabase};
+    use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+    use futures_util::FutureExt;
+    use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn selected_integrations_sdk_write_readback_and_refusals() {
+        let sqld = PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("integrations-sdk-{}", Uuid::now_v7()));
+        let fixture = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let connection = |database| {
+            Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+                database,
+                NonZeroU32::MIN,
+            )))
+        };
+        let backend = connection(fixture.database().await.unwrap());
+        let fresh = connection(fixture.database().await.unwrap());
+        let result=std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&backend).await.unwrap();
+            let workspace=Uuid::now_v7();let actor=Uuid::now_v7();let session=Uuid::now_v7();
+            let mut tx=backend.begin_write().await.unwrap();
+            let DbTx::SqliteFamily(family)=&mut tx else {unreachable!()};
+            family.execute("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'integration-sdk','Integration SDK','personal')", &[Cell::uuid(workspace)]).await.unwrap();
+            family.execute("INSERT INTO users(id,email,given_name,personal_workspace_id) VALUES(?1,'integration-sdk@example.invalid','Fixture',?2)", &[Cell::uuid(actor),Cell::uuid(workspace)]).await.unwrap();
+            family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')", &[Cell::uuid(workspace),Cell::uuid(actor)]).await.unwrap();
+            family.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'synthetic-integration-sdk',unixepoch()*1000000+3600000000)", &[Cell::uuid(session),Cell::uuid(actor)]).await.unwrap();
+            tx.commit().await.unwrap();
+            let keys=webhook_family_fixture::keys();let hook=Uuid::now_v7();let events=vec!["task.created".to_string()];
+            let sealed=crate::secret_box::seal(&keys,"synthetic-hook",&crate::integrations::webhooks::webhook_secret_context(workspace,hook)).unwrap();
+            assert!(create_webhook_backend(&backend,workspace,actor,session,NewWebhook {id:hook,url:"https://example.com/hook",events:&events,sealed_secret:&sealed},None).await.unwrap().is_ok());
+            assert_eq!(list_webhooks_backend(&fresh,workspace,actor,session).await.unwrap().unwrap()[0].id,hook);
+            assert!(remove_webhook_backend(&backend,Uuid::now_v7(),actor,session,hook,None).await.unwrap().is_err());
+            use crate::integrations::github;
+            assert!(github::begin_install_backend(&backend,workspace,actor,session,"synthetic-nonce").await.unwrap().is_ok());
+            assert!(github::complete_install_backend(&backend,workspace,actor,session,"synthetic-nonce","42").await.unwrap().is_ok());
+            assert_eq!(github::get_installation_backend(&fresh,workspace,actor,session).await.unwrap().unwrap().as_deref(),Some("42"));
+            assert!(github::complete_install_backend(&backend,workspace,actor,session,"synthetic-nonce","42").await.unwrap().is_err());
+            let date=chrono::NaiveDate::from_ymd_opt(2026,12,25).unwrap();
+            assert!(crate::db::holidays::add_workspace_holiday_backend(&backend,workspace,actor,session,date).await.unwrap().is_ok());
+            assert_eq!(crate::db::holidays::list_workspace_holidays_backend(&fresh,workspace,actor,session).await.unwrap().unwrap().items,vec![date]);
+            let url=crate::db::ics::rotate_ics_token_backend(&backend,workspace,actor,session,"https://example.invalid").await.unwrap().unwrap();
+            let token=url.rsplit('/').next().unwrap();
+            assert!(crate::db::ics::read_ics_by_token_backend(&fresh,token).await.unwrap().is_some());
+            let subscription=crate::push::db::PushSubscriptionRow {endpoint:"https://push.example.com/fixture".into(),p256dh:"B".repeat(87),auth:"A".repeat(22)};
+            assert!(crate::push::db::register_subscription_backend(&backend,workspace,actor,session,&subscription).await.unwrap());
+            assert!(!crate::push::db::register_subscription_backend(&backend,Uuid::now_v7(),actor,session,&subscription).await.unwrap());
+            let owner=crate::db::zotero::Actor {workspace,user:actor,session};
+            let input=crate::api::zotero_dto::ConnectBody {library_type:crate::api::zotero_dto::LibraryType::User,remote_library_id:"42".into(),library_url:"https://www.zotero.org/users/42".into(),api_key:"SYNTHETIC_ONLY".into()};
+            let connector=crate::db::zotero::connect_backend(&backend,owner,&input,&keys).await.unwrap();
+            assert_eq!(crate::db::zotero::list_backend(&fresh,owner).await.unwrap().connectors[0].id,connector.id);
+            assert_eq!(crate::db::zotero::disconnect_backend(&backend,owner,connector.id).await.unwrap().state,"disconnected");
+            assert!(remove_webhook_backend(&backend,workspace,actor,session,hook,None).await.unwrap().is_ok());
+            let mut read=fresh.begin_read().await.unwrap();let DbTx::SqliteFamily(family)=&mut read else {unreachable!()};
+            assert_eq!(family.query("SELECT count(*) FROM push_subscriptions",&[]).await.unwrap()[0].cell(0).unwrap().integer().unwrap(),1);
+            read.commit().await.unwrap();
+        }).catch_unwind().await;
+        fresh.close().await.unwrap();
+        backend.close().await.unwrap();
+        let receipt = fixture.finish().await.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod webhook_family_fixture {
     use super::*;

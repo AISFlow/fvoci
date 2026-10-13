@@ -1,6 +1,130 @@
 #![cfg(feature = "db-tests")]
 #![allow(dead_code)]
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
+#[tokio::test]
+async fn sqlite_holidays_and_ics_http_rotation_expiry_and_tenant_refusal() {
+    let f = integrations_family::Fixture::new().await;
+    let app = f.app(std::sync::Arc::new(
+        fvoci_server::integrations::Integrations::disabled(),
+    ));
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let (status, list) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/holidays"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["canEdit"], true);
+    for _ in 0..2 {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/holidays"),
+            Some(json!({"date":"2026-12-25"})),
+            Some(&f.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let fresh = f.fresh().await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workspace_holidays")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{}/holidays/2026-12-25", Uuid::now_v7()),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{base}/holidays/2026-12-25"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, first) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/ics-token"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first_path = url::Url::parse(first["url"].as_str().unwrap())
+        .unwrap()
+        .path()
+        .to_string();
+    let (status, second) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/ics-token"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let path = url::Url::parse(second["url"].as_str().unwrap())
+        .unwrap()
+        .path()
+        .to_string();
+    let (project, backlog, _) = f.seed_project().await;
+    let task = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by,due_date) VALUES(?1,?2,?3,1,'Assigned calendar task',?4,'a0',1,'{\"type\":\"doc\",\"content\":[]}',?5,'2026-12-25')").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&fresh).await.unwrap();
+    sqlx::query("INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)")
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, _, calendar) = raw_request(app.clone(), "GET", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(calendar)
+        .unwrap()
+        .contains("Assigned calendar task"));
+    assert_eq!(
+        raw_request(app.clone(), "GET", &first_path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    for (method, expected) in [
+        ("GET", StatusCode::OK),
+        ("HEAD", StatusCode::OK),
+        ("OPTIONS", StatusCode::NO_CONTENT),
+        ("PROPFIND", StatusCode::MULTI_STATUS),
+        ("REPORT", StatusCode::MULTI_STATUS),
+    ] {
+        assert_eq!(
+            raw_request(app.clone(), method, &path, None).await.0,
+            expected
+        );
+    }
+    sqlx::query("UPDATE ics_tokens SET expires_at=unixepoch()*1000000-1")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_request(app.clone(), "GET", &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 #[path = "support/project_harness.rs"]
 mod project_harness;
 

@@ -95,17 +95,9 @@ async fn list(
 ) -> Result<Json<ConnectorListOutput>, TaskApiError> {
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::list(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            actor,
-        )
-        .await
-        .map_err(error)?,
+        zotero::list_backend(&state.auth.db.pool, actor)
+            .await
+            .map_err(error)?,
     ))
 }
 async fn connect(
@@ -126,19 +118,9 @@ async fn connect(
     Ok((
         StatusCode::CREATED,
         Json(
-            zotero::connect(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("src/http/routes/zotero.rs")
-                    .map_err(crate::http::routes::tasks::internal)?,
-                actor,
-                &input,
-                keys,
-            )
-            .await
-            .map_err(error)?,
+            zotero::connect_backend(&state.auth.db.pool, actor, &input, keys)
+                .await
+                .map_err(error)?,
         ),
     ))
 }
@@ -150,18 +132,9 @@ async fn read(
 ) -> Result<Json<LibraryOutput>, TaskApiError> {
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::library(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            actor,
-            id,
-        )
-        .await
-        .map_err(error)?,
+        zotero::library_backend(&state.auth.db.pool, actor, id)
+            .await
+            .map_err(error)?,
     ))
 }
 async fn disconnect(
@@ -173,18 +146,9 @@ async fn disconnect(
     check_origin(&headers, &state.public_origin)?;
     let actor = actor(&state, &headers, &jar, workspace).await?;
     Ok(Json(
-        zotero::disconnect(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            actor,
-            id,
-        )
-        .await
-        .map_err(error)?,
+        zotero::disconnect_backend(&state.auth.db.pool, actor, id)
+            .await
+            .map_err(error)?,
     ))
 }
 async fn link(
@@ -197,20 +161,17 @@ async fn link(
     check_origin(&headers, &state.public_origin)?;
     let actor = actor(&state, &headers, &jar, workspace).await?;
     let input: LinkBody = remote::parse(&body).map_err(|e| error(e.into()))?;
+    if input
+        .anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.contains('\0'))
+    {
+        return Err(error(ZoteroError::Invalid.into()));
+    }
     Ok(Json(
-        zotero::link(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            actor,
-            id,
-            &input,
-        )
-        .await
-        .map_err(error)?,
+        zotero::link_backend(&state.auth.db.pool, actor, id, &input)
+            .await
+            .map_err(error)?,
     ))
 }
 async fn sync(
@@ -226,43 +187,19 @@ async fn sync(
         .encryption_keys
         .as_deref()
         .ok_or_else(|| error(DbError::Encryption))?;
-    let cycle = zotero::start(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/zotero.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        actor,
-        id,
-        keys,
-    )
-    .await
-    .map_err(error)?;
+    let cycle = zotero::start_backend(&state.auth.db.pool, actor, id, keys)
+        .await
+        .map_err(error)?;
     let result = tokio::time::timeout(
         remote::CYCLE_TIMEOUT,
-        collect(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            &cycle,
-            &integrations.zotero,
-        ),
+        collect_backend(&state.auth.db.pool, &cycle, &integrations.zotero),
     )
     .await
     .unwrap_or_else(|_| Err(ZoteroError::Transient.into()));
     if let Err(ref failure) = result {
         // A retired credential cannot update state, retry time or the new cycle.
-        let _ = zotero::finish_failed(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
+        let _ = zotero::finish_failed_backend(
+            &state.auth.db.pool,
             &cycle,
             0,
             matches!(failure, DbError::Remote(ZoteroError::Denied)),
@@ -271,31 +208,13 @@ async fn sync(
     }
     // The read has ended (including timeout/drop of its transport future).
     // Retiring a key kept this nonce so another library could not overlap it.
-    let released = zotero::release_read(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/zotero.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
-        &cycle,
-    )
-    .await;
+    let released = zotero::release_read_backend(&state.auth.db.pool, &cycle).await;
     result.map_err(error)?;
     released.map_err(error)?;
     Ok(Json(
-        zotero::library(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/zotero.rs")
-                .map_err(crate::http::routes::tasks::internal)?,
-            actor,
-            id,
-        )
-        .await
-        .map_err(error)?,
+        zotero::library_backend(&state.auth.db.pool, actor, id)
+            .await
+            .map_err(error)?,
     ))
 }
 
@@ -466,6 +385,187 @@ pub async fn collect(pool: &PgPool, cycle: &Cycle, client: &ZoteroClient) -> Res
         return Err(ZoteroError::VersionChanged.into());
     }
     zotero::commit_page(
+        pool,
+        cycle,
+        version,
+        &collections,
+        &last_page,
+        Some((&deleted, &excluded, &all_keys)),
+    )
+    .await
+}
+
+struct BackendReads<'a> {
+    pool: &'a crate::db::backend::Backend,
+    cycle: &'a Cycle,
+    client: &'a ZoteroClient,
+    count: usize,
+    delayed: bool,
+}
+impl BackendReads<'_> {
+    async fn get(
+        &mut self,
+        resource: &str,
+        params: &[(&str, String)],
+        expected: Option<i64>,
+    ) -> Result<ReadReply, DbError> {
+        if self.delayed {
+            return Err(ZoteroError::Delayed.into());
+        }
+        if self.count >= remote::REQUEST_MAX {
+            return Err(ZoteroError::Limit.into());
+        }
+        self.count += 1;
+        zotero::current_backend(self.pool, self.cycle).await?;
+        let reply = self
+            .client
+            .read(&self.cycle.library, &self.cycle.key, resource, params)
+            .await?;
+        // Link is an unconsumed navigation hint. Requests come only from the
+        // fixed version/key plan; no link/header URL ever reaches transport.
+        let delay = remote::delay(&reply)?;
+        if delay > 0 {
+            zotero::delay_next_backend(self.pool, self.cycle, delay).await?;
+            self.delayed = true;
+        }
+        remote::version(&reply, expected)?;
+        if remote::body_contains_credential(&reply.body, &self.cycle.key)? {
+            return Err(ZoteroError::Invalid.into());
+        }
+        Ok(reply)
+    }
+    async fn inventory(
+        &mut self,
+        resource: &str,
+        params: &[(&str, String)],
+        expected: Option<i64>,
+    ) -> Result<(i64, BTreeMap<String, i64>), DbError> {
+        let reply = self.get(resource, params, expected).await?;
+        let version = remote::version(&reply, expected)?;
+        let inventory = remote::versions(&reply.body, version)?;
+        if let Some(total) = remote::header(&reply, "total-results")? {
+            if remote::decimal(total)? != inventory.len() as i64 {
+                return Err(ZoteroError::Invalid.into());
+            }
+        }
+        Ok((version, inventory))
+    }
+}
+pub async fn collect_backend(
+    pool: &crate::db::backend::Backend,
+    cycle: &Cycle,
+    client: &ZoteroClient,
+) -> Result<(), DbError> {
+    if let crate::db::backend::Backend::Postgres(pg) = pool {
+        return collect(pg, cycle, client).await;
+    }
+    let mut reads = BackendReads {
+        pool,
+        cycle,
+        client,
+        count: 0,
+        delayed: false,
+    };
+    let (version, collection_keys) = reads
+        .inventory("collections", &[("format", "versions".into())], None)
+        .await?;
+    if version < cycle.since {
+        return Err(ZoteroError::VersionChanged.into());
+    }
+    let mut collections = Vec::new();
+    for (key, object_version) in &collection_keys {
+        let reply = reads
+            .get(&format!("collections/{key}"), &[], Some(*object_version))
+            .await?;
+        collections.push(remote::collection(
+            &reply.body,
+            &cycle.library,
+            &collection_keys,
+            key,
+        )?);
+    }
+    remote::collection_graph(&collections)?;
+    let common = vec![
+        ("format", "versions".to_owned()),
+        ("since", cycle.since.to_string()),
+        ("includeTrashed", "1".to_owned()),
+    ];
+    let (_, all_keys) = reads.inventory("items", &common, Some(version)).await?;
+    let mut params = common.clone();
+    params.push(("itemType", remote::bibliographic_types().join(" || ")));
+    let (_, item_keys) = reads.inventory("items", &params, Some(version)).await?;
+    let mut params = common.clone();
+    params.push(("itemType", "note || attachment || annotation".into()));
+    let (_, excluded) = reads.inventory("items", &params, Some(version)).await?;
+    // A newly introduced type must not silently become an excluded note/file.
+    let mut union = item_keys.clone();
+    for (key, v) in &excluded {
+        if union.insert(key.clone(), *v).is_some() {
+            return Err(ZoteroError::Invalid.into());
+        }
+    }
+    if union != all_keys {
+        return Err(ZoteroError::Invalid.into());
+    }
+    let keys: Vec<_> = item_keys.iter().collect();
+    let pages: Vec<_> = keys.chunks(remote::PAGE_SIZE).collect();
+    let mut last_page = Vec::new();
+    for (index, keys) in pages.iter().enumerate() {
+        let requested: BTreeMap<_, _> = keys.iter().map(|(k, v)| ((*k).clone(), **v)).collect();
+        let key_list = requested.keys().cloned().collect::<Vec<_>>().join(",");
+        let reply = reads
+            .get(
+                "items",
+                &[
+                    ("format", "json".into()),
+                    ("itemKey", key_list),
+                    ("includeTrashed", "1".into()),
+                    ("limit", remote::PAGE_SIZE.to_string()),
+                ],
+                Some(version),
+            )
+            .await?;
+        if let Some(total) = remote::header(&reply, "total-results")? {
+            if remote::decimal(total)? != requested.len() as i64 {
+                return Err(ZoteroError::Invalid.into());
+            }
+        }
+        let items = remote::items(&reply.body, &cycle.library, &requested)?;
+        if index + 1 == pages.len() {
+            last_page = items;
+        } else {
+            zotero::commit_page_backend(pool, cycle, version, &collections, &items, None).await?;
+        }
+    }
+    let reply = reads
+        .get(
+            "deleted",
+            &[("since", cycle.since.to_string())],
+            Some(version),
+        )
+        .await?;
+    let deleted: remote::Deleted = remote::parse(&reply.body)?;
+    deleted.validate()?;
+    if deleted.items.iter().any(|key| item_keys.contains_key(key))
+        || deleted
+            .collections
+            .iter()
+            .any(|key| collection_keys.contains_key(key))
+    {
+        return Err(ZoteroError::Invalid.into());
+    }
+    // Detect library changes during single-object collection reads and gaps.
+    let (_, final_collections) = reads
+        .inventory(
+            "collections",
+            &[("format", "versions".into())],
+            Some(version),
+        )
+        .await?;
+    if final_collections != collection_keys {
+        return Err(ZoteroError::VersionChanged.into());
+    }
+    zotero::commit_page_backend(
         pool,
         cycle,
         version,
