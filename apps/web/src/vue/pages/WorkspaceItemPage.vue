@@ -5,6 +5,7 @@ import UButton from "@nuxt/ui/components/Button.vue";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, onScopeDispose, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { unreachableDrafts } from "@/features/documents/off-wiki-draft";
 import { findProjectByKey, projectsQuery, workflowQuery } from "@/features/projects/queries";
 import { invalidateTaskCaches } from "@/features/tasks/task-cache";
 import {
@@ -32,8 +33,10 @@ import AppLink from "../components/AppLink.vue";
 import QueryError from "../components/QueryError.vue";
 import QueryLoading from "../components/QueryLoading.vue";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
+import { listRetainedOffDrafts } from "../composables/useOffWikiBody";
 import { useTaskStream } from "../composables/useTaskStream";
 import ProjectDocumentView from "../features/documents/ProjectDocumentView.vue";
+import RetainedDraftList from "../features/documents/RetainedDraftList.vue";
 import TaskDetailView from "../features/tasks/TaskDetailView.vue";
 import { leaveTo } from "../session/navigation";
 import { useWorkspaceSession } from "../session/useWorkspaceSession";
@@ -354,6 +357,50 @@ const realNotFound = computed(
     lookupMiss.value ||
     task404.value,
 );
+// The task's own read refused (401·403·404). A form kept from earlier data
+// drops its OFF owner, so its draft there is export only and nothing is sent.
+const taskReadRefused = computed(
+  () =>
+    Boolean(lookupTask.value) &&
+    task.isError.value &&
+    task.error.value instanceof ProblemError &&
+    [401, 403, 404].includes(task.error.value.status),
+);
+// The same refusal with no form left on the page, like the document view's
+// refused metadata: its retained OFF draft below is export only.
+const taskRefused = computed(
+  () => !(item.value && task.data.value && !realNotFound.value) && taskReadRefused.value,
+);
+// A lookup miss may be a project this tab still has cached as granted. A failed
+// read stays on the query, and the list below then trusts no project list.
+watch(lookupMiss, (missed) => {
+  if (missed) projects.refetch().catch(() => undefined);
+});
+// This tab's OFF drafts of the current actor and credential that this page can
+// no longer reach: the refused task, any target of a project the fresh list no
+// longer grants, or the one last opened at this address that now names nothing
+// (trashed, deleted or moved). Local reads only: export, never send.
+const retainedDrafts = computed(() => {
+  const actor = session.me.value;
+  if (
+    !workspace.value ||
+    !actor?.userId ||
+    !actor.sessionId ||
+    !(realNotFound.value || taskRefused.value)
+  )
+    return [];
+  const granted =
+    projects.isSuccess.value && !projects.isFetching.value
+      ? new Set((projects.data.value?.items ?? []).map((row) => row.id))
+      : null;
+  return unreachableDrafts(
+    listRetainedOffDrafts(actor.userId, actor.sessionId),
+    workspace.value.id,
+    granted,
+    taskRefused.value ? (lookupTask.value?.id ?? null) : null,
+    realNotFound.value ? (item.value?.displayId ?? null) : null,
+  );
+});
 
 const taskReadOnly = computed(
   () =>
@@ -500,6 +547,7 @@ async function onTrash(): Promise<void> {
       @retry="projects.refetch()"
     />
     <p v-if="realNotFound" role="alert" class="task-form__alert">{{ t("task.error.notFound") }}</p>
+    <RetainedDraftList :drafts="retainedDrafts" class="task-home__note" />
     <ProjectDocumentView
       v-if="projectDocument && project"
       :key="collabRoomName(workspace.id, 'document', projectDocument.id)"
@@ -561,6 +609,7 @@ async function onTrash(): Promise<void> {
       :form-epoch="formEpoch"
       :clone-pending="cloneTask.isPending.value"
       :delete-pending="deleteTask.isPending.value"
+      :refused="taskReadRefused"
       :on-title-blur="onTitleBlur"
       :on-status-change="onStatusChange"
       :on-priority-change="onPriorityChange"

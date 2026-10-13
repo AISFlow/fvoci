@@ -7,17 +7,19 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import {
   OffWikiDraft,
+  adoptMovedDraft,
   decodeUpdate,
   encodeUpdate,
   loadBody,
   ownerKey,
+  readRetainedDraft,
   serverContainsLive,
 } from "../../features/documents/off-wiki-draft";
 import type { OffWikiOwner } from "../../features/documents/off-wiki-draft";
 import type { BodySaveResult, VersionedBody } from "../../features/documents/versioned-body-api";
 const raw = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
-  .replace("export function", "function");
+  .replaceAll("export function", "function");
 const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
 class ProblemError extends Error {
   constructor(readonly status: number) {
@@ -71,10 +73,12 @@ function harness(storageKind: "null" | "access-denied" | "write-denied") {
     ...Vue,
     Y,
     OffWikiDraft,
+    adoptMovedDraft,
     decodeUpdate,
     encodeUpdate,
     loadBody,
     ownerKey,
+    readRetainedDraft,
     serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),
@@ -207,8 +211,13 @@ test("refresh A->B->A cannot reattach retired owner or overwrite the newest priv
   required(h.reads[1]).resolve(body(owner, "old restore response", "2"));
   await oldRefresh;
   expect(h.current.draft.value).toBe(fresh);
-  expect(JSON.stringify(fresh.mine)).toContain("newest A");
+  // Without tab storage, A's private draft waits in this page's memory and
+  // comes back against the newest authorized read, never the old response.
+  expect(JSON.stringify(fresh.mine)).toContain("late private");
+  expect(fresh.latest?.tailSeq).toBe("4");
+  expect(JSON.stringify(fresh.comparison?.current)).toContain("newest A");
   expect(JSON.stringify(fresh.mine)).not.toContain("old restore response");
+  expect(JSON.stringify(fresh.comparison)).not.toContain("old restore response");
   expect(original.active).toBe(false);
   h.effect.stop();
 });

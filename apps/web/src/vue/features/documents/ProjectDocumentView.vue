@@ -30,7 +30,7 @@ import {
   trashDocument,
 } from "@/features/documents/document-api";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
-import { useOffWikiBody } from "../../composables/useOffWikiBody";
+import { useOffWikiBody, useRetainedDraftExport } from "../../composables/useOffWikiBody";
 import { projectAncestors } from "@/features/documents/project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { createProjectDocumentAttachmentBridge } from "@/features/workspace/attachment-upload";
@@ -56,6 +56,7 @@ import DocumentExportMenu from "./DocumentExportMenu.vue";
 import DocumentTagsBar from "./DocumentTagsBar.vue";
 import OriginPanel from "./OriginPanel.vue";
 import { sourceBlockSelection } from "../capture/source-block";
+import RetainedDraftList from "./RetainedDraftList.vue";
 import RevisionPanel from "./RevisionPanel.vue";
 import ShareDialog from "./ShareDialog.vue";
 import StarToggle from "./StarToggle.vue";
@@ -130,6 +131,7 @@ const offBody = useOffWikiBody(
       workspaceId: props.workspaceId,
       targetId: props.documentId,
       projectId: props.project.id,
+      displayId: formatDisplayId(props.project.key, metaQuery.data.value.number),
     };
   },
   () => realtimeOff.value,
@@ -185,6 +187,40 @@ const offComparisons = computed(() => {
   ];
 });
 
+const restoredChanges = computed(() => {
+  const bodies = offBody.restoredComparison.value;
+  if (!bodies) return null;
+  const projection = (id: string, contentJson: unknown) => ({
+    id,
+    targetKind: "document",
+    targetId: props.documentId,
+    contentJson,
+  });
+  return compareRevisionProjections(
+    projection("start", bodies.start),
+    projection("mine", bodies.mine),
+    UNIQUE_ID_NODE_TYPES,
+  );
+});
+// A refused document still offers this tab's own retained draft, export only.
+const deniedDraft = computed(() => {
+  const actor = me.data.value;
+  const failure = metaQuery.error.value;
+  if (
+    !actor?.userId ||
+    !actor.sessionId ||
+    !(failure instanceof ProblemError && [401, 403, 404].includes(failure.status))
+  )
+    return null;
+  return offBody.retainedFor({
+    actorId: actor.userId,
+    credentialId: actor.sessionId,
+    workspaceId: props.workspaceId,
+    targetId: props.documentId,
+    projectId: props.project.id,
+  });
+});
+const { note: draftExportNote, run: exportDraft } = useRetainedDraftExport();
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
   () =>
@@ -1010,6 +1046,58 @@ function refOf(number: number): string {
       <p v-if="realtimeOff && offBody.storageError.value" role="alert">{{
         t("doc.off.storageFailed")
       }}</p>
+      <section
+        v-if="realtimeOff && offBody.unmoved.value"
+        class="document-off-compare"
+        data-testid="off-draft-unmoved"
+      >
+        <p role="alert">{{ t("doc.off.unmoved") }}</p>
+        <RetainedDraftList :drafts="[offBody.unmoved.value]" />
+      </section>
+      <section
+        v-if="realtimeOff && offBody.restored.value"
+        class="document-off-compare"
+        data-testid="off-draft-restored"
+      >
+        <p role="status">{{ t("doc.off.restored") }}</p>
+        <details v-if="restoredChanges">
+          <summary>{{ t("doc.off.restoredChanges") }}</summary>
+          <p v-for="limit in restoredChanges.limits" :key="limit">{{
+            t(`version.diff.${limit}`)
+          }}</p>
+          <div v-for="change in restoredChanges.changes" :key="change.key">
+            <p
+              >{{ t(`version.diff.${change.kind}`) }} ·
+              {{ (change.after ?? change.before)?.blockId }}</p
+            >
+            <del>{{ change.before?.text }}</del> → <ins>{{ change.after?.text }}</ins>
+          </div>
+        </details>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :disabled="offBody.saving.value || offBody.creating.value"
+          @click="offBody.discard"
+          >{{ t("doc.off.discard") }}</UButton
+        >
+      </section>
+      <section
+        v-if="realtimeOff && offBody.retained.value"
+        class="document-off-compare"
+        data-testid="off-draft-retained"
+      >
+        <p role="alert">{{
+          t(offBody.retained.value.unstored ? "doc.off.retainedUnstored" : "doc.off.retained")
+        }}</p>
+        <UButton size="sm" @click="exportDraft(offBody.retained.value, 'copy')">{{
+          t("doc.off.copyDraft")
+        }}</UButton>
+        <UButton size="sm" @click="exportDraft(offBody.retained.value, 'download', title)">{{
+          t("doc.off.downloadDraft")
+        }}</UButton>
+        <p v-if="draftExportNote" role="status">{{ draftExportNote }}</p>
+      </section>
       <UButton
         v-if="
           realtimeOff && (!offBody.doc.value || !offBody.writable.value) && !offBody.loading.value
@@ -1194,6 +1282,19 @@ function refOf(number: number): string {
       :read-only="readOnly"
     />
   </article>
+  <section v-if="deniedDraft" class="document-off-compare" data-testid="off-draft-retained">
+    <p role="alert">{{
+      t(deniedDraft.unstored ? "doc.off.retainedUnstored" : "doc.off.retained")
+    }}</p>
+    <p>{{ deniedDraft.excerpt }}</p>
+    <UButton size="sm" @click="exportDraft(deniedDraft, 'copy')">{{
+      t("doc.off.copyDraft")
+    }}</UButton>
+    <UButton size="sm" @click="exportDraft(deniedDraft, 'download')">{{
+      t("doc.off.downloadDraft")
+    }}</UButton>
+    <p v-if="draftExportNote" role="status">{{ draftExportNote }}</p>
+  </section>
   <NativeModal :open="sourceLeaveOpen" :labelled-by="sourceDraftDialogId" @close="keepEditing">
     <h2 :id="sourceDraftDialogId">{{ t("editor.mode.leaveTitle") }}</h2>
     <p>{{ t("editor.mode.leaveDescription") }}</p>

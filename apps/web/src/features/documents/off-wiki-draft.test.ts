@@ -2,7 +2,18 @@ import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
-import { OffWikiDraft, encodeUpdate, loadBody, ownerKey } from "./off-wiki-draft";
+import {
+  OffWikiDraft,
+  adoptMovedDraft,
+  encodeUpdate,
+  listRetainedDrafts,
+  loadBody,
+  ownerKey,
+  readRetainedDraft,
+  unreachableDrafts,
+  type OffWikiOwner,
+  type RetainedOffDraft,
+} from "./off-wiki-draft";
 import type { BodySaveCommand, BodySaveResult, VersionedBody } from "./versioned-body-api";
 
 const targetId = "11111111-1111-4111-8111-111111111111";
@@ -623,5 +634,393 @@ describe("OFF wiki native draft owner", () => {
     expect(JSON.stringify(draft.mine)).toContain(" after");
     expect(draft.start.tailSeq).toBe("2");
     draft.retire();
+  });
+});
+
+describe("retired dirty OFF draft policy", () => {
+  function listable(slots: Map<string, string>) {
+    return {
+      get length() {
+        return slots.size;
+      },
+      key: (index: number) => [...slots.keys()][index] ?? null,
+      getItem: (key: string) => slots.get(key) ?? null,
+    };
+  }
+  test("the storage scope key stays actor, credential, workspace, target, kind and project", () => {
+    expect(ownerKey(owner)).toBe(
+      `fvoci:off-wiki:1:${JSON.stringify(["actor", "credential", "workspace", targetId])}`,
+    );
+    expect(ownerKey({ ...owner, kind: "task", projectId: "project" })).toBe(
+      `fvoci:off-wiki:1:${JSON.stringify(["actor", "credential", "workspace", targetId, "task", "project"])}`,
+    );
+    for (const field of ["actorId", "credentialId", "workspaceId", "targetId"] as const)
+      expect(ownerKey({ ...owner, [field]: "other" })).not.toBe(ownerKey(owner));
+  });
+  test("retire keeps the dirty slot; the same owner gets it back as an offer until a save ACK", async () => {
+    const persisted = storage();
+    const initial = source();
+    const first = new OffWikiDraft(owner, initial, persisted, () => {});
+    expect(first.restored).toBe(false);
+    edit(first.doc, " kept after leaving");
+    first.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+    const back = new OffWikiDraft(
+      owner,
+      initial,
+      persisted,
+      () => {},
+      () => commandId,
+    );
+    expect(back.restored).toBe(true);
+    expect(back.hasPrivateState).toBe(true);
+    expect(JSON.stringify(back.mine)).toContain("kept after leaving");
+    expect(await back.save((command) => Promise.resolve(result(command)))).toBe(true);
+    expect(back.restored).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    back.retire();
+  });
+  test("editor mount normalization alone is restored silently, never offered as a draft", () => {
+    const persisted = storage();
+    const empty = source();
+    const blank = new Y.Doc({ gc: false });
+    const legacy = tiptapJsonToYDoc({
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "legacy" }] }],
+    });
+    const bodies = [
+      {
+        ...empty,
+        snapshotV1: encodeUpdate(Y.encodeStateAsUpdate(blank)),
+        contentJson: { type: "doc" },
+      },
+      {
+        ...empty,
+        snapshotV1: encodeUpdate(Y.encodeStateAsUpdate(legacy)),
+        // A server projection may spell a default attr the Y projection leaves out.
+        contentJson: {
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              attrs: { textAlign: null },
+              content: [{ type: "text", text: "legacy" }],
+            },
+          ],
+        },
+      },
+    ];
+    blank.destroy();
+    legacy.destroy();
+    for (const [index, body] of bodies.entries()) {
+      const first = new OffWikiDraft(owner, body, persisted, () => {});
+      const fragment = first.doc.getXmlFragment(FVOCI_YDOC_FRAGMENT);
+      // What the editor writes on mount: an ID on the existing or default paragraph.
+      if (index === 0) {
+        const paragraph = new Y.XmlElement("paragraph");
+        paragraph.setAttribute("id", "mounted-block");
+        fragment.insert(0, [paragraph]);
+      } else (fragment.get(0) as Y.XmlElement).setAttribute("id", "mounted-block");
+      expect(first.dirty).toBe(true);
+      first.retire();
+      const back = new OffWikiDraft(owner, body, persisted, () => {});
+      expect(back.hasPrivateState).toBe(true);
+      expect(back.restored).toBe(false);
+      const paragraph = back.doc.getXmlFragment(FVOCI_YDOC_FRAGMENT).get(0) as Y.XmlElement;
+      const run = paragraph.get(0) as Y.XmlText | undefined;
+      if (run) run.insert(run.length, " typed");
+      else paragraph.insert(0, [new Y.XmlText(" typed")]);
+      back.retire();
+      const typed = new OffWikiDraft(owner, body, persisted, () => {});
+      expect(typed.restored).toBe(true);
+      typed.retire();
+      persisted.slots.clear();
+    }
+  });
+  test("an export after edit current still carries the private draft it set aside", () => {
+    const persisted = storage();
+    const draft = new OffWikiDraft(owner, source(), persisted, () => {});
+    edit(draft.doc, " set aside");
+    draft.retire();
+    const reload = new OffWikiDraft(
+      owner,
+      source("another writer", "9007199254740994"),
+      persisted,
+      () => {},
+    );
+    reload.editCurrent();
+    edit(reload.doc, " typed on current");
+    const live = reload.exportDraft().markdown;
+    reload.retire();
+    const stored = readRetainedDraft(persisted, owner)?.markdown;
+    for (const markdown of [live, stored]) {
+      expect(markdown).toContain("set aside");
+      expect(markdown).toContain("another writer typed on current");
+    }
+  });
+  test("an export accepts only a slot the restoring reader accepts", () => {
+    const persisted = storage();
+    const initial = source();
+    const draft = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(draft.doc, " tampered");
+    draft.retire();
+    const valid = JSON.parse(persisted.slots.get(ownerKey(owner)) ?? "") as Record<string, unknown>;
+    const blank = new Y.Doc({ gc: false });
+    const other = encodeUpdate(Y.encodeStateAsUpdate(blank));
+    blank.destroy();
+    for (const broken of [
+      { ...valid, acknowledged: other },
+      { ...valid, sourceBuffer: { text: 7, baseV1: other } },
+      { ...valid, conflictBackup: { ...valid, owner: { ...owner, actorId: "B" } } },
+    ]) {
+      persisted.slots.set(ownerKey(owner), JSON.stringify(broken));
+      expect(readRetainedDraft(persisted, owner)).toBeNull();
+      const reader = new OffWikiDraft(owner, initial, persisted, () => {});
+      expect(reader.hasPrivateState).toBe(false);
+      reader.retire();
+    }
+  });
+  test("only an explicit discard drops the slot, never during a request, and nothing is offered again", async () => {
+    const persisted = storage();
+    const initial = source();
+    const first = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(first.doc, " discard me");
+    first.retire();
+    const back = new OffWikiDraft(owner, initial, persisted, () => {});
+    const pending = deferred<BodySaveResult>();
+    let command!: BodySaveCommand;
+    const saving = back.save((input) => {
+      command = input;
+      return pending.promise;
+    });
+    expect(back.discard()).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+    pending.resolve({ ...result(command), commandId: "wrong" });
+    expect(await saving.catch((error: unknown) => error)).toBeInstanceOf(Error);
+    expect(back.discard()).toBe(true);
+    expect(back.active).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    back.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    expect(back.discard()).toBe(false);
+    const reopened = new OffWikiDraft(owner, initial, persisted, () => {});
+    expect(reopened.restored).toBe(false);
+    expect(reopened.hasPrivateState).toBe(false);
+    expect(JSON.stringify(reopened.mine)).not.toContain("discard me");
+    reopened.retire();
+  });
+  test("a slot that cannot be removed keeps the live draft instead of discarding", () => {
+    const persisted = storage();
+    const draft = new OffWikiDraft(
+      owner,
+      source(),
+      {
+        ...persisted,
+        removeItem: () => {
+          throw new Error("storage unavailable");
+        },
+      },
+      () => {},
+    );
+    edit(draft.doc, " must survive");
+    expect(draft.discard()).toBe(false);
+    expect(draft.active).toBe(true);
+    expect(draft.storageError).toBeInstanceOf(Error);
+    expect(JSON.stringify(draft.mine)).toContain("must survive");
+    draft.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+  });
+  test("a retained draft exports only its exact slot and lists one actor and credential", () => {
+    const persisted = storage();
+    const initial = source();
+    const mine = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(mine.doc, " exported text");
+    expect(mine.exportDraft().markdown).toContain("exported text");
+    mine.retire();
+    const otherCredential = { ...owner, credentialId: "credential-2" };
+    const theirs = new OffWikiDraft(otherCredential, initial, persisted, () => {});
+    edit(theirs.doc, " other credential text");
+    theirs.retire();
+    const markdown = new OffWikiDraft(
+      { ...owner, targetId: "draft-2" },
+      { ...initial, targetId: "draft-2" },
+      persisted,
+      () => {},
+    );
+    markdown.setSourceBuffer({
+      text: "# unapplied Markdown",
+      baseV1: Y.encodeStateAsUpdate(markdown.doc),
+    });
+    markdown.retire();
+    persisted.slots.set(ownerKey({ ...owner, targetId: "broken" }), "{not json");
+    persisted.slots.set("unrelated", "{}");
+    const exact = readRetainedDraft(persisted, owner);
+    expect(exact?.markdown).toContain("exported text");
+    expect(exact?.markdown).not.toContain("other credential text");
+    expect(exact?.excerpt).toContain("exported text");
+    expect(readRetainedDraft(persisted, { ...owner, actorId: "B" })).toBeNull();
+    expect(readRetainedDraft(persisted, { ...owner, targetId: "broken" })).toBeNull();
+    expect(readRetainedDraft(null, owner)).toBeNull();
+    const listed = listRetainedDrafts(listable(persisted.slots), "actor", "credential");
+    expect(listed.map((draft) => draft.owner.targetId).sort()).toEqual(
+      ["draft-2", targetId].sort(),
+    );
+    expect(listed.find((draft) => draft.owner.targetId === "draft-2")?.markdown).toBe(
+      "# unapplied Markdown",
+    );
+    expect(listRetainedDrafts(listable(persisted.slots), "actor", "credential-2")).toHaveLength(1);
+    expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
+    expect(listRetainedDrafts(null, "actor", "credential")).toEqual([]);
+    // Another credential's slots are skipped by key, never parsed.
+    const read: string[] = [];
+    listRetainedDrafts(
+      {
+        ...listable(persisted.slots),
+        getItem: (key: string) => {
+          read.push(key);
+          return persisted.slots.get(key) ?? null;
+        },
+      },
+      "actor",
+      "credential",
+    );
+    expect(read).not.toContain(ownerKey(otherCredential));
+    expect(read).toContain(ownerKey(owner));
+    // A slot whose stored owner disagrees with its key is not exported.
+    const moved = persisted.slots.get(ownerKey(owner)) ?? "";
+    persisted.slots.set(ownerKey({ ...owner, actorId: "B" }), moved);
+    expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
+  });
+  test("an item page reaches only its refused task and the lost projects of its workspace", () => {
+    const draft = (patch: Partial<OffWikiOwner>): RetainedOffDraft => ({
+      owner: { ...owner, ...patch },
+      markdown: "draft",
+      excerpt: "draft",
+    });
+    const lostDocument = draft({ targetId: "lost-document", projectId: "lost" });
+    const lostTask = draft({ targetId: "lost-task", projectId: "lost", kind: "task" });
+    const refused = draft({ targetId: "refused", projectId: "granted", kind: "task" });
+    const reachable = draft({ targetId: "reachable", projectId: "granted", kind: "task" });
+    const reachableDocument = draft({ targetId: "refused", projectId: "granted" });
+    const wiki = draft({ targetId: "wiki" });
+    const elsewhere = draft({ workspaceId: "other", targetId: "refused", projectId: "lost" });
+    const all = [lostDocument, lostTask, refused, reachable, reachableDocument, wiki, elsewhere];
+    const granted = new Set(["granted"]);
+    expect(unreachableDrafts(all, "workspace", granted, null)).toEqual([lostDocument, lostTask]);
+    expect(unreachableDrafts(all, "workspace", granted, "refused")).toEqual([
+      lostDocument,
+      lostTask,
+      refused,
+    ]);
+    // Without a fresh project list only the refused task itself is offered.
+    expect(unreachableDrafts(all, "workspace", null, "refused")).toEqual([refused]);
+    expect(unreachableDrafts(all, "workspace", null, null)).toEqual([]);
+  });
+  test("a display ID rides in the slot outside its key and names only this actor's draft", () => {
+    const persisted = storage();
+    const gone = { ...owner, displayId: "WIKI-7" };
+    expect(ownerKey(gone)).toBe(ownerKey(owner));
+    const leave = (who: OffWikiOwner, text: string) => {
+      const draft = new OffWikiDraft(who, source(), persisted, () => {});
+      edit(draft.doc, text);
+      draft.retire();
+    };
+    leave(gone, " gone wiki");
+    // Another actor left a draft at the same address in this tab.
+    leave({ ...gone, actorId: "B" }, " their draft");
+    const listed = (actorId: string) =>
+      listRetainedDrafts(listable(persisted.slots), actorId, "credential");
+    const at = (actorId: string, workspaceId: string, displayId: string) =>
+      unreachableDrafts(listed(actorId), workspaceId, null, null, displayId).map(
+        (draft) => draft.markdown,
+      );
+    expect(at("actor", "workspace", "wiki-7")).toHaveLength(1);
+    expect(at("actor", "workspace", "wiki-7")[0]).toContain("gone wiki");
+    expect(at("actor", "workspace", "wiki-7")[0]).not.toContain("their draft");
+    expect(at("actor", "workspace", "WIKI-8")).toEqual([]);
+    expect(at("actor", "other", "WIKI-7")).toEqual([]);
+    expect(at("B", "workspace", "WIKI-7")).toHaveLength(1);
+    expect(at("B", "workspace", "WIKI-7")[0]).toContain("their draft");
+    // An actor with no draft at that address gets nothing from the others' slots.
+    expect(at("C", "workspace", "WIKI-7")).toEqual([]);
+  });
+  function movable(persisted: ReturnType<typeof storage>, read: string[] = []) {
+    return {
+      get length() {
+        return persisted.slots.size;
+      },
+      key: (index: number) => [...persisted.slots.keys()][index] ?? null,
+      getItem: (key: string) => {
+        read.push(key);
+        return persisted.getItem(key);
+      },
+      setItem: persisted.setItem,
+      removeItem: persisted.removeItem,
+    };
+  }
+  test("a moved target takes along only this actor's and credential's slot of its workspace, target and kind", () => {
+    const persisted = storage();
+    const wiki = { ...owner, displayId: "WIKI-7" };
+    const moved = { ...owner, projectId: "project", displayId: "KEY-3" };
+    const leave = (who: OffWikiOwner, text: string) => {
+      const draft = new OffWikiDraft(who, source(), persisted, () => {});
+      edit(draft.doc, text);
+      draft.retire();
+    };
+    // The same target id under another actor, credential, workspace or kind.
+    const strangers = [
+      { ...wiki, actorId: "B" },
+      { ...wiki, credentialId: "credential-2" },
+      { ...wiki, workspaceId: "workspace-2" },
+      { ...moved, projectId: "other-project", kind: "task" as const },
+    ];
+    for (const stranger of strangers) leave(stranger, " not mine");
+    const untouched = new Map(persisted.slots);
+    const read: string[] = [];
+    expect(adoptMovedDraft(movable(persisted, read), moved, source())).toBe(false);
+    expect(persisted.slots).toEqual(untouched);
+    // Another actor's, credential's or workspace's slot is skipped by key, never read.
+    for (const stranger of strangers.slice(0, 3)) expect(read).not.toContain(ownerKey(stranger));
+    leave(wiki, " moved along");
+    expect(adoptMovedDraft(movable(persisted), moved, source())).toBe(true);
+    expect(persisted.slots.has(ownerKey(wiki))).toBe(false);
+    for (const [key, value] of untouched) expect(persisted.slots.get(key)).toBe(value);
+    expect(readRetainedDraft(persisted, moved)?.owner).toEqual(moved);
+    const offered = new OffWikiDraft(moved, source(), persisted, () => {});
+    expect(offered.restored).toBe(true);
+    expect(JSON.stringify(offered.mine)).toContain("moved along");
+    offered.retire();
+    // A draft already at the new address is never replaced.
+    leave(wiki, " left again");
+    const kept = persisted.slots.get(ownerKey(moved));
+    expect(adoptMovedDraft(movable(persisted), moved, source())).toBe(false);
+    expect(persisted.slots.get(ownerKey(moved))).toBe(kept);
+    expect(persisted.slots.has(ownerKey(wiki))).toBe(true);
+  });
+  test("a pending save or copy keeps its slot at the address it was sent to", () => {
+    for (const pending of ["save", "copy"] as const) {
+      const persisted = storage();
+      const before = { ...owner, projectId: "project-1" };
+      const draft = new OffWikiDraft(
+        before,
+        source(),
+        persisted,
+        () => {},
+        () => commandId,
+      );
+      edit(draft.doc, ` pending ${pending}`);
+      const never = () => new Promise<never>(() => {});
+      const sent =
+        pending === "save"
+          ? draft.save(never)
+          : draft.createDistinct({ projectId: "project-1", parentId: null, title: "copy" }, never);
+      sent.catch(() => undefined);
+      draft.retire();
+      const slot = persisted.slots.get(ownerKey(before));
+      const moved = { ...owner, projectId: "project-2" };
+      expect(adoptMovedDraft(movable(persisted), moved, source())).toBe(false);
+      expect(persisted.slots.get(ownerKey(before))).toBe(slot);
+      expect(persisted.slots.has(ownerKey(moved))).toBe(false);
+    }
   });
 });

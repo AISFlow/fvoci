@@ -3,9 +3,12 @@ import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { computed, watchEffect } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { wikiPath } from "@/lib/href";
+import { unreachableDrafts } from "@/features/documents/off-wiki-draft";
+import { parseWikiRef, wikiDisplayId, wikiPath } from "@/lib/href";
 import { collabRoomName } from "../collab/useCollabRoom";
 import WorkspaceShell from "../components/WorkspaceShell.vue";
+import { listRetainedOffDrafts } from "../composables/useOffWikiBody";
+import RetainedDraftList from "../features/documents/RetainedDraftList.vue";
 import WikiDocumentView from "../features/documents/WikiDocumentView.vue";
 import { useNavigationError } from "../features/workspace/useNavigationError";
 import { useWikiDocumentRef } from "../session/useWikiDocumentRef";
@@ -27,12 +30,43 @@ const navigation = useNavigationError(
   () => `${route.fullPath}:${session.me.value?.userId ?? ""}:${session.status.value}`,
 );
 
-// A ref that names no readable wiki document goes to the wiki list, as in the React app.
+// A ref that names no readable wiki document may still be the address this
+// tab's own OFF draft was left at (trashed, deleted, moved into a project): that
+// draft of the current actor and credential stays here for export only. Local
+// reads only; no request is made.
+const missingDrafts = computed(() => {
+  const actor = session.me.value;
+  const ref = parseWikiRef(refParam.value);
+  if (
+    session.status.value !== "ready" ||
+    !workspace.value ||
+    !actor?.userId ||
+    !actor.sessionId ||
+    !ref ||
+    !documentRef.notFound.value
+  )
+    return [];
+  return unreachableDrafts(
+    listRetainedOffDrafts(actor.userId, actor.sessionId),
+    workspace.value.id,
+    null,
+    null,
+    wikiDisplayId(ref.number),
+  );
+});
+
+// Any other ref that names no readable wiki document goes to the wiki list, as in
+// the React app.
 // The session owns auth/setup/eviction hard boundaries; a missing ref is an
 // ordinary replacement in the current app. Its lazy-route failure stays here.
 let attemptedPage: string | undefined;
 function replaceMissingWiki(): void {
-  if (session.status.value !== "ready" || !workspace.value || !documentRef.notFound.value) {
+  if (
+    session.status.value !== "ready" ||
+    !workspace.value ||
+    !documentRef.notFound.value ||
+    missingDrafts.value.length > 0
+  ) {
     attemptedPage = undefined;
     return;
   }
@@ -70,6 +104,10 @@ function retryNavigation(): void {
     <div v-else-if="documentRef.failed.value">
       <p role="alert" class="text-muted">{{ t("load.failed") }}</p>
       <UButton size="sm" class="mt-2" @click="documentRef.retry()">{{ t("load.retry") }}</UButton>
+    </div>
+    <div v-else-if="missingDrafts.length > 0">
+      <p role="alert" class="text-muted">{{ t("doc.error.notFound") }}</p>
+      <RetainedDraftList :drafts="missingDrafts" class="mt-2 text-sm" />
     </div>
     <WikiDocumentView
       v-else-if="node && !documentRef.notFound.value"
