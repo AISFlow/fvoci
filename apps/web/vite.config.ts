@@ -209,9 +209,9 @@ export default defineConfig({
     dedupe: ["vue", "yjs", "y-protocols", "@tiptap/core", "@tiptap/pm", "@hocuspocus/provider"],
   },
   optimizeDeps: {
-    // Web forms use Zod 3 while the linked editor uses Zod 4. Prebundling
-    // bare "zod" resolves it from the app and gives both importers Zod 3.
-    // Both versions ship ESM; keep their importer-specific resolution.
+    // Web and the linked editor each pin their own Zod. Prebundling bare
+    // "zod" resolves it from the app and gives both importers the app's copy
+    // whenever the pins differ. Zod ships ESM; keep importer-specific resolution.
     exclude: ["zod"],
   },
   server: {
