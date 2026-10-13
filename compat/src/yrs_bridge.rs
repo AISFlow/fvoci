@@ -129,3 +129,45 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `crates/collab-engine/fixtures/revision_before.v1` as standard padded base64.
+    const UPDATE_B64: &str = "AQEpAAgBAXQBdxDsiqTrg4Xsg7ct67O466y4AA==";
+
+    fn b64_reply(doc: &mut Doc, req: Value) -> String {
+        let resp = handle(doc, &req);
+        assert_eq!(resp["ok"], true, "{req} -> {resp}");
+        resp["b64"].as_str().expect("b64").to_owned()
+    }
+
+    #[test]
+    fn bridge_base64_bytes_are_stable() {
+        let mut doc = new_doc();
+        assert_eq!(b64_reply(&mut doc, json!({ "cmd": "encode_sv" })), "AA==");
+        assert_eq!(
+            b64_reply(&mut doc, json!({ "cmd": "encode_state_v1" })),
+            "AAA="
+        );
+        let applied = handle(
+            &mut doc,
+            &json!({ "cmd": "apply_v1", "b64": format!(" {UPDATE_B64}\n") }),
+        );
+        assert_eq!(applied, json!({ "ok": true }));
+        assert_eq!(
+            b64_reply(&mut doc, json!({ "cmd": "encode_state_v1" })),
+            UPDATE_B64
+        );
+        assert_eq!(b64_reply(&mut doc, json!({ "cmd": "encode_sv" })), "ASkB");
+        assert_eq!(
+            b64_reply(&mut doc, json!({ "cmd": "diff_v1", "sv_b64": "AA==" })),
+            UPDATE_B64
+        );
+        for bad in ["AAA", "AA A=", "-w==", "+x==", "AAA=="] {
+            let resp = handle(&mut doc, &json!({ "cmd": "apply_v1", "b64": bad }));
+            assert_eq!(resp["ok"], false, "{bad:?} must be refused");
+        }
+    }
+}
