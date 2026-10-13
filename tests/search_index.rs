@@ -21,7 +21,7 @@ use fvoci_server::search::meili::{
     wait_meili_tasks, MeiliConfig, MeiliError, MeiliSearchInput, MeiliSearchScope,
     SearchSourceKind,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;

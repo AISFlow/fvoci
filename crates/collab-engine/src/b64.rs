@@ -78,3 +78,65 @@ pub mod vec_of {
 pub fn decoded_len_estimate(b64_chars: usize) -> u64 {
     (b64_chars as u64).saturating_mul(3) / 4
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Request;
+
+    // Parent-child frames and the versioned body HTTP API carry these exact strings.
+    const FIXTURE: &[u8] = include_bytes!("../fixtures/korean_emoji_mid_edit.v1");
+    const FIXTURE_B64: &str = "AQEVC8QVBBUFA+ykkQA=";
+
+    #[test]
+    fn encodes_standard_alphabet_with_padding() {
+        assert_eq!(encode(&[]), "");
+        assert_eq!(encode(&[0xfb]), "+w==");
+        assert_eq!(encode(&[0xfb, 0xff]), "+/8=");
+        assert_eq!(encode(&[0xfb, 0xff, 0xbf]), "+/+/");
+        assert_eq!(encode(FIXTURE), FIXTURE_B64);
+    }
+
+    #[test]
+    fn decodes_only_canonical_padded_standard() {
+        assert_eq!(decode("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode("+w==").unwrap(), [0xfb]);
+        assert_eq!(decode(" +/8=\n").unwrap(), [0xfb, 0xff]);
+        assert_eq!(decode(FIXTURE_B64).unwrap(), FIXTURE);
+        for bad in [
+            "+w", "+/8", "+w=", "+w===", "-w==", "_/8=", "+x==", "+/9=", "+w ==", "+w==+w==",
+        ] {
+            assert!(decode(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn load_frame_bytes_round_trip() {
+        let json = format!(
+            r#"{{"op":"load","snapshot_b64":"{FIXTURE_B64}","tail_b64":["+w==","+/8="],"encoding":1}}"#
+        );
+        let request = Request::Load {
+            snapshot_b64: Some(FIXTURE.to_vec()),
+            tail_b64: vec![vec![0xfb], vec![0xfb, 0xff]],
+            encoding: 1,
+        };
+        assert_eq!(serde_json::to_string(&request).unwrap(), json);
+        let Request::Load {
+            snapshot_b64,
+            tail_b64,
+            ..
+        } = serde_json::from_str(&json).unwrap()
+        else {
+            panic!("load frame");
+        };
+        assert_eq!(snapshot_b64.as_deref(), Some(FIXTURE));
+        assert_eq!(tail_b64, [vec![0xfb], vec![0xfb, 0xff]]);
+        let Request::Load { snapshot_b64, .. } =
+            serde_json::from_str(r#"{"op":"load","snapshot_b64":""}"#).unwrap()
+        else {
+            panic!("load frame");
+        };
+        assert_eq!(snapshot_b64, None);
+        assert!(serde_json::from_str::<Request>(r#"{"op":"load","tail_b64":["+w"]}"#).is_err());
+    }
+}

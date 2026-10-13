@@ -16,7 +16,7 @@ use fvoci_server::db::documents::{empty_document_json, CreateDocumentInput};
 use fvoci_server::db::identity::revoke_session;
 use fvoci_server::db::workspace::{self, WorkspaceRole};
 use fvoci_server::db::{documents, migrate, pool};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;

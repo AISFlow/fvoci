@@ -12,7 +12,7 @@ use fvoci_server::auth::AuthService;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;

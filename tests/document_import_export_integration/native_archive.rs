@@ -5350,7 +5350,7 @@ fn restore_storage_effects(root: &std::path::Path) -> Vec<(std::path::PathBuf, S
             } else {
                 out.push((
                     relative,
-                    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap())),
+                    hex::encode(Sha256::digest(std::fs::read(path).unwrap())),
                 ));
             }
         }
@@ -6146,7 +6146,7 @@ async fn native_archive_retained_guard_cost_is_measured() {
     .map(|path| {
         let file = path.file_name().unwrap().to_str().unwrap();
         let version: i32 = file.split('_').next().unwrap().parse().unwrap();
-        json!({"version":version,"lineage":fvoci_server::db::migrate::POSTGRES_LINEAGE,"sql_sha256":format!("{:x}",Sha256::digest(std::fs::read(&path).unwrap()))})
+        json!({"version":version,"lineage":fvoci_server::db::migrate::POSTGRES_LINEAGE,"sql_sha256":hex::encode(Sha256::digest(std::fs::read(&path).unwrap()))})
     })
     .collect();
     source_checksums.sort_by_key(|row| row["version"].as_i64().unwrap());

@@ -17,7 +17,7 @@ use fvoci_server::config::S3Settings;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;

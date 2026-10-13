@@ -195,9 +195,10 @@ mod tests {
         let html = r#"<head><script type="module" src="/assets/a.js"></script><script>x=1</script><style>a{}</style></head>"#;
         let scripts = inline_hashes(html, "script");
         assert_eq!(scripts.len(), 1);
+        // Padded standard base64 of SHA-256("x=1"), the value browsers compare.
         assert_eq!(
             scripts[0],
-            format!("'sha256-{}'", STANDARD.encode(Sha256::digest(b"x=1")))
+            "'sha256-HyBrEcI+KMwlDe1/wAmNOCOoRnpUNA8axOU1y4VEST8='"
         );
         assert_eq!(inline_hashes(html, "style").len(), 1);
     }

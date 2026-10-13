@@ -2,12 +2,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::{Algorithm, Argon2, Params, Version};
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use hmac::{Hmac, Mac};
+use argon2::{Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Version};
+use hmac::{Hmac, KeyInit, Mac};
+use rand::rngs::SysRng;
+use rand::TryRng;
 use regex::Regex;
 use sha2::Sha256;
 use tokio::sync::Semaphore;
@@ -16,6 +14,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MEMORY_COST: u32 = 65536;
 const TIME_COST: u32 = 3;
+const SALT_LEN: usize = 32;
 const ARGON2_CONCURRENCY: usize = 4;
 
 static PASSWORD_HASH_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -99,12 +98,20 @@ fn argon2() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
-fn generate_salt() -> Result<SaltString, String> {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let b64 = STANDARD.encode(bytes);
-    let trimmed = b64.trim_end_matches('=');
-    SaltString::from_b64(trimmed).map_err(|e| e.to_string())
+fn generate_salt() -> Result<[u8; SALT_LEN], String> {
+    let mut bytes = [0u8; SALT_LEN];
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// PHC string of `input` under the fixed parameters and this salt.
+fn phc_hash(input: &[u8], salt: &[u8; SALT_LEN]) -> Result<String, String> {
+    argon2()
+        .hash_password_with_salt(input, salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| e.to_string())
 }
 
 pub async fn hash_password(password: &str, ring: &Keyring) -> Result<String, String> {
@@ -123,10 +130,7 @@ pub async fn hash_password(password: &str, ring: &Keyring) -> Result<String, Str
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let input = sign_hmac(&key, &password);
-        let salt = generate_salt()?;
-        let hash = argon2()
-            .hash_password(&input, &salt)
-            .map_err(|e| e.to_string())?;
+        let hash = phc_hash(&input, &generate_salt()?)?;
         Ok(format!("$fvoci-pepper={}{}", active_id, hash))
     })
     .await
@@ -180,9 +184,7 @@ fn verify_password_sync(hash: Option<&str>, password: &str, ring: &Keyring) -> V
         _ => DUMMY_HASH,
     };
 
-    let verified = PasswordHash::new(candidate)
-        .and_then(|parsed| argon2().verify_password(&input, &parsed))
-        .is_ok();
+    let verified = argon2().verify_password(&input, candidate).is_ok();
 
     let ok = key.is_some() && phc.is_some() && full_match && verified;
     VerifyResult {
@@ -214,5 +216,44 @@ mod tests {
         let hash = hash_password("supersecret1", &ring).await.unwrap();
         assert!(!verify_password(Some(&hash), "wrong", &ring).await.ok);
         assert!(!verify_password(None, "supersecret1", &ring).await.ok);
+    }
+
+    // A stored hash of "supersecret1" under the `test` pepper with salt bytes
+    // 0..32. argon2 0.5 and OpenSSL 3.5 ARGON2ID over HMAC-SHA256(pepper,
+    // password) both produce exactly this string.
+    const STORED_HASH: &str = "$fvoci-pepper=test$argon2id$v=19$m=65536,t=3,p=1$AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8$IzpiQUgvMaS5XdKjOOgStLUCvBM5BXH4O6jTMu0UDz8";
+
+    #[tokio::test]
+    async fn stored_hash_verifies_and_rotates() {
+        let ring = Keyring::parse(PEPPER, "test").unwrap();
+        let verified = verify_password(Some(STORED_HASH), "supersecret1", &ring).await;
+        assert!(verified.ok);
+        assert!(!verified.needs_pepper_rotation);
+        assert!(
+            !verify_password(Some(STORED_HASH), "supersecret2", &ring)
+                .await
+                .ok
+        );
+        let rotated = Keyring::parse(
+            &format!(
+                r#"{{"test":"{}","next":"{}"}}"#,
+                "aa".repeat(32),
+                "bb".repeat(32)
+            ),
+            "next",
+        )
+        .unwrap();
+        let verified = verify_password(Some(STORED_HASH), "supersecret1", &rotated).await;
+        assert!(verified.ok);
+        assert!(verified.needs_pepper_rotation);
+    }
+
+    #[test]
+    fn new_hash_keeps_algorithm_parameters_and_bytes() {
+        let ring = Keyring::parse(PEPPER, "test").unwrap();
+        let input = sign_hmac(&ring.keys["test"], "supersecret1");
+        let salt: [u8; SALT_LEN] = std::array::from_fn(|i| i as u8);
+        let hash = format!("$fvoci-pepper=test{}", phc_hash(&input, &salt).unwrap());
+        assert_eq!(hash, STORED_HASH);
     }
 }

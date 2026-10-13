@@ -23,7 +23,7 @@ use fvoci_server::outbox::{
     spawn_outbox_dispatcher, DeliveryMode, OutboxConsumer, OutboxDispatcherSettings,
     OutboxProcessError,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};

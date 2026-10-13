@@ -36,7 +36,7 @@ use fvoci_server::integrations::{ai::AiConfig, Integrations};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxConsumer, OutboxDispatcherHandle, OutboxDispatcherSettings,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, create_project, setup_session, test_peer, TestDb,
 };

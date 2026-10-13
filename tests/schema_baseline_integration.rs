@@ -401,7 +401,7 @@ async fn postgres_catalog_dump() {
 /// inside owner transactions that are rolled back.
 #[tokio::test]
 async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledgers_apart() {
-    use rand::RngCore;
+    use rand::Rng;
     use sqlx::postgres::PgPoolOptions;
     let admin_base = std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("FVOCI_TEST_DATABASE_URL"))

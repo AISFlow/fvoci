@@ -3857,9 +3857,9 @@ pub(crate) mod cleanup_tests {
         assert_eq!(read, BYTES);
         use sha2::Digest;
         println!(
-            "S17 actual object bytes={} sha256={:x}",
+            "S17 actual object bytes={} sha256={}",
             read.len(),
-            sha2::Sha256::digest(&read)
+            hex::encode(sha2::Sha256::digest(&read))
         );
     }
     async fn drain(f: &Fixture, storage: &ObjectStorage) -> ObjectCleanupStats {
@@ -4288,9 +4288,9 @@ pub(crate) mod cleanup_tests {
         if let Ok(value) = &restored {
             use sha2::Digest;
             println!(
-                "S17 unknown-commit sentinel bytes={} sha256={:x}",
+                "S17 unknown-commit sentinel bytes={} sha256={}",
                 value.len(),
-                sha2::Sha256::digest(value)
+                hex::encode(sha2::Sha256::digest(value))
             );
         }
         let document: Vec<u8> =
@@ -5641,9 +5641,9 @@ mod upload_session_tests {
         assert_eq!(actual, BYTES);
         use sha2::Digest;
         println!(
-            "S18 actual stored bytes={} sha256={:x}",
+            "S18 actual stored bytes={} sha256={}",
             actual.len(),
-            sha2::Sha256::digest(actual)
+            hex::encode(sha2::Sha256::digest(actual))
         );
     }
     fn published_part_files(f: &Fixture, key: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -8337,9 +8337,9 @@ mod upload_owned_adapter_tests {
         assert_eq!(bytes, BYTES);
         use sha2::Digest;
         println!(
-            "S18 owned current bytes={} sha256={:x}",
+            "S18 owned current bytes={} sha256={}",
             bytes.len(),
-            sha2::Sha256::digest(&bytes)
+            hex::encode(sha2::Sha256::digest(&bytes))
         );
     }
     fn restore(f: &Fixture, key: &str, bytes: &[u8]) {

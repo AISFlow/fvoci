@@ -720,7 +720,7 @@ fn hash<T: serde::Serialize>(
     }
     let value = serde_json::to_vec(&(kind, workspace, task, semantic))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    Ok(format!("{:x}", Sha256::digest(value)))
+    Ok(hex::encode(Sha256::digest(value)))
 }
 
 /// Receipts are read only after current credential and target permission are
@@ -1774,12 +1774,9 @@ pub async fn history_backend(
             })
             .collect::<Vec<_>>();
         records.sort_by(|a, b| (a.id, kind_text(a.kind)).cmp(&(b.id, kind_text(b.kind))));
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&records).map_err(|e| sqlx::Error::Protocol(e.to_string()))?
-            )
-        );
+        let fingerprint = hex::encode(Sha256::digest(
+            serde_json::to_vec(&records).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
+        ));
         if cursor
             .as_ref()
             .is_some_and(|c| c.fingerprint != fingerprint)
@@ -3008,4 +3005,17 @@ async fn family_estimate(
         unit: row.cell(1)?.optional(Cell::string)?,
         updated_at: row.cell(2)?.datetime()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn receipt_digest_is_lowercase_sha256_hex_of_the_semantic_body() {
+        // sha256sum of `["cleanup",null,null,{}]`: the session id is not part of it.
+        let body = serde_json::json!({"expectedSessionId": "s"});
+        assert_eq!(
+            super::hash("cleanup", None, None, &body).unwrap(),
+            "a38b11f5f3307f8aeec1f2deed2c2ecfe21f3190426e63c8138f8ff9982b6cca"
+        );
+    }
 }

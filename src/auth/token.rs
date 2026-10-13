@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 pub const SESSION_TTL_SECS: i64 = 30 * 24 * 60 * 60;
