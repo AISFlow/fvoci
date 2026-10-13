@@ -209,8 +209,13 @@ test("refresh A->B->A cannot reattach retired owner or overwrite the newest priv
   required(h.reads[1]).resolve(body(owner, "old restore response", "2"));
   await oldRefresh;
   expect(h.current.draft.value).toBe(fresh);
-  expect(JSON.stringify(fresh.mine)).toContain("newest A");
+  // Without tab storage, A's private draft waits in this page's memory and
+  // comes back against the newest authorized read, never the old response.
+  expect(JSON.stringify(fresh.mine)).toContain("late private");
+  expect(fresh.latest?.tailSeq).toBe("4");
+  expect(JSON.stringify(fresh.comparison?.current)).toContain("newest A");
   expect(JSON.stringify(fresh.mine)).not.toContain("old restore response");
+  expect(JSON.stringify(fresh.comparison)).not.toContain("old restore response");
   expect(original.active).toBe(false);
   h.effect.stop();
 });

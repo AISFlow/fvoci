@@ -21,6 +21,7 @@ import { projectDocumentsQuery } from "@/features/projects/queries";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
 import { documentPath, wikiDisplayId } from "@/lib/href";
 import type { OffDraftCreateResponse } from "@/features/documents/document-api";
+import type { RetainedOffDraft } from "@/features/documents/off-wiki-draft";
 import { useRetainedDraftExport, type useOffWikiBody } from "../../composables/useOffWikiBody";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
@@ -47,6 +48,9 @@ const props = defineProps<{
   readOnly: boolean;
   session: CollabRoomSession | null;
   offBody: ReturnType<typeof useOffWikiBody> | null;
+  /** The host dropped the OFF owner for a refused task read; its draft is export only. */
+  refused?: boolean;
+  refusedDraft?: RetainedOffDraft | null;
   collabUser: CollabUser | null;
 }>();
 
@@ -92,6 +96,7 @@ const restoredChanges = computed(() => {
     UNIQUE_ID_NODE_TYPES,
   );
 });
+const exportOnly = computed(() => props.offBody?.retained.value ?? props.refusedDraft ?? null);
 const { note: draftExportNote, run: exportDraft } = useRetainedDraftExport();
 
 const { mentionItems, entityResolver } = useEditorEntities(
@@ -457,21 +462,28 @@ async function persistBody(): Promise<void> {
       >
     </section>
     <section
-      v-if="offBody && offBody.retained.value"
+      v-if="offBody && exportOnly"
       class="document-off-compare"
       data-testid="off-draft-retained"
     >
-      <p role="alert">{{ t("doc.off.retained") }}</p>
-      <UButton size="sm" @click="exportDraft(offBody.retained.value, 'copy')">{{
+      <p role="alert">{{
+        t(exportOnly.unstored ? "doc.off.retainedUnstored" : "doc.off.retained")
+      }}</p>
+      <UButton size="sm" @click="exportDraft(exportOnly, 'copy')">{{
         t("doc.off.copyDraft")
       }}</UButton>
-      <UButton size="sm" @click="exportDraft(offBody.retained.value, 'download')">{{
+      <UButton size="sm" @click="exportDraft(exportOnly, 'download')">{{
         t("doc.off.downloadDraft")
       }}</UButton>
       <p v-if="draftExportNote" role="status">{{ draftExportNote }}</p>
     </section>
     <UButton
-      v-if="offBody && (!offBody.doc.value || !offBody.writable.value) && !offBody.loading.value"
+      v-if="
+        offBody &&
+        !refused &&
+        (!offBody.doc.value || !offBody.writable.value) &&
+        !offBody.loading.value
+      "
       @click="offBody.load"
       >{{ t("load.retry") }}</UButton
     >

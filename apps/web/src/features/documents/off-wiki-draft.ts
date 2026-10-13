@@ -48,8 +48,14 @@ export function ownerKey(owner: OffWikiOwner): string {
   return `${STORAGE_PREFIX}${JSON.stringify(identity)}`;
 }
 /** A retired private draft read back for local copy/download only. It is
- * never a live draft or a save base, and nothing here can send it. */
-export type RetainedOffDraft = { owner: OffWikiOwner; markdown: string; excerpt: string };
+ * never a live draft or a save base, and nothing here can send it. `unstored`:
+ * the tab storage refused it, so only this page's memory holds it. */
+export type RetainedOffDraft = {
+  owner: OffWikiOwner;
+  markdown: string;
+  excerpt: string;
+  unstored?: true;
+};
 const markdownOf = (body: unknown) => (isTiptapDoc(body) ? tiptapDocToMd(body) : "");
 /** The native body a stored draft, or the draft "edit current" set aside, holds. */
 function storedBody(saved: Pick<StoredDraft, "start" | "mine">, targetId: string): unknown {

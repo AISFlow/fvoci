@@ -1055,7 +1055,9 @@ function flashBlock(id: string): void {
         class="document-off-compare"
         data-testid="off-draft-retained"
       >
-        <p role="alert">{{ t("doc.off.retained") }}</p>
+        <p role="alert">{{
+          t(offBody.retained.value.unstored ? "doc.off.retainedUnstored" : "doc.off.retained")
+        }}</p>
         <UButton size="sm" @click="exportDraft(offBody.retained.value, 'copy')">{{
           t("doc.off.copyDraft")
         }}</UButton>
@@ -1236,7 +1238,9 @@ function flashBlock(id: string): void {
     />
   </article>
   <section v-if="deniedDraft" class="document-off-compare" data-testid="off-draft-retained">
-    <p role="alert">{{ t("doc.off.retained") }}</p>
+    <p role="alert">{{
+      t(deniedDraft.unstored ? "doc.off.retainedUnstored" : "doc.off.retained")
+    }}</p>
     <p>{{ deniedDraft.excerpt }}</p>
     <UButton size="sm" @click="exportDraft(deniedDraft, 'copy')">{{
       t("doc.off.copyDraft")

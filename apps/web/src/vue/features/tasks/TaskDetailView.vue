@@ -60,6 +60,8 @@ const props = defineProps<{
   formEpoch?: number;
   clonePending?: boolean;
   deletePending?: boolean;
+  /** The task's own read was refused (401·403·404) while this form stays. */
+  refused?: boolean;
   onTitleBlur: (title: string) => void | Promise<void>;
   onStatusChange: (statusId: string) => void | Promise<void>;
   onPriorityChange: (priority: string) => void | Promise<void>;
@@ -89,12 +91,15 @@ const me = useQuery(meQuery);
 const setup = useQuery(setupStatusQuery);
 const realtimeOn = computed(() => setup.data.value?.realtimeMode === "on");
 const realtimeOff = computed(() => setup.data.value?.realtimeMode === "off");
+// A refused task read drops the OFF owner like a refused document meta: its
+// draft stays in the tab for export only and no body request leaves.
 const offBody = useOffWikiBody(
   () => {
     const actor = me.data.value;
     if (
       !actor?.userId ||
       !actor.sessionId ||
+      props.refused ||
       (me.error.value instanceof ProblemError && [401, 403].includes(me.error.value.status))
     )
       return null;
@@ -109,6 +114,18 @@ const offBody = useOffWikiBody(
   },
   () => realtimeOff.value,
 );
+const refusedDraft = computed(() => {
+  const actor = me.data.value;
+  if (!props.refused || !realtimeOff.value || !actor?.userId || !actor.sessionId) return null;
+  return offBody.retainedFor({
+    actorId: actor.userId,
+    credentialId: actor.sessionId,
+    workspaceId: props.workspaceId,
+    targetId: props.task.id,
+    projectId: props.projectId,
+    kind: "task",
+  });
+});
 const collabUser = computed(() => {
   const data = me.data.value;
   return data ? collabUserOf(data.userId, formatPersonName(data, data.locale)) : null;
@@ -375,6 +392,8 @@ async function handleArchiveToggle(archived: boolean): Promise<void> {
       :read-only="bodyReadOnly"
       :session="session"
       :off-body="realtimeOff ? offBody : null"
+      :refused="refused"
+      :refused-draft="refusedDraft"
       :collab-user="collabUser"
     />
     <TaskAttachmentsPanel

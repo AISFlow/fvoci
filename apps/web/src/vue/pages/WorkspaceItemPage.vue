@@ -357,16 +357,19 @@ const realNotFound = computed(
     lookupMiss.value ||
     task404.value,
 );
-// A refused task read with no form left on the page, like the document view's
-// refused metadata: its retained OFF draft below is export only. A form kept
-// from earlier data still owns its draft and refuses on its own requests.
-const taskRefused = computed(
+// The task's own read refused (401·403·404). A form kept from earlier data
+// drops its OFF owner, so its draft there is export only and nothing is sent.
+const taskReadRefused = computed(
   () =>
-    !(item.value && task.data.value && !realNotFound.value) &&
     Boolean(lookupTask.value) &&
     task.isError.value &&
     task.error.value instanceof ProblemError &&
     [401, 403, 404].includes(task.error.value.status),
+);
+// The same refusal with no form left on the page, like the document view's
+// refused metadata: its retained OFF draft below is export only.
+const taskRefused = computed(
+  () => !(item.value && task.data.value && !realNotFound.value) && taskReadRefused.value,
 );
 // A lookup miss may be a project this tab still has cached as granted. A failed
 // read stays on the query, and the list below then trusts no project list.
@@ -604,6 +607,7 @@ async function onTrash(): Promise<void> {
       :form-epoch="formEpoch"
       :clone-pending="cloneTask.isPending.value"
       :delete-pending="deleteTask.isPending.value"
+      :refused="taskReadRefused"
       :on-title-blur="onTitleBlur"
       :on-status-change="onStatusChange"
       :on-priority-change="onPriorityChange"

@@ -22,6 +22,9 @@ const { note, run } = useRetainedDraftExport();
       <span class="min-w-0 break-all text-muted">{{ draft.excerpt }}</span>
       <UButton size="sm" @click="run(draft, 'copy')">{{ t("doc.off.copyDraft") }}</UButton>
       <UButton size="sm" @click="run(draft, 'download')">{{ t("doc.off.downloadDraft") }}</UButton>
+      <p v-if="draft.unstored" role="alert" class="w-full break-keep">{{
+        t("doc.off.retainedRowUnstored")
+      }}</p>
     </div>
     <p v-if="note" role="status" class="mt-2">{{ note }}</p>
   </section>
