@@ -193,7 +193,7 @@ export const RUST_POSTGRES_RUNNER_ARCH: Readonly<Record<string, string>> = {
 export const POSTGRES_MATRIX_CATALOG_ENV = "FVOCI_POSTGRES_MATRIX_CATALOG";
 export const POSTGRES_MATRIX_EXPR = "${{ fromJSON(needs.ci-plan.outputs.postgres_matrix) }}";
 export const POSTGRES_MATRIX_OUTPUT_EXPR = "${{ steps.plan.outputs.postgres_matrix }}";
-export const CACHE_PIN = "0057852bfaa89a56745cba8c7296529d2fc39830";
+export const CACHE_PIN = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 export const RUST_POSTGRES_BUILD_CACHE_KEY =
   "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-" +
   "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-" +

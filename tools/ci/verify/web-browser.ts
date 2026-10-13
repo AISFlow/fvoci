@@ -67,8 +67,8 @@ const RECEIPT_DOWNLOAD_WITH = {
   "merge-multiple": true,
   path: "${{ runner.temp }}/fvoci-closed-install",
 };
-export const DOWNLOAD_PIN = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
-const UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02";
+export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
+const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
 
 export const COLLABORATION_PREPARATION_JOBS = [
   "collaboration-main-build",

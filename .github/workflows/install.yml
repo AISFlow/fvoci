@@ -34,7 +34,7 @@ jobs:
       select_backup_restore_smoke: ${{ steps.plan.outputs.select_backup_restore_smoke }}
       select_upgrade_smoke_arm64: ${{ steps.plan.outputs.select_upgrade_smoke_arm64 }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -67,7 +67,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.98.1 --profile minimal
@@ -76,7 +76,7 @@ jobs:
       - name: Measure product Task scalar runtime
         run: cargo xtask task-scalar-qualification image-measure --image fvoci-rust-install:local --directory "$RUNNER_TEMP/task-scalar-runtime"
       - name: Retain product Task scalar runtime measurement
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task-scalar-product-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/task-scalar-runtime/runtime.json
@@ -84,7 +84,7 @@ jobs:
           retention-days: 90
       - name: Save the install image
         run: cargo xtask install-image save fvoci-rust-install:local "$RUNNER_TEMP/install-image"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/install-image/
@@ -122,7 +122,7 @@ jobs:
         run: cargo xtask task-scalar-qualification final --image fvoci-rust-install:local --directory "$RUNNER_TEMP/task-scalar-final" --target-dir "$RUNNER_TEMP/task-scalar-target" --sqlite-inputs "$RUNNER_TEMP/task-scalar-native/consumer-inputs.json"
       - name: Retain ARM64 Task scalar final admission evidence
         if: runner.arch == 'ARM64'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task-scalar-final-${{ github.sha }}-${{ github.run_attempt }}
           path: |
@@ -146,7 +146,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # scripts/install-smoke-collab.mjs needs a WebSocket client that sends headers (Bun's).
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -154,7 +154,7 @@ jobs:
       # tools/release/smoke-documents.ts parses Office XML with the locked saxes.
       - name: Prepare locked smoke dependencies
         run: bun ci
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/install-image
@@ -180,11 +180,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/install-image
@@ -208,7 +208,7 @@ jobs:
       UPGRADE_NEW: 1e0acbe15f903244ff7479c36dce2a90fa6e783d
       TESTED_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # git archive of both pinned SHAs and the first-parent check need full history.
           fetch-depth: 0
@@ -262,7 +262,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version

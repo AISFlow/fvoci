@@ -345,7 +345,7 @@ test("web current build handoff positive and fail closed", () => {
       (bad) =>
         void steps(bad, "collaboration-postgres-on").push({
           name: "Foreign download",
-          uses: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          uses: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
           with: {
             "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}",
             "merge-multiple": true,
@@ -633,7 +633,7 @@ test("normalized collaboration jobs reject long-term native and helper fallback 
           const restore: Mapping = {
             name: "Restore old helper",
             id: "old_helper",
-            uses: "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
+            uses: "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
             with: {
               path,
               key: "old-source",
