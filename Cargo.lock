@@ -641,7 +641,7 @@ dependencies = [
 name = "collab-engine"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "libc",
  "serde",
  "serde_json",
