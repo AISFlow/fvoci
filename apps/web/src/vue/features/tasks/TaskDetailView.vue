@@ -13,7 +13,7 @@ import type { LabelItem, MilestoneItem, TaskDetail, TaskListItem } from "@/featu
 import { collabUserOf } from "@/features/documents/collab-model";
 import type { MemberOutput } from "@/lib/contracts";
 import { ProblemError } from "@/lib/api";
-import { projectTasksPath } from "@/lib/href";
+import { formatDisplayId, projectTasksPath } from "@/lib/href";
 import { meQuery, workspacesQuery, setupStatusQuery } from "@/lib/queries";
 import { useCollabRoom, collabRoomName } from "../../collab/useCollabRoom";
 import { useOffWikiBody } from "../../composables/useOffWikiBody";
@@ -110,6 +110,7 @@ const offBody = useOffWikiBody(
       targetId: props.task.id,
       projectId: props.projectId,
       kind: "task" as const,
+      displayId: formatDisplayId(props.projectKey, props.task.number),
     };
   },
   () => realtimeOff.value,

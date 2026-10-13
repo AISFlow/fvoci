@@ -3,6 +3,7 @@ import { computed, inject, markRaw, onScopeDispose, ref, shallowRef, watch } fro
 import * as Y from "yjs";
 import {
   OffWikiDraft,
+  adoptMovedDraft,
   decodeUpdate,
   listRetainedDrafts,
   loadBody,
@@ -193,6 +194,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         mounted.observeAuthorizedBody(current);
       } else {
         mounted?.retire();
+        // A target moved to another project component brings its draft along.
+        adoptMovedDraft(storage, scope, current);
         const next = new OffWikiDraft(scope, current, storage, changed);
         // A slot only memory holds is offered back like any other. Writing it
         // again lets the storage take it now, or keeps its warning.

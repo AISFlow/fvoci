@@ -7,6 +7,7 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import {
   OffWikiDraft,
+  adoptMovedDraft,
   decodeUpdate,
   encodeUpdate,
   loadBody,
@@ -72,6 +73,7 @@ function harness(storageKind: "null" | "access-denied" | "write-denied") {
     ...Vue,
     Y,
     OffWikiDraft,
+    adoptMovedDraft,
     decodeUpdate,
     encodeUpdate,
     loadBody,

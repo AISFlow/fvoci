@@ -15,6 +15,10 @@ export type OffWikiOwner = {
   targetId: string;
   projectId?: string | null;
   kind?: "document" | "task";
+  /** The address the target was opened at (WIKI-12, KEY-3). Stored in the slot
+   * outside its key, so a page that no longer finds the target can still name
+   * this draft locally. It is never sent to the server. */
+  displayId?: string;
 };
 type FrozenSave = { command: BodySaveCommand; snapshot: string };
 export type DraftDestination = {
@@ -188,22 +192,102 @@ export function listRetainedDrafts(
   }
   return drafts;
 }
-/** The retained drafts of one workspace an item page can no longer reach: the
- * task whose own read was refused, or any target of a project the fresh list no
- * longer grants. Without that list only the refused task qualifies; a target
- * missing from a granted project cannot be told apart without the server. */
+/** The retained drafts of one workspace a page can no longer reach: the task
+ * whose own read was refused, any target of a project the fresh list no longer
+ * grants, or the target last opened at the address that now names nothing
+ * (trashed, deleted or moved). Without the list only the other two qualify. */
 export function unreachableDrafts(
   drafts: readonly RetainedOffDraft[],
   workspaceId: string,
   grantedProjects: ReadonlySet<string> | null,
   refusedTaskId: string | null,
+  missingDisplayId: string | null = null,
 ): RetainedOffDraft[] {
+  const missing = missingDisplayId?.trim().toUpperCase();
   return drafts.filter(
     ({ owner }) =>
       owner.workspaceId === workspaceId &&
       ((owner.kind === "task" && owner.targetId === refusedTaskId) ||
-        (!!grantedProjects && !!owner.projectId && !grantedProjects.has(owner.projectId))),
+        (!!grantedProjects && !!owner.projectId && !grantedProjects.has(owner.projectId)) ||
+        (!!missing &&
+          typeof owner.displayId === "string" &&
+          owner.displayId.toUpperCase() === missing)),
   );
+}
+/** A target moved to another project component of its workspace (wiki
+ * included) keeps its id: its draft follows it. Only this actor's and
+ * credential's slots of the same workspace, target and kind are read, by key
+ * prefix; no other slot is parsed. The restoring constructor checks the slot
+ * for the new owner first; one it refuses stays where it was. The slot moves,
+ * it is never discarded. */
+export function adoptMovedDraft(
+  storage: Pick<Storage, "length" | "key" | "getItem" | "setItem" | "removeItem"> | null,
+  owner: OffWikiOwner,
+  current: VersionedBody,
+): boolean {
+  const key = ownerKey(owner);
+  if (!storage || storage.getItem(key) !== null) return false;
+  const target = `${STORAGE_PREFIX}${JSON.stringify([
+    owner.actorId,
+    owner.credentialId,
+    owner.workspaceId,
+    owner.targetId,
+  ]).slice(0, -1)}`;
+  const candidates: string[] = [];
+  for (let index = 0; index < storage.length; index++) {
+    const candidate = storage.key(index);
+    if (
+      candidate &&
+      candidate !== key &&
+      [`${target}]`, `${target},`].some((at) => candidate.startsWith(at))
+    )
+      candidates.push(candidate);
+  }
+  for (const from of candidates) {
+    let saved: Partial<StoredDraft> | null;
+    try {
+      saved = JSON.parse(storage.getItem(from) ?? "null") as Partial<StoredDraft> | null;
+    } catch {
+      continue;
+    }
+    // A pending save or copy stays bound to the address it was sent to; its old
+    // address still offers it for export.
+    if (
+      !saved?.owner ||
+      ownerKey(saved.owner) !== from ||
+      (saved.owner.kind ?? "document") !== (owner.kind ?? "document") ||
+      saved.frozen ||
+      saved.distinct
+    )
+      continue;
+    const moved = JSON.stringify({
+      ...saved,
+      owner,
+      ...(saved.conflictBackup ? { conflictBackup: { ...saved.conflictBackup, owner } } : {}),
+    });
+    const trial = new OffWikiDraft(
+      owner,
+      current,
+      { getItem: (at) => (at === key ? moved : null), setItem() {}, removeItem() {} },
+      () => {},
+    );
+    const taken = trial.storageError === null && trial.hasPrivateState;
+    trial.retire();
+    if (!taken) continue;
+    try {
+      storage.setItem(key, moved);
+    } catch {
+      /* A storage fallback may still hold it; checked below. */
+    }
+    if (storage.getItem(key) !== moved) return false;
+    try {
+      storage.removeItem(from);
+    } catch {
+      /* Left where it was: kept, not lost. */
+    }
+    return true;
+  }
+  return false;
 }
 export function encodeUpdate(bytes: Uint8Array): string {
   let binary = "";

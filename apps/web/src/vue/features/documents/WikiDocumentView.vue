@@ -120,6 +120,7 @@ const offBody = useOffWikiBody(
       credentialId: actor.sessionId,
       workspaceId: props.workspaceId,
       targetId: props.documentId,
+      displayId: wikiDisplayId(metaQuery.data.value.number),
     };
   },
   () => realtimeOff.value,

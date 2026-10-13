@@ -377,8 +377,9 @@ watch(lookupMiss, (missed) => {
   if (missed) projects.refetch().catch(() => undefined);
 });
 // This tab's OFF drafts of the current actor and credential that this page can
-// no longer reach: the refused task, or any target of a project the fresh list
-// no longer grants. Local reads only: export, never send.
+// no longer reach: the refused task, any target of a project the fresh list no
+// longer grants, or the one last opened at this address that now names nothing
+// (trashed, deleted or moved). Local reads only: export, never send.
 const retainedDrafts = computed(() => {
   const actor = session.me.value;
   if (
@@ -397,6 +398,7 @@ const retainedDrafts = computed(() => {
     workspace.value.id,
     granted,
     taskRefused.value ? (lookupTask.value?.id ?? null) : null,
+    realNotFound.value ? (item.value?.displayId ?? null) : null,
   );
 });
 

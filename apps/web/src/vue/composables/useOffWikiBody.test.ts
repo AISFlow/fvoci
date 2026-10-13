@@ -9,6 +9,7 @@ import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import {
   OffWikiDraft,
+  adoptMovedDraft,
   decodeUpdate,
   encodeUpdate,
   listRetainedDrafts,
@@ -18,6 +19,7 @@ import {
   serverContainsLive,
   type OffWikiOwner,
 } from "../../features/documents/off-wiki-draft";
+import { formatDisplayId } from "../../lib/href";
 import type {
   BodySaveCommand,
   BodySaveResult,
@@ -119,6 +121,7 @@ function harness(owner?: () => OffWikiOwner | null) {
     ...Vue,
     Y,
     OffWikiDraft,
+    adoptMovedDraft,
     decodeUpdate,
     encodeUpdate,
     listRetainedDrafts,
@@ -1293,7 +1296,8 @@ test("actual TaskDetailView drops the OFF owner on a refused task read: nothing 
   const props = Vue.reactive({
     workspaceId: original.workspaceId,
     projectId: "project",
-    task: { id: original.targetId },
+    projectKey: "KEY",
+    task: { id: original.targetId, number: 3 },
     refused: false,
   });
   const me = {
@@ -1304,8 +1308,9 @@ test("actual TaskDetailView drops the OFF owner on a refused task read: nothing 
     me,
     props,
     ProblemError,
+    formatDisplayId,
   }) as () => OffWikiOwner | null;
-  const task = { ...original, projectId: "project", kind: "task" as const };
+  const task = { ...original, projectId: "project", kind: "task" as const, displayId: "KEY-3" };
   expect(owner()).toEqual(task);
   const h = harness(owner);
   required(h.reads[0]).pending.resolve(source(task));
@@ -1323,5 +1328,37 @@ test("actual TaskDetailView drops the OFF owner on a refused task read: nothing 
   expect(h.writes).toHaveLength(0);
   expect(h.body.retainedFor(task)?.markdown).toContain("refused task");
   expect(h.body.retainedFor({ ...task, actorId: "B", credentialId: "session-B" })).toBeNull();
+  h.effects.stop();
+});
+
+test("a moved target offers its draft back under its new owner and never sends the display ID", async () => {
+  const wiki: OffWikiOwner = { ...original, displayId: "WIKI-7" };
+  const moved: OffWikiOwner = { ...original, projectId: "project", displayId: "KEY-3" };
+  const scope = Vue.shallowRef<OffWikiOwner>(wiki);
+  const h = harness(() => scope.value);
+  required(h.reads[0]).pending.resolve(source(wiki));
+  await settle();
+  const paragraph = required(h.body.draft.value)
+    .doc.getXmlFragment("prosemirror")
+    .get(0) as Y.XmlElement;
+  (paragraph.get(0) as Y.XmlText).insert(1, " moved along");
+  // The wiki document now opens as a project document with the same id.
+  scope.value = moved;
+  required(h.reads.at(-1)).pending.resolve(source(moved));
+  await settle();
+  expect(h.body.restored.value).toBe(true);
+  expect(JSON.stringify(required(h.body.draft.value).mine)).toContain("moved along");
+  expect(h.slots.has(ownerKey(wiki))).toBe(false);
+  expect(h.slots.has(ownerKey(moved))).toBe(true);
+  const saving = h.body.save();
+  required(h.writes[0]).pending.reject(new ProblemError(503));
+  await saving;
+  const copying = h.body.createDistinct({ projectId: "project", parentId: null, title: "copy" });
+  required(h.creates[0]).pending.reject(new ProblemError(503));
+  await copying;
+  expect([h.writes.length, h.creates.length]).toEqual([1, 1]);
+  for (const request of [...h.writes, ...h.creates])
+    for (const displayId of ["WIKI-7", "KEY-3"])
+      expect(JSON.stringify(request)).not.toContain(displayId);
   h.effects.stop();
 });
