@@ -2590,6 +2590,23 @@ pub(crate) mod maintenance_claim_driver_tests {
 
 #[cfg(test)]
 mod remote_tls {
+    //! Handshakes of the vendored libsql rustls connector
+    //! (`vendor/libsql-0.9.30/src/tls.rs`) through `RemoteDatabase::connect`.
+    //! Fixture certificates: `tests/fixtures/remote-tls/`.
+    use super::RemoteDatabase;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+
+    const TOKEN: &str = "fvoci-remote-tls-fixture-token";
+    const CHILD: &str = "FVOCI_REMOTE_TLS_CHILD";
+    const ANSWER: &str = "remote TLS fixture answer";
+
     #[tokio::test]
     async fn remote_builder_uses_platform_roots_without_dialing() {
         // build() loads the platform trust store and constructs the rustls
@@ -2598,5 +2615,359 @@ mod remote_tls {
             .build()
             .await
             .expect("platform roots should build a remote client");
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/remote-tls")
+            .join(name)
+    }
+
+    fn trust_environment() -> [Option<std::ffi::OsString>; 3] {
+        ["SSL_CERT_FILE", "SSL_CERT_DIR", CHILD].map(std::env::var_os)
+    }
+
+    /// Runs `case` only in a fresh copy of this test binary whose sole trust
+    /// store is `roots`. Every remote build reads the process-wide
+    /// `SSL_CERT_FILE`, so it is set for that child alone.
+    fn trusting(test: &str, roots: &Path, case: impl std::future::Future<Output = ()>) {
+        if let Some(selected) = std::env::var_os(CHILD) {
+            assert_eq!(selected, test);
+            return tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(case);
+        }
+        let selector = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let parent = trust_environment();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &selector, "--test-threads=1"])
+            .env(CHILD, test)
+            .env("SSL_CERT_FILE", roots)
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .unwrap();
+        assert_eq!(
+            trust_environment(),
+            parent,
+            "parent trust environment changed"
+        );
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success()
+                && stdout.contains(&format!("test {selector} ... ok"))
+                && stdout.contains("test result: ok. 1 passed"),
+            "{selector} child {}:\n{stdout}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// The product build, then the first Hrana round trip. Building never
+    /// dials, so every handshake outcome surfaces here.
+    async fn first_query(url: String) -> libsql::Error {
+        let remote = match RemoteDatabase::connect(url, TOKEN.into(), 1).await {
+            Ok(remote) => remote,
+            Err(error) => panic!("remote build failed: {error}"),
+        };
+        let connection = remote.database.connect().expect("remote connect is lazy");
+        match connection.query("select 1", ()).await {
+            Ok(_) => panic!("no fixture server answers a query"),
+            Err(error) => error,
+        }
+    }
+
+    /// The `RemoteDatabase::connect` error of a trust store without roots.
+    async fn build_refusal() -> std::io::Error {
+        let error =
+            match RemoteDatabase::connect("https://127.0.0.1:1".into(), TOKEN.into(), 1).await {
+                Ok(_) => panic!("built a remote client without a trusted root"),
+                Err(sqlx::Error::AnyDriverError(error)) => error,
+                Err(error) => panic!("unexpected build error: {error}"),
+            };
+        match error.downcast::<libsql::Error>().map(|error| *error) {
+            Ok(libsql::Error::InvalidTlsConfiguration(error)) => error,
+            other => panic!("unexpected build error: {other:?}"),
+        }
+    }
+
+    /// Accepts one connection on `ip` with the `leaf` chain. Returns the
+    /// request it decrypted and answered, or why the handshake ended.
+    fn tls_server(ip: IpAddr, leaf: &str) -> (SocketAddr, JoinHandle<Result<String, String>>) {
+        let chain = CertificateDer::pem_file_iter(fixture(leaf))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_file(fixture("server.key")).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .unwrap();
+        let listener = TcpListener::bind((ip, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut tls = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            while tls.is_handshaking() {
+                tls.complete_io(&mut tcp)
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut stream = rustls::StreamOwned::new(tls, tcp);
+            let request = read_request(&mut stream);
+            let answer = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ANSWER}",
+                ANSWER.len()
+            );
+            stream.write_all(answer.as_bytes()).unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+            Ok(request)
+        });
+        (address, server)
+    }
+
+    fn read_request(stream: &mut impl Read) -> String {
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let mut request = String::from_utf8(head).unwrap();
+        let length = request
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|length| length.trim().parse::<usize>().unwrap())
+            })
+            .expect("request content-length");
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        request.push_str(std::str::from_utf8(&body).unwrap());
+        request
+    }
+
+    /// Accepts one connection on a plaintext listener. Returns every byte the
+    /// client sent before it dropped the connection.
+    fn plaintext_server() -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut seen = vec![0; 64 * 1024];
+            let read = tcp.read(&mut seen).unwrap_or(0);
+            seen.truncate(read);
+            // What a plaintext HTTP server answers to bytes it cannot parse.
+            let _ = tcp.write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            let _ = tcp.read_to_end(&mut seen);
+            seen
+        });
+        (address, server)
+    }
+
+    /// Joins a fixture server after the client is done. One throwaway
+    /// connection releases a server that the client never reached; the
+    /// client's own connection is ahead of it in the accept queue.
+    async fn finish<T: Send + 'static>(address: SocketAddr, server: JoinHandle<T>) -> T {
+        drop(std::net::TcpStream::connect(address));
+        tokio::task::spawn_blocking(move || server.join().unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// Returns the client error and the server's handshake failure.
+    async fn handshake_refusal(ip: IpAddr, leaf: &str) -> (String, String) {
+        let (address, server) = tls_server(ip, leaf);
+        let error = first_query(format!("https://{address}")).await;
+        let seen = finish(address, server).await;
+        assert!(matches!(error, libsql::Error::Hrana(_)), "{error:?}");
+        let refusal = seen.expect_err("the server decrypted a request");
+        (error.to_string(), refusal)
+    }
+
+    async fn plaintext_refusal(scheme: &str) {
+        let (address, server) = plaintext_server();
+        let error = first_query(format!("{scheme}://{address}")).await;
+        let seen = finish(address, server).await;
+        assert!(matches!(error, libsql::Error::Hrana(_)), "{error:?}");
+        let error = error.to_string();
+        assert!(
+            error.contains(
+                "error trying to connect: received corrupt message of type InvalidContentType"
+            ),
+            "{error}"
+        );
+        // A TLS handshake record, never the plaintext request or its token.
+        assert_eq!(seen.first(), Some(&0x16), "{seen:?}");
+        let seen = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+        for leaked in ["authorization", TOKEN, "select 1"] {
+            assert!(!seen.contains(leaked), "plaintext server saw {leaked}");
+        }
+    }
+
+    #[test]
+    fn trusted_test_ca_completes_the_handshake() {
+        trusting(
+            "trusted_test_ca_completes_the_handshake",
+            &fixture("ca.pem"),
+            async {
+                let (address, server) = tls_server(Ipv4Addr::LOCALHOST.into(), "server.pem");
+                let error = first_query(format!("https://{address}")).await;
+                let request = finish(address, server)
+                    .await
+                    .expect("handshake with the trusted test CA");
+                assert!(request.starts_with("POST /"), "{request}");
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains(&format!("\r\nauthorization: bearer {TOKEN}\r\n")),
+                    "{request}"
+                );
+                assert!(request.contains("select 1"), "{request}");
+                // The fixture's answer came back through the same TLS stream.
+                assert!(
+                    error.to_string().contains(&format!(
+                        "api error: `status=503 Service Unavailable, body={ANSWER}`"
+                    )),
+                    "{error:?}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn untrusted_ca_is_refused() {
+        trusting("untrusted_ca_is_refused", &fixture("other-ca.pem"), async {
+            let (error, refusal) =
+                handshake_refusal(Ipv4Addr::LOCALHOST.into(), "server.pem").await;
+            assert!(
+                error.contains("error trying to connect: invalid peer certificate: UnknownIssuer"),
+                "{error}"
+            );
+            assert_eq!(refusal, "received fatal alert: UnknownCA");
+        });
+    }
+
+    #[test]
+    fn ipv4_name_mismatch_is_refused() {
+        trusting("ipv4_name_mismatch_is_refused", &fixture("ca.pem"), async {
+            let (error, refusal) =
+                handshake_refusal(Ipv4Addr::LOCALHOST.into(), "wrong-name.pem").await;
+            assert!(
+                error.contains(
+                    "invalid peer certificate: certificate not valid for name \"127.0.0.1\""
+                ),
+                "{error}"
+            );
+            assert_eq!(refusal, "received fatal alert: BadCertificate");
+        });
+    }
+
+    #[test]
+    fn bracketed_ipv6_name_mismatch_is_refused() {
+        trusting(
+            "bracketed_ipv6_name_mismatch_is_refused",
+            &fixture("ca.pem"),
+            async {
+                let (error, refusal) =
+                    handshake_refusal(Ipv6Addr::LOCALHOST.into(), "wrong-name.pem").await;
+                // The connector strips the URL brackets: an IP name, not
+                // "invalid dnsname".
+                assert!(
+                    error.contains(
+                        "invalid peer certificate: certificate not valid for name \"::1\""
+                    ),
+                    "{error}"
+                );
+                assert_eq!(refusal, "received fatal alert: BadCertificate");
+            },
+        );
+    }
+
+    #[test]
+    fn https_to_a_plaintext_server_is_refused() {
+        trusting(
+            "https_to_a_plaintext_server_is_refused",
+            &fixture("ca.pem"),
+            plaintext_refusal("https"),
+        );
+    }
+
+    #[test]
+    fn libsql_to_a_plaintext_server_is_refused() {
+        trusting(
+            "libsql_to_a_plaintext_server_is_refused",
+            &fixture("ca.pem"),
+            plaintext_refusal("libsql"),
+        );
+    }
+
+    #[test]
+    fn empty_trust_store_refuses_to_build() {
+        trusting(
+            "empty_trust_store_refuses_to_build",
+            Path::new("/dev/null"),
+            async {
+                let error = build_refusal().await;
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(
+                    error.to_string(),
+                    "no valid native root CA certificates found (0 invalid)"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn unreadable_trust_store_refuses_to_build() {
+        let missing = fixture("missing.pem");
+        assert!(!missing.exists());
+        trusting("unreadable_trust_store_refuses_to_build", &missing, async {
+            // The upstream connector panicked here instead.
+            let error = build_refusal().await;
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("could not load certs from file "),
+                "{error}"
+            );
+        });
+    }
+
+    #[test]
+    fn fixture_leaves_verify_now_and_in_2100() {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_file(fixture("ca.pem")).unwrap())
+            .unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        // 2100-01-01T00:00:00Z; the fixtures are valid until 2126-01-01.
+        let horizon = UnixTime::since_unix_epoch(std::time::Duration::from_secs(4_102_444_800));
+        for (leaf, name) in [
+            ("server.pem", "127.0.0.1"),
+            ("wrong-name.pem", "wrong-name.invalid"),
+        ] {
+            let certificate = CertificateDer::from_pem_file(fixture(leaf)).unwrap();
+            let name = ServerName::try_from(name).unwrap();
+            for at in [UnixTime::now(), horizon] {
+                if let Err(error) = verifier.verify_server_cert(&certificate, &[], &name, &[], at) {
+                    panic!("{leaf} at {at:?}: {error}; regenerate per tests/fixtures/remote-tls/README.md");
+                }
+            }
+        }
     }
 }

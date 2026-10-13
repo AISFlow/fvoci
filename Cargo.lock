@@ -1536,6 +1536,7 @@ dependencies = [
  "regex",
  "reqwest",
  "ring",
+ "rustls",
  "rusty-s3",
  "rustybuzz",
  "serde",

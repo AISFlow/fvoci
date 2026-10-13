@@ -51,4 +51,8 @@ verifier, no client certificate, no revocation lists. Plain `http` is still
 forwarded without TLS. The `tls` Cargo feature no longer enables the
 `webpki-roots` set; production already called `with_native_roots()`, not
 `with_webpki_roots()`. `examples/flutter.rs` now uses that same default
-connector.
+connector. FVOCI's `db::backend::remote_tls` tests (`src/db/backend.rs`, with
+`tests/fixtures/remote-tls/`) drive this connector against loopback servers:
+one trusted handshake, and refusals of an untrusted CA, IPv4 and bracketed
+IPv6 name mismatches, `https://` and `libsql://` to plaintext, and trust
+stores without a root.

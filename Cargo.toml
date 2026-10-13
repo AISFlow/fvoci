@@ -132,6 +132,9 @@ reqwest = { version = "0.12", default-features = false, features = ["cookies", "
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
 mailparse = "0.16"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Loopback TLS server for the vendored libsql connector tests: the rustls
+# version and features vendor/libsql-0.9.30 already builds (no aws-lc-rs).
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 [features]
 db-tests = []
