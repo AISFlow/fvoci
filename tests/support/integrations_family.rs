@@ -124,6 +124,10 @@ impl Fixture {
         let backlog = Uuid::now_v7();
         let done = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'TEST','Fixture','workspace',?3)").bind(project.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(self.user.as_bytes().as_slice()).execute(&self.sqlite).await.unwrap();
+        // Mirror projects_task_collection for this raw-SQL project fixture.
+        sqlx::query("INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,'task','Fixture')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).execute(&self.sqlite).await.unwrap();
         sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
             .bind(workflow.as_bytes().as_slice())
             .bind(self.workspace.as_bytes().as_slice())
@@ -138,6 +142,26 @@ impl Fixture {
             sqlx::query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES(?1,?2,?3,?4,?5,?6,?7)").bind(id.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(workflow.as_bytes().as_slice()).bind(name).bind(category).bind(sort).execute(&self.sqlite).await.unwrap();
         }
         (project, backlog, done)
+    }
+    /// A second live session in the fixture workspace with `role`.
+    pub async fn member(&self, role: &str) -> (Uuid, String) {
+        let user = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Peer')")
+            .bind(user.as_bytes().as_slice())
+            .bind(format!("{user}@example.invalid"))
+            .execute(&self.sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(self.workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .bind(role)
+            .execute(&self.sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(token.hash).execute(&self.sqlite).await.unwrap();
+        (user, token.token)
     }
     pub async fn cleanup(self) {
         self.auth.db.pool.close().await.unwrap();

@@ -7269,7 +7269,7 @@ impl OperationTx<'_, '_> {
 
     /// The caller owns current authority and commit. Import and normal origin
     /// creation share this exact hierarchy/status/number/sort/canonical row leaf.
-    async fn insert_task_row_family(
+    pub(crate) async fn insert_task_row_family(
         &mut self,
         workspace: Uuid,
         project: Uuid,

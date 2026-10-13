@@ -41,6 +41,7 @@ use crate::db::outbox::{
 };
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
+use crate::db::tasks::CreateTaskInput;
 use crate::db::workspace::workspace_is_live;
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::projects::ProjectPermission;
@@ -1325,18 +1326,50 @@ async fn create_linked_task_family(
     .cloned() else {
         return Ok(InboundOutcome::Ignored);
     };
-    let Some(sort) = family_end_sort_key(tx, workspace, project, status.id, None).await? else {
+    // PG ignores an exhausted end sort key before allocating a number.
+    if family_end_sort_key(tx, workspace, project, status.id, None)
+        .await?
+        .is_none()
+    {
         return Ok(InboundOutcome::Ignored);
+    }
+    let task = Uuid::now_v7();
+    let clipped = clip_title(&issue.title);
+    let input = CreateTaskInput {
+        title: &clipped,
+        task_type: "task",
+        priority: "none",
+        status_id: Some(status.id),
+        start_date: None,
+        due_date: None,
+        parent_id: None,
+        milestone_id: None,
+        recurrence: None,
     };
-    let rows=github_family(tx)?.query("UPDATE projects SET next_number=next_number+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1", &[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+    // The shared leaf allocates the number and inserts the row and its task
+    // collection item (PG tasks_collection_item) in this writer. The gates
+    // above leave its refusals unreachable; any refusal follows the number
+    // allocation, so it aborts the writer rather than commit an Ignored.
+    if tx
+        .operation()
+        .insert_task_row_family(workspace, project, actor, &input, task)
+        .await?
+        .is_err()
+    {
+        return Err(sqlx::Error::Protocol("webhook task insert refused".into()));
+    }
+    let title = input.title.trim();
+    let rows = github_family(tx)?
+        .query(
+            "SELECT number FROM tasks WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace), Cell::uuid(task)],
+        )
+        .await?;
     let number = rows
         .first()
         .ok_or(sqlx::Error::RowNotFound)?
         .cell(0)?
         .int32()?;
-    let task = Uuid::now_v7();
-    let title = clip_title(&issue.title);
-    github_family(tx)?.execute("INSERT INTO tasks(id,workspace_id,project_id,number,title,type,priority,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,?4,?5,'task','none',?6,?7,?8,?9,?10)", &[Cell::uuid(task),Cell::uuid(workspace),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(&title),Cell::uuid(status.id),Cell::text(sort),Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),Cell::json(&empty_document_json())?,Cell::uuid(actor)]).await?;
     github_family(tx)?.execute("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,?4,?5)", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task),Cell::text(&issue.repo),Cell::Integer(i64::from(issue.number))]).await?;
     record_webhook_task_event_family(&mut tx.operation(),workspace,actor,"task.created",task,json!({"taskId":task.to_string(),"projectId":project.to_string(),"number":number,"statusId":status.id.to_string(),"title":title})).await?;
     crate::db::tasks::family_record_task_activity(

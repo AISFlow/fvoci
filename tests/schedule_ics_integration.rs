@@ -125,6 +125,58 @@ async fn sqlite_holidays_and_ics_http_rotation_expiry_and_tenant_refusal() {
     f.cleanup().await;
 }
 
+/// Same-workspace refusal: a member reads the holidays but only an admin
+/// writes them (PG `mutate_holiday`).
+#[tokio::test]
+async fn sqlite_holiday_writes_refuse_same_workspace_member() {
+    let f = integrations_family::Fixture::new().await;
+    let app = f.app(std::sync::Arc::new(
+        fvoci_server::integrations::Integrations::disabled(),
+    ));
+    let path = format!("/api/v1/workspaces/{}/holidays", f.workspace);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date":"2026-12-25"})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, member) = f.member("member").await;
+    let (status, list) = json_request(app.clone(), "GET", &path, None, Some(&member)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["canEdit"], false);
+    let fresh = f.fresh().await;
+    let counts = "SELECT (SELECT group_concat(date) FROM workspace_holidays),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)";
+    let before: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before.0, "2026-12-25");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date":"2026-12-31"})),
+        Some(&member),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{path}/2026-12-25"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before, after);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
@@ -350,6 +402,55 @@ async fn holidays_crud_permissions_and_dependency_lag() {
     .await;
     assert_eq!(status, StatusCode::OK, "{dep_ok}");
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PG twin of `sqlite_holiday_writes_refuse_same_workspace_member`.
+#[tokio::test]
+async fn holiday_writes_refuse_same_workspace_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/holidays");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date": "2026-12-25"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let member = add_workspace_user(&admin, workspace_id, "member", "hol-writer").await;
+    let (status, list) = json_request(app.clone(), "GET", &path, None, Some(&member.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["canEdit"], false);
+    let counts = "SELECT (SELECT string_agg(date::text, ',' ORDER BY date) FROM fvoci.workspace_holidays), (SELECT count(*) FROM fvoci.events), (SELECT count(*) FROM fvoci.audit_log)";
+    let before: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before.0, "2026-12-25");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date": "2026-12-31"})),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{path}/2026-12-25"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before, after);
     admin.close().await;
     harness.cleanup().await;
 }
