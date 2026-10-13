@@ -56,11 +56,11 @@ await test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and th
   // Two-level bullets: marker characters and a deeper indent for the second level.
   assert.match(
     svg,
-    /padding-left:24\.00px;text-indent:-18\.00px"><span[^>]*>•<\/span><span[^>]*>첫째 항목/,
+    /padding-inline-start:24\.00px;text-indent:-18\.00px"><span[^>]*>•<\/span><span[^>]*>첫째 항목/,
   );
   assert.match(
     svg,
-    /padding-left:56\.00px;text-indent:-18\.00px"><span[^>]*>–<\/span><span[^>]*>하위 항목/,
+    /padding-inline-start:56\.00px;text-indent:-18\.00px"><span[^>]*>–<\/span><span[^>]*>하위 항목/,
   );
   // Table: red first cell and bordered grid; shapes: green rectangle, orange ellipse.
   assert.match(
@@ -69,7 +69,12 @@ await test("slide 1 lays out Korean/emoji text, runs, list, table, shapes and th
   );
   assert.ok((svg.match(/<line [^>]*stroke="#000000"/g) ?? []).length >= 8);
   assert.match(svg, /<rect x="40\.00" y="380\.00" width="160\.00" height="80\.00" fill="#00B050"/);
-  assert.match(svg, /<ellipse cx="320\.00" cy="420\.00" rx="80\.00" ry="40\.00" fill="#FFC000"/);
+  // The ellipse (centre 320,420, radii 80×40) as four cubic arcs.
+  assert.ok(
+    svg.includes(
+      '<path d="M240.00,420.00 C240.00,397.91 275.82,380.00 320.00,380.00 C364.18,380.00 400.00,397.91 400.00,420.00 C400.00,442.09 364.18,460.00 320.00,460.00 C275.82,460.00 240.00,442.09 240.00,420.00 Z" fill="#FFC000"',
+    ),
+  );
   // The embedded PNG is inlined at its 96×48 extent; the linked picture is only a labelled placeholder.
   assert.match(
     svg,
@@ -102,10 +107,17 @@ await test("slide count and rendered size caps", async () => {
     status: "tooLarge",
   });
   const deck = await fixtureDeck();
-  assert.deepEqual(renderSlide(deck, 0, { ...PPTX_LIMITS, maxSlideSvgBytes: 1000 }), {
+  // A test bound between slide 1 (~10 kB of markup) and slide 2 (~1 kB).
+  assert.deepEqual(renderSlide(deck, 0, { ...PPTX_LIMITS, maxSlideSvgBytes: 2000 }), {
     status: "tooLarge",
   });
-  assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: 1000 }).status, "ok");
+  assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: 2000 }).status, "ok");
+  // Slide 2 is shown at exactly its own size and refused one unit under it.
+  const size = svgOf(deck, 1).length;
+  assert.equal(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: size }).status, "ok");
+  assert.deepEqual(renderSlide(deck, 1, { ...PPTX_LIMITS, maxSlideSvgBytes: size - 1 }), {
+    status: "tooLarge",
+  });
 });
 
 await test("packages over the inflate cap or that are not decks are refused", async () => {

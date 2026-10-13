@@ -2,7 +2,7 @@ import { assertPresent } from "./test-invariants.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { openPptx, renderSlide, renderSlideImage, type PptxDeck } from "./pptx-deck.ts";
-import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "./pptx-hostile-fixture.ts";
+import { buildChartPptx, HOSTILE_PPTX_MARKUP, rendererText } from "./pptx-hostile-fixture.ts";
 import { innerSlideSvg, slideImageSvg, toBase64 } from "./pptx-svg.ts";
 import {
   buildFixturePptx,
@@ -60,8 +60,9 @@ await test("review B1 counterexamples: chart number-format markup reaches the re
   for (const [name, markup] of Object.entries(HOSTILE_PPTX_MARKUP)) {
     const deck = await deckOf(await buildChartPptx(markup));
     const raw = rawSvg(deck, 0);
-    // Negative control: the renderer really does emit the deck's markup unescaped.
-    assert.ok(raw.includes(markup), name);
+    // The deck's markup reaches the renderer, which (since pptx-preview 0.15) writes it as text.
+    assert.ok(raw.includes(rendererText(markup)), name);
+    assert.ok(!raw.includes(markup), name);
     const outer = imageSvg(deck, 0);
     const match =
       /^<svg [^<>]*><image [^<>]*href="data:image\/svg\+xml;base64,([A-Za-z0-9+/=]*)"\/><\/svg>$/.exec(
@@ -70,6 +71,28 @@ await test("review B1 counterexamples: chart number-format markup reaches the re
     assert.ok(match, name);
     assert.equal(outer, TEMPLATE("1280", "720", assertPresent(match[1])), name);
     assert.equal(innerSlideSvg(outer), raw, name);
+  }
+  // Negative control with markup the renderer does emit as is: the fixture's `javascript:` link.
+  const linked = await deckOf(buildFixturePptx());
+  const raw = rawSvg(linked, 0);
+  assert.ok(raw.includes('<a href="javascript:alert(1)"'));
+  const outer = imageSvg(linked, 0);
+  assert.equal(outer, TEMPLATE("960", "540", Buffer.from(raw, "utf8").toString("base64")));
+  assert.ok(!outer.includes("javascript:"));
+  assert.equal(innerSlideSvg(outer), raw);
+  // And with the payloads themselves as the renderer's output: only inside the image.
+  for (const [name, markup] of Object.entries(HOSTILE_PPTX_MARKUP)) {
+    const inner = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">${markup}</svg>`;
+    const wrapped = slideImageSvg(inner, 1280, 720, 1024);
+    assert.equal(wrapped.status, "ok", name);
+    const served = (wrapped as { svg: string }).svg;
+    assert.equal(
+      served,
+      TEMPLATE("1280", "720", Buffer.from(inner, "utf8").toString("base64")),
+      name,
+    );
+    assert.ok(!served.includes(markup), name);
+    assert.equal(innerSlideSvg(served), inner, name);
   }
 });
 

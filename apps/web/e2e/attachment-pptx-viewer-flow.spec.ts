@@ -8,6 +8,7 @@ import { writeZip } from "../src/features/attachments/docx-test-fixture";
 import {
   buildChartPptx,
   HOSTILE_PPTX_MARKUP,
+  rendererText,
 } from "../src/features/attachments/pptx-hostile-fixture";
 import { PPTX_MAX_MARKUP_BYTES } from "../src/features/attachments/pptx-limits";
 import { innerSlideSvg } from "../src/features/attachments/pptx-svg";
@@ -524,6 +525,11 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   });
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  const dialogs: string[] = [];
+  page.on("dialog", async (dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/, { timeout: 15000 });
@@ -623,6 +629,9 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
     /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="960" height="540" viewBox="0 0 960 540"><image /,
   );
   expect(first.inner).toContain(`href="${FIXTURE_PPTX_EXTERNAL_LINK}"`);
+  // Markup the renderer emits as is: the script link is an active <a> inside the image only.
+  expect(first.inner).toContain('<a href="javascript:alert(1)"');
+  expect(first.outer).not.toContain("javascript:");
   expect(first.images).toBe(1);
   expect(first.foreignObjects).toBeGreaterThan(0);
 
@@ -682,6 +691,23 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await page.waitForTimeout(300);
   expect(page.url()).toBe(before);
   expect(page.context().pages()).toHaveLength(1);
+  expect(dialogs).toEqual([]);
+  // The same blob as its own document ("open image in new tab"): the link is still only an image.
+  const slideTab = await page.context().newPage();
+  const slideTabCsp = watchCspViolations(slideTab);
+  const slideTabDialogs: string[] = [];
+  slideTab.on("dialog", async (dialog) => {
+    slideTabDialogs.push(dialog.message());
+    await dialog.dismiss();
+  });
+  await slideTab.goto(first.src);
+  expect(await slideTab.evaluate(() => document.querySelectorAll("a, script").length)).toBe(0);
+  await slideTab.mouse.click(640, 115);
+  await slideTab.waitForTimeout(300);
+  expect(slideTab.url()).toBe(first.src);
+  expect(slideTabDialogs).toEqual([]);
+  expect(slideTabCsp).toEqual([]);
+  await slideTab.close();
 
   // --- Slide 2, zoom, blob URL revocation ------------------------------------
   await viewer.getByRole("button", { name: "다음 슬라이드" }).click();
@@ -935,9 +961,13 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   await page.goto(`/w/acme/a/${hostileId}/view`);
   await expect(viewer).toBeVisible({ timeout: 20000 });
   const hostile = await probeSvg(page);
-  // The renderer really emitted the deck's markup (negative control), but only inside the image.
+  // The deck's markup reached the renderer, which writes it as text, and only inside the image.
+  // (The slide 1 script link above is markup the renderer does emit as is.)
   expect(hostile.inner).not.toBeNull();
-  for (const markup of Object.values(HOSTILE_PPTX_MARKUP)) expect(hostile.inner).toContain(markup);
+  for (const markup of Object.values(HOSTILE_PPTX_MARKUP)) {
+    expect(hostile.inner).toContain(rendererText(markup));
+    expect(hostile.inner).not.toContain(markup);
+  }
   expect(hostile.outer).not.toMatch(/script|iframe|meta|javascript/i);
   await expect
     .poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0))
@@ -1075,8 +1105,12 @@ test("PPTX attachment: slide layout, image-wrapped SVG, slides, zoom, original b
   for (const name of ["@office-kit/pptx", "@office-kit/pptx-preview", "fflate"]) {
     expect(notice).toContain(name);
   }
+  // @office-kit/pptx's own third-party notice (Apache-2.0 table style definitions) rides along.
+  expect(notice).toMatch(/^## @office-kit\/pptx [0-9.]+: THIRD_PARTY_NOTICES\.md$/m);
+  expect(notice).toContain("Dewiride PPTX Studio");
 
   expect(csp).toEqual([]);
+  expect(dialogs).toEqual([]);
   expect(foreign).toEqual([]);
   expect(
     foreign.filter((url) => url.startsWith(new URL(FIXTURE_PPTX_EXTERNAL_LINK).origin)),
