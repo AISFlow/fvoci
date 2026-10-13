@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::backend::{Backend, OperationTx};
-use super::codec::Cell;
+use super::codec::{Cell, PostgresRefusal};
 
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, session_is_live, set_self_user,
@@ -2330,11 +2330,40 @@ pub async fn trash_workspace_backend(
                 &[Cell::uuid(ws)],
             )
             .await?;
+            // The memberships delete cascades every user grant. PostgreSQL's
+            // deferred project_members_private_lead_check_del then refuses the
+            // commit when a live private project that lost a grant keeps no
+            // lead; the family applies the same check to the same projects.
+            let touched = f
+                .query(
+                    "SELECT DISTINCT lower(hex(project_id)) FROM project_members WHERE workspace_id=?1 AND user_id IS NOT NULL",
+                    &[Cell::uuid(ws)],
+                )
+                .await?
+                .iter()
+                .map(|row| row.cell(0)?.string())
+                .collect::<Result<Vec<_>, _>>()?;
             f.execute(
                 "DELETE FROM memberships WHERE workspace_id=?1",
                 &[Cell::uuid(ws)],
             )
             .await?;
+            let leadless = f
+                .query(
+                    "SELECT EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=?1 AND lower(hex(p.id)) IN (SELECT value FROM json_each(?2))
+                     AND p.deleted_at IS NULL AND p.visibility='private' AND NOT EXISTS(SELECT 1 FROM project_members m
+                     WHERE m.workspace_id=p.workspace_id AND m.project_id=p.id AND m.role='lead'))",
+                    &[Cell::uuid(ws), Cell::json(&json!(touched))?],
+                )
+                .await?;
+            if leadless
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .boolean()?
+            {
+                return Err(PostgresRefusal::PRIVATE_PROJECT_WITHOUT_LEAD.into());
+            }
             f.execute(
                 "UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1",
                 &[

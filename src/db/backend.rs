@@ -1,6 +1,6 @@
 //! Closed driver boundary. PostgreSQL-only callers are rejected explicitly
 //! during the staged port; no synthetic PostgreSQL pool exists for SQLite.
-use super::codec::{remote_error, Cell, FamilyRow};
+use super::codec::{remote_error, Cell, FamilyRow, PostgresRefusal};
 use sqlx::{PgPool, Postgres, Sqlite, SqlitePool, Transaction};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -494,44 +494,9 @@ fn refuse_nul_text(args: &[Cell]) -> Result<(), sqlx::Error> {
         .iter()
         .any(|cell| matches!(cell, Cell::Text(text) if text.contains('\0')))
     {
-        return Err(sqlx::Error::Database(Box::new(NulTextRefused)));
+        return Err(PostgresRefusal::NUL_TEXT.into());
     }
     Ok(())
-}
-
-/// The family form of PostgreSQL's 22021 refusal, with its kind and message.
-/// It never carries the bound value.
-#[derive(Debug)]
-struct NulTextRefused;
-
-const NUL_TEXT_MESSAGE: &str = "invalid byte sequence for encoding \"UTF8\": 0x00";
-
-impl std::fmt::Display for NulTextRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(NUL_TEXT_MESSAGE)
-    }
-}
-impl std::error::Error for NulTextRefused {}
-
-impl sqlx::error::DatabaseError for NulTextRefused {
-    fn message(&self) -> &str {
-        NUL_TEXT_MESSAGE
-    }
-    fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
-        Some("22021".into())
-    }
-    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-        self
-    }
-    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-        self
-    }
-    fn kind(&self) -> sqlx::error::ErrorKind {
-        sqlx::error::ErrorKind::Other
-    }
 }
 
 fn local_query<'a>(
@@ -3038,7 +3003,10 @@ mod nul_text_guard_tests {
     pub(super) fn assert_refused(error: sqlx::Error) {
         let database = error.as_database_error().expect("database error");
         assert_eq!(database.code().as_deref(), Some("22021"));
-        assert_eq!(database.message(), NUL_TEXT_MESSAGE);
+        assert_eq!(
+            database.message(),
+            "invalid byte sequence for encoding \"UTF8\": 0x00"
+        );
         assert!(matches!(database.kind(), sqlx::error::ErrorKind::Other));
         assert!(database.constraint().is_none());
     }
