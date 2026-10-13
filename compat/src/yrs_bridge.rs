@@ -170,4 +170,19 @@ mod tests {
             assert_eq!(resp["ok"], false, "{bad:?} must be refused");
         }
     }
+
+    #[test]
+    fn bridge_uses_the_standard_alphabet() {
+        // `crates/collab-engine/fixtures/korean_emoji_mid_edit.v1`; it encodes back unchanged.
+        const PLUS_B64: &str = "AQEVC8QVBBUFA+ykkQA=";
+        let mut doc = new_doc();
+        let applied = handle(&mut doc, &json!({ "cmd": "apply_v1", "b64": PLUS_B64 }));
+        assert_eq!(applied, json!({ "ok": true }));
+        assert_eq!(
+            b64_reply(&mut doc, json!({ "cmd": "encode_state_v1" })),
+            PLUS_B64
+        );
+        assert_eq!(b64_decode("+/8=").unwrap(), [0xfb, 0xff]);
+        assert!(b64_decode("-_8=").is_err());
+    }
 }
