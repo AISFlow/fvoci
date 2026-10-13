@@ -15,8 +15,10 @@ import {
   type Browser,
   type BrowserContext,
   type Cookie,
+  type Locator,
   type Page,
   type Request,
+  type Route,
 } from "@playwright/test";
 import { createE2eUser, flowSchemas, login, readJson } from "./helpers";
 import {
@@ -32,6 +34,8 @@ const admin = { email: "Admin@Example.COM", password: "supersecret1" };
 const suffix = randomBytes(4).toString("hex");
 const member = { email: `draft-member-${suffix}@example.com`, password: "memberpass1" };
 const other = { email: `draft-other-${suffix}@example.com`, password: "otherpass1" };
+// A workspace member whose private project access is revoked and granted back.
+const projectUser = { email: `draft-project-${suffix}@example.com`, password: "projectpass1" };
 
 type OffApp = { baseUrl: string };
 const test = base.extend<object, { offApp: OffApp }>({
@@ -117,6 +121,7 @@ type Target = { id: string; url: string; body: string };
 let workspaceId = "";
 let workspaceSlug = "";
 let memberId = "";
+let projectUserId = "";
 const cookies = new Map<string, Cookie[]>();
 
 async function signIn(page: Page, who: { email: string; password: string }): Promise<void> {
@@ -152,7 +157,56 @@ async function document(page: Page, title: string): Promise<Target> {
   };
 }
 
+type Project = { id: string; key: string; rootDocumentId: string | null };
+
+async function privateProject(page: Page, key: string): Promise<Project> {
+  // Workspace membership alone grants nothing in a private project.
+  const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
+    data: { key, name: `초안 ${key}`, visibility: "private" },
+  });
+  expect(response.status()).toBe(201);
+  return readJson(response, flowSchemas.project);
+}
+
+async function projectAccess(page: Page, project: Project, granted: boolean): Promise<void> {
+  const members = `/api/v1/workspaces/${workspaceId}/projects/${project.id}/members`;
+  const response = granted
+    ? await page.request.post(members, { data: { userId: projectUserId, role: "member" } })
+    : await page.request.delete(`${members}/${projectUserId}`);
+  expect(response.status()).toBe(granted ? 201 : 200);
+}
+
+async function projectDocument(page: Page, project: Project, title: string): Promise<Target> {
+  const response = await page.request.post(
+    `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents`,
+    { data: { parentId: project.rootDocumentId, title } },
+  );
+  expect(response.status()).toBe(201);
+  const meta = await readJson(response, flowSchemas.createdDocument);
+  return {
+    id: meta.id,
+    url: `/w/${workspaceSlug}/${meta.displayId}`,
+    body: `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${meta.id}/body/versioned`,
+  };
+}
+
+async function task(page: Page, project: Project, title: string): Promise<Target> {
+  const response = await page.request.post(
+    `/api/v1/workspaces/${workspaceId}/projects/${project.id}/tasks`,
+    { data: { title } },
+  );
+  expect(response.status()).toBe(201);
+  const meta = await readJson(response, flowSchemas.item);
+  return {
+    id: meta.id,
+    url: `/w/${workspaceSlug}/${project.key}-${String(meta.number)}`,
+    body: `/api/v1/workspaces/${workspaceId}/tasks/${meta.id}/body/versioned`,
+  };
+}
+
 const editor = (page: Page) => page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]');
+const notFound = (page: Page) =>
+  page.getByRole("alert").filter({ hasText: "태스크를 찾을 수 없습니다" });
 
 async function openOff(page: Page, target: Target): Promise<void> {
   const response = await page.goto(target.url);
@@ -207,6 +261,26 @@ async function slots(page: Page): Promise<string[]> {
   );
 }
 
+/** Export only: the row offers exactly copy and download, both carrying the draft. */
+async function exportsOnly(page: Page, row: Locator, draft: string): Promise<void> {
+  await expect(row.getByRole("button")).toHaveText(["초안 복사", "초안 내려받기"]);
+  await row.getByRole("button", { name: "초안 복사", exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain(draft);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    row.getByRole("button", { name: "초안 내려받기", exact: true }).click(),
+  ]);
+  expect(download.suggestedFilename()).toMatch(/\.md$/);
+  expect(readFileSync(await download.path(), "utf8")).toContain(draft);
+}
+
+async function switchAccount(page: Page, who: { email: string; password: string }) {
+  // Same tab: the logged-out actor's slots stay in this sessionStorage.
+  await page.getByRole("button", { name: "로그아웃", exact: true }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  await signIn(page, who);
+}
+
 function sends(page: Page): Request[] {
   const sent: Request[] = [];
   page.on("request", (request) => {
@@ -258,6 +332,7 @@ test.beforeAll(async ({ browser, offApp }) => {
     for (const [who, name] of [
       [member, "멤버"],
       [other, "다른"],
+      [projectUser, "프로젝트"],
     ] as const) {
       createE2eUser(who.email, who.password, name, {
         familyName: "초안",
@@ -267,12 +342,11 @@ test.beforeAll(async ({ browser, offApp }) => {
       await context.clearCookies();
       await signIn(page, who);
       cookies.set(who.email, await context.cookies());
-      if (who === member) {
-        const me = (await (await page.request.get("/api/v1/auth/me")).json()) as {
-          userId: string;
-        };
-        memberId = me.userId;
-      }
+      const me = (await (await page.request.get("/api/v1/auth/me")).json()) as {
+        userId: string;
+      };
+      if (who === member) memberId = me.userId;
+      if (who === projectUser) projectUserId = me.userId;
     }
   } finally {
     await context.close();
@@ -380,6 +454,148 @@ test("(d) after logout another account in the same tab never sees the draft", as
     expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
   } finally {
     await tab.context.close();
+  }
+});
+
+test("(e) project access loss: the item page offers the document and task drafts for export only", async ({
+  browser,
+  offApp,
+}) => {
+  const owner = await actor(browser, offApp.baseUrl, admin);
+  const peer = await actor(browser, offApp.baseUrl, projectUser);
+  try {
+    const project = await privateProject(owner.page, `PL${suffix.toUpperCase()}`);
+    await projectAccess(owner.page, project, true);
+    const targets = [
+      {
+        target: await projectDocument(owner.page, project, "프로젝트 권한"),
+        draft: `project document 초안 ${suffix}`,
+      },
+      {
+        target: await task(owner.page, project, "작업 권한"),
+        draft: `project task 초안 ${suffix}`,
+      },
+    ];
+    const sent = sends(peer.page);
+    for (const { target, draft } of targets) {
+      await openOff(peer.page, target);
+      await typeDraft(peer.page, draft);
+    }
+    const revokedAt = sent.length;
+    await projectAccess(owner.page, project, false);
+    // No project access event reaches an open page; reopening reads the denial
+    // (the project leaves the list and the lookup answers empty).
+    for (const { target, draft } of targets) {
+      await peer.page.goto(target.url);
+      await expect(notFound(peer.page)).toBeVisible();
+      await expect(editor(peer.page)).toHaveCount(0);
+      const retained = peer.page.getByTestId("off-draft-retained");
+      await expect(retained).toHaveCount(targets.length);
+      for (const entry of targets)
+        await expect(retained.filter({ hasText: entry.draft })).toHaveCount(1);
+      await exportsOnly(peer.page, retained.filter({ hasText: draft }), draft);
+    }
+    expect(sent.slice(revokedAt)).toEqual([]);
+    for (const { target, draft } of targets) {
+      expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+      expect(await bodyText(owner.page, target)).not.toContain(draft);
+    }
+    // Access granted back: each target restores its own draft as before.
+    await projectAccess(owner.page, project, true);
+    for (const { target, draft } of targets) {
+      await openOff(peer.page, target);
+      await expect(peer.page.getByTestId("off-draft-restored")).toBeVisible();
+      await expect(editor(peer.page)).toHaveText(draft);
+      await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+    }
+    // Another account in this same tab never lists them.
+    await switchAccount(peer.page, other);
+    for (const { target, draft } of targets) {
+      await peer.page.goto(target.url);
+      await expect(notFound(peer.page)).toBeVisible();
+      await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+      await expect(peer.page.getByText(draft)).toHaveCount(0);
+    }
+  } finally {
+    await Promise.all([owner.context.close(), peer.context.close()]);
+  }
+});
+
+test("(f) a task read refused after a granted lookup offers its draft for export only", async ({
+  browser,
+  offApp,
+}) => {
+  const owner = await actor(browser, offApp.baseUrl, admin);
+  const peer = await actor(browser, offApp.baseUrl, projectUser);
+  try {
+    const project = await privateProject(owner.page, `PT${suffix.toUpperCase()}`);
+    await projectAccess(owner.page, project, true);
+    const target = await task(owner.page, project, "작업 거부");
+    const sent = sends(peer.page);
+    await openOff(peer.page, target);
+    const draft = `refused task 초안 ${suffix}`;
+    await typeDraft(peer.page, draft);
+    await leave(peer.page);
+    // The revoke lands between the granted lookup and the task's own read, the
+    // order a live revoke produces: that one read waits for the revoke, then
+    // reaches the server.
+    const meta = `/api/v1/workspaces/${workspaceId}/tasks/${target.id}`;
+    const isMeta = (url: URL) => url.pathname === meta;
+    let reached!: () => void;
+    const held = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const revoked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = false;
+    const hold = async (route: Route) => {
+      if (holding || route.request().method() !== "GET") return route.fallback();
+      holding = true;
+      reached();
+      await revoked;
+      await route.continue();
+    };
+    await peer.page.route(isMeta, hold);
+    const projectsRead = peer.page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === `/api/v1/workspaces/${workspaceId}/projects`,
+    );
+    const refused = peer.page.waitForResponse(
+      (response) => response.request().method() === "GET" && isMeta(new URL(response.url())),
+    );
+    await peer.page.goto(target.url);
+    expect((await projectsRead).status()).toBe(200);
+    await held;
+    const revokedAt = sent.length;
+    await projectAccess(owner.page, project, false);
+    release();
+    expect((await refused).status()).toBe(404);
+    await peer.page.unroute(isMeta, hold);
+    await expect(notFound(peer.page)).toBeVisible();
+    await expect(editor(peer.page)).toHaveCount(0);
+    const retained = peer.page.getByTestId("off-draft-retained");
+    await expect(retained).toHaveCount(1);
+    await expect(retained).toContainText(draft);
+    await exportsOnly(peer.page, retained, draft);
+    expect(sent.slice(revokedAt)).toEqual([]);
+    expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+    expect(await bodyText(owner.page, target)).not.toContain(draft);
+    // Access granted back: the task restores the draft as before.
+    await projectAccess(owner.page, project, true);
+    await openOff(peer.page, target);
+    await expect(peer.page.getByTestId("off-draft-restored")).toBeVisible();
+    await expect(editor(peer.page)).toHaveText(draft);
+    // Another account in this same tab never sees it.
+    await switchAccount(peer.page, other);
+    await peer.page.goto(target.url);
+    await expect(notFound(peer.page)).toBeVisible();
+    await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+    await expect(peer.page.getByText(draft)).toHaveCount(0);
+  } finally {
+    await Promise.all([owner.context.close(), peer.context.close()]);
   }
 });
 
