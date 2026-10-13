@@ -98,7 +98,7 @@ await test("businessInfoUrl is checked as typed, never trimmed into an https: UR
   assert.equal(op.safeParse({ ...empty, businessInfoUrl: "not a url" }).success, false);
   const trailing = op.safeParse({ ...empty, businessInfoUrl: "https://example.com " });
   assert.equal(trailing.success, true);
-  assert.equal(trailing.data?.businessInfoUrl, "https://example.com ");
+  assert.equal(trailing.data.businessInfoUrl, "https://example.com ");
 });
 
 await test("attachmentTransfer accepts only the two modes the server knows", () => {

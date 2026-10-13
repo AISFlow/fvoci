@@ -111,7 +111,7 @@ for (const [label, leaf, next, values, code, path] of [
     const draft = model.withLeaf(values.branding, leaf, next);
     const parsed = catalog.SETTINGS_CATALOG.branding.schema.safeParse(draft);
     assert.equal(parsed.success, false);
-    const issue = parsed.error?.issues[0];
+    const issue = parsed.error.issues[0];
     assert.equal(issue?.code, code);
     assert.equal(issue.path.join("."), path);
     // The line is the schema's own issue; the library's wording is not pinned.
