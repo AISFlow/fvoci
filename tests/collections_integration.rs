@@ -3535,8 +3535,29 @@ mod sqlite_port_data {
         drop(app);
         std::fs::remove_dir_all(root).unwrap();
     }
+    // Runtime admission, not the architecture, decides the result: the test
+    // runtime is a qualified one, and LOCPATH refuses the GNU collation on
+    // every target, so a fresh child asserts the refusal.
     #[tokio::test]
     async fn sqlite_collection_text_sort_uses_qualified_profile() {
+        const CHILD: &str = "FVOCI_COLLECTION_SORT_LOCPATH_CHILD";
+        const SELECTOR: &str =
+            "sqlite_port_data::sqlite_collection_text_sort_uses_qualified_profile";
+        let qualified = std::env::var_os(CHILD).is_none();
+        if qualified {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", SELECTOR, "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("LOCPATH", "/FVOCI-unqualified-test-locale")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+        }
         let (root, db, app, cookie, user, ws) = fixture().await;
         let base = format!("/api/v1/workspaces/{ws}/collections");
         let mut cid = String::new();
@@ -3553,17 +3574,16 @@ mod sqlite_port_data {
             cid = created["id"].as_str().unwrap().into();
         }
         let (status, listed) = call(&app, "GET", &base, None, &cookie).await;
-        #[cfg(target_arch = "x86_64")]
-        {
+        if qualified {
             assert_eq!(status, StatusCode::OK, "{listed}");
             assert_eq!(listed["items"][0]["name"], "Äther");
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unqualified GNU locale must refuse: {listed}"
+            );
         }
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unqualified GNU locale must refuse: {listed}"
-        );
         let field = create_field(
             &app,
             &cookie,
@@ -3600,14 +3620,10 @@ mod sqlite_port_data {
             json!({"config":{"query":{"sort":[{"field":field["id"],"direction":"asc"}]}}}),
         )
         .await;
-        #[cfg(target_arch = "x86_64")]
-        {
+        if qualified {
             assert_eq!(status, StatusCode::OK, "{rows}");
             assert_eq!(rows["items"][0]["id"], expected.unwrap());
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            let _ = expected;
+        } else {
             assert_eq!(
                 status,
                 StatusCode::INTERNAL_SERVER_ERROR,
