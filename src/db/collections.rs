@@ -2453,6 +2453,19 @@ async fn family_find_item(
     tx.query(match column {"task_id"=>"SELECT id,collection_id,document_id,task_id,version FROM collection_items WHERE workspace_id=?1 AND task_id=?2",_=>"SELECT id,collection_id,document_id,task_id,version FROM collection_items WHERE workspace_id=?1 AND document_id=?2"},&[Cell::uuid(ws),Cell::uuid(id)]).await?.first().map(family_item_row).transpose()
 }
 
+fn family_view_row(row: &FamilyRow) -> Result<CollectionViewRow, sqlx::Error> {
+    Ok(view_from((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.id()?,
+        row.cell(3)?.string()?,
+        row.cell(4)?.string()?,
+        row.cell(5)?.string()?,
+        row.cell(6)?.value()?,
+        row.cell(7)?.int32()?,
+    )))
+}
+
 async fn family_visible_views(
     tx: &mut FamilyTx,
     ws: Uuid,
@@ -2462,21 +2475,21 @@ async fn family_visible_views(
     let rows=tx.query("SELECT id,collection_id,owner_id,visibility,name,type,config,version FROM collection_views WHERE workspace_id=?1 AND collection_id=?2 AND (owner_id=?3 OR visibility='shared')",&[Cell::uuid(ws),Cell::uuid(collection),Cell::uuid(user)]).await?;
     let mut views = rows
         .iter()
-        .map(|r| {
-            Ok(view_from((
-                r.cell(0)?.id()?,
-                r.cell(1)?.id()?,
-                r.cell(2)?.id()?,
-                r.cell(3)?.string()?,
-                r.cell(4)?.string()?,
-                r.cell(5)?.string()?,
-                r.cell(6)?.value()?,
-                r.cell(7)?.int32()?,
-            )))
-        })
+        .map(family_view_row)
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     crate::db::tasks::family_sort_names(&mut views, |v| (&v.name, v.id))?;
     Ok(views)
+}
+
+// An ID write needs only its target row; name order belongs to the list.
+async fn family_visible_view(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    collection: Uuid,
+    user: Uuid,
+    id: Uuid,
+) -> Result<Option<CollectionViewRow>, sqlx::Error> {
+    tx.query("SELECT id,collection_id,owner_id,visibility,name,type,config,version FROM collection_views WHERE workspace_id=?1 AND collection_id=?2 AND (owner_id=?3 OR visibility='shared') AND id=?4",&[Cell::uuid(ws),Cell::uuid(collection),Cell::uuid(user),Cell::uuid(id)]).await?.first().map(family_view_row).transpose()
 }
 
 async fn family_list_collections(
@@ -3029,11 +3042,7 @@ async fn family_save_view(
         return Ok(Err(CollectionDbError::Forbidden));
     }
     let rows = if let Some(id) = view_id {
-        let Some(old) = family_visible_views(tx, ws, collection_id, actor.user_id)
-            .await?
-            .into_iter()
-            .find(|v| v.id == id)
-        else {
+        let Some(old) = family_visible_view(tx, ws, collection_id, actor.user_id, id).await? else {
             return Ok(Err(CollectionDbError::NotFound));
         };
         if old.visibility != input.visibility.as_str() && old.owner_id != actor.user_id {
@@ -3055,16 +3064,7 @@ async fn family_save_view(
     let Some(r) = rows.first() else {
         return Ok(Err(CollectionDbError::VersionConflict));
     };
-    let view = view_from((
-        r.cell(0)?.id()?,
-        r.cell(1)?.id()?,
-        r.cell(2)?.id()?,
-        r.cell(3)?.string()?,
-        r.cell(4)?.string()?,
-        r.cell(5)?.string()?,
-        r.cell(6)?.value()?,
-        r.cell(7)?.int32()?,
-    ));
+    let view = family_view_row(r)?;
     if view.visibility == "shared" {
         family_audit(
             tx,
@@ -3098,11 +3098,7 @@ async fn family_remove_view(
     if access.archived {
         return Ok(Err(CollectionDbError::ProjectArchived));
     }
-    let Some(old) = family_visible_views(tx, ws, collection, actor.user_id)
-        .await?
-        .into_iter()
-        .find(|v| v.id == id)
-    else {
+    let Some(old) = family_visible_view(tx, ws, collection, actor.user_id, id).await? else {
         return Ok(Err(CollectionDbError::NotFound));
     };
     if old.visibility == "shared" && access.permission != ProjectPermission::Manage {

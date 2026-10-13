@@ -3661,6 +3661,98 @@ mod sqlite_port_data {
         std::fs::remove_dir_all(root).unwrap();
         assert_pre_pg_epoch_datetimes(stored, reads, days);
     }
+    // A view write addresses one row by ID; only the list orders names. LOCPATH
+    // refuses the GNU collation on every target, so a fresh child carries it.
+    #[tokio::test]
+    async fn sqlite_view_id_writes_skip_name_sort_in_unqualified_runtime() {
+        const CHILD: &str = "FVOCI_VIEW_LOCPATH_CHILD";
+        const SELECTOR: &str =
+            "sqlite_port_data::sqlite_view_id_writes_skip_name_sort_in_unqualified_runtime";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", SELECTOR, "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("LOCPATH", "/FVOCI-unqualified-test-locale")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "{stdout}{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
+        let (root, sqlite, app, cookie, _user, ws) = fixture().await;
+        let base = format!("/api/v1/workspaces/{ws}/collections");
+        let (status, collection) = call(
+            &app,
+            "POST",
+            &base,
+            Some(json!({"name":"Views","kind":"document","projectId":null})),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{collection}");
+        let views = format!("{base}/{}/views", collection["id"].as_str().unwrap());
+        let mut paths = Vec::new();
+        for (name, visibility) in [("Mine", "private"), ("Team", "shared")] {
+            let (status, view) = call(
+                &app,
+                "POST",
+                &views,
+                Some(json!({"name":name,"type":"table","visibility":visibility,"config":{}})),
+                &cookie,
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{view}");
+            paths.push(format!("{views}/{}", view["id"].as_str().unwrap()));
+        }
+        let (status, listed) = call(&app, "GET", &views, None, &cookie).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{listed}");
+        // Another manager sees the shared view, never the owner's private one.
+        let admin = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,'views-admin@example.invalid','Admin')").bind(admin.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'admin')")
+            .bind(ws.as_bytes().as_slice())
+            .bind(admin.as_bytes().as_slice())
+            .execute(&sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(admin.as_bytes().as_slice()).bind(&token.hash).execute(&sqlite).await.unwrap();
+        let mine = json!({"name":"Changed","type":"table","visibility":"private","config":{},"expectedVersion":1});
+        let (status, hidden) =
+            call(&app, "PATCH", &paths[0], Some(mine.clone()), &token.token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let (status, hidden) = call(&app, "DELETE", &paths[0], None, &token.token).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{hidden}");
+        let (status, patched) = call(&app, "PATCH", &paths[0], Some(mine.clone()), &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(
+            (&patched["name"], &patched["version"]),
+            (&json!("Changed"), &json!(2))
+        );
+        let (status, stale) = call(&app, "PATCH", &paths[0], Some(mine), &cookie).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        let (status, deleted) = call(&app, "DELETE", &paths[1], None, &token.token).await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let rows: Vec<(String, String, i32)> =
+            sqlx::query_as("SELECT name,visibility,version FROM collection_views")
+                .fetch_all(&fresh)
+                .await
+                .unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE verb='collection_view.deleted' AND actor_user_id=?1").bind(admin.as_bytes().as_slice()).fetch_one(&fresh).await.unwrap();
+        fresh.close().await;
+        sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(rows, vec![("Changed".into(), "private".into(), 2)]);
+        assert_eq!(audits, 1);
+    }
 }
 
 /// SQLx binds timestamptz as microseconds since 2000-01-01, truncated toward
