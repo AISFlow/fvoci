@@ -48,8 +48,10 @@ watch(
     const granted = new Set(items.value.map((item) => item.id));
     return { actorId: actor.userId, credentialId: actor.sessionId, granted };
   },
-  async (scope) => {
-    const started = ++listing;
+  async (scope, _previous, onCleanup) => {
+    // A newer scope or leaving the page retires this read.
+    const started = listing;
+    onCleanup(() => listing++);
     retainedDrafts.value = [];
     if (!scope || !holdsRetainedDrafts(scope.actorId, scope.credentialId)) return;
     const { listRetainedOffDrafts } = await import("../composables/useOffWikiBody");
