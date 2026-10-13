@@ -18,9 +18,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"],
+      "@/*": ["./src/*"],
       "yjs": ["../../node_modules/yjs"],
       "@hocuspocus/provider": ["../../node_modules/@hocuspocus/provider"]
     }

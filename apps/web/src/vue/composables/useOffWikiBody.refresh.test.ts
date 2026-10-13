@@ -18,7 +18,7 @@ import type { BodySaveResult, VersionedBody } from "../../features/documents/ver
 const raw = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replace("export function", "function");
-const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
 class ProblemError extends Error {
   constructor(readonly status: number) {
     super(String(status));

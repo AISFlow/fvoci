@@ -12,7 +12,7 @@ const expected = {
   prettier: "3.9.9",
   "eslint-config-prettier": "10.1.8",
   globals: "17.12.0",
-  typescript: "5.9.3",
+  typescript: "6.0.3",
   "@types/bun": "1.4.2",
 };
 const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));

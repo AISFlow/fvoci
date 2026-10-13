@@ -699,7 +699,7 @@ function actualHostAuthorization(file: string, me: unknown) {
   assert.ok(getter && ts.isArrowFunction(getter));
   const result: unknown = runInNewContext(
     ts.transpileModule(`(${getter.getText(parsed)})`, {
-      compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None },
+      compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext },
     }).outputText,
     {
       me,

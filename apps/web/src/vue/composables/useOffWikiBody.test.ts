@@ -37,7 +37,7 @@ class ProblemError extends Error {
 const text = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replace("export function", "function");
-const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
 const original = {
   actorId: "A",
   credentialId: "session-A",
@@ -567,7 +567,7 @@ for (const host of [
     expect(copy).toBeDefined();
     const copyScript = ts.transpile(required(copy).getText(setup), {
       target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.None,
+      module: ts.ModuleKind.ESNext,
     });
     const h = harness();
     required(h.reads[0]).pending.resolve(source(original));
