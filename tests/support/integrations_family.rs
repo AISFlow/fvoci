@@ -143,6 +143,26 @@ impl Fixture {
         }
         (project, backlog, done)
     }
+    /// A second live session in the fixture workspace with `role`.
+    pub async fn member(&self, role: &str) -> (Uuid, String) {
+        let user = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Peer')")
+            .bind(user.as_bytes().as_slice())
+            .bind(format!("{user}@example.invalid"))
+            .execute(&self.sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(self.workspace.as_bytes().as_slice())
+            .bind(user.as_bytes().as_slice())
+            .bind(role)
+            .execute(&self.sqlite)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)").bind(Uuid::now_v7().as_bytes().as_slice()).bind(user.as_bytes().as_slice()).bind(token.hash).execute(&self.sqlite).await.unwrap();
+        (user, token.token)
+    }
     pub async fn cleanup(self) {
         self.auth.db.pool.close().await.unwrap();
         self.sqlite.close().await;

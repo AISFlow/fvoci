@@ -400,6 +400,47 @@ fn sign_github(body: &[u8]) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
+/// Same-workspace refusal: a project viewer can read the task's project but
+/// lacks the Edit grant an issue link requires (PG `link_issue`).
+#[tokio::test]
+async fn sqlite_github_issue_link_refuses_same_workspace_viewer() {
+    let f = integrations_family::Fixture::new().await;
+    let (_, addr) = start_fake_github().await;
+    let app = f.app(github_integrations(addr));
+    let (project, backlog, _) = f.seed_project().await;
+    let task = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,1,'Viewer link',?4,'a0',1,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.sqlite).await.unwrap();
+    let (viewer, viewer_token) = f.member("guest").await;
+    sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(viewer.as_bytes().as_slice()).execute(&f.sqlite).await.unwrap();
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{base}/projects/{project}"),
+        None,
+        Some(&viewer_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "viewer reads the project: {body}");
+    let fresh = f.fresh().await;
+    let counts = "SELECT (SELECT count(*) FROM github_issue_links),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)";
+    let before: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    let path = format!("{base}/github/issue-links");
+    let link = json!({"taskId":task,"repo":"fixture/viewer","issueNumber":1});
+    let (status, body, _) =
+        call(&app, "POST", &path, Some(link.clone()), Some(&viewer_token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before, after);
+    assert_eq!(before.0, 0);
+    // The same request from an editor links, so only the grant was refused.
+    let (status, body, _) = call(&app, "POST", &path, Some(link), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 #[tokio::test]
 async fn sqlite_zotero_http_sync_links_retirement_and_current_owner() {
     use fvoci_server::db::zotero::{self, Actor};
@@ -2713,6 +2754,67 @@ async fn github_issue_links_and_status_sync_use_the_fake_api() {
     dispatcher.request_shutdown();
     dispatcher.join().await.unwrap();
     pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PG twin of `sqlite_github_issue_link_refuses_same_workspace_viewer`.
+#[tokio::test]
+async fn github_issue_link_refuses_same_workspace_viewer() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "VIEW", "workspace").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, task, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/projects/{project_id}/tasks"),
+        Some(json!({ "title": "Viewer link" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let viewer = add_workspace_user(&admin, workspace_id, "guest", "viewer").await;
+    sqlx::query("INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1, $2, $3, $4, 'viewer')")
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(Uuid::parse_str(&project_id).unwrap())
+        .bind(viewer.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{base}/projects/{project_id}"),
+        None,
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "viewer reads the project: {body}");
+    let counts = "SELECT (SELECT count(*) FROM fvoci.github_issue_links), (SELECT count(*) FROM fvoci.events), (SELECT count(*) FROM fvoci.audit_log)";
+    let before: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    let path = format!("{base}/github/issue-links");
+    let link = json!({"taskId": task["id"], "repo": "octo/viewer", "issueNumber": 1});
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &path,
+        Some(link.clone()),
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before, after);
+    assert_eq!(before.0, 0);
+    let (status, body, _) = call(&app, "POST", &path, Some(link), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     admin.close().await;
     harness.cleanup().await;
 }
