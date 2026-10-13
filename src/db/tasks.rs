@@ -1112,13 +1112,28 @@ pub(crate) mod selected_task_detail_tests {
         .fetch_one(&f.pool)
         .await
         .unwrap();
+        // tasks_keep_collection_scope refuses a scope change while the created
+        // task item exists: detach, move, then attach to the target's task collection.
+        let mut moved = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("DELETE FROM collection_items WHERE workspace_id=?1 AND task_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .execute(&mut *moved)
+            .await
+            .unwrap();
         sqlx::query("UPDATE tasks SET project_id=?1,status_id=?2 WHERE id=?3")
             .bind(target.as_bytes().as_slice())
             .bind(&status)
             .bind(task.as_bytes().as_slice())
-            .execute(&f.pool)
+            .execute(&mut *moved)
             .await
             .unwrap();
+        let attached = sqlx::query("INSERT INTO collection_items(id,workspace_id,collection_id,task_id) SELECT ?1,workspace_id,id,?2 FROM collections WHERE workspace_id=?3 AND project_id=?4 AND kind='task'")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(task.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice()).bind(target.as_bytes().as_slice())
+            .execute(&mut *moved).await.unwrap();
+        assert_eq!(attached.rows_affected(), 1);
+        moved.commit().await.unwrap();
         assert!(
             matches!(read_other().await.unwrap(), Err(ProjectDbError::NotFound)),
             "old project grant cannot authorize current affiliation"
