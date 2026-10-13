@@ -85,7 +85,7 @@ url = "2"
 html5gum = { version = "=0.8.4", default-features = false }
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
-infer = "0.19"
+infer = "0.22"
 # Image previews (source magick-wasm preview set: PNG/APNG, JPEG, GIF, TIFF,
 # BMP, WebP), decoded only in the rlimited `--internal-image-preview` child.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }

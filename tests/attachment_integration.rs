@@ -872,6 +872,46 @@ async fn hwp_upload_sets_pending_extract_status() {
     harness.cleanup().await;
 }
 
+/// `infer` reads an AutoCAD header as `image/vnd.dwg` and `%PDF` anywhere in
+/// the first KiB as a PDF; both uploads keep the download MIME, not an image.
+#[tokio::test]
+async fn drawing_and_late_pdf_signature_upload_as_downloads() {
+    // AutoCAD 2018 file header (`AC1032`, code page 30).
+    const DWG: &[u8] = b"AC1032\0\0\0\0\0\0\x01\x60\x01\0\0\x21\0\x1e\0\0\0\0\0\0\0\0\0";
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let mut late_pdf = vec![b'x'; 512];
+    late_pdf.extend_from_slice(b"%PDF-1.7\n");
+    for (name, bytes) in [("plan.dwg", DWG), ("scan.bin", &late_pdf[..])] {
+        let uploaded = upload_bytes(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            name,
+            bytes,
+            Some("application/octet-stream"),
+        )
+        .await;
+        let (status, meta, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{workspace_id}/attachments/{}",
+                uploaded.attachment_id
+            ),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert_eq!(meta["mime"], "application/octet-stream", "{name}");
+        assert_eq!(meta["image"], false, "{name}");
+    }
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn revoked_session_cannot_complete_upload() {
     let harness = TestDb::bootstrap().await;
