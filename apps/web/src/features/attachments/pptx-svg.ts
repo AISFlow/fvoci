@@ -3,9 +3,10 @@
  * whose only content is one `<image>` of the renderer's SVG as a
  * `data:image/svg+xml;base64,` URL.
  *
- * `@office-kit/pptx-preview` interpolates some deck strings into its markup
- * unescaped (chart number-format prefixes, for one), so its output is treated
- * as hostile markup and never filtered or rewritten here. The one change
+ * `@office-kit/pptx-preview` writes deck-controlled markup into its output
+ * (hyperlinks keep their target, `javascript:` included; its 0.11 release
+ * also interpolated chart number-format prefixes unescaped), so its output is
+ * treated as hostile markup and never filtered or rewritten here. The one change
  * made to it before this wrapper, in the worker, is `pptx-fallback.ts`: a
  * standard XML tokenizer finds the renderer's placeholder labels, and each
  * is enclosed in a viewport of its own box. That is layout, not a security

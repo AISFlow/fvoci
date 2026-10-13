@@ -137,6 +137,21 @@ function officeKitXlsxNotice() {
 }
 
 /**
+ * `@office-kit/pptx` ships THIRD_PARTY_NOTICES.md as well (the Apache-2.0
+ * notice for its built-in table style definitions); added the same way.
+ */
+function officeKitPptxNotice() {
+  const dir = installedPackageDir("@office-kit/pptx");
+  const { version } = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
+    version: string;
+  };
+  return {
+    title: `@office-kit/pptx ${version}: THIRD_PARTY_NOTICES.md`,
+    text: fs.readFileSync(path.join(dir, "THIRD_PARTY_NOTICES.md"), "utf8").trim(),
+  };
+}
+
+/**
  * The directory `name` is installed in for this app: the first
  * node_modules/`name` up from apps/web, where the bundle resolves it from. For
  * packages that export no ./package.json (createRequire cannot resolve them);
@@ -196,7 +211,12 @@ export default defineConfig({
     fvociWebLicenseAdapt({
       repoRoot,
       manifestPath: browserLicenseManifest,
-      assetNotices: () => [...pdfjsAssetNotices(), officeKitXlsxNotice(), rhwpWasmNotice()],
+      assetNotices: () => [
+        ...pdfjsAssetNotices(),
+        officeKitXlsxNotice(),
+        officeKitPptxNotice(),
+        rhwpWasmNotice(),
+      ],
       workerModuleIds: () => workerModuleIds,
       iconSetRoot: import.meta.dirname,
     }),
