@@ -1666,7 +1666,6 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
     let pool = project_harness::app_pool(&harness).await;
     let dispatcher = Delivery::start(&pool, outbound, Duration::from_secs(5), Vec::new());
     receiver.script("/endless", &[Reply::Endless]);
-    let started = Instant::now();
     insert_event(&admin, workspace_id, "task.deleted", None, json!({})).await;
     wait_until("every hook settled", || {
         let admin = admin.clone();
@@ -1713,9 +1712,18 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
         );
     }
     // Endless body: the read stops at the cap and the delivery completes
-    // well inside the 5 s request budget.
-    assert_eq!(row("endless").await.status, "delivered");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // inside the 5 s request budget. The budget also bounds the body read, so
+    // a read that did not stop at the cap would end as a timeout and be
+    // recorded as a retryable failure, not as this delivered attempt.
+    assert_eq!(
+        deliveries(&admin, hooks["endless"]).await,
+        vec![DeliveryRow {
+            status: "delivered".into(),
+            attempt: 1,
+            http_status: Some(200),
+            next_in_secs: None,
+        }]
+    );
 
     // Redirect: refused (not followed) and terminal; the Location target is
     // never requested.
@@ -3120,14 +3128,14 @@ async fn github_token_client_errors_are_final_and_do_not_hold_other_workspaces()
     let (task_a, statuses_a) = linked_task(&app, &cookie, ws_a, "GHA", "octo/a", 1).await;
     let (task_b, statuses_b) = linked_task(&app, &cookie, ws_b, "GHB", "octo/b", 2).await;
 
-    // A retried event would wait 30 s before its next attempt and hold the
-    // shared cursor that long; B must be PATCHed well before that.
+    // A retried event would wait out the failure backoff before its next
+    // attempt and hold the shared cursor that long. The backoff outlasts the
+    // observation bound, so B is PATCHed inside `wait_until` only if A's
+    // client error never entered the retry path; the state checks after the
+    // wait confirm that directly.
+    const RETRY_BACKOFF: Duration = Duration::from_secs(OBSERVATION_BOUND.as_secs() * 2);
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = github_dispatcher(
-        &pool,
-        Some(github_config(fake_addr)),
-        Duration::from_secs(30),
-    );
+    let dispatcher = github_dispatcher(&pool, Some(github_config(fake_addr)), RETRY_BACKOFF);
     move_task(
         &app,
         &cookie,
@@ -3144,17 +3152,11 @@ async fn github_token_client_errors_are_final_and_do_not_hold_other_workspaces()
         &status_of(&statuses_b, "done"),
     )
     .await;
-    let started = Instant::now();
     wait_until("B PATCHed", || {
         let fake = fake.clone();
         async move { fake.count("PATCH", "/repos/octo/b/issues/2") == 1 }
     })
     .await;
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "B waited {:?} behind A",
-        started.elapsed()
-    );
     assert_eq!(
         fake.count("POST", "/app/installations/404001/access_tokens"),
         1,
