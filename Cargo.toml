@@ -93,9 +93,11 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
 rusty-s3 = "0.8"
 # Same features rusty-s3 already enables: only used to call its signing
-# primitive (ListMultipartUploads) and to parse/serialize S3 XML.
+# primitive (ListMultipartUploads).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-quick-xml = { version = "0.38", features = ["serialize"] }
+# S3 XML bodies (serde) and the office child's OOXML/ODF reader. The
+# rhwp helper links the same 0.42; rusty-s3 0.8 still links 0.38.
+quick-xml = { version = "0.42", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
 # `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
 pdf-extract = "0.12"
