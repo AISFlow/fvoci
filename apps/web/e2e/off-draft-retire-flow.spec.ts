@@ -20,6 +20,7 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
+import * as Y from "yjs";
 import { createE2eUser, flowSchemas, login, readJson } from "./helpers";
 import {
   ownedServerChildEnv,
@@ -36,6 +37,9 @@ const member = { email: `draft-member-${suffix}@example.com`, password: "memberp
 const other = { email: `draft-other-${suffix}@example.com`, password: "otherpass1" };
 // A workspace member whose private project access is revoked and granted back.
 const projectUser = { email: `draft-project-${suffix}@example.com`, password: "projectpass1" };
+// An account with no membership in this workspace: only the actor scope hides
+// another account's slots from it on the denied workspace list.
+const outsider = { email: `draft-outsider-${suffix}@example.com`, password: "outsiderpass1" };
 
 type OffApp = { baseUrl: string };
 const test = base.extend<object, { offApp: OffApp }>({
@@ -168,6 +172,21 @@ async function privateProject(page: Page, key: string): Promise<Project> {
   return readJson(response, flowSchemas.project);
 }
 
+async function workspaceProject(page: Page, key: string): Promise<Project> {
+  // Every workspace member reaches it without a project grant.
+  const response = await page.request.post(`/api/v1/workspaces/${workspaceId}/projects`, {
+    data: { key, name: `초안 ${key}`, visibility: "workspace" },
+  });
+  expect(response.status()).toBe(201);
+  return readJson(response, flowSchemas.project);
+}
+
+/** The owner trashes or restores a target through its own API path. */
+async function trashed(page: Page, lifecycle: string, trash: boolean): Promise<void> {
+  const response = await page.request.post(`${lifecycle}/${trash ? "trash" : "restore"}`);
+  expect(response.status()).toBe(200);
+}
+
 async function projectAccess(page: Page, project: Project, granted: boolean): Promise<void> {
   const members = `/api/v1/workspaces/${workspaceId}/projects/${project.id}/members`;
   const response = granted
@@ -293,6 +312,43 @@ async function switchAccount(page: Page, who: { email: string; password: string 
   await signIn(page, who);
 }
 
+/** True when a request body carries the draft: as plain text, or inside a base64
+ * string such as the Yjs update a versioned body PUT sends. */
+function carries(request: Request, draft: string): boolean {
+  const raw = request.postData() ?? "";
+  if (raw.includes(draft)) return true;
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  const strings: string[] = [];
+  const walk = (value: unknown): void => {
+    if (typeof value === "string") strings.push(value);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  };
+  walk(body);
+  return strings.some((value) => {
+    if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+    const bytes = Buffer.from(value, "base64");
+    if (bytes.toString("utf8").includes(draft)) return true;
+    try {
+      // Typed text may land in several items; join them in update order.
+      return Y.decodeUpdate(bytes)
+        .structs.map((struct) =>
+          struct instanceof Y.Item && struct.content instanceof Y.ContentString
+            ? struct.content.str
+            : "",
+        )
+        .join("")
+        .includes(draft);
+    } catch {
+      return false;
+    }
+  });
+}
+
 function sends(page: Page): Request[] {
   const sent: Request[] = [];
   page.on("request", (request) => {
@@ -360,6 +416,7 @@ test.beforeAll(async ({ browser, offApp }) => {
       if (who === member) memberId = me.userId;
       if (who === projectUser) projectUserId = me.userId;
     }
+    createE2eUser(outsider.email, outsider.password, "바깥", { familyName: "초안" });
   } finally {
     await context.close();
   }
@@ -433,7 +490,9 @@ test("(c) an explicit discard removes the tab slot and nothing is offered again"
     expect(await bodyText(owner.page, target)).not.toContain(draft);
     // The one send is the deliberate base save; the discarded draft never left.
     expect(sent.filter((request) => request.url().includes(target.id))).toHaveLength(1);
-    expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+    // The detector reads the base64 Yjs body: that save carries its own text.
+    expect(sent.filter((request) => carries(request, base))).toHaveLength(1);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
   } finally {
     await owner.context.close();
   }
@@ -463,7 +522,14 @@ test("(d) after logout another account in the same tab never sees the draft", as
     await expect(tab.page.getByRole("alert").first()).toBeVisible();
     await expect(tab.page.getByTestId("off-draft-retained")).toHaveCount(0);
     await expect(tab.page.getByText(draft)).toHaveCount(0);
-    expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+    // Outside the workspace no grant hides the slot: only its actor scope does.
+    await switchAccount(tab.page, outsider);
+    expect((await slots(tab.page)).some((key) => key.includes(target.id))).toBe(true);
+    await tab.page.goto("/?denied=workspace");
+    await expect(tab.page.getByRole("alert").first()).toBeVisible();
+    await expect(tab.page.getByTestId("off-draft-retained")).toHaveCount(0);
+    await expect(tab.page.getByText(draft)).toHaveCount(0);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
   } finally {
     await tab.context.close();
   }
@@ -509,7 +575,7 @@ test("(e) project access loss: the item page offers the document and task drafts
     }
     expect(sent.slice(revokedAt)).toEqual([]);
     for (const { target, draft } of targets) {
-      expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+      expect(sent.filter((request) => carries(request, draft))).toEqual([]);
       expect(await bodyText(owner.page, target)).not.toContain(draft);
     }
     // Access granted back: each target restores its own draft as before.
@@ -593,7 +659,7 @@ test("(f) a task read refused after a granted lookup offers its draft for export
     await expect(retained).toContainText(draft);
     await exportsOnly(peer.page, retained, draft);
     expect(sent.slice(revokedAt)).toEqual([]);
-    expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
     expect(await bodyText(owner.page, target)).not.toContain(draft);
     // Access granted back: the task restores the draft as before.
     await projectAccess(owner.page, project, true);
@@ -606,6 +672,150 @@ test("(f) a task read refused after a granted lookup offers its draft for export
     await expect(notFound(peer.page)).toBeVisible();
     await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
     await expect(peer.page.getByText(draft)).toHaveCount(0);
+  } finally {
+    await Promise.all([owner.context.close(), peer.context.close()]);
+  }
+});
+
+const wikiGone = (page: Page) =>
+  page.getByRole("alert").filter({ hasText: "접근 권한이 없거나 존재하지 않는 항목입니다" });
+
+test("(g) a trashed target reopens with its draft for export only and offers it back once restored", async ({
+  browser,
+  offApp,
+}) => {
+  const owner = await actor(browser, offApp.baseUrl, admin);
+  const peer = await ownSession(browser, offApp.baseUrl, projectUser);
+  try {
+    const project = await workspaceProject(owner.page, `TR${suffix.toUpperCase()}`);
+    const wiki = await document(owner.page, "휴지통 위키");
+    const projectDoc = await projectDocument(owner.page, project, "휴지통 문서");
+    const work = await task(owner.page, project, "휴지통 작업");
+    const api = `/api/v1/workspaces/${workspaceId}`;
+    const targets = [
+      {
+        target: wiki,
+        lifecycle: `${api}/documents/${wiki.id}`,
+        gone: wikiGone,
+        draft: `trashed wiki 초안 ${suffix}`,
+      },
+      {
+        target: projectDoc,
+        lifecycle: `${api}/projects/${project.id}/documents/${projectDoc.id}`,
+        gone: notFound,
+        draft: `trashed document 초안 ${suffix}`,
+      },
+      {
+        target: work,
+        lifecycle: `${api}/tasks/${work.id}`,
+        gone: notFound,
+        draft: `trashed task 초안 ${suffix}`,
+      },
+    ];
+    const sent = sends(peer.page);
+    for (const { target, draft } of targets) {
+      await openOff(peer.page, target);
+      await typeDraft(peer.page, draft);
+    }
+    await leave(peer.page);
+    const trashedAt = sent.length;
+    for (const { lifecycle } of targets) await trashed(owner.page, lifecycle, true);
+    // Each address now names nothing; its own draft stays there for export only.
+    for (const { target, gone, draft } of targets) {
+      await peer.page.goto(target.url);
+      await expect(gone(peer.page)).toBeVisible();
+      expect(new URL(peer.page.url()).pathname).toBe(target.url);
+      await expect(editor(peer.page)).toHaveCount(0);
+      const retained = peer.page.getByTestId("off-draft-retained");
+      await expect(retained).toHaveCount(1);
+      await expect(retained).toContainText(draft);
+      await exportsOnly(peer.page, retained, draft);
+    }
+    expect(sent.slice(trashedAt)).toEqual([]);
+    // Restored from the trash: each target offers its draft back as before.
+    for (const { lifecycle } of targets) await trashed(owner.page, lifecycle, false);
+    for (const { target, draft } of targets) {
+      await openOff(peer.page, target);
+      await expect(peer.page.getByTestId("off-draft-restored")).toBeVisible();
+      await expect(editor(peer.page)).toHaveText(draft);
+      await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+      expect(await bodyText(owner.page, target)).not.toContain(draft);
+    }
+    expect(sent.filter((request) => targets.some(({ draft }) => carries(request, draft)))).toEqual(
+      [],
+    );
+    // Trashed again: another account in this tab, with the slots still here,
+    // gets the plain not-found pages and never a draft.
+    await leave(peer.page);
+    for (const { lifecycle } of targets) await trashed(owner.page, lifecycle, true);
+    await switchAccount(peer.page, other);
+    for (const { target, draft } of targets) {
+      expect((await slots(peer.page)).some((key) => key.includes(target.id))).toBe(true);
+      await peer.page.goto(target.url);
+      if (target === wiki)
+        await expect(peer.page).toHaveURL(new RegExp(`/w/${workspaceSlug}/wiki$`));
+      else await expect(notFound(peer.page)).toBeVisible();
+      await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+      await expect(peer.page.getByText(draft)).toHaveCount(0);
+    }
+  } finally {
+    await Promise.all([owner.context.close(), peer.context.close()]);
+  }
+});
+
+test("(h) a wiki document moved into a project offers its draft back at its new address", async ({
+  browser,
+  offApp,
+}) => {
+  const owner = await actor(browser, offApp.baseUrl, admin);
+  const peer = await ownSession(browser, offApp.baseUrl, projectUser);
+  try {
+    const project = await workspaceProject(owner.page, `MV${suffix.toUpperCase()}`);
+    const target = await document(owner.page, "이동");
+    const sent = sends(peer.page);
+    await openOff(peer.page, target);
+    const draft = `moved wiki 초안 ${suffix}`;
+    await typeDraft(peer.page, draft);
+    await leave(peer.page);
+    const movedAt = sent.length;
+    // The one same-workspace move that keeps the id: wiki into a project.
+    const response = await owner.page.request.post(
+      `/api/v1/workspaces/${workspaceId}/documents/${target.id}/move`,
+      { data: { newParentId: project.rootDocumentId } },
+    );
+    expect(response.status()).toBe(200);
+    const meta = (await response.json()) as { id: string; number: number; projectId: string };
+    expect(meta).toMatchObject({ id: target.id, projectId: project.id });
+    const moved: Target = {
+      id: target.id,
+      url: `/w/${workspaceSlug}/${project.key}-${String(meta.number)}`,
+      body: `/api/v1/workspaces/${workspaceId}/projects/${project.id}/documents/${target.id}/body/versioned`,
+    };
+    // The old wiki address names nothing now: the draft waits there, export only.
+    await peer.page.goto(target.url);
+    await expect(wikiGone(peer.page)).toBeVisible();
+    const retained = peer.page.getByTestId("off-draft-retained");
+    await expect(retained).toHaveCount(1);
+    await exportsOnly(peer.page, retained, draft);
+    expect(sent.slice(movedAt)).toEqual([]);
+    // At its new project address the same target offers the draft back.
+    await openOff(peer.page, moved);
+    await expect(peer.page.getByTestId("off-draft-restored")).toBeVisible();
+    await expect(editor(peer.page)).toHaveText(draft);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
+    expect(await bodyText(owner.page, moved)).not.toContain(draft);
+    // The draft moved along: the old address no longer offers it.
+    await leave(peer.page);
+    await peer.page.goto(target.url);
+    await expect(peer.page).toHaveURL(new RegExp(`/w/${workspaceSlug}/wiki$`));
+    await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
+    // Another account in this tab, with the moved slot still here, is never offered it.
+    await switchAccount(peer.page, other);
+    expect((await slots(peer.page)).some((key) => key.includes(target.id))).toBe(true);
+    await openOff(peer.page, moved);
+    await expect(editor(peer.page)).not.toContainText(draft);
+    await expect(peer.page.getByTestId("off-draft-restored")).toHaveCount(0);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
   } finally {
     await Promise.all([owner.context.close(), peer.context.close()]);
   }
@@ -647,12 +857,12 @@ test("(b) membership revoke: zero sends, reopen shows the denial with export onl
     expect(download.suggestedFilename()).toMatch(/\.md$/);
     expect(readFileSync(await download.path(), "utf8")).toContain(draft);
     expect(sent.slice(revokedAt)).toEqual([]);
-    expect(sent.filter((request) => request.postData()?.includes(draft))).toEqual([]);
+    expect(sent.filter((request) => carries(request, draft))).toEqual([]);
     expect(await bodyText(owner.page, target)).not.toContain(draft);
-    // The same tab after logout: another account never lists it.
-    await peer.page.getByRole("button", { name: "로그아웃", exact: true }).click();
-    await expect(peer.page).toHaveURL(/\/login$/);
-    await signIn(peer.page, other);
+    // The same tab after logout: an account outside the workspace, which no grant
+    // filters, never lists it while the slot is still in this tab.
+    await switchAccount(peer.page, outsider);
+    expect((await slots(peer.page)).some((key) => key.includes(target.id))).toBe(true);
     await peer.page.goto("/?denied=workspace");
     await expect(peer.page.getByRole("alert").first()).toBeVisible();
     await expect(peer.page.getByTestId("off-draft-retained")).toHaveCount(0);
