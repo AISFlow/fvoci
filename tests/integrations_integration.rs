@@ -239,7 +239,7 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
             .fetch_all(&fresh)
             .await
             .unwrap();
-    assert_eq!(items, [collection.clone()]);
+    assert_eq!(items, std::slice::from_ref(&collection));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_activity")
         .fetch_one(&fresh)
         .await
