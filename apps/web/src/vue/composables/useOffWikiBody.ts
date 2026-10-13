@@ -115,6 +115,9 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   const retained = shallowRef<RetainedOffDraft | null>(null);
   // The private draft of an owner the view dropped, for retainedFor only.
   const lost = shallowRef<RetainedOffDraft | null>(null);
+  // The draft this target had before a move, left at its old key because the
+  // tab storage refused the new one: export only until an open with room.
+  const unmoved = shallowRef<RetainedOffDraft | null>(null);
   const error = shallowRef<unknown>(null);
   const loading = ref(false);
   const revision = ref(0);
@@ -131,6 +134,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     draft.value?.retire();
     draft.value = null;
     retained.value = null;
+    unmoved.value = null;
     loading.value = false;
     error.value = null;
     generation.value++;
@@ -194,8 +198,10 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         mounted.observeAuthorizedBody(current);
       } else {
         mounted?.retire();
-        // A target moved to another project component brings its draft along.
-        adoptMovedDraft(storage, scope, current);
+        // A target moved to another project component brings its draft along
+        // once the tab storage takes it under the new key.
+        unmoved.value = null;
+        adoptMovedDraft(storage, scope, current, (left) => (unmoved.value = held(left)));
         const next = new OffWikiDraft(scope, current, storage, changed);
         // A slot only memory holds is offered back like any other. Writing it
         // again lets the storage take it now, or keeps its warning.
@@ -243,7 +249,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     if (
       (current?.storageError && (current.dirty || current.sourceBuffer || current.distinct)) ||
       retained.value?.unstored ||
-      lost.value?.unstored
+      lost.value?.unstored ||
+      unmoved.value?.unstored
     )
       event.preventDefault();
   }
@@ -402,6 +409,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     discard,
     verifyCommitted,
     retained: computed(() => retained.value),
+    unmoved: computed(() => unmoved.value),
     retainedFor,
     restored: value((current) => current.restored && current.hasPrivateState, false),
     restoredComparison: value(

@@ -59,6 +59,7 @@ import DocumentExportMenu from "./DocumentExportMenu.vue";
 import DocumentTagsBar from "./DocumentTagsBar.vue";
 import OriginPanel from "./OriginPanel.vue";
 import { sourceBlockSelection } from "../capture/source-block";
+import RetainedDraftList from "./RetainedDraftList.vue";
 import RevisionPanel from "./RevisionPanel.vue";
 import ShareDialog from "./ShareDialog.vue";
 import PersonalTransferDialog from "../capture/PersonalTransferDialog.vue";
@@ -1023,6 +1024,14 @@ function flashBlock(id: string): void {
       <p v-if="realtimeOff && offBody.storageError.value" role="alert">{{
         t("doc.off.storageFailed")
       }}</p>
+      <section
+        v-if="realtimeOff && offBody.unmoved.value"
+        class="document-off-compare"
+        data-testid="off-draft-unmoved"
+      >
+        <p role="alert">{{ t("doc.off.unmoved") }}</p>
+        <RetainedDraftList :drafts="[offBody.unmoved.value]" />
+      </section>
       <section
         v-if="realtimeOff && offBody.restored.value"
         class="document-off-compare"

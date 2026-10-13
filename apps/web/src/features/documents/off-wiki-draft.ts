@@ -218,12 +218,16 @@ export function unreachableDrafts(
  * included) keeps its id: its draft follows it. Only this actor's and
  * credential's slots of the same workspace, target and kind are read, by key
  * prefix; no other slot is parsed. The restoring constructor checks the slot
- * for the new owner first; one it refuses stays where it was. The slot moves,
- * it is never discarded. */
+ * for the new owner first; one it refuses stays where it was. The old slot is
+ * removed only after the storage took the new key without refusing it. A
+ * refused write is taken back even when a fallback kept it, so the old slot
+ * stays the one copy: it goes to `unmoved` for export only and moves on a
+ * later open with room. The slot moves; it is never discarded. */
 export function adoptMovedDraft(
   storage: Pick<Storage, "length" | "key" | "getItem" | "setItem" | "removeItem"> | null,
   owner: OffWikiOwner,
   current: VersionedBody,
+  unmoved: (draft: RetainedOffDraft) => void = () => {},
 ): boolean {
   const key = ownerKey(owner);
   if (!storage || storage.getItem(key) !== null) return false;
@@ -277,7 +281,20 @@ export function adoptMovedDraft(
     try {
       storage.setItem(key, moved);
     } catch {
-      /* A storage fallback may still hold it; checked below. */
+      // A fallback that kept the refused write (page memory) is not the tab
+      // storage. The new key was empty, so this removes only that copy.
+      try {
+        storage.removeItem(key);
+      } catch {
+        /* Nothing was stored there. */
+      }
+      try {
+        const left = parseRetained(storage.getItem(from), from);
+        if (left) unmoved(left);
+      } catch {
+        /* Not exportable; the old slot still stays where it was. */
+      }
+      return false;
     }
     if (storage.getItem(key) !== moved) return false;
     try {

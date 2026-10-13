@@ -36,6 +36,7 @@ import TemplateToolbar from "../editor/TemplateToolbar.vue";
 import { useEditorEntities } from "../editor/useEditorEntities";
 import UnfurlCard from "../editor/UnfurlCard.vue";
 import CollabPresence from "../documents/CollabPresence.vue";
+import RetainedDraftList from "../documents/RetainedDraftList.vue";
 import RevisionPanel from "../documents/RevisionPanel.vue";
 import "@/features/documents/document-shell.css";
 
@@ -435,6 +436,14 @@ async function persistBody(): Promise<void> {
     <p v-if="offBody && offBody.storageError.value" role="alert">{{
       t("doc.off.storageFailed")
     }}</p>
+    <section
+      v-if="offBody && offBody.unmoved.value"
+      class="document-off-compare"
+      data-testid="off-draft-unmoved"
+    >
+      <p role="alert">{{ t("doc.off.unmoved") }}</p>
+      <RetainedDraftList :drafts="[offBody.unmoved.value]" />
+    </section>
     <section
       v-if="offBody && offBody.restored.value"
       class="document-off-compare"
