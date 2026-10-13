@@ -15,7 +15,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use regex::Regex;
 use ring::hkdf;
 use ring::rand::SystemRandom;
@@ -554,7 +554,7 @@ pub async fn check_manager_backend(
 /// A fresh install nonce: 256 random bits, base64url.
 pub fn new_install_nonce() -> String {
     let mut bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

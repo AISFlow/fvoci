@@ -2,12 +2,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::{Algorithm, Argon2, Params, Version};
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use hmac::{Hmac, Mac};
+use argon2::{Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Version};
+use hmac::{Hmac, KeyInit, Mac};
+use rand::rngs::SysRng;
+use rand::TryRng;
 use regex::Regex;
 use sha2::Sha256;
 use tokio::sync::Semaphore;
@@ -102,16 +100,16 @@ fn argon2() -> Argon2<'static> {
 
 fn generate_salt() -> Result<[u8; SALT_LEN], String> {
     let mut bytes = [0u8; SALT_LEN];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
 
 /// PHC string of `input` under the fixed parameters and this salt.
 fn phc_hash(input: &[u8], salt: &[u8; SALT_LEN]) -> Result<String, String> {
-    let b64 = STANDARD.encode(salt);
-    let salt = SaltString::from_b64(b64.trim_end_matches('=')).map_err(|e| e.to_string())?;
     argon2()
-        .hash_password(input, &salt)
+        .hash_password_with_salt(input, salt)
         .map(|hash| hash.to_string())
         .map_err(|e| e.to_string())
 }
@@ -186,9 +184,7 @@ fn verify_password_sync(hash: Option<&str>, password: &str, ring: &Keyring) -> V
         _ => DUMMY_HASH,
     };
 
-    let verified = PasswordHash::new(candidate)
-        .and_then(|parsed| argon2().verify_password(&input, &parsed))
-        .is_ok();
+    let verified = argon2().verify_password(&input, candidate).is_ok();
 
     let ok = key.is_some() && phc.is_some() && full_match && verified;
     VerifyResult {

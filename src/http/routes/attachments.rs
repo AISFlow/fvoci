@@ -1473,9 +1473,9 @@ mod upload_session_route_tests {
         assert_eq!(bytes, BODY);
         use sha2::Digest;
         println!(
-            "S18 actual fresh HTTP bytes={} sha256={:x}",
+            "S18 actual fresh HTTP bytes={} sha256={}",
             bytes.len(),
-            sha2::Sha256::digest(&bytes)
+            hex::encode(sha2::Sha256::digest(&bytes))
         );
         let (status, _) = request(
             fresh.clone(),

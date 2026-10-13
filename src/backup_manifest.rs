@@ -1,11 +1,11 @@
 //! Offline backup manifest creation and restore preflight. No database or server setup.
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path};
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -142,7 +142,15 @@ fn file_entry(path: &Path, expected_name: &str) -> Result<FileEntry> {
     }
     let mut input = File::open(path).map_err(|_| format!("cannot read {expected_name}"))?;
     let mut hash = Sha256::new();
-    io::copy(&mut input, &mut hash).map_err(|_| format!("cannot hash {expected_name}"))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(format!("cannot hash {expected_name}")),
+        }
+    }
     Ok(FileEntry {
         path: expected_name.into(),
         size_bytes: metadata.len(),

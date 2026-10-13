@@ -1867,7 +1867,7 @@ pub(crate) mod maintenance_claim_driver_tests {
         let first = requests.len().saturating_sub(128);
         let records = requests.iter().enumerate().skip(first).map(|(index, body)| {
             let baton = body["baton"].as_str().map(|baton| {
-                format!("{:x}", Sha256::digest(baton.as_bytes()))
+                hex::encode(Sha256::digest(baton.as_bytes()))
             });
             let wire_requests = body["requests"].as_array().map_or_else(
                 || vec![body],

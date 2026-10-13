@@ -10,7 +10,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
+use rand::Rng;
 
 const TEMPLATE: &str = include_str!("../infra/rust/.env.example");
 pub const USAGE: &str =

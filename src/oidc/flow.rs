@@ -13,7 +13,7 @@ use crate::db::backend::Backend;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{Duration, Utc};
-use rand::RngCore;
+use rand::Rng;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
