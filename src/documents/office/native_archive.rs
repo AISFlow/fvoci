@@ -461,4 +461,31 @@ mod tests {
         assert_eq!(record, end);
         assert!(read_archive(&bytes).is_err());
     }
+
+    /// The same field in a central record is invisible to the reader too; the
+    /// fixed 46-byte central span leaves a gap that the tiling refuses.
+    #[test]
+    fn native_archive_container_denies_unparsed_central_extra_field() {
+        let archive = crate::native_archive::tests::policy_fixture();
+        let valid = pack_archive(&archive).unwrap();
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        // Deliberately malformed fixture only: the first central record grows
+        // by an extra field and the end record's directory size with it.
+        let end = valid.len() - 22;
+        let record = u32_at(&valid, end + 16) as usize;
+        let name_end = record + 46 + u16_at(&valid, record + 28);
+        let mut bytes = valid[..name_end].to_vec();
+        bytes[record + 30..record + 32].copy_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xCA, 0xFE]);
+        bytes.extend_from_slice(&valid[name_end..]);
+        let end = bytes.len() - 22;
+        let size = u32_at(&bytes, end + 12) + 2;
+        bytes[end + 12..end + 16].copy_from_slice(&size.to_le_bytes());
+        let mut zip = ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        let file = zip.by_index(0).unwrap();
+        assert!(file.extra_data_fields().next().is_none());
+        assert!(file.extra_data().unwrap_or_default().is_empty());
+        assert!(read_archive(&bytes).is_err());
+    }
 }
