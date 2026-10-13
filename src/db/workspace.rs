@@ -2239,6 +2239,16 @@ pub async fn trash_workspace(
     }
     crate::db::invitations::remove_by_workspace(&mut tx, workspace_id).await?;
     crate::db::api_tokens::remove_by_workspace(&mut tx, workspace_id).await?;
+    // Trash goes to every live project with the workspace stamp. The
+    // memberships delete cascades every user grant, and the deferred
+    // project_members_private_lead_check_del only exempts deleted projects, so
+    // a private project led by a user would otherwise refuse the commit.
+    sqlx::query(
+        "UPDATE fvoci.projects SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
         .bind(workspace_id)
         .execute(&mut *tx)
@@ -2330,10 +2340,17 @@ pub async fn trash_workspace_backend(
                 &[Cell::uuid(ws)],
             )
             .await?;
-            // The memberships delete cascades every user grant. PostgreSQL's
-            // deferred project_members_private_lead_check_del then refuses the
-            // commit when a live private project that lost a grant keeps no
-            // lead; the family applies the same check to the same projects.
+            // Trash goes to every live project with the workspace stamp, as on
+            // PostgreSQL. The memberships delete then cascades every user
+            // grant; the check below mirrors the deferred
+            // project_members_private_lead_check_del on the projects that lost
+            // a grant, which only refuses a live private project left leadless.
+            let stamp = Cell::instant(crate::db::identity::stored_now())?;
+            f.execute(
+                "UPDATE projects SET deleted_at=?2,updated_at=?2 WHERE workspace_id=?1 AND deleted_at IS NULL",
+                &[Cell::uuid(ws), stamp.clone()],
+            )
+            .await?;
             let touched = f
                 .query(
                     "SELECT DISTINCT lower(hex(project_id)) FROM project_members WHERE workspace_id=?1 AND user_id IS NOT NULL",
@@ -2366,10 +2383,7 @@ pub async fn trash_workspace_backend(
             }
             f.execute(
                 "UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1",
-                &[
-                    Cell::uuid(ws),
-                    Cell::instant(crate::db::identity::stored_now())?,
-                ],
+                &[Cell::uuid(ws), stamp],
             )
             .await?;
         }

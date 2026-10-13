@@ -2536,59 +2536,81 @@ mod sqlite_port {
         .await
     }
 
-    /// Trash cascades every user grant away. PostgreSQL's deferred
-    /// project_members_private_lead_check_del then refuses the commit while a
-    /// live private project keeps no lead, and passes once a group leads it.
+    /// Trash tombstones every live project with the workspace stamp before the
+    /// memberships delete cascades every user grant, so PostgreSQL's deferred
+    /// project_members_private_lead_check_del passes for a private project led
+    /// only by its creator. While the workspace is live that lead stays required.
     #[tokio::test]
-    async fn trash_leaving_private_project_without_lead_matches_postgres() {
-        /// (trashed, memberships, project grants, workspace.deleted events)
-        type Stored = (bool, i64, i64, i64);
+    async fn trash_with_user_led_private_project_matches_postgres() {
+        /// (trashed, memberships, project grants, workspace.deleted events,
+        /// live projects, projects stamped with the workspace stamp)
+        type Stored = (bool, i64, i64, i64, i64, i64);
         async fn pg_stored(admin: &sqlx::PgPool, ws: Uuid) -> Stored {
-            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM fvoci.workspaces WHERE id=$1),(SELECT count(*) FROM fvoci.memberships WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.project_members WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.events WHERE verb='workspace.deleted')")
+            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM fvoci.workspaces WHERE id=$1),(SELECT count(*) FROM fvoci.memberships WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.project_members WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.events WHERE verb='workspace.deleted'),(SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1 AND deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p JOIN fvoci.workspaces w ON w.id=p.workspace_id WHERE w.id=$1 AND p.deleted_at=w.deleted_at)")
                 .bind(ws)
                 .fetch_one(admin)
                 .await
                 .unwrap()
         }
         async fn sqlite_stored(pool: &sqlx::SqlitePool, ws: Uuid) -> Stored {
-            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM workspaces WHERE id=?1),(SELECT count(*) FROM memberships WHERE workspace_id=?1),(SELECT count(*) FROM project_members WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE verb='workspace.deleted')")
+            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM workspaces WHERE id=?1),(SELECT count(*) FROM memberships WHERE workspace_id=?1),(SELECT count(*) FROM project_members WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects WHERE workspace_id=?1 AND deleted_at IS NULL),(SELECT count(*) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE w.id=?1 AND p.deleted_at=w.deleted_at)")
                 .bind(ws.as_bytes().as_slice())
                 .fetch_one(pool)
                 .await
                 .unwrap()
         }
+        async fn drop_lead(
+            app: &axum::Router,
+            cookie: &str,
+            ws: Uuid,
+            project: &str,
+            user: Uuid,
+        ) -> (StatusCode, Value) {
+            json_request(
+                app.clone(),
+                "DELETE",
+                &format!("/api/v1/workspaces/{ws}/projects/{project}/members/{user}"),
+                None,
+                Some(cookie),
+            )
+            .await
+        }
 
         let harness = TestDb::bootstrap().await;
-        let (app, cookie, _, ws) = setup_session(&harness).await;
+        let (app, cookie, owner, ws) = setup_session(&harness).await;
         let admin = admin_pool(&harness).await;
-        let project = private_project(&app, &cookie, ws).await;
+        let led = private_project(&app, &cookie, ws).await;
+        let grouped = create_project(app.clone(), &cookie, ws, "GRP", "private").await;
+        let grouped = grouped["id"].as_str().unwrap().to_string();
+        group_lead(&app, &cookie, ws, &grouped).await;
         let mut postgres = vec![pg_stored(&admin, ws).await];
-        let refused = trash(&app, &cookie, ws, "acme").await;
-        postgres.push(pg_stored(&admin, ws).await);
-        group_lead(&app, &cookie, ws, &project).await;
+        let kept = drop_lead(&app, &cookie, ws, &led, owner).await;
         postgres.push(pg_stored(&admin, ws).await);
         let trashed = trash(&app, &cookie, ws, "acme").await;
         postgres.push(pg_stored(&admin, ws).await);
-        assert_eq!(refused, postgres_internal_error(), "{postgres:?}");
+        assert_eq!(kept.0, StatusCode::CONFLICT, "{kept:?}");
         assert_eq!(trashed, (StatusCode::OK, json!({"ok": true})));
         assert_eq!(
             postgres,
             [
-                (false, 1, 1, 0),
-                (false, 1, 1, 0),
-                (false, 1, 2, 0),
-                (true, 0, 1, 1)
+                (false, 1, 3, 0, 2, 0),
+                (false, 1, 3, 0, 2, 0),
+                (true, 0, 1, 1, 0, 2)
             ]
         );
         admin.close().await;
         harness.cleanup().await;
 
         let f = Fixture::start().await;
-        let project = private_project(&f.app, &f.cookie, f.ws).await;
+        let led = private_project(&f.app, &f.cookie, f.ws).await;
+        let grouped = create_project(f.app.clone(), &f.cookie, f.ws, "GRP", "private").await;
+        let grouped = grouped["id"].as_str().unwrap().to_string();
+        group_lead(&f.app, &f.cookie, f.ws, &grouped).await;
         let mut sqlite = vec![sqlite_stored(&f.pool, f.ws).await];
-        assert_eq!(trash(&f.app, &f.cookie, f.ws, "groups").await, refused);
-        sqlite.push(sqlite_stored(&f.pool, f.ws).await);
-        group_lead(&f.app, &f.cookie, f.ws, &project).await;
+        assert_eq!(
+            drop_lead(&f.app, &f.cookie, f.ws, &led, f.actor).await,
+            kept
+        );
         sqlite.push(sqlite_stored(&f.pool, f.ws).await);
         assert_eq!(trash(&f.app, &f.cookie, f.ws, "groups").await, trashed);
         sqlite.push(sqlite_stored(&f.pool, f.ws).await);
@@ -2596,11 +2618,12 @@ mod sqlite_port {
         f.close().await;
     }
 
-    /// The JSON NUL, overlong email and leadless trash refusals through the
-    /// remote libSQL driver: the PostgreSQL responses, and nothing stored.
+    /// The JSON NUL and overlong email refusals through the remote libSQL
+    /// driver: the PostgreSQL responses, and nothing stored. Trash with a
+    /// user-led private project succeeds and tombstones it with the workspace.
     #[tokio::test]
     #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
-    async fn remote_json_nul_email_and_trash_refusals_match_postgres() {
+    async fn remote_json_nul_email_refusals_and_trash_match_postgres() {
         let r = Remote::start("parity").await;
         let ints = |row: libsql::Row, n: i32| -> Vec<i64> {
             (0..n).map(|i| row.get::<i64>(i).unwrap()).collect()
@@ -2632,13 +2655,17 @@ mod sqlite_port {
         assert_eq!(ints(r.row(account).await, 3), before);
 
         private_project(&r.app, &r.cookie, r.ws).await;
-        let workspace = "SELECT (SELECT deleted_at IS NOT NULL FROM workspaces WHERE slug='groups'),(SELECT count(*) FROM memberships),(SELECT count(*) FROM project_members),(SELECT count(*) FROM events WHERE verb='workspace.deleted')";
-        let before = ints(r.row(workspace).await, 4);
+        let workspace = "SELECT w.deleted_at IS NOT NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at=w.deleted_at) FROM workspaces w WHERE w.slug='groups'";
+        let before = ints(r.row(workspace).await, 6);
+        assert_eq!((before[0], before[5]), (0, 0));
         assert_eq!(
             trash(&r.app, &r.cookie, r.ws, "groups").await,
-            postgres_internal_error()
+            (StatusCode::OK, json!({"ok": true}))
         );
-        assert_eq!(ints(r.row(workspace).await, 4), before);
+        assert_eq!(
+            ints(r.row(workspace).await, 6),
+            [1, 0, 0, before[3] + 1, 0, before[4]]
+        );
         r.finish().await;
     }
 

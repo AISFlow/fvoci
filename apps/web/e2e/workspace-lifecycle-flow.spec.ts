@@ -56,6 +56,15 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
   await page.getByRole("dialog").getByRole("button", { name: "만들기" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Beta 팀" })).toBeVisible();
+  // A private project led only by its creator must not block the delete.
+  const beta = (
+    await readJson(await page.request.get("/api/v1/me/workspaces"), flowSchemas.workspaces)
+  ).items.find((item) => item.slug === "beta-team");
+  if (beta === undefined) throw new Error("Missing fixture value: beta-team");
+  const privateProject = await page.request.post(`/api/v1/workspaces/${beta.id}/projects`, {
+    data: { key: "BPRIV", name: "비공개 프로젝트", visibility: "private" },
+  });
+  expect(privateProject.status(), await privateProject.text()).toBe(201);
 
   await page.getByRole("link", { name: "Beta 팀" }).click();
   await expect(page).toHaveURL(/\/w\/beta-team\/wiki$/);
@@ -65,7 +74,13 @@ test("home counts and owner deletes a team workspace", async ({ page }) => {
     .filter({ hasText: /^워크스페이스 삭제$/ })
     .click();
   await page.getByLabel("확인을 위해 주소(영문)를 입력하세요.").fill("beta-team");
+  const deleted = page.waitForResponse(
+    (response) =>
+      response.request().method() === "DELETE" &&
+      response.url().endsWith(`/api/v1/workspaces/${beta.id}`),
+  );
   await page.getByRole("button", { name: "워크스페이스 삭제" }).click();
+  expect((await deleted).status()).toBe(200);
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("link", { name: "Beta 팀" })).toHaveCount(0);
   await expect(page.getByText(admin.workspaceName)).toBeVisible();
