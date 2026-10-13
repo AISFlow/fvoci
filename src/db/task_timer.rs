@@ -3009,3 +3009,16 @@ async fn family_estimate(
         updated_at: row.cell(2)?.datetime()?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn receipt_digest_is_lowercase_sha256_hex_of_the_semantic_body() {
+        // sha256sum of `["cleanup",null,null,{}]`: the session id is not part of it.
+        let body = serde_json::json!({"expectedSessionId": "s"});
+        assert_eq!(
+            super::hash("cleanup", None, None, &body).unwrap(),
+            "a38b11f5f3307f8aeec1f2deed2c2ecfe21f3190426e63c8138f8ff9982b6cca"
+        );
+    }
+}

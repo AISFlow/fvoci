@@ -460,6 +460,21 @@ mod tests {
         path
     }
 
+    #[test]
+    fn file_entry_streams_the_sha256_of_the_whole_file() {
+        let dir = scratch();
+        let path = dir.join("db.dump");
+        // Several read buffers long; sha256sum value.
+        fs::write(&path, vec![b'a'; 100_000]).unwrap();
+        let entry = file_entry(&path, "db.dump").unwrap();
+        assert_eq!(entry.size_bytes, 100_000);
+        assert_eq!(
+            entry.sha256,
+            "6d1cf22d7cc09b085dfc25ee1a1f3ae0265804c607bc2074ad253bcc82fd81ee"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     fn write_tar(path: &Path, name: &str, kind: tar::EntryType) {
         let output = File::create(path).unwrap();
         let mut builder = tar::Builder::new(output);

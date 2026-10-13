@@ -527,4 +527,53 @@ mod tests {
             Inspection::Disabled(Reason::Invalid)
         ));
     }
+
+    #[test]
+    fn trust_keys_refuse_malformed_and_mismatched_spki() {
+        // RFC 8410 section 10.1 Ed25519 public key.
+        let ed = hex::decode(
+            "302a300506032b657003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1",
+        )
+        .unwrap();
+        assert!(prepare_keys(&manifest("test-1", "ed25519", &ed)).is_some());
+        assert!(prepare_keys(&manifest("test-1", "es256", &ed)).is_none());
+        let trailing = [ed.as_slice(), &[0]].concat();
+        let with_null_params = [
+            hex::decode("302c300706032b65700500032100")
+                .unwrap()
+                .as_slice(),
+            &ed[12..],
+        ]
+        .concat();
+        let mut unused_bits = ed.clone();
+        unused_bits[11] = 1;
+        for der in [
+            &trailing[..],
+            &ed[..ed.len() - 1],
+            &with_null_params[..],
+            &unused_bits[..],
+        ] {
+            assert!(prepare_keys(&manifest("test-1", "ed25519", der)).is_none());
+        }
+        let wrong_digest = manifest("test-1", "ed25519", &ed)
+            .replace(&hex::encode(Sha256::digest(&ed)), &"0".repeat(64));
+        assert!(prepare_keys(&wrong_digest).is_none());
+        let private_label = manifest("test-1", "ed25519", &ed).replace("PUBLIC KEY", "PRIVATE KEY");
+        assert!(prepare_keys(&private_label).is_none());
+
+        // id-ecPublicKey: the curve parameter must be P-256 (not P-384 or absent).
+        let point = [&[4u8][..], &[1u8; 64]].concat();
+        let ec = |params: &str| {
+            let algorithm = format!("06072a8648ce3d0201{params}");
+            let algorithm = format!("30{:02x}{algorithm}", algorithm.len() / 2);
+            let body = format!("{algorithm}034200{}", hex::encode(&point));
+            hex::decode(format!("30{:02x}{body}", body.len() / 2)).unwrap()
+        };
+        assert!(prepare_keys(&manifest("test-1", "es256", &ec("06082a8648ce3d030107"))).is_some());
+        assert!(prepare_keys(&manifest("test-1", "es256", &ec("06052b81040022"))).is_none());
+        assert!(prepare_keys(&manifest("test-1", "es256", &ec(""))).is_none());
+        assert!(
+            prepare_keys(&manifest("test-1", "ed25519", &ec("06082a8648ce3d030107"))).is_none()
+        );
+    }
 }

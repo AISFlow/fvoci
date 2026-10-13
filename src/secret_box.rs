@@ -157,4 +157,22 @@ mod tests {
         let stored = format!("enc:v2:a:{}", URL_SAFE_NO_PAD.encode(packed));
         assert_eq!(open(&keyring, &stored, "ctx").expect("open"), "hello");
     }
+
+    #[test]
+    fn opens_a_stored_value_byte_for_byte() {
+        // The value above as stored, recomputed with WebCrypto AES-256-GCM:
+        // base64url without padding, `_` from the URL-safe alphabet.
+        let stored = "enc:v2:a:BwcHBwcHBwcHBwcH49DvQremaIXtyKBEClxl_bhfYNSc";
+        assert_eq!(open(&ring("a"), stored, "ctx").expect("open"), "hello");
+        for altered in [
+            format!("{stored}="),
+            stored.replace('_', "/"),
+            format!("{}d", &stored[..stored.len() - 1]),
+        ] {
+            assert_eq!(
+                open(&ring("a"), &altered, "ctx"),
+                Err(SecretBoxError::Invalid)
+            );
+        }
+    }
 }

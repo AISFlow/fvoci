@@ -2230,6 +2230,11 @@ mod tests {
         let a = state_key_from_secret(&"s".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
         let b = state_key_from_secret(&"t".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
         assert_ne!(a, b);
+        // Longer than the SHA-256 block, so HMAC hashes the key first (OpenSSL value).
+        assert_eq!(
+            hex::encode(state_key_from_secret(&"s".repeat(100)).expect("key")),
+            "7a0bda0ae5492f2a190a96f06253e5d41bd985e18c039ad782dc4f15ff736c54"
+        );
         let keys = Keyring::parse_named(
             r#"{"k1":"0101010101010101010101010101010101010101010101010101010101010101","k2":"0202020202020202020202020202020202020202020202020202020202020202"}"#,
             "k1",
@@ -2280,6 +2285,11 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(b"whsec").expect("key");
         mac.update(body);
         let good = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        // OpenSSL HMAC-SHA256("whsec", body), as GitHub sends it.
+        assert_eq!(
+            good,
+            "sha256=2f699952c2a984b0b1c395407dd9a2cca9dccec77a6d328bd3ca78a87c111739"
+        );
         assert!(github.verify_webhook_signature(body, Some(&good)));
         assert!(!github.verify_webhook_signature(b"{}", Some(&good)));
         assert!(!github.verify_webhook_signature(body, Some(&good.to_uppercase())));
