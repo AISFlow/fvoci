@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Dev/test only. Opens Rust-seeded updates the way the editor client does:
-// Yjs 13.6.32 applies the update, y-tiptap builds the ProseMirror root node
+// Yjs 13.6.33 applies the update, y-tiptap builds the ProseMirror root node
 // with the editor schema, and the result must equal the TS seed's.
 //   bun seed-client-check.mjs <collab-engine bin> <case.json>...
 import { spawnSync } from "node:child_process";

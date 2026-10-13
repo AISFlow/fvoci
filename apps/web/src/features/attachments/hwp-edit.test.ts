@@ -126,7 +126,7 @@ await test("HWP: replace one and replace all, export as HWP 5.0, reopen", async 
 await test("no match changes nothing: replaceAll count 0 and a refused replaceOne", async () => {
   const session = await openSession(fixture("sample.hwpx"));
   assert.equal(await replace(session, "없는문자열", "X", true), "unchanged");
-  // rhwp 0.8.6 answers {"ok":false} to a replaceOne with no match.
+  // rhwp 0.8.7 answers {"ok":false} to a replaceOne with no match.
   assert.equal(await replace(session, "없는문자열", "X", false), "rejected");
   assert.equal(await replace(session, "", "X", true), "unchanged");
   assert.deepEqual(reopen(await exported(session, "hwpx")), ["안녕\n"]);

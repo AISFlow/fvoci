@@ -9,7 +9,7 @@ import { chunkPlainText } from "./chunk-plain-text.ts";
 export const HWP_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
- * rhwp `getPageText` (0.8.6) returns the page text as a JSON string literal.
+ * rhwp `getPageText` (0.8.7) returns the page text as a JSON string literal.
  * Decodes it and normalizes CRLF so paragraph boundaries chunk like the
  * server's plain text.
  */

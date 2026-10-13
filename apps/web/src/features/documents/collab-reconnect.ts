@@ -1,7 +1,7 @@
 /* WHY: 방 수용 한도(close 1013)나 협업 불가(1011)로 서버가 인증 전에 소켓을 닫으면 provider 4.7.0
  * 은 두 경로로 동시에 재접속한다. onOpen 이 재시도 루프의 취소 핸들을 지운 뒤라
- * (hocuspocus-provider.esm.js:188-193) 루프는 첫 서버 프레임 전까지 끝나지 않았는데도
- * (:305-334) onClose 가 setTimeout(connect) 로 새 루프를 만들고(:404-414) 옛 루프도 자기
+ * (hocuspocus-provider.esm.js:190-195) 루프는 첫 서버 프레임 전까지 끝나지 않았는데도
+ * (:307-336) onClose 가 setTimeout(connect) 로 새 루프를 만들고(:406-416) 옛 루프도 자기
  * backoff 로 계속 돈다. 거절될 때마다 루프가 하나씩 늘어 간격이 1 s → 20 ms 로 줄어드는
  * 폭주가 된다. OwnedSocket 이 취소 핸들을 첫 프레임까지 쥐고 있어 루프는 늘 하나다: 같은
  * 소켓이 상한 있는 jitter backoff(RECONNECT_BACKOFF)로 다시 열고 열 때마다 인증을 다시
@@ -16,7 +16,8 @@ import {
 
 /** Backoff of the socket's own retry loop (@lifeomic/attempt 3.1 via provider 4.7.0): retry n
  * waits a random delay in [minDelay, min(delay·factor^(n-1), maxDelay)]. minDelay < delay keeps
- * the first retry jittered; delay < minDelay would make connect() reject. A served session that
+ * the first retry jittered; delay < minDelay fails attempt's option check, so connect() only emits
+ * maxAttemptsFailed and never opens a socket. A served session that
  * drops waits `delay` before its fresh loop starts again from the first step. */
 export const RECONNECT_BACKOFF = {
   delay: 1_000,
@@ -63,7 +64,7 @@ export class RefusalWatch {
   }
 }
 
-/* WHY: 두 가지를 provider 4.7.0 위에서 고친다(공개 멤버만 재정의, index.d.ts:261-281).
+/* WHY: 두 가지를 provider 4.7.0 위에서 고친다(공개 멤버만 재정의, index.d.ts:265-285).
  * 1) 재시도 루프는 하나: onOpen 은 취소 핸들을 지우지 않고, 첫 서버 프레임이 시도를 끝낼 때만
  *    지운다. 그 전의 close 는 루프가 backoff 로 다시 시도하고, onClose 는 핸들이 있어 새 루프를
  *    만들지 않는다. 서비스 중 끊긴 세션(프레임 뒤)은 핸들이 없어 onClose 가 새 루프를 연다.

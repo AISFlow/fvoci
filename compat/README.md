@@ -64,9 +64,9 @@ This is **document-update** interchange only.
 
 ### Hocuspocus provider vs y-protocols sync
 
-Real `@hocuspocus/provider@4.6.0` handshake against a capturing WebSocket (no network server):
+Real `@hocuspocus/provider@4.7.0` handshake against a capturing WebSocket (no network server):
 
-1. **Auth** (64B): varString document name, type 2, `writeAuthentication` token, version `4.6.0`
+1. **Auth** (64B): varString document name, type 2, `writeAuthentication` token, version `4.7.0`
 2. **Sync** (50B): name + type 0 + inner y-protocols SyncStep1 (`00 01 00`)
 3. **Awareness** (58B): name + type 1 + awareness blob
 

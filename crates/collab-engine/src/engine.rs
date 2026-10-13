@@ -19,7 +19,7 @@ pub const FRAGMENT: &str = "prosemirror";
 
 pub fn new_doc() -> Doc {
     // Options::default() uses with_guid_and_client_id: cleanup_formatting=false.
-    // small-client (crate feature) keeps 32-bit ClientID for Yjs 13.6.32.
+    // small-client (crate feature) keeps 32-bit ClientID for Yjs 13.6.33.
     let opts = Options {
         skip_gc: true,
         offset_kind: OffsetKind::Utf16,

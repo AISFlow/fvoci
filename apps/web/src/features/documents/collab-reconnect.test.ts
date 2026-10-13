@@ -198,7 +198,7 @@ async function simulatedOpens(
   }
 }
 
-await test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
+await test("재현: provider 4.7.0 은 인증 전 거절마다 재시도 루프가 늘어 폭주한다", async () => {
   const live = await simulatedOpens(
     1_500,
     () => new HocuspocusProviderWebsocket({ ...FAST, WebSocketPolyfill: RefusingSocket }),
@@ -210,7 +210,7 @@ await test("재현: provider 4.6.0 은 인증 전 거절마다 재시도 루프�
   assert.ok(lateGaps[10] < 20, `late gaps shrink below the base delay: ${String(lateGaps[10])} ms`);
 });
 
-await test("재현: provider 4.6.0 은 파기 전에 예약된 재접속으로 파기 뒤에도 소켓을 연다", async () => {
+await test("재현: provider 4.7.0 은 파기 전에 예약된 재접속으로 파기 뒤에도 소켓을 연다", async () => {
   const { live, madeAfterDestroy, afterDestroy } = await measure(
     300,
     () =>
