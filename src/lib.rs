@@ -1,3 +1,9 @@
+// tests/support/libsql_finish_fixture.rs is compiled into these lib tests
+// (src/db/mod.rs) and into integration tests, and names the crate as
+// `fvoci_server` in both.
+#[cfg(all(test, feature = "db-tests"))]
+extern crate self as fvoci_server;
+
 pub mod alloc_guard;
 pub mod api;
 pub mod attachments;
@@ -15,6 +21,7 @@ pub mod export_zip;
 pub mod gantt;
 pub mod healthcheck;
 pub mod http;
+pub mod http_client;
 pub mod ics;
 pub mod identity;
 pub mod import_job;

@@ -366,7 +366,7 @@ async fn meili_ids(meili: &MeiliConfig) -> Vec<String> {
         "{}/indexes/{}/documents?limit=1000",
         meili.url, meili.index_uid
     );
-    let resp = reqwest::Client::new()
+    let resp = fvoci_server::http_client::client()
         .get(url)
         .bearer_auth(meili.api_key())
         .send()
@@ -389,7 +389,7 @@ async fn meili_ids(meili: &MeiliConfig) -> Vec<String> {
 
 async fn meili_doc(meili: &MeiliConfig, id: &str) -> Value {
     let url = format!("{}/indexes/{}/documents/{}", meili.url, meili.index_uid, id);
-    let resp = reqwest::Client::new()
+    let resp = fvoci_server::http_client::client()
         .get(url)
         .bearer_auth(meili.api_key())
         .send()
@@ -401,7 +401,7 @@ async fn meili_doc(meili: &MeiliConfig, id: &str) -> Value {
 
 async fn enqueue_raw_documents(meili: &MeiliConfig, docs: Value) -> u64 {
     let url = format!("{}/indexes/{}/documents", meili.url, meili.index_uid);
-    let resp = reqwest::Client::new()
+    let resp = fvoci_server::http_client::client()
         .post(url)
         .bearer_auth(meili.api_key())
         .json(&docs)
@@ -593,7 +593,7 @@ async fn wiki_to_private_project_move_updates_project_id() {
             None
         )
     );
-    let doc: Value = reqwest::Client::new()
+    let doc: Value = fvoci_server::http_client::client()
         .get(url)
         .bearer_auth(meili.api_key())
         .send()
@@ -2317,7 +2317,7 @@ impl IndexGate {
         let addr = listener.local_addr().expect("index gate address");
         let state = std::sync::Arc::new(IndexGateState {
             upstream: upstream.clone(),
-            http: reqwest::Client::builder()
+            http: fvoci_server::http_client::builder()
                 .timeout(Duration::from_millis(
                     fvoci_server::search::meili::MEILI_OP_TIMEOUT_MS,
                 ))

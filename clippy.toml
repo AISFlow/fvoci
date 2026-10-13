@@ -1,0 +1,8 @@
+# reqwest is built with `rustls-no-provider`: a client that does not get
+# FVOCI's TLS config (src/http_client.rs: ring, bundled Mozilla roots)
+# panics when it is built. Only that module may call these.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "use fvoci_server::http_client::client()" },
+    { path = "reqwest::Client::builder", reason = "use fvoci_server::http_client::builder()" },
+    { path = "reqwest::ClientBuilder::new", reason = "use fvoci_server::http_client::builder()" },
+]

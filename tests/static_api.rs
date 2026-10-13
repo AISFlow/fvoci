@@ -811,7 +811,10 @@ fn metric_sample<'a>(body: &'a str, name: &str) -> &'a str {
 /// allowed address, and a listed peer is not refused by a foreign XFF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_allow_list_uses_tcp_peer_not_forwarded_for() {
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let client = fvoci_server::http_client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     for (allow, forwarded, expected) in [
         ("127.0.0.1/32", None, 200),
         ("127.0.0.1/32", Some("203.0.113.9"), 200),

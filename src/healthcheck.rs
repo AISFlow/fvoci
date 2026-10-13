@@ -94,7 +94,7 @@ fn probe_target(bind: Option<&str>) -> Result<SocketAddr, String> {
 }
 
 async fn probe_ready(target: SocketAddr) -> Result<reqwest::StatusCode, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(PROBE_TIMEOUT)

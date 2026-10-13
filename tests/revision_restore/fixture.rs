@@ -203,7 +203,7 @@ pub(super) async fn request(
     token: &str,
     body: Option<Value>,
 ) -> (reqwest::StatusCode, Value) {
-    let mut req = reqwest::Client::new()
+    let mut req = fvoci_server::http_client::client()
         .request(method, format!("http://{addr}{path}"))
         .header("origin", PUBLIC_ORIGIN)
         .header("cookie", format!("fvoci_session={token}"));
@@ -218,7 +218,7 @@ pub(super) async fn setup(
     addr: std::net::SocketAddr,
     with_document: bool,
 ) -> (String, String, String) {
-    let response = reqwest::Client::new().post(format!("http://{addr}/api/v1/setup"))
+    let response = fvoci_server::http_client::client().post(format!("http://{addr}/api/v1/setup"))
         .header("origin", PUBLIC_ORIGIN).json(&json!({"email":"restore@example.invalid","password":"supersecret1","givenName":"Restore","workspaceSlug":"restore","workspaceName":"Restore"}))
         .send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);

@@ -702,7 +702,7 @@ fn signed_until<'a, A: S3Action<'a>>(action: &A, ttl: Duration) -> PresignedUrl 
 /// implicit `HTTP(S)_PROXY`: signed URLs go only to the configured endpoint.
 /// TCP keepalive detects a peer that vanished without closing.
 fn client_builder() -> reqwest::ClientBuilder {
-    Client::builder()
+    crate::http_client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .tcp_keepalive(TCP_KEEPALIVE)
         .redirect(redirect::Policy::none())

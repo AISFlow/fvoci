@@ -1558,7 +1558,7 @@ async fn wait_for_postgres(
 }
 
 async fn wait_for_meili(url: &str, deadline: tokio::time::Instant) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;

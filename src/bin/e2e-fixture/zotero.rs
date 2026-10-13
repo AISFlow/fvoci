@@ -186,7 +186,7 @@ pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::timeout(std::time::Duration::from_secs(5), server).await???;
     let clean = hub.shutdown().await.is_clean();
     if let Some(config) = meili.as_ref().filter(|_| index_cleanup_required) {
-        let response = reqwest::Client::new()
+        let response = fvoci_server::http_client::client()
             .delete(format!("{}/indexes/{}", config.url, config.index_uid))
             .bearer_auth(config.api_key())
             .send()

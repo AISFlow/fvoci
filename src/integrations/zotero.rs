@@ -1967,7 +1967,7 @@ pub mod fixtures {
                 let mut header = reqwest::header::HeaderValue::from_str(key)
                     .map_err(|_| ZoteroError::Invalid)?;
                 header.set_sensitive(true);
-                let response = reqwest::Client::builder()
+                let response = crate::http_client::builder()
                     .no_proxy()
                     .redirect(reqwest::redirect::Policy::none())
                     .build()

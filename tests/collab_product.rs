@@ -1184,7 +1184,7 @@ async fn collab_unavailable_without_helper_config() {
     let harness = TestDb::bootstrap().await;
     let server = start_product_test_server(&harness.app_url, false).await;
     let addr = server.addr;
-    let response = reqwest::Client::new()
+    let response = fvoci_server::http_client::client()
         .get(format!("http://{addr}/collab"))
         .header("origin", PUBLIC_ORIGIN)
         .send()
@@ -6434,7 +6434,7 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     ));
 
     let http_started = std::time::Instant::now();
-    let http = reqwest::Client::new()
+    let http = fvoci_server::http_client::client()
         .get(format!("http://{addr}/collab"))
         .header("origin", PUBLIC_ORIGIN)
         .send()

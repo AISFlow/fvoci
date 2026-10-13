@@ -357,7 +357,7 @@ async fn meili_vectors(meili: &MeiliConfig, id: &str) -> Value {
         "{}/indexes/{}/documents/{}?retrieveVectors=true",
         meili.url, meili.index_uid, id
     );
-    let resp = reqwest::Client::new()
+    let resp = fvoci_server::http_client::client()
         .get(url)
         .bearer_auth(meili.api_key())
         .send()

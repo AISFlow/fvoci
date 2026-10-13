@@ -418,7 +418,7 @@ async fn selected_install_fresh_and_existing_service_uid() {
     let inputs = Inputs::load();
     let run = inputs.run_directory("uid");
     let db = run.join("data/app.sqlite");
-    let client = reqwest::Client::builder()
+    let client = fvoci_server::http_client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -640,7 +640,7 @@ async fn selected_install_sigterm_waits_actual_commit_and_close() {
         let mut restart =
             OwnedProcess::start(&mut inputs.command(&db), run.report("restart-process.json"));
         let url = ready(&mut restart).await;
-        let response = reqwest::Client::builder()
+        let response = fvoci_server::http_client::builder()
             .no_proxy()
             .build()
             .unwrap()
@@ -937,7 +937,7 @@ async fn selected_install_forced_failure_cleans_owned_child_gate_and_temporary_t
                         .parse::<std::net::SocketAddr>()
                         .unwrap(),
                 );
-                let response = reqwest::Client::builder()
+                let response = fvoci_server::http_client::builder()
                     .no_proxy()
                     .build()
                     .unwrap()

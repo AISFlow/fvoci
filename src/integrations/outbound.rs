@@ -437,7 +437,7 @@ pub(crate) fn pinned_client(
     pinned: SocketAddr,
     timeout: Duration,
 ) -> Result<reqwest::Client, OutboundError> {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .timeout(timeout)
