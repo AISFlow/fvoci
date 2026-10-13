@@ -30,7 +30,8 @@ import {
   trashDocument,
 } from "@/features/documents/document-api";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
-import { useOffWikiBody, useRetainedDraftExport } from "../../composables/useOffWikiBody";
+import { useOffWikiBody } from "../../composables/useOffWikiBody";
+import { useRetainedDraftExport } from "../../composables/useOffWikiBodySlots";
 import { projectAncestors } from "@/features/documents/project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { createProjectDocumentAttachmentBridge } from "@/features/workspace/attachment-upload";
