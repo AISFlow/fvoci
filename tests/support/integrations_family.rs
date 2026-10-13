@@ -124,6 +124,10 @@ impl Fixture {
         let backlog = Uuid::now_v7();
         let done = Uuid::now_v7();
         sqlx::query("INSERT INTO projects(id,workspace_id,key,name,visibility,created_by) VALUES(?1,?2,'TEST','Fixture','workspace',?3)").bind(project.as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice()).bind(self.user.as_bytes().as_slice()).execute(&self.sqlite).await.unwrap();
+        // Mirror projects_task_collection for this raw-SQL project fixture.
+        sqlx::query("INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,'task','Fixture')")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(self.workspace.as_bytes().as_slice())
+            .bind(project.as_bytes().as_slice()).execute(&self.sqlite).await.unwrap();
         sqlx::query("INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)")
             .bind(workflow.as_bytes().as_slice())
             .bind(self.workspace.as_bytes().as_slice())

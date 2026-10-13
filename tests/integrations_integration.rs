@@ -225,6 +225,21 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
         .await
         .unwrap();
     let task = Uuid::from_slice(&task).unwrap();
+    // PG tasks_collection_item: the webhook task is one item of its project's
+    // task collection, written by the same writer.
+    let collection: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM collections WHERE project_id=?1 AND kind='task'")
+            .bind(project.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    let items: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE task_id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_all(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(items, [collection.clone()]);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_activity")
         .fetch_one(&fresh)
         .await
@@ -333,6 +348,39 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // Like the PG trigger, a project without its task collection aborts the
+    // delivery: no task, item, link, event, activity, number or marker.
+    sqlx::query("DELETE FROM collections WHERE id=?1")
+        .bind(&collection)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let counts = "SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM github_issue_links),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),(SELECT count(*) FROM github_deliveries),next_number FROM projects WHERE id=?1";
+    let before: (i64, i64, i64, i64, i64, i64, i64, i32) = sqlx::query_as(counts)
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let mut orphan = payload.clone();
+    orphan["issue"]["number"] = json!(3);
+    orphan["issue"]["title"] = json!("No task collection");
+    let bytes = serde_json::to_vec(&orphan).unwrap();
+    assert!(github::handle_webhook_backend(
+        &f.auth.db.pool,
+        &config,
+        &bytes,
+        Some(&sign_github(&bytes)),
+        Some("issues"),
+        Some(&Uuid::now_v7().to_string())
+    )
+    .await
+    .is_err());
+    let after: (i64, i64, i64, i64, i64, i64, i64, i32) = sqlx::query_as(counts)
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
     assert_eq!(
         call(&app, "DELETE", &base, None, Some(&f.token)).await.0,
         StatusCode::OK
@@ -2391,6 +2439,20 @@ async fn github_webhook_verifies_signature_dedupes_and_syncs_issue_tasks() {
     .unwrap();
     assert_eq!(task.1, "버그 🐛 수정");
     assert_eq!(task.2.to_string(), backlog);
+    let collection: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fvoci.collections WHERE project_id = $1 AND kind = 'task'",
+    )
+    .bind(Uuid::parse_str(&project_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let items: Vec<Uuid> =
+        sqlx::query_scalar("SELECT collection_id FROM fvoci.collection_items WHERE task_id = $1")
+            .bind(task.0)
+            .fetch_all(&admin)
+            .await
+            .unwrap();
+    assert_eq!(items, [collection]);
     let channel: String = sqlx::query_scalar(
         "SELECT channel FROM fvoci.events WHERE verb = 'task.created' AND target_id = $1",
     )
