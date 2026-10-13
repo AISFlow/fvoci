@@ -50,43 +50,76 @@ export function ownerKey(owner: OffWikiOwner): string {
 /** A retired private draft read back for local copy/download only. It is
  * never a live draft or a save base, and nothing here can send it. */
 export type RetainedOffDraft = { owner: OffWikiOwner; markdown: string; excerpt: string };
+const markdownOf = (body: unknown) => (isTiptapDoc(body) ? tiptapDocToMd(body) : "");
+/** The native body a stored draft, or the draft "edit current" set aside, holds. */
+function storedBody(saved: Pick<StoredDraft, "start" | "mine">, targetId: string): unknown {
+  const doc = loadBody(saved.start, targetId);
+  try {
+    Y.applyUpdate(doc, decodeUpdate(saved.mine));
+    if (doc.store.pendingStructs || doc.store.pendingDs)
+      throw new Error("Incomplete draft history");
+    return yDocToTiptapJson(doc);
+  } finally {
+    doc.destroy();
+  }
+}
+function backupBody(backup: StoredDraft | null | undefined, targetId: string): unknown {
+  try {
+    return backup ? storedBody(backup, targetId) : null;
+  } catch {
+    // An unreadable set-aside draft is left out; the working draft still exports.
+    return null;
+  }
+}
 function retainedExport(
   owner: OffWikiOwner,
   mine: unknown,
   sourceText: string | null,
+  backup: unknown,
 ): RetainedOffDraft {
-  // Unapplied Markdown is newer than the native body it was edited from.
-  const markdown = sourceText ?? (isTiptapDoc(mine) ? tiptapDocToMd(mine) : "");
+  // Unapplied Markdown is newer than the native body it was edited from. The
+  // private draft that "edit current" set aside follows the working one.
+  const parts = [sourceText ?? markdownOf(mine)];
+  if (backup !== null) parts.push(markdownOf(backup));
+  const markdown = parts.join("\n\n---\n\n");
   const line = markdown.split("\n").find((value) => value.trim()) ?? "";
   return { owner, markdown, excerpt: line.trim().slice(0, 80) };
 }
 function parseRetained(raw: string | null, key: string): RetainedOffDraft | null {
   if (!raw || raw.length > 40 * 1024 * 1024) return null;
   const saved = JSON.parse(raw) as Partial<Omit<StoredDraft, "format">> & { format: unknown };
+  const source = saved.sourceBuffer;
+  // Export only what the restoring constructor would accept for these fields.
   if (
     saved.format !== 1 ||
     !saved.owner ||
     !saved.start ||
     typeof saved.mine !== "string" ||
-    ownerKey(saved.owner) !== key
+    typeof saved.acknowledged !== "string" ||
+    ownerKey(saved.owner) !== key ||
+    (source &&
+      (typeof source.text !== "string" ||
+        source.text.length > 2 * 1024 * 1024 ||
+        typeof source.baseV1 !== "string")) ||
+    (saved.conflictBackup && ownerKey(saved.conflictBackup.owner) !== key)
   )
     return null;
-  const doc = loadBody(saved.start, saved.owner.targetId);
+  const base = loadBody(saved.start, saved.owner.targetId);
   try {
-    Y.applyUpdate(doc, decodeUpdate(saved.mine));
-    if (doc.store.pendingStructs || doc.store.pendingDs) return null;
-    const source = saved.sourceBuffer?.text;
-    return retainedExport(
-      saved.owner,
-      yDocToTiptapJson(doc),
-      typeof source === "string" ? source : null,
-    );
+    if (saved.acknowledged !== encodeUpdate(Y.encodeStateAsUpdate(base))) return null;
   } finally {
-    doc.destroy();
+    base.destroy();
   }
+  return retainedExport(
+    saved.owner,
+    storedBody({ start: saved.start, mine: saved.mine }, saved.owner.targetId),
+    source ? source.text : null,
+    backupBody(saved.conflictBackup, saved.owner.targetId),
+  );
 }
 /** The body without editor mount normalization: block IDs and the empty
- * document's paragraph are written on mount, not typed by the user. */
+ * document's paragraph are written on mount, not typed by the user. Both
+ * sides are Y projections so attr spelling cannot differ. */
 function visibleBody(content: unknown): string {
   const strip = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(strip);
@@ -129,10 +162,12 @@ export function listRetainedDrafts(
   credentialId: string,
 ): RetainedOffDraft[] {
   const drafts: RetainedOffDraft[] = [];
+  // The key spells the actor and credential first: other slots stay unparsed.
+  const scope = `${STORAGE_PREFIX}${JSON.stringify([actorId, credentialId]).slice(0, -1)},`;
   try {
     for (let index = 0; storage && index < storage.length; index++) {
       const key = storage.key(index);
-      if (!key?.startsWith(STORAGE_PREFIX)) continue;
+      if (!key?.startsWith(scope)) continue;
       let draft: RetainedOffDraft | null = null;
       try {
         draft = parseRetained(storage.getItem(key), key);
@@ -234,6 +269,7 @@ export class OffWikiDraft {
         try {
           if (saved.acknowledged !== encodeUpdate(Y.encodeStateAsUpdate(old)))
             throw new Error("Invalid draft base");
+          const startBody = yDocToTiptapJson(old);
           Y.applyUpdate(old, decodeUpdate(saved.mine));
           if (old.store.pendingStructs || old.store.pendingDs)
             throw new Error("Incomplete draft history");
@@ -308,7 +344,7 @@ export class OffWikiDraft {
             !!saved.comparison ||
             !!saved.sourceBuffer ||
             saved.start.tailSeq !== current.tailSeq ||
-            visibleBody(saved.start.contentJson) !== visibleBody(yDocToTiptapJson(old));
+            visibleBody(startBody) !== visibleBody(yDocToTiptapJson(old));
           if (saved.start.tailSeq !== current.tailSeq) {
             this.latest = current;
             this.comparison = {
@@ -604,7 +640,12 @@ export class OffWikiDraft {
   }
   /** The live private state as a local export, before access loss retires it. */
   exportDraft(): RetainedOffDraft {
-    return retainedExport(this.owner, this.mine, this.sourceBuffer?.text ?? null);
+    return retainedExport(
+      this.owner,
+      this.mine,
+      this.sourceBuffer?.text ?? null,
+      backupBody(this.conflictBackup, this.owner.targetId),
+    );
   }
   /** Only an explicit user choice discards private state, never an in-flight
    * request's. The slot goes before retirement so nothing rewrites it. */

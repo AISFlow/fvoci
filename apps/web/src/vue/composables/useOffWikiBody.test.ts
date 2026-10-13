@@ -1077,4 +1077,51 @@ describe("retired dirty OFF draft lifetime", () => {
     expect(h.writes).toHaveLength(0);
     h.effects.stop();
   });
+  test("a denial of a draft without private state retains nothing to export", async () => {
+    const h = harness();
+    required(h.reads[0]).pending.resolve(source(original));
+    await settle();
+    const verifying = h.body.verifyCommitted();
+    required(h.reads.at(-1)).pending.reject(new ProblemError(403));
+    expect(await verifying).toBe(false);
+    expect(h.body.doc.value).toBeNull();
+    expect(h.body.retained.value).toBeNull();
+    await reopen(h);
+    const loading = h.body.load();
+    required(h.reads.at(-1)).pending.reject(new ProblemError(404));
+    await loading;
+    expect(h.body.retained.value).toBeNull();
+    expect(h.body.retainedFor(original)).toBeNull();
+    expect(h.slots.size).toBe(0);
+    h.effects.stop();
+  });
+  test("losing the owner keeps a draft storage refused for export to that owner only", async () => {
+    for (const deniedFirst of [false, true]) {
+      const h = harness();
+      required(h.reads[0]).pending.resolve(source(original));
+      await settle();
+      h.slots.set = () => {
+        throw new Error("quota");
+      };
+      type(h, " only in memory");
+      expect(required(h.body.draft.value).storageError).toBeInstanceOf(Error);
+      if (deniedFirst) {
+        const saving = h.body.save();
+        required(h.writes.at(-1)).pending.reject(new ProblemError(403));
+        expect(await saving).toBe(false);
+        expect(h.body.retained.value?.markdown).toContain("only in memory");
+      }
+      // The view drops the owner when its document meta is refused.
+      h.scope.value = null;
+      expect(h.body.retained.value).toBeNull();
+      expect(h.body.retainedFor(original)?.markdown).toContain("only in memory");
+      expect(
+        h.body.retainedFor({ ...original, actorId: "B", credentialId: "session-B" }),
+      ).toBeNull();
+      h.scope.value = { ...original, targetId: "other" };
+      expect(h.body.retainedFor(original)).toBeNull();
+      expect(h.slots.size).toBe(0);
+      h.effects.stop();
+    }
+  });
 });

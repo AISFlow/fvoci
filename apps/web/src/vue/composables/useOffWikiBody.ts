@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import {
   OffWikiDraft,
   decodeUpdate,
+  listRetainedDrafts,
   loadBody,
   ownerKey,
   readRetainedDraft,
@@ -29,9 +30,9 @@ function tabStorage(): Storage | null {
 const denied = (failure: unknown) =>
   failure instanceof ProblemError && [401, 403, 404].includes(failure.status);
 
-/** This tab's retained draft of an owner whose current access was refused. */
-export function readRetainedOffDraft(owner: OffWikiOwner): RetainedOffDraft | null {
-  return readRetainedDraft(tabStorage(), owner);
+/** This tab's retained drafts of one actor and credential, read locally only. */
+export function listRetainedOffDrafts(actorId: string, credentialId: string): RetainedOffDraft[] {
+  return listRetainedDrafts(tabStorage(), actorId, credentialId);
 }
 
 /** Local copy/download of a retained draft; neither path reaches the server. */
@@ -68,6 +69,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   const isAuthRetired = () => authRetired.value;
   const draft = shallowRef<OffWikiDraft | null>(null);
   const retained = shallowRef<RetainedOffDraft | null>(null);
+  // The private draft of an owner the view dropped, for retainedFor only.
+  const lost = shallowRef<RetainedOffDraft | null>(null);
   const error = shallowRef<unknown>(null);
   const loading = ref(false);
   const revision = ref(0);
@@ -88,10 +91,20 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     error.value = null;
     generation.value++;
   }
+  // Only private state is a draft; a clean body is the server's, not an export.
+  function exportOf(current: OffWikiDraft | null): RetainedOffDraft | null {
+    if (!current?.active || !current.hasPrivateState) return null;
+    try {
+      return current.exportDraft();
+    } catch {
+      // Never block retirement; the tab slot still holds the draft.
+      return null;
+    }
+  }
   /** Lost access keeps the owned draft in its tab slot and switches it to
    * export only; nothing sends it again before a fresh authorized read. */
   function deny(current: OffWikiDraft) {
-    const kept = current.active ? current.exportDraft() : null;
+    const kept = exportOf(current);
     current.retire();
     draft.value = null;
     retained.value = kept ?? readRetainedDraft(tabStorage(), current.owner);
@@ -145,9 +158,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         if (denied(failure)) {
           const mounted = draft.value;
           const kept =
-            mounted?.active && ownerKey(mounted.owner) === ownerKey(scope)
-              ? mounted.exportDraft()
-              : null;
+            mounted && ownerKey(mounted.owner) === ownerKey(scope) ? exportOf(mounted) : null;
           retire();
           retained.value = kept ?? readRetainedDraft(tabStorage(), scope);
         }
@@ -167,7 +178,11 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
       ]);
     },
     () => {
+      // An owner the view dropped (its document was refused) keeps this page's
+      // private draft for export even when storage refused it; others never do.
+      const kept = owner() || isAuthRetired() ? null : (exportOf(draft.value) ?? retained.value);
       retire();
+      lost.value = kept;
       return load();
     },
     { immediate: true, flush: "sync" },
@@ -280,6 +295,14 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     await load();
     return true;
   }
+  /** A refused owner's export-only draft: this page's own copy first (storage
+   * may have refused it), else that owner's tab slot. */
+  function retainedFor(scope: OffWikiOwner): RetainedOffDraft | null {
+    const key = ownerKey(scope);
+    for (const kept of [retained.value, lost.value])
+      if (kept && ownerKey(kept.owner) === key) return kept;
+    return readRetainedDraft(tabStorage(), scope);
+  }
   async function verifyCommitted(): Promise<boolean> {
     const current = draft.value;
     const started = lifetime;
@@ -325,6 +348,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     discard,
     verifyCommitted,
     retained: computed(() => retained.value),
+    retainedFor,
     restored: value((current) => current.restored && current.hasPrivateState, false),
     restoredComparison: value(
       (current) =>

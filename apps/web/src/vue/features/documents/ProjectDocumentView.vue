@@ -30,11 +30,7 @@ import {
   trashDocument,
 } from "@/features/documents/document-api";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
-import {
-  readRetainedOffDraft,
-  useOffWikiBody,
-  useRetainedDraftExport,
-} from "../../composables/useOffWikiBody";
+import { useOffWikiBody, useRetainedDraftExport } from "../../composables/useOffWikiBody";
 import { projectAncestors } from "@/features/documents/project-ancestors";
 import { projectDocumentsQuery } from "@/features/projects/queries";
 import { createProjectDocumentAttachmentBridge } from "@/features/workspace/attachment-upload";
@@ -214,7 +210,7 @@ const deniedDraft = computed(() => {
     !(failure instanceof ProblemError && [401, 403, 404].includes(failure.status))
   )
     return null;
-  return readRetainedOffDraft({
+  return offBody.retainedFor({
     actorId: actor.userId,
     credentialId: actor.sessionId,
     workspaceId: props.workspaceId,

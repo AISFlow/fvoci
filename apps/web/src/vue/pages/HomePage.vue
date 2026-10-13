@@ -9,8 +9,7 @@ import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
-import { listRetainedDrafts } from "@/features/documents/off-wiki-draft";
-import { useRetainedDraftExport } from "../composables/useOffWikiBody";
+import { listRetainedOffDrafts, useRetainedDraftExport } from "../composables/useOffWikiBody";
 import AuthenticatedLegalNav from "../features/legal/AuthenticatedLegalNav.vue";
 import EmptyWorkspace from "../features/workspace/EmptyWorkspace.vue";
 import WorkspaceCreateDialog from "../features/workspace/WorkspaceCreateDialog.vue";
@@ -39,14 +38,8 @@ const items = computed(() => workspaces.data.value?.items ?? []);
 const retainedDrafts = computed(() => {
   const actor = me.data.value;
   if (!denied.value || !actor?.userId || !actor.sessionId || !workspaces.isSuccess.value) return [];
-  let storage: Storage;
-  try {
-    storage = window.sessionStorage;
-  } catch {
-    return [];
-  }
   const granted = new Set(items.value.map((item) => item.id));
-  return listRetainedDrafts(storage, actor.userId, actor.sessionId).filter(
+  return listRetainedOffDrafts(actor.userId, actor.sessionId).filter(
     (draft) => !granted.has(draft.owner.workspaceId),
   );
 });

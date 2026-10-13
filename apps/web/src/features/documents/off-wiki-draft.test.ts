@@ -693,7 +693,17 @@ describe("retired dirty OFF draft policy", () => {
       {
         ...empty,
         snapshotV1: encodeUpdate(Y.encodeStateAsUpdate(legacy)),
-        contentJson: yDocToTiptapJson(legacy),
+        // A server projection may spell a default attr the Y projection leaves out.
+        contentJson: {
+          type: "doc",
+          content: [
+            {
+              type: "paragraph",
+              attrs: { textAlign: null },
+              content: [{ type: "text", text: "legacy" }],
+            },
+          ],
+        },
       },
     ];
     blank.destroy();
@@ -721,6 +731,49 @@ describe("retired dirty OFF draft policy", () => {
       expect(typed.restored).toBe(true);
       typed.retire();
       persisted.slots.clear();
+    }
+  });
+  test("an export after edit current still carries the private draft it set aside", () => {
+    const persisted = storage();
+    const draft = new OffWikiDraft(owner, source(), persisted, () => {});
+    edit(draft.doc, " set aside");
+    draft.retire();
+    const reload = new OffWikiDraft(
+      owner,
+      source("another writer", "9007199254740994"),
+      persisted,
+      () => {},
+    );
+    reload.editCurrent();
+    edit(reload.doc, " typed on current");
+    const live = reload.exportDraft().markdown;
+    reload.retire();
+    const stored = readRetainedDraft(persisted, owner)?.markdown;
+    for (const markdown of [live, stored]) {
+      expect(markdown).toContain("set aside");
+      expect(markdown).toContain("another writer typed on current");
+    }
+  });
+  test("an export accepts only a slot the restoring reader accepts", () => {
+    const persisted = storage();
+    const initial = source();
+    const draft = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(draft.doc, " tampered");
+    draft.retire();
+    const valid = JSON.parse(persisted.slots.get(ownerKey(owner)) ?? "") as Record<string, unknown>;
+    const blank = new Y.Doc({ gc: false });
+    const other = encodeUpdate(Y.encodeStateAsUpdate(blank));
+    blank.destroy();
+    for (const broken of [
+      { ...valid, acknowledged: other },
+      { ...valid, sourceBuffer: { text: 7, baseV1: other } },
+      { ...valid, conflictBackup: { ...valid, owner: { ...owner, actorId: "B" } } },
+    ]) {
+      persisted.slots.set(ownerKey(owner), JSON.stringify(broken));
+      expect(readRetainedDraft(persisted, owner)).toBeNull();
+      const reader = new OffWikiDraft(owner, initial, persisted, () => {});
+      expect(reader.hasPrivateState).toBe(false);
+      reader.retire();
     }
   });
   test("only an explicit discard drops the slot, never during a request, and nothing is offered again", async () => {
@@ -814,6 +867,21 @@ describe("retired dirty OFF draft policy", () => {
     expect(listRetainedDrafts(listable(persisted.slots), "actor", "credential-2")).toHaveLength(1);
     expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
     expect(listRetainedDrafts(null, "actor", "credential")).toEqual([]);
+    // Another credential's slots are skipped by key, never parsed.
+    const read: string[] = [];
+    listRetainedDrafts(
+      {
+        ...listable(persisted.slots),
+        getItem: (key: string) => {
+          read.push(key);
+          return persisted.slots.get(key) ?? null;
+        },
+      },
+      "actor",
+      "credential",
+    );
+    expect(read).not.toContain(ownerKey(otherCredential));
+    expect(read).toContain(ownerKey(owner));
     // A slot whose stored owner disagrees with its key is not exported.
     const moved = persisted.slots.get(ownerKey(owner)) ?? "";
     persisted.slots.set(ownerKey({ ...owner, actorId: "B" }), moved);

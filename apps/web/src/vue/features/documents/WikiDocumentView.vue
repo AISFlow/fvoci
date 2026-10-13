@@ -47,11 +47,7 @@ import QueryLoading from "../../components/QueryLoading.vue";
 import NativeModal from "../../components/NativeModal.vue";
 import { useSourceDraftGuard } from "../../composables/useSourceDraftGuard";
 import { useReadonlyCommittedBody } from "../../composables/useReadonlyCommittedBody";
-import {
-  readRetainedOffDraft,
-  useOffWikiBody,
-  useRetainedDraftExport,
-} from "../../composables/useOffWikiBody";
+import { useOffWikiBody, useRetainedDraftExport } from "../../composables/useOffWikiBody";
 import CommentPanel from "../comments/CommentPanel.vue";
 import EditorControls from "../editor/EditorControls.vue";
 import TemplateToolbar from "../editor/TemplateToolbar.vue";
@@ -203,7 +199,7 @@ const deniedDraft = computed(() => {
     !(failure instanceof ProblemError && [401, 403, 404].includes(failure.status))
   )
     return null;
-  return readRetainedOffDraft({
+  return offBody.retainedFor({
     actorId: actor.userId,
     credentialId: actor.sessionId,
     workspaceId: props.workspaceId,
