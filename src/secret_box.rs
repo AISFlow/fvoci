@@ -164,6 +164,16 @@ mod tests {
         // base64url without padding, `_` from the URL-safe alphabet.
         let stored = "enc:v2:a:BwcHBwcHBwcHBwcH49DvQremaIXtyKBEClxl_bhfYNSc";
         assert_eq!(open(&ring("a"), stored, "ctx").expect("open"), "hello");
+        // 34 packed bytes: a padded engine would want `==`; `-` is URL-safe.
+        assert_eq!(
+            open(
+                &ring("a"),
+                "enc:v2:a:BwcHBwcHBwcHBwcH-5p2ABo2ElB7dqUxgJndh7hfYNScmA",
+                "ctx"
+            )
+            .expect("open"),
+            "hello!"
+        );
         for altered in [
             format!("{stored}="),
             stored.replace('_', "/"),
