@@ -872,7 +872,7 @@ for (const path of ["target", "crates/collab-engine/target"])
     // The normalized producer has no long-term helper cache. Keep testing the
     // writer collision policy if another helper writer is introduced later.
     const selected =
-      path === "target" ? save("collaboration-test-build") : structuredClone(ordinary);
+      path === "target" ? save("collaboration-main-build") : structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
     if (path !== "target") {
       assert.ok(
