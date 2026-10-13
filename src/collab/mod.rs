@@ -1,4 +1,4 @@
-//! Authenticated Hocuspocus 4.6.0 `/collab` product transport.
+//! Authenticated Hocuspocus 4.7.0 `/collab` product transport.
 //!
 //! Enabled only when `FVOCI_COLLAB_ENGINE` points at a built `collab-engine`
 //! helper binary. Without it the route returns 503 `collab_unavailable`.

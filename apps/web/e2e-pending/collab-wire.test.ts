@@ -21,14 +21,14 @@ function hexBytes(hex: string): Uint8Array {
   return out;
 }
 
-await test("decoder keeps provider 4.6 persist strings and awareness token", () => {
+await test("decoder keeps provider 4.7 persist strings and awareness token", () => {
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
     pins: { "@hocuspocus/provider": string; yjs: string };
     clientID: number;
     cases: Array<{ id: string; hex: string }>;
   };
-  assert.equal(fixture.pins["@hocuspocus/provider"], "4.6.0");
-  assert.equal(fixture.pins.yjs, "13.6.32");
+  assert.equal(fixture.pins["@hocuspocus/provider"], "4.7.0");
+  assert.equal(fixture.pins.yjs, "13.6.33");
   const byId = new Map(fixture.cases.map((row) => [row.id, row.hex]));
 
   assert.deepEqual(decodeHocuspocusFrame(hexBytes(byId.get("connection_ping") ?? "")), {

@@ -25,7 +25,7 @@ function assertInertSvg(svg: string): void {
 }
 
 await test("pinned @rhwp/core is the source contract version", () => {
-  assert.equal(version(), "0.8.6");
+  assert.equal(version(), "0.8.7");
 });
 
 await test("the user-authored Hancom HWP and HWPX samples lay out their Korean text", () => {

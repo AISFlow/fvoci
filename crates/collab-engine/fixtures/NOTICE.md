@@ -3,7 +3,7 @@
 No private customer documents are stored here.
 
 Binary `*.v1` / `*.bin` files and `expectations.json` are produced by
-`js/generate.mjs` using pinned **Yjs 13.6.32** and public TipTap packages
+`js/generate.mjs` using pinned **Yjs 13.6.33** and public TipTap packages
 (`@tiptap/core` / `starter-kit` / `extension-table` / `extension-unique-id` /
 `y-tiptap` 3.0.9). Product code must never import `js/` or spawn Node.
 

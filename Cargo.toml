@@ -43,7 +43,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 # Selected Task projection compares stored decimal text without a float cast.
 bigdecimal = { version = "=0.4.11", default-features = false, features = ["std"] }
 # Explicit pinned TZif data avoids host-local time zones and narrower timestamps.
-jiff-tzdb = "=0.1.8"
+jiff-tzdb = "=0.1.9"
 tz-rs = { version = "=0.7.3", default-features = false, features = ["alloc"] }
 hex = "0.4"
 hmac = "0.12"

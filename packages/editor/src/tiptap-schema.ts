@@ -43,7 +43,7 @@ export type EmojiMenuItem = EmojiItem & { title: string };
 
 const attemptedLangs = new Set<string>();
 
-// TOC 3.31.3 assigns both attrs when data-toc-id is absent, overwriting the
+// TOC 3.31.4 assigns both attrs when data-toc-id is absent, overwriting the
 // block id used by body/blocks and internal links. Seed its separate anchor
 // from an existing unique block id before the inherited lifecycle/plugin runs.
 function preserveHeadingIds(state: EditorState, getId?: (text: string) => string) {
@@ -413,7 +413,7 @@ export function createFvociExtensions(opts?: {
       types: [...UNIQUE_ID_NODE_TYPES],
       /* WHY: #258 — a block without an id (a body the server seeded, a new
        * document's first paragraph) gets one on the first local edit in it.
-       * UniqueID (@tiptap/extension-unique-id 3.31.3, the latest) appends
+       * UniqueID (@tiptap/extension-unique-id 3.31.4) appends
        * that setNodeMarkup to the same dispatch, so when the edit is an IME
        * composition's first update, ProseMirror (prosemirror-view 1.42.5)
        * redraws the block under the composition and Chromium restarts it:

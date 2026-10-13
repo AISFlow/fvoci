@@ -2,7 +2,7 @@
  * What `@rhwp/core` `replaceOne` / `replaceAll` returned (source
  * `rhwp-mutation.ts`). Both answer a JSON string: `{"ok":true,"count":n}`
  * from `replaceAll`, `{"ok":true,...position}` from `replaceOne`, and
- * `{"ok":false}` when nothing was replaced (0.8.6 `replaceOne` with no match).
+ * `{"ok":false}` when nothing was replaced (0.8.7 `replaceOne` with no match).
  */
 export type RhwpMutationResult = { ok: true; count?: number } | { ok: false; reason: string };
 

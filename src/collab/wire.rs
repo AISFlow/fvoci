@@ -1,6 +1,6 @@
-//! Bounded Hocuspocus 4.6.0 provider/server WebSocket frame codec.
+//! Bounded Hocuspocus 4.7.0 provider/server WebSocket frame codec.
 //!
-//! Framing matches `@hocuspocus/provider@4.6.0` and `@hocuspocus/server@4.6.0`:
+//! Framing matches `@hocuspocus/provider@4.7.0` and `@hocuspocus/server@4.7.0`:
 //! - Connection-level `Ping` is a single `[9]` byte with no document prefix.
 //! - Connection-level `Pong` is `writeVarUint(10)` (one byte `0x0a`).
 //! - Document frames are `varString(routingKey) + varUint(type) + payload`.
@@ -34,9 +34,9 @@ impl Limits {
 /// lib0 `readVarUint` throws above `Number.MAX_SAFE_INTEGER`.
 const LIB0_MAX_SAFE_UINT: u64 = (1_u64 << 53) - 1;
 
-/// Provider 4.6.0 multiplex message type after the routing key.
+/// Provider 4.7.0 multiplex message type after the routing key.
 ///
-/// Installed `@hocuspocus/provider@4.6.0` `MessageType` has no opcode 4 or 6.
+/// Installed `@hocuspocus/provider@4.7.0` `MessageType` has no opcode 4 or 6.
 /// Connection-level Ping/Pong are not document-prefixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

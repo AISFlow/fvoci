@@ -25,7 +25,7 @@ function isZip(bytes: Uint8Array): boolean {
 }
 
 /**
- * Bytes to hand rhwp. rhwp 0.8.6 caps each HWPX part (256 MiB XML, 512 MiB
+ * Bytes to hand rhwp. rhwp 0.8.7 caps each HWPX part (256 MiB XML, 512 MiB
  * binary) but not their sum, and eagerly reads every `Scripts/*` part even
  * when nothing references it, so a small package can inflate without bound.
  *

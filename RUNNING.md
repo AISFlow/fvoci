@@ -548,7 +548,7 @@ remain unsupported in this slice.
 ## Collaboration (`/collab`)
 
 The HTTP server exposes `GET /collab` (426 without WebSocket upgrade) and
-upgrades to Hocuspocus 4.6.0 only when `FVOCI_COLLAB_ENGINE` points at a built
+upgrades to Hocuspocus 4.7.0 only when `FVOCI_COLLAB_ENGINE` points at a built
 `collab-engine` helper binary. The container image and Compose stack set it by
 default (see "Container install"); a server run outside them needs the variable.
 Without it the route returns 503 `collab_unavailable`.

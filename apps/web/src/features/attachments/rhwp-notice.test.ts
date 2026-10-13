@@ -24,7 +24,7 @@ await test("the rhwp wasm notice is the pinned wasm32 graph concatenation", () =
   assert.match(text, new RegExp(`^${String(RHWP_WASM_CRATE_COUNT)} crates:$`, "m"));
   assert.equal(text.match(/^ {2}\S+ \d\S*: /gm)?.length, RHWP_WASM_CRATE_COUNT);
   // AND-licensed and incorporated texts a crate table alone would not carry.
-  assert.match(text, /^Applies to: encoding_rs 0\.8\.35 \(LICENSE-WHATWG\)$/m);
+  assert.match(text, /^Applies to: encoding_rs 0\.8\.42 \(LICENSE-WHATWG\)$/m);
   assert.match(text, /^Applies to: unicode-ident 1\.0\.24 \(LICENSE-UNICODE\)$/m);
   assert.match(text, /Copyright © `2024`, `Volexity, Inc`/);
   // Native-only or non-default rhwp dependencies are not in the wasm.
@@ -51,6 +51,6 @@ await test("the notice follows the installed @rhwp/core version", () => {
     fs.readFileSync(path.join(path.dirname(require.resolve("@rhwp/core")), "package.json"), "utf8"),
   ) as { version: string };
   assert.equal(pkg.version, RHWP_CORE_VERSION);
-  assert.match(rhwpWasmNoticeTitle(pkg.version), /e8800c8def63449808a4092798442652ed460552/);
-  assert.throws(() => rhwpWasmNoticeTitle("0.8.7"), /update the rhwp wasm notice/);
+  assert.match(rhwpWasmNoticeTitle(pkg.version), /1a76570e833917d15817415a53c09ad61ab3203f/);
+  assert.throws(() => rhwpWasmNoticeTitle("0.8.8"), /update the rhwp wasm notice/);
 });

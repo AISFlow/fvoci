@@ -3,15 +3,15 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const expected = {
-  eslint: "10.11.0",
+  eslint: "10.12.0",
   "@eslint/js": "10.0.1",
   "typescript-eslint": "8.71.1",
   "@typescript-eslint/parser": "8.71.1",
   "eslint-plugin-vue": "10.11.1",
   "vue-eslint-parser": "10.4.1",
-  prettier: "3.9.9",
+  prettier: "3.9.10",
   "eslint-config-prettier": "10.1.8",
-  globals: "17.12.0",
+  globals: "17.13.0",
   typescript: "5.9.3",
   "@types/bun": "1.4.2",
 };
