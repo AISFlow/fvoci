@@ -4,6 +4,9 @@ This is the maintained crates.io libsql 0.9.30 source at upstream VCS
 `0653c5788d77ef16a97c56ff3e9fdc11717a72d9`, directory `libsql`.
 It is a local FVOCI patch, not an upstream accepted release. See
 `PROVENANCE.json` and `UPSTREAM-FILES.json` for immutable original inputs.
+`cachedSourceEqual` there compares each archive file with Cargo's extracted
+registry source, not with this patched copy; `sdkProductionChangedFiles` in
+`PROVENANCE.json` lists the patched files.
 
 Original crate SHA-256:
 `30fe980ac5693ed1f3db490559fb578885e913a018df64af8a1a46e1959a78df`.
