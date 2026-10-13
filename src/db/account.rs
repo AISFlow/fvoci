@@ -622,6 +622,118 @@ pub async fn schedule_user_erasure(
     })))
 }
 
+pub async fn schedule_user_erasure_backend(
+    backend: &super::backend::Backend,
+    actor: Uuid,
+    session: Uuid,
+    user: Uuid,
+    ip: Option<&str>,
+) -> Result<Option<AdminEraseOutcome>, sqlx::Error> {
+    if let super::backend::Backend::Postgres(pool) = backend {
+        return schedule_user_erasure(pool, actor, session, user, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx.operation().require_admin_session(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows=family.query("SELECT email,is_instance_admin,deleted_at FROM users WHERE id=?1 AND anonymized_at IS NULL",&[Cell::uuid(user)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Some(AdminEraseOutcome::NotFound));
+    };
+    let email = row.cell(0)?.string()?;
+    let admin = row.cell(1)?.boolean()?;
+    if let Some(deleted_at) = row.cell(2)?.optional(Cell::datetime)? {
+        tx.rollback().await?;
+        return Ok(Some(AdminEraseOutcome::Scheduled(WithdrawScheduled {
+            cancel_token: String::new(),
+            erase_at: withdrawal_deadline(deleted_at),
+            email,
+        })));
+    }
+    let owned = family
+        .query(
+            r#"SELECT EXISTS(SELECT 1
+        FROM memberships m
+        JOIN workspaces w ON w.id=m.workspace_id
+        WHERE m.user_id=?1
+        AND m.role='owner'
+        AND w.kind='team'
+        AND w.deleted_at IS NULL)"#,
+            &[Cell::uuid(user)],
+        )
+        .await?;
+    if owned[0].cell(0)?.boolean()? {
+        tx.rollback().await?;
+        return Ok(Some(AdminEraseOutcome::OwnerTransferRequired));
+    }
+    let admins=family.query("SELECT count(*) FROM users WHERE is_instance_admin=1 AND deleted_at IS NULL AND suspended_at IS NULL",&[]).await?;
+    if admin && admins[0].cell(0)?.integer()? <= 1 {
+        tx.rollback().await?;
+        return Ok(Some(AdminEraseOutcome::LastInstanceAdmin));
+    }
+    let cancel = new_token();
+    family
+        .execute(
+            r#"DELETE
+        FROM invitations
+        WHERE invited_by=?1
+        AND accepted_at IS NULL
+        AND workspace_id IN(SELECT workspace_id
+        FROM memberships
+        WHERE user_id=?1)"#,
+            &[Cell::uuid(user)],
+        )
+        .await?;
+    let rows=family.query(r#"UPDATE users SET deleted_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000,withdraw_cancel_token_hash=?2,auth_generation=auth_generation+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000
+        WHERE id=?1
+        AND deleted_at IS NULL
+        AND anonymized_at IS NULL
+        RETURNING deleted_at"#,&[Cell::uuid(user),Cell::text(&cancel.hash)]).await?;
+    let at = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .datetime()?;
+    family
+        .execute(
+            "DELETE FROM api_tokens WHERE user_id=?1",
+            &[Cell::uuid(user)],
+        )
+        .await?;
+    family
+        .execute(
+            "DELETE FROM ics_tokens WHERE user_id=?1",
+            &[Cell::uuid(user)],
+        )
+        .await?;
+    tx.operation().revoke_auth_sessions(user, None).await?;
+    tx.operation()
+        .record_auth_account_change(user_record(
+            "user.withdrawn",
+            Some(actor),
+            user,
+            json!({"userId":user.to_string()}),
+            ip,
+        ))
+        .await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(AdminEraseOutcome::Scheduled(WithdrawScheduled {
+        cancel_token: cancel.token,
+        erase_at: withdrawal_deadline(at),
+        email,
+    })))
+}
+
 async fn user_id_by_cancel_hash(
     executor: impl sqlx::PgExecutor<'_>,
     hash: &str,
@@ -795,6 +907,57 @@ pub async fn admin_cancel_user_erasure(
     )
     .await?;
     tx.commit().await?;
+    Ok(Some(CancelWithdrawOutcome::Ok))
+}
+
+pub async fn admin_cancel_user_erasure_backend(
+    backend: &super::backend::Backend,
+    actor: Uuid,
+    session: Uuid,
+    user: Uuid,
+    ip: Option<&str>,
+) -> Result<Option<CancelWithdrawOutcome>, sqlx::Error> {
+    if let super::backend::Backend::Postgres(pool) = backend {
+        return admin_cancel_user_erasure(pool, actor, session, user, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx.operation().require_admin_session(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows=family.query(r#"SELECT deleted_at,deleted_at+1209600000000>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)
+        FROM users
+        WHERE id=?1
+        AND deleted_at IS NOT NULL
+        AND anonymized_at IS NULL"#,&[Cell::uuid(user)]).await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Some(CancelWithdrawOutcome::NotFound));
+    };
+    if !row.cell(1)?.boolean()? {
+        tx.rollback().await?;
+        return Ok(Some(CancelWithdrawOutcome::DeadlinePassed));
+    }
+    family.execute(r#"UPDATE users SET deleted_at=NULL,withdraw_cancel_token_hash=NULL,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000
+        WHERE id=?1"#,&[Cell::uuid(user)]).await?;
+    tx.operation()
+        .record_auth_account_change(user_record(
+            "user.withdraw_cancelled",
+            Some(actor),
+            user,
+            json!({"userId":user.to_string()}),
+            ip,
+        ))
+        .await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
     Ok(Some(CancelWithdrawOutcome::Ok))
 }
 

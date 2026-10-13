@@ -273,6 +273,33 @@ pub async fn native_history_inventory(
         })
         .collect();
     let content_digest = target_content_digest(&input, &receipts, &revision_meta);
+    inspect_inventory(
+        kind,
+        input,
+        receipts,
+        content_digest,
+        binding,
+        engine_bin,
+        limits,
+        cancel,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn inspect_inventory(
+    kind: crate::collab::wire::CollabKind,
+    input: NativeTargetInput,
+    receipts: Vec<(Uuid, i64, i64, Vec<u8>, Uuid)>,
+    content_digest: String,
+    binding: String,
+    engine_bin: &std::path::Path,
+    limits: collab_engine::Limits,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<NativeHistoryInventory>, NativeDbError> {
+    let target = input.id;
+    let cutoff = input.cutoff;
+    let tail_seq = input.tail_seq;
     let tail_ids: Vec<(i64, Uuid)> = input.tail.iter().map(|(seq, op, _)| (*seq, *op)).collect();
     let revision_ids: Vec<Uuid> = input.revisions.iter().map(|r| r.0).collect();
     let cancelled = cancel.child_token();
@@ -312,4 +339,357 @@ pub async fn native_history_inventory(
         binding: report.binding.clone(),
         report,
     }))
+}
+
+/// The family writer reservation replaces PG row locks for the whole inventory
+/// and publication. It excludes edits and GC until this caller finishes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn native_history_inventory_family(
+    tx: &mut super::backend::FamilyTx,
+    workspace: Uuid,
+    actor: Uuid,
+    kind: crate::collab::wire::CollabKind,
+    target: Uuid,
+    engine_bin: &std::path::Path,
+    limits: collab_engine::Limits,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<NativeHistoryInventory>, NativeDbError> {
+    use super::codec::Cell;
+    use crate::collab::wire::CollabKind;
+    tx.require_writer()?;
+    tx.require_tenant(workspace)?;
+    let name = match kind {
+        CollabKind::Document => "document",
+        CollabKind::Task => "task",
+    };
+    let args = [Cell::uuid(workspace), Cell::uuid(target)];
+    if !tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE workspace_id=?1 AND id=?2)"
+                }
+                CollabKind::Task => {
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE workspace_id=?1 AND id=?2)"
+                }
+            },
+            &args,
+        )
+        .await?[0]
+        .cell(0)?
+        .boolean()?
+    {
+        return Err(NativeDbError::Forbidden);
+    }
+    let states = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT encoding,snapshot_cutoff_seq,tail_seq,length(state)
+        FROM document_states
+        WHERE workspace_id=?1
+        AND document_id=?2"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT encoding,snapshot_cutoff_seq,tail_seq,length(state)
+        FROM task_states
+        WHERE workspace_id=?1
+        AND task_id=?2"#
+                }
+            },
+            &args,
+        )
+        .await?;
+    let Some(state) = states.first() else {
+        let orphan = tx
+            .query(
+                match kind {
+                    CollabKind::Document => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM document_collab_updates
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM document_collab_op_receipts
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_id=?2
+            AND target_kind=?3)"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM task_collab_updates
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM task_collab_op_receipts
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_id=?2
+            AND target_kind=?3)"#
+                    }
+                },
+                &[args[0].clone(), args[1].clone(), Cell::text(name)],
+            )
+            .await?[0]
+            .cell(0)?
+            .boolean()?;
+        return if orphan {
+            Err(ArchiveError::Unsupported("missing native state for captured body".into()).into())
+        } else {
+            Ok(None)
+        };
+    };
+    let encoding = i16::try_from(state.cell(0)?.integer()?)
+        .map_err(|_| ArchiveError::Invalid("native encoding".into()))?;
+    let cutoff = state.cell(1)?.integer()?;
+    let tail_seq = state.cell(2)?.integer()?;
+    let revargs = [args[0].clone(), args[1].clone(), Cell::text(name)];
+    let revision_sizes=tx.query(r#"SELECT id,length(y_snapshot),length(CAST(content_json AS BLOB))+length(CAST(text AS BLOB))
+        FROM revisions
+        WHERE workspace_id=?1
+        AND target_id=?2
+        AND target_kind=?3
+        ORDER BY created_at,id LIMIT 10001"#,&revargs).await?;
+    let bytes = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT COALESCE(sum(length(payload)),0)
+        FROM document_collab_updates
+        WHERE workspace_id=?1
+        AND document_id=?2
+        AND seq>?3
+        AND seq<=?4"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT COALESCE(sum(length(payload)),0)
+        FROM task_collab_updates
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND seq>?3
+        AND seq<=?4"#
+                }
+            },
+            &[
+                args[0].clone(),
+                args[1].clone(),
+                Cell::Integer(cutoff),
+                Cell::Integer(tail_seq),
+            ],
+        )
+        .await?[0]
+        .cell(0)?
+        .integer()?;
+    let body_bytes = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT length(CAST(content_json AS BLOB))
+        FROM documents
+        WHERE workspace_id=?1
+        AND id=?2"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT length(CAST(content_json AS BLOB))
+        FROM tasks
+        WHERE workspace_id=?1
+        AND id=?2"#
+                }
+            },
+            &args,
+        )
+        .await?[0]
+        .cell(0)?
+        .integer()?;
+    let mut revision_bytes = 0i64;
+    let mut json_bytes = body_bytes;
+    for r in &revision_sizes {
+        let n = r.cell(1)?.integer()?;
+        if n as u64 > limits.max_load_bytes {
+            return Err(ArchiveError::Limit.into());
+        }
+        revision_bytes = revision_bytes.saturating_add(n);
+        json_bytes = json_bytes.saturating_add(r.cell(2)?.integer()?);
+    }
+    let load_bytes = state.cell(3)?.integer()?.saturating_add(bytes);
+    if load_bytes as u64 > limits.max_load_bytes
+        || revision_sizes.len() > MAX_ENTRIES
+        || revision_bytes.saturating_add(load_bytes) > MAX_BYTES as i64
+        || json_bytes > MAX_GRAPH_BYTES as i64
+    {
+        return Err(ArchiveError::Limit.into());
+    }
+    let snapshot = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    "SELECT state FROM document_states WHERE workspace_id=?1 AND document_id=?2"
+                }
+                CollabKind::Task => {
+                    "SELECT state FROM task_states WHERE workspace_id=?1 AND task_id=?2"
+                }
+            },
+            &args,
+        )
+        .await?[0]
+        .cell(0)?
+        .bytes()?;
+    let body = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    "SELECT content_json FROM documents WHERE workspace_id=?1 AND id=?2"
+                }
+                CollabKind::Task => {
+                    "SELECT content_json FROM tasks WHERE workspace_id=?1 AND id=?2"
+                }
+            },
+            &args,
+        )
+        .await?[0]
+        .cell(0)?
+        .value()?;
+    let tails = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT seq,op_id,payload
+        FROM document_collab_updates
+        WHERE workspace_id=?1
+        AND document_id=?2
+        AND seq>?3
+        AND seq<=?4
+        ORDER BY seq LIMIT 10001"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT seq,op_id,payload
+        FROM task_collab_updates
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND seq>?3
+        AND seq<=?4
+        ORDER BY seq LIMIT 10001"#
+                }
+            },
+            &[
+                args[0].clone(),
+                args[1].clone(),
+                Cell::Integer(cutoff),
+                Cell::Integer(tail_seq),
+            ],
+        )
+        .await?;
+    let receipt_rows = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT op_id,seq,payload_len,payload_sha256,actor_user_id
+        FROM document_collab_op_receipts
+        WHERE workspace_id=?1
+        AND document_id=?2
+        ORDER BY seq,op_id LIMIT 10001"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT op_id,seq,payload_len,payload_sha256,actor_user_id
+        FROM task_collab_op_receipts
+        WHERE workspace_id=?1
+        AND task_id=?2
+        ORDER BY seq,op_id LIMIT 10001"#
+                }
+            },
+            &args,
+        )
+        .await?;
+    if tails.len() > MAX_ENTRIES || receipt_rows.len() > MAX_ENTRIES {
+        return Err(ArchiveError::Limit.into());
+    }
+    let tail: Vec<(i64, Uuid, Vec<u8>)> = tails
+        .iter()
+        .map(|r| Ok((r.cell(0)?.integer()?, r.cell(1)?.id()?, r.cell(2)?.bytes()?)))
+        .collect::<Result<_, sqlx::Error>>()?;
+    let receipts: Vec<(Uuid, i64, i64, Vec<u8>, Uuid)> = receipt_rows
+        .iter()
+        .map(|r| {
+            Ok((
+                r.cell(0)?.id()?,
+                r.cell(1)?.integer()?,
+                r.cell(2)?.integer()?,
+                r.cell(3)?.bytes()?,
+                r.cell(4)?.id()?,
+            ))
+        })
+        .collect::<Result<_, sqlx::Error>>()?;
+    check_canonical_history(cutoff, tail_seq, &tail, &receipts)?;
+    let revs=tx.query(r#"SELECT id,encoding,y_snapshot,content_json,reason,created_by,created_at,text,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq
+        FROM revisions
+        WHERE workspace_id=?1
+        AND target_id=?2
+        AND target_kind=?3
+        ORDER BY created_at,id"#,&revargs).await?;
+    if revs.len() != revision_sizes.len() {
+        return Err(ArchiveError::Invalid("native history continuity".into()).into());
+    }
+    let revisions = revs
+        .iter()
+        .map(|r| {
+            Ok((
+                r.cell(0)?.id()?,
+                i16::try_from(r.cell(1)?.integer()?)
+                    .map_err(|_| sqlx::Error::Protocol("native encoding".into()))?,
+                r.cell(2)?.bytes()?,
+                r.cell(3)?.value()?,
+            ))
+        })
+        .collect::<Result<_, sqlx::Error>>()?;
+    let meta = revs
+        .iter()
+        .map(|r| {
+            Ok(RetainedRevisionMeta {
+                reason: r.cell(4)?.string()?,
+                created_by: r.cell(5)?.optional(Cell::id)?,
+                created_at: r
+                    .cell(6)?
+                    .datetime()?
+                    .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                text: r.cell(7)?.string()?,
+                restored_from_id: r.cell(8)?.optional(Cell::id)?,
+                restore_correlation_id: r.cell(9)?.optional(Cell::id)?,
+                restore_base_tail_seq: r.cell(10)?.optional(Cell::integer)?,
+                restore_committed_tail_seq: r.cell(11)?.optional(Cell::integer)?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let input = NativeTargetInput {
+        kind: name.into(),
+        id: target,
+        encoding,
+        cutoff,
+        tail_seq,
+        snapshot,
+        tail,
+        body,
+        revisions,
+    };
+    let captured_at = tx
+        .query(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+            &[],
+        )
+        .await?[0]
+        .cell(0)?
+        .datetime()?
+        .to_rfc3339();
+    let binding = target_binding(workspace, actor, &captured_at, &input);
+    let digest = target_content_digest(&input, &receipts, &meta);
+    inspect_inventory(
+        kind, input, receipts, digest, binding, engine_bin, limits, cancel,
+    )
+    .await
 }

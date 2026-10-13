@@ -5,8 +5,8 @@ use crate::api::personal_transfer::{
 };
 use crate::collab::room::RoomKey;
 use crate::db::personal_transfer::{
-    preview_personal_transfer, transfer_personal_item, PersonalTransferDbError, TransferBodyEngine,
-    TransferFiles,
+    preview_personal_transfer_backend, transfer_personal_item_backend, PersonalTransferDbError,
+    TransferBodyEngine, TransferFiles,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
@@ -136,13 +136,8 @@ async fn preview(
     let auth = require_request_auth(&state, &headers, &jar, Access::Session, Some(source)).await?;
     let selection: PersonalTransferSelection = serde_json::from_slice(&body)
         .map_err(|_| AppError::from_code(ProblemCode::InvalidInput))?;
-    let output = preview_personal_transfer(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/personal_transfer.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
+    let output = preview_personal_transfer_backend(
+        &state.auth.db.pool,
         source,
         auth.user_id,
         auth.credential_id,
@@ -170,13 +165,8 @@ async fn transfer(
         return Err(AppError::from_code(ProblemCode::ConfirmInvalid).into());
     }
     let ip = peer_ip(peer.ip());
-    let output = transfer_personal_item(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/personal_transfer.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
+    let output = transfer_personal_item_backend(
+        &state.auth.db.pool,
         source,
         auth.user_id,
         auth.credential_id,
