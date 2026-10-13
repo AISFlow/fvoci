@@ -163,7 +163,7 @@ mod sqlite_port {
 
 #[tokio::test]
 async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() {
-    use fvoci_server::integrations::github::{self, InboundOutcome};
+    use fvoci_server::integrations::github::{self, InboundError, InboundOutcome};
     let f = integrations_family::Fixture::new().await;
     let (_, addr) = start_fake_github().await;
     let app = f.app(github_integrations(addr));
@@ -276,6 +276,13 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
     let path = format!("{base}/issue-links");
     let manual = Uuid::now_v7();
     sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,2,'Manual link',?4,'a1',1,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(manual.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&fresh).await.unwrap();
+    // The raw task holds number 2; advance the counter as task creation does
+    // so later webhook tasks do not collide on tasks.number.
+    sqlx::query("UPDATE projects SET next_number=next_number+1 WHERE id=?1")
+        .bind(project.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
     assert_eq!(
         call(
             &app,
@@ -349,7 +356,8 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     // Like the PG trigger, a project without its task collection aborts the
-    // delivery: no task, item, link, event, activity, number or marker.
+    // delivery: the leaf refuses with "task collection missing" and leaves no
+    // task, item, link, event, activity, number or marker.
     sqlx::query("DELETE FROM collections WHERE id=?1")
         .bind(&collection)
         .execute(&fresh)
@@ -365,16 +373,23 @@ async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() 
     orphan["issue"]["number"] = json!(3);
     orphan["issue"]["title"] = json!("No task collection");
     let bytes = serde_json::to_vec(&orphan).unwrap();
-    assert!(github::handle_webhook_backend(
+    let refused = github::handle_webhook_backend(
         &f.auth.db.pool,
         &config,
         &bytes,
         Some(&sign_github(&bytes)),
         Some("issues"),
-        Some(&Uuid::now_v7().to_string())
+        Some(&Uuid::now_v7().to_string()),
     )
-    .await
-    .is_err());
+    .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(InboundError::Db(sqlx::Error::Protocol(message)))
+                if message == "task collection missing"
+        ),
+        "{refused:?}"
+    );
     let after: (i64, i64, i64, i64, i64, i64, i64, i32) = sqlx::query_as(counts)
         .bind(project.as_bytes().as_slice())
         .fetch_one(&fresh)
