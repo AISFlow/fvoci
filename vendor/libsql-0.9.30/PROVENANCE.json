@@ -34,7 +34,7 @@
     "Cargo.toml",
     "examples/flutter.rs"
   ],
-  "sdkVersionOrFeaturesChanged": false,
+  "sdkVersionOrFeaturesChanged": true,
   "fullLicenseTextStatus": "RESOLVED_EXACT_ROOT_RECOVERED_SAME_VCS_TEXT",
   "buildAndTests": "NOTRUN",
   "network": "NOTRUN",
