@@ -16,7 +16,9 @@ use crate::api::dto::OkResponse;
 use crate::auth::scopes::ApiTokenScope;
 use crate::collections::{parse_project_view_create, parse_project_view_patch};
 use crate::db::project_views::{
-    create_view, delete_view, list_views, update_view, ProjectViewRow, ViewDbError,
+    create_view_backend as create_view, delete_view_backend as delete_view,
+    list_views_backend as list_views, update_view_backend as update_view, ProjectViewRow,
+    ViewDbError,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::guard::check_origin;
@@ -70,20 +72,10 @@ async fn list_route(
         None,
     )
     .await?;
-    let rows = list_views(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_views.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        project_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_view_error)?;
+    let rows = list_views(&state.auth.db.pool, workspace_id, &actor, project_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_view_error)?;
     Ok(Json(ProjectViewListResponse {
         items: rows.into_iter().map(output).collect(),
     }))
@@ -108,12 +100,7 @@ async fn create_route(
     .await?;
     let input = parse_project_view_create(&json_body(body)?).map_err(|_| invalid())?;
     let row = create_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_views.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         project_id,
@@ -143,21 +130,10 @@ async fn update_route(
     )
     .await?;
     let input = parse_project_view_patch(&json_body(body)?).map_err(|_| invalid())?;
-    update_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_views.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        view_id,
-        &input,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_view_error)?;
+    update_view(&state.auth.db.pool, workspace_id, &actor, view_id, &input)
+        .await
+        .map_err(internal)?
+        .map_err(map_view_error)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -177,19 +153,9 @@ async fn delete_route(
         None,
     )
     .await?;
-    delete_view(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_views.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        view_id,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_view_error)?;
+    delete_view(&state.auth.db.pool, workspace_id, &actor, view_id)
+        .await
+        .map_err(internal)?
+        .map_err(map_view_error)?;
     Ok(Json(OkResponse { ok: true }))
 }

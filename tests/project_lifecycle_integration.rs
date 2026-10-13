@@ -582,3 +582,668 @@ async fn project_delete_and_concurrent_document_create_leave_no_live_orphan() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// SQLite family ports of the project routes: every operation runs through
+/// the real router on a migrated database and is read back on a new
+/// connection.
+mod sqlite_port {
+    use super::project_harness::{http_request, json_request};
+    use axum::http::StatusCode;
+    use fvoci_server::auth::{password::Keyring, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use serde_json::{json, Value};
+    use sqlx::SqlitePool;
+    use std::{path::PathBuf, sync::Arc};
+    use uuid::Uuid;
+
+    pub(super) fn blob(id: Uuid) -> Vec<u8> {
+        id.as_bytes().to_vec()
+    }
+
+    pub(super) fn id_of(value: &Value) -> Uuid {
+        Uuid::parse_str(value.as_str().expect("id string")).expect("uuid")
+    }
+
+    pub(super) struct Member {
+        pub id: Uuid,
+        pub cookie: String,
+    }
+
+    pub(super) struct Lite {
+        root: PathBuf,
+        pub path: PathBuf,
+        pub pool: SqlitePool,
+        pub app: axum::Router,
+        pub ws: Uuid,
+        pub owner: Member,
+    }
+
+    fn app(backend: Backend, root: &std::path::Path) -> axum::Router {
+        fvoci_server::http::router(
+            AppState {
+                realtime_mode: fvoci_server::config::RealtimeMode::On,
+                native_engine: None,
+                auth: Arc::new(AuthService {
+                    db: Db::from_backend(backend),
+                    password_keys: Keyring::parse(
+                        r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                        "test",
+                    )
+                    .unwrap(),
+                }),
+                branding_name: "Projects".into(),
+                public_origin: "http://localhost".into(),
+                cookie_secure: false,
+                rate_limiter: RateLimiter::new(),
+                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+                upload: fvoci_server::attachments::UploadLimits {
+                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                    ),
+                },
+                collab: None,
+                meili: None,
+                search_embedder: None,
+                markdown: None,
+                import_wake: None,
+                import_extractor_available: false,
+                preview_extract: None,
+                quota: Default::default(),
+                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+                streams: AppState::fresh_streams(),
+            },
+            None,
+        )
+    }
+
+    impl Lite {
+        pub async fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("projects-port-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("projects.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let pool = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let app = app(Backend::Sqlite(pool.clone()), &root);
+            let ws = insert_workspace(&pool, "lite").await;
+            let owner = insert_member(&pool, ws, "owner", "owner").await;
+            Self {
+                root,
+                path,
+                pool,
+                app,
+                ws,
+                owner,
+            }
+        }
+
+        pub async fn workspace(&self, slug: &str) -> Uuid {
+            insert_workspace(&self.pool, slug).await
+        }
+
+        pub async fn member(&self, ws: Uuid, role: &str, label: &str) -> Member {
+            insert_member(&self.pool, ws, role, label).await
+        }
+
+        /// A personal access token of `who` in this workspace with `scopes`.
+        pub async fn token(&self, who: &Member, scopes: &str) -> String {
+            let token = fvoci_server::auth::token::new_token();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Port',?5)")
+                .bind(blob(Uuid::now_v7()))
+                .bind(blob(self.ws))
+                .bind(blob(who.id))
+                .bind(&token.hash)
+                .bind(scopes)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            token.token
+        }
+
+        pub fn url(&self, rest: &str) -> String {
+            format!("/api/v1/workspaces/{}{rest}", self.ws)
+        }
+
+        pub async fn call(
+            &self,
+            method: &str,
+            rest: &str,
+            body: Option<Value>,
+            who: &Member,
+        ) -> (StatusCode, Value) {
+            json_request(
+                self.app.clone(),
+                method,
+                &self.url(rest),
+                body,
+                Some(&who.cookie),
+            )
+            .await
+        }
+
+        pub async fn bearer(
+            &self,
+            method: &str,
+            rest: &str,
+            body: Option<Value>,
+            token: &str,
+        ) -> (StatusCode, Value) {
+            let header = format!("Bearer {token}");
+            let (status, body, _) = http_request(
+                self.app.clone(),
+                method,
+                &self.url(rest),
+                body.map(|body| body.to_string().into_bytes()),
+                Some("application/json"),
+                None,
+                &[("authorization", header.as_str())],
+            )
+            .await;
+            (status, body)
+        }
+
+        /// A new connection: readback never reuses the writer's pool.
+        pub async fn fresh(&self) -> SqlitePool {
+            pool::connect_sqlite_app(&self.path, 1).await.unwrap()
+        }
+
+        pub async fn project(&self, key: &str, visibility: &str) -> (Uuid, Uuid) {
+            let (status, body) = self
+                .call(
+                    "POST",
+                    "/projects",
+                    Some(json!({"key": key, "name": key, "visibility": visibility})),
+                    &self.owner,
+                )
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            (id_of(&body["id"]), id_of(&body["rootDocumentId"]))
+        }
+
+        pub async fn finish(self) {
+            self.pool.close().await;
+            drop(self.app);
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    async fn insert_workspace(pool: &SqlitePool, slug: &str) -> Uuid {
+        let ws = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,?2)")
+            .bind(blob(ws))
+            .bind(slug)
+            .execute(pool)
+            .await
+            .unwrap();
+        ws
+    }
+
+    async fn insert_member(pool: &SqlitePool, ws: Uuid, role: &str, label: &str) -> Member {
+        let id = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,?3)")
+            .bind(blob(id))
+            .bind(format!("{label}@example.test"))
+            .bind(label)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(blob(ws))
+            .bind(blob(id))
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)")
+            .bind(blob(Uuid::now_v7()))
+            .bind(blob(id))
+            .bind(&token.hash)
+            .execute(pool)
+            .await
+            .unwrap();
+        Member {
+            id,
+            cookie: token.token,
+        }
+    }
+
+    pub(super) async fn scalar(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> i64 {
+        let mut query = sqlx::query_scalar::<_, i64>(sql);
+        for id in ids {
+            query = query.bind(blob(*id));
+        }
+        query.fetch_one(pool).await.unwrap()
+    }
+
+    pub(super) async fn text(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> Option<String> {
+        let mut query = sqlx::query_scalar::<_, Option<String>>(sql);
+        for id in ids {
+            query = query.bind(blob(*id));
+        }
+        query.fetch_one(pool).await.unwrap()
+    }
+
+    /// `events` and `audit_log` rows of `verb` in the workspace.
+    pub(super) async fn journal(pool: &SqlitePool, ws: Uuid, verb: &str) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events WHERE workspace_id=?1 AND verb=?2),
+                    (SELECT count(*) FROM audit_log WHERE workspace_id=?1 AND verb=?2)",
+        )
+        .bind(blob(ws))
+        .bind(verb)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn member_roles(pool: &SqlitePool, project: Uuid) -> Vec<(Uuid, String)> {
+        sqlx::query_as::<_, (Vec<u8>, String)>(
+            "SELECT user_id,role FROM project_members WHERE project_id=?1 AND user_id IS NOT NULL ORDER BY user_id",
+        )
+        .bind(blob(project))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(id, role)| (Uuid::from_slice(&id).unwrap(), role))
+        .collect()
+    }
+}
+
+async fn sqlite_document(
+    lite: &sqlite_port::Lite,
+    project: Uuid,
+    parent: Uuid,
+    title: &str,
+) -> Uuid {
+    let (status, body) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/documents"),
+            Some(json!({"parentId": parent, "title": title})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sqlite_port::id_of(&body["id"])
+}
+
+/// `deleted_at` of each id (None: live), on the given connection.
+async fn sqlite_stamps(pool: &sqlx::SqlitePool, table: &str, ids: &[Uuid]) -> Vec<Option<i64>> {
+    let sql = format!("SELECT deleted_at FROM {table} WHERE id=?1");
+    let mut out = Vec::new();
+    for id in ids {
+        out.push(
+            sqlx::query_scalar(&sql)
+                .bind(sqlite_port::blob(*id))
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+        );
+    }
+    out
+}
+
+/// Archive, trash (DELETE), the deleted list and restore on SQLite: one
+/// stamp marks the project and its live subtree, restore brings back exactly
+/// those rows, and retention and access refusals change nothing.
+#[tokio::test]
+async fn sqlite_project_lifecycle_keeps_the_postgres_contract() {
+    use sqlite_port::{blob, journal, scalar, text, Lite};
+
+    let lite = Lite::new().await;
+    let (project, root) = lite.project("LIFE", "workspace").await;
+    let p = format!("/projects/{project}");
+    let a = sqlite_document(&lite, project, root, "A").await;
+    let b = sqlite_document(&lite, project, a, "B").await;
+    let earlier = sqlite_document(&lite, project, root, "Earlier").await;
+    let (status, task) = lite
+        .call(
+            "POST",
+            &format!("{p}/tasks"),
+            Some(json!({"title": "Kept"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let member = lite.member(lite.ws, "member", "member").await;
+    let stranger_ws = lite.workspace("strangers").await;
+    let stranger = lite.member(stranger_ws, "owner", "stranger").await;
+
+    // Archive and unarchive need Manage; an archived project refuses edits.
+    for who in [&member, &stranger] {
+        let (status, _) = lite.call("POST", &format!("{p}/archive"), None, who).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, _) = lite
+        .call("POST", &format!("{p}/archive"), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = lite
+        .call("PATCH", &p, Some(json!({"name": "Frozen"})), &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "project_archived");
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(
+            &fresh,
+            "SELECT status FROM projects WHERE id=?1",
+            &[project]
+        )
+        .await
+        .as_deref(),
+        Some("archived")
+    );
+    assert_eq!(journal(&fresh, lite.ws, "project.archived").await, (1, 1));
+    fresh.close().await;
+    let (status, _) = lite
+        .call("POST", &format!("{p}/unarchive"), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(
+            &fresh,
+            "SELECT status||'|'||name FROM projects WHERE id=?1",
+            &[project]
+        )
+        .await
+        .as_deref(),
+        Some("active|LIFE")
+    );
+    assert_eq!(journal(&fresh, lite.ws, "project.unarchived").await, (1, 1));
+    fresh.close().await;
+
+    // A document trashed on its own keeps its own stamp through the project's.
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("{p}/documents/{earlier}/trash"),
+            None,
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE documents SET deleted_at=deleted_at-1000000 WHERE id=?1")
+        .bind(blob(earlier))
+        .execute(&lite.pool)
+        .await
+        .unwrap();
+    for who in [&member, &stranger] {
+        let (status, _) = lite.call("DELETE", &p, None, who).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let fresh = lite.fresh().await;
+    let before = sqlite_stamps(&fresh, "documents", &[earlier]).await;
+    fresh.close().await;
+    let (status, _) = lite.call("DELETE", &p, None, &lite.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = lite.fresh().await;
+    let stamp = sqlite_stamps(&fresh, "projects", &[project]).await[0];
+    assert!(stamp.is_some());
+    assert_eq!(
+        sqlite_stamps(&fresh, "documents", &[root, a, b]).await,
+        vec![stamp; 3]
+    );
+    assert_eq!(sqlite_stamps(&fresh, "documents", &[earlier]).await, before);
+    assert_eq!(journal(&fresh, lite.ws, "document.trashed").await, (4, 4));
+    assert_eq!(journal(&fresh, lite.ws, "project.deleted").await, (1, 1));
+    fresh.close().await;
+
+    let (status, active) = lite.call("GET", "/projects", None, &lite.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(active["items"], json!([]));
+    let (status, deleted) = lite
+        .call("GET", "/projects?deleted=true", None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["items"][0]["id"], project.to_string());
+    assert_eq!(deleted["items"].as_array().unwrap().len(), 1);
+    for who in [&member, &stranger] {
+        let (status, _) = lite.call("GET", "/projects?deleted=true", None, who).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = lite.call("POST", &format!("{p}/restore"), None, who).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    let (status, body) = lite
+        .call("POST", &format!("{p}/restore"), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], project.to_string());
+    assert_eq!(body["status"], "active");
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        sqlite_stamps(&fresh, "projects", &[project]).await,
+        vec![None]
+    );
+    assert_eq!(
+        sqlite_stamps(&fresh, "documents", &[root, a, b]).await,
+        vec![None; 3]
+    );
+    assert_eq!(sqlite_stamps(&fresh, "documents", &[earlier]).await, before);
+    assert_eq!(journal(&fresh, lite.ws, "document.restored").await, (3, 3));
+    assert_eq!(journal(&fresh, lite.ws, "project.restored").await, (1, 1));
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM collection_items i JOIN collections c ON c.id=i.collection_id WHERE c.project_id=?1 AND c.kind='task'",
+            &[project]
+        )
+        .await,
+        1
+    );
+    fresh.close().await;
+
+    // Past retention (by the DB clock) the project is neither listed nor
+    // restorable.
+    let (status, _) = lite.call("DELETE", &p, None, &lite.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE projects SET deleted_at=deleted_at-31*86400000000 WHERE id=?1")
+        .bind(blob(project))
+        .execute(&lite.pool)
+        .await
+        .unwrap();
+    let (status, deleted) = lite
+        .call("GET", "/projects?deleted=true", None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["items"], json!([]));
+    let (status, _) = lite
+        .call("POST", &format!("{p}/restore"), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let fresh = lite.fresh().await;
+    assert!(sqlite_stamps(&fresh, "projects", &[project]).await[0].is_some());
+    assert_eq!(journal(&fresh, lite.ws, "project.restored").await, (1, 1));
+    fresh.close().await;
+    lite.finish().await;
+}
+
+/// Project document meta, sort, trash and restore on SQLite.
+#[tokio::test]
+async fn sqlite_project_documents_keep_the_postgres_contract() {
+    use sqlite_port::{blob, journal, scalar, text, Lite};
+
+    let lite = Lite::new().await;
+    let (project, root) = lite.project("DOCS", "private").await;
+    let d = |doc: Uuid| format!("/projects/{project}/documents/{doc}");
+    let a = sqlite_document(&lite, project, root, "A").await;
+    let b = sqlite_document(&lite, project, root, "B").await;
+    let c = sqlite_document(&lite, project, root, "C").await;
+    let child = sqlite_document(&lite, project, a, "Child").await;
+    let viewer = lite.member(lite.ws, "member", "viewer").await;
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/members"),
+            Some(json!({"userId": viewer.id, "role": "viewer"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let outsider = lite.member(lite.ws, "member", "outsider").await;
+
+    let (status, body) = lite
+        .call("PATCH", &d(a), Some(json!({"title": "Alpha"})), &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["title"], "Alpha");
+    assert_eq!(body["displayId"], "DOCS-2");
+    for (who, title, expected) in [
+        (&lite.owner, "Bad\u{0}title", StatusCode::BAD_REQUEST),
+        (&viewer, "Viewer", StatusCode::NOT_FOUND),
+        (&outsider, "Outsider", StatusCode::NOT_FOUND),
+    ] {
+        let (status, _) = lite
+            .call("PATCH", &d(a), Some(json!({"title": title})), who)
+            .await;
+        assert_eq!(status, expected, "{title:?}");
+    }
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(&fresh, "SELECT title FROM documents WHERE id=?1", &[a])
+            .await
+            .as_deref(),
+        Some("Alpha")
+    );
+    fresh.close().await;
+
+    // Sort: first, then after a sibling; a non-sibling anchor is not found.
+    let sort = |doc| format!("{}/sort", d(doc));
+    let (status, body) = lite
+        .call(
+            "POST",
+            &sort(c),
+            Some(json!({"afterId": null})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let order = || async {
+        let fresh = lite.fresh().await;
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT id FROM documents WHERE parent_id=?1 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY",
+        )
+        .bind(blob(root))
+        .fetch_all(&fresh)
+        .await
+        .unwrap();
+        fresh.close().await;
+        rows.into_iter()
+            .map(|id| Uuid::from_slice(&id).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order().await, [c, a, b]);
+    let (status, _) = lite
+        .call("POST", &sort(c), Some(json!({"afterId": a})), &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(order().await, [a, c, b]);
+    for (who, after, expected) in [
+        (&lite.owner, Some(child), StatusCode::NOT_FOUND),
+        (&lite.owner, Some(c), StatusCode::NOT_FOUND),
+        (&viewer, None, StatusCode::NOT_FOUND),
+        (&outsider, None, StatusCode::NOT_FOUND),
+    ] {
+        let (status, _) = lite
+            .call("POST", &sort(c), Some(json!({"afterId": after})), who)
+            .await;
+        assert_eq!(status, expected);
+    }
+    assert_eq!(order().await, [a, c, b]);
+    let fresh = lite.fresh().await;
+    let reorders = scalar(
+        &fresh,
+        "SELECT count(*) FROM events WHERE verb='document.moved' AND json_extract(payload,'$.kind')='reorder' AND target_id=?1",
+        &[c],
+    )
+    .await;
+    assert_eq!(reorders, 2);
+    fresh.close().await;
+
+    // Trash and restore: a child waits for its parent; restore is per row.
+    let (status, _) = lite
+        .call("POST", &format!("{}/trash", d(a)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for (who, doc, expected, code) in [
+        (&viewer, a, StatusCode::NOT_FOUND, None),
+        (&outsider, a, StatusCode::NOT_FOUND, None),
+        (
+            &lite.owner,
+            child,
+            StatusCode::CONFLICT,
+            Some("restore_rejected"),
+        ),
+        (&lite.owner, b, StatusCode::NOT_FOUND, None),
+    ] {
+        let (status, body) = lite
+            .call("POST", &format!("{}/restore", d(doc)), None, who)
+            .await;
+        assert_eq!(status, expected, "{body}");
+        if let Some(code) = code {
+            assert_eq!(body["code"], code);
+        }
+    }
+    let (status, _) = lite
+        .call("POST", &format!("{}/restore", d(a)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = lite.fresh().await;
+    assert_eq!(sqlite_stamps(&fresh, "documents", &[a]).await, vec![None]);
+    assert!(sqlite_stamps(&fresh, "documents", &[child]).await[0].is_some());
+    assert_eq!(journal(&fresh, lite.ws, "document.restored").await, (1, 1));
+    fresh.close().await;
+    let (status, _) = lite
+        .call("POST", &format!("{}/restore", d(child)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Past retention a trashed row is gone; an archived project refuses.
+    let (status, _) = lite
+        .call("POST", &format!("{}/trash", d(b)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE documents SET deleted_at=deleted_at-31*86400000000 WHERE id=?1")
+        .bind(blob(b))
+        .execute(&lite.pool)
+        .await
+        .unwrap();
+    let (status, _) = lite
+        .call("POST", &format!("{}/restore", d(b)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = lite
+        .call("POST", &format!("{}/trash", d(c)), None, &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/archive"),
+            None,
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for path in [format!("{}/restore", d(c)), sort(a)] {
+        let (status, _) = lite
+            .call("POST", &path, Some(json!({"afterId": null})), &lite.owner)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    let fresh = lite.fresh().await;
+    assert!(sqlite_stamps(&fresh, "documents", &[b, c])
+        .await
+        .iter()
+        .all(Option::is_some));
+    assert_eq!(journal(&fresh, lite.ws, "document.restored").await, (2, 2));
+    fresh.close().await;
+    lite.finish().await;
+}

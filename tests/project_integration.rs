@@ -3863,3 +3863,1599 @@ async fn project_document_count_snapshot_keeps_grants_counts_and_permissions_con
     admin.close().await;
     harness.cleanup().await;
 }
+
+/// SQLite family ports of the project routes: every operation runs through
+/// the real router on a migrated database and is read back on a new
+/// connection.
+mod sqlite_port {
+    use super::project_harness::{http_request, json_request};
+    use axum::http::StatusCode;
+    use fvoci_server::auth::{password::Keyring, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use serde_json::{json, Value};
+    use sqlx::SqlitePool;
+    use std::{path::PathBuf, sync::Arc};
+    use uuid::Uuid;
+
+    pub(super) fn blob(id: Uuid) -> Vec<u8> {
+        id.as_bytes().to_vec()
+    }
+
+    pub(super) fn id_of(value: &Value) -> Uuid {
+        Uuid::parse_str(value.as_str().expect("id string")).expect("uuid")
+    }
+
+    pub(super) struct Member {
+        pub id: Uuid,
+        pub cookie: String,
+    }
+
+    pub(super) struct Lite {
+        root: PathBuf,
+        pub path: PathBuf,
+        pub pool: SqlitePool,
+        pub app: axum::Router,
+        pub ws: Uuid,
+        pub owner: Member,
+    }
+
+    fn app(backend: Backend, root: &std::path::Path) -> axum::Router {
+        fvoci_server::http::router(
+            AppState {
+                realtime_mode: fvoci_server::config::RealtimeMode::On,
+                native_engine: None,
+                auth: Arc::new(AuthService {
+                    db: Db::from_backend(backend),
+                    password_keys: Keyring::parse(
+                        r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                        "test",
+                    )
+                    .unwrap(),
+                }),
+                branding_name: "Projects".into(),
+                public_origin: "http://localhost".into(),
+                cookie_secure: false,
+                rate_limiter: RateLimiter::new(),
+                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+                upload: fvoci_server::attachments::UploadLimits {
+                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                    ),
+                },
+                collab: None,
+                meili: None,
+                search_embedder: None,
+                markdown: None,
+                import_wake: None,
+                import_extractor_available: false,
+                preview_extract: None,
+                quota: Default::default(),
+                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+                streams: AppState::fresh_streams(),
+            },
+            None,
+        )
+    }
+
+    impl Lite {
+        pub async fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("projects-port-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("projects.sqlite");
+            migrate::run_sqlite_migrations(&path).await.unwrap();
+            let pool = pool::connect_sqlite_app(&path, 4).await.unwrap();
+            let app = app(Backend::Sqlite(pool.clone()), &root);
+            let ws = insert_workspace(&pool, "lite").await;
+            let owner = insert_member(&pool, ws, "owner", "owner").await;
+            Self {
+                root,
+                path,
+                pool,
+                app,
+                ws,
+                owner,
+            }
+        }
+
+        pub async fn workspace(&self, slug: &str) -> Uuid {
+            insert_workspace(&self.pool, slug).await
+        }
+
+        pub async fn member(&self, ws: Uuid, role: &str, label: &str) -> Member {
+            insert_member(&self.pool, ws, role, label).await
+        }
+
+        /// A personal access token of `who` in this workspace with `scopes`.
+        pub async fn token(&self, who: &Member, scopes: &str) -> String {
+            let token = fvoci_server::auth::token::new_token();
+            sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Port',?5)")
+                .bind(blob(Uuid::now_v7()))
+                .bind(blob(self.ws))
+                .bind(blob(who.id))
+                .bind(&token.hash)
+                .bind(scopes)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            token.token
+        }
+
+        pub fn url(&self, rest: &str) -> String {
+            format!("/api/v1/workspaces/{}{rest}", self.ws)
+        }
+
+        pub async fn call(
+            &self,
+            method: &str,
+            rest: &str,
+            body: Option<Value>,
+            who: &Member,
+        ) -> (StatusCode, Value) {
+            json_request(
+                self.app.clone(),
+                method,
+                &self.url(rest),
+                body,
+                Some(&who.cookie),
+            )
+            .await
+        }
+
+        pub async fn bearer(
+            &self,
+            method: &str,
+            rest: &str,
+            body: Option<Value>,
+            token: &str,
+        ) -> (StatusCode, Value) {
+            let header = format!("Bearer {token}");
+            let (status, body, _) = http_request(
+                self.app.clone(),
+                method,
+                &self.url(rest),
+                body.map(|body| body.to_string().into_bytes()),
+                Some("application/json"),
+                None,
+                &[("authorization", header.as_str())],
+            )
+            .await;
+            (status, body)
+        }
+
+        /// A new connection: readback never reuses the writer's pool.
+        pub async fn fresh(&self) -> SqlitePool {
+            pool::connect_sqlite_app(&self.path, 1).await.unwrap()
+        }
+
+        pub async fn project(&self, key: &str, visibility: &str) -> (Uuid, Uuid) {
+            let (status, body) = self
+                .call(
+                    "POST",
+                    "/projects",
+                    Some(json!({"key": key, "name": key, "visibility": visibility})),
+                    &self.owner,
+                )
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            (id_of(&body["id"]), id_of(&body["rootDocumentId"]))
+        }
+
+        pub async fn finish(self) {
+            self.pool.close().await;
+            drop(self.app);
+            std::fs::remove_dir_all(self.root).unwrap();
+        }
+    }
+
+    async fn insert_workspace(pool: &SqlitePool, slug: &str) -> Uuid {
+        let ws = Uuid::now_v7();
+        sqlx::query("INSERT INTO workspaces(id,slug,name) VALUES(?1,?2,?2)")
+            .bind(blob(ws))
+            .bind(slug)
+            .execute(pool)
+            .await
+            .unwrap();
+        ws
+    }
+
+    async fn insert_member(pool: &SqlitePool, ws: Uuid, role: &str, label: &str) -> Member {
+        let id = Uuid::now_v7();
+        let token = fvoci_server::auth::token::new_token();
+        sqlx::query("INSERT INTO users(id,email,given_name) VALUES(?1,?2,?3)")
+            .bind(blob(id))
+            .bind(format!("{label}@example.test"))
+            .bind(label)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)")
+            .bind(blob(ws))
+            .bind(blob(id))
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,(unixepoch()+3600)*1000000)")
+            .bind(blob(Uuid::now_v7()))
+            .bind(blob(id))
+            .bind(&token.hash)
+            .execute(pool)
+            .await
+            .unwrap();
+        Member {
+            id,
+            cookie: token.token,
+        }
+    }
+
+    pub(super) async fn scalar(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> i64 {
+        let mut query = sqlx::query_scalar::<_, i64>(sql);
+        for id in ids {
+            query = query.bind(blob(*id));
+        }
+        query.fetch_one(pool).await.unwrap()
+    }
+
+    pub(super) async fn text(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> Option<String> {
+        let mut query = sqlx::query_scalar::<_, Option<String>>(sql);
+        for id in ids {
+            query = query.bind(blob(*id));
+        }
+        query.fetch_one(pool).await.unwrap()
+    }
+
+    /// `events` and `audit_log` rows of `verb` in the workspace.
+    pub(super) async fn journal(pool: &SqlitePool, ws: Uuid, verb: &str) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events WHERE workspace_id=?1 AND verb=?2),
+                    (SELECT count(*) FROM audit_log WHERE workspace_id=?1 AND verb=?2)",
+        )
+        .bind(blob(ws))
+        .bind(verb)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    pub(super) async fn member_roles(pool: &SqlitePool, project: Uuid) -> Vec<(Uuid, String)> {
+        sqlx::query_as::<_, (Vec<u8>, String)>(
+            "SELECT user_id,role FROM project_members WHERE project_id=?1 AND user_id IS NOT NULL ORDER BY user_id",
+        )
+        .bind(blob(project))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(id, role)| (Uuid::from_slice(&id).unwrap(), role))
+        .collect()
+    }
+}
+
+/// PATCH project and the member routes on SQLite: success with a new-connection
+/// readback and journal rows, then every refusal leaves the rows as they were.
+#[tokio::test]
+async fn sqlite_project_update_and_members_keep_the_postgres_contract() {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use sqlite_port::{journal, member_roles, scalar, text, Lite};
+
+    let lite = Lite::new().await;
+    let (project, _root) = lite.project("LITE", "workspace").await;
+    let p = format!("/projects/{project}");
+    let alice = lite.member(lite.ws, "member", "ba").await;
+    let zed = lite.member(lite.ws, "member", "b-z").await;
+    let guest = lite.member(lite.ws, "guest", "guest").await;
+    let other_ws = lite.workspace("elsewhere").await;
+    let stranger = lite.member(other_ws, "owner", "stranger").await;
+
+    let (status, body) = lite
+        .call(
+            "PATCH",
+            &p,
+            Some(json!({"name": "  Renamed  ", "description": "About", "icon": "R"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "Renamed");
+    assert_eq!(body["description"], "About");
+    let fresh = lite.fresh().await;
+    let stored = text(
+        &fresh,
+        "SELECT name||'|'||description||'|'||icon||'|'||visibility FROM projects WHERE id=?1",
+        &[project],
+    )
+    .await;
+    assert_eq!(stored.as_deref(), Some("Renamed|About|R|workspace"));
+    assert_eq!(journal(&fresh, lite.ws, "project.updated").await, (1, 1));
+    fresh.close().await;
+
+    // NUL is a 400 before any write; Manage, the tenant and the credential are
+    // checked before any change.
+    for name in ["Bad\u{0}name", " "] {
+        let (status, _) = lite
+            .call("PATCH", &p, Some(json!({"name": name})), &lite.owner)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name:?}");
+    }
+    for who in [&alice, &guest, &stranger] {
+        let (status, _) = lite
+            .call("PATCH", &p, Some(json!({"name": "Taken"})), who)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(&fresh, "SELECT name FROM projects WHERE id=?1", &[project])
+            .await
+            .as_deref(),
+        Some("Renamed")
+    );
+    assert_eq!(journal(&fresh, lite.ws, "project.updated").await, (1, 1));
+    fresh.close().await;
+
+    // A projects.manage token is a credential like a session.
+    let token = lite.token(&lite.owner, r#"["projects.manage"]"#).await;
+    let (status, body) = lite
+        .bearer("PATCH", &p, Some(json!({"icon": null})), &token)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["icon"].is_null());
+
+    // Members: add, duplicate, non-member and guest-lead refusals.
+    let members = format!("{p}/members");
+    for (who, role) in [(&alice, "member"), (&zed, "viewer")] {
+        let (status, body) = lite
+            .call(
+                "POST",
+                &members,
+                Some(json!({"userId": who.id, "role": role})),
+                &lite.owner,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    for (user, role) in [
+        (alice.id, "viewer"),
+        (stranger.id, "member"),
+        (guest.id, "lead"),
+    ] {
+        let (status, body) = lite
+            .call(
+                "POST",
+                &members,
+                Some(json!({"userId": user, "role": role})),
+                &lite.owner,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+    let (status, _) = lite
+        .call(
+            "POST",
+            &members,
+            Some(json!({"userId": guest.id, "role": "viewer"})),
+            &alice,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Email order is bytewise ("b-z" sorts before "ba"), as COLLATE "C".
+    let (status, list) = lite.call("GET", &members, None, &zed).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let emails: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["email"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        emails,
+        ["b-z@example.test", "ba@example.test", "owner@example.test"]
+    );
+    assert_eq!(list["items"][0]["role"], "viewer");
+    let (status, _) = lite.call("GET", &members, None, &stranger).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Two concurrent adds of one user: one grant, one conflict.
+    let racer = lite.member(lite.ws, "member", "racer").await;
+    let add = || {
+        lite.call(
+            "POST",
+            &members,
+            Some(json!({"userId": racer.id, "role": "member"})),
+            &lite.owner,
+        )
+    };
+    let (first, second) = tokio::join!(add(), add());
+    let mut statuses = [first.0, second.0];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT]);
+
+    // Role change and the private last-lead invariant.
+    let (status, _) = lite
+        .call(
+            "PATCH",
+            &format!("{members}/{}", alice.id),
+            Some(json!({"role": "lead"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = lite
+        .call(
+            "PATCH",
+            &format!("{members}/{}", guest.id),
+            Some(json!({"role": "member"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = lite
+        .call(
+            "PATCH",
+            &p,
+            Some(json!({"visibility": "private"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = lite
+        .call(
+            "DELETE",
+            &format!("{members}/{}", alice.id),
+            None,
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for (method, body) in [("PATCH", Some(json!({"role": "member"}))), ("DELETE", None)] {
+        let (status, refused) = lite
+            .call(
+                method,
+                &format!("{members}/{}", lite.owner.id),
+                body,
+                &lite.owner,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{method} {refused}");
+    }
+    let fresh = lite.fresh().await;
+    let mut expected = vec![
+        (lite.owner.id, "lead".to_string()),
+        (zed.id, "viewer".to_string()),
+        (racer.id, "member".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(member_roles(&fresh, project).await, expected);
+    assert_eq!(
+        journal(&fresh, lite.ws, "project_member.added").await,
+        (3, 3)
+    );
+    assert_eq!(
+        journal(&fresh, lite.ws, "project_member.role_changed").await,
+        (1, 1)
+    );
+    assert_eq!(
+        journal(&fresh, lite.ws, "project_member.removed").await,
+        (1, 1)
+    );
+    assert_eq!(
+        text(
+            &fresh,
+            "SELECT visibility FROM projects WHERE id=?1",
+            &[project]
+        )
+        .await
+        .as_deref(),
+        Some("private")
+    );
+    fresh.close().await;
+
+    // A lead change promotes a direct member and demotes the other leads; a
+    // guest or a non-member cannot be named lead.
+    let (status, _) = lite
+        .call(
+            "PATCH",
+            &p,
+            Some(json!({"leadUserId": guest.id})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = lite
+        .call(
+            "PATCH",
+            &p,
+            Some(json!({"leadUserId": alice.id})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = lite
+        .call(
+            "PATCH",
+            &p,
+            Some(json!({"leadUserId": racer.id})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fresh = lite.fresh().await;
+    let mut expected = vec![
+        (lite.owner.id, "member".to_string()),
+        (zed.id, "viewer".to_string()),
+        (racer.id, "lead".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(member_roles(&fresh, project).await, expected);
+    fresh.close().await;
+
+    // A workspace project without a lead cannot become private.
+    let (open, _) = lite.project("OPEN", "workspace").await;
+    let (status, _) = lite
+        .call(
+            "DELETE",
+            &format!("/projects/{open}/members/{}", lite.owner.id),
+            None,
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = lite
+        .call(
+            "PATCH",
+            &format!("/projects/{open}"),
+            Some(json!({"visibility": "private"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(
+            &fresh,
+            "SELECT visibility FROM projects WHERE id=?1",
+            &[open]
+        )
+        .await
+        .as_deref(),
+        Some("workspace")
+    );
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM project_members WHERE project_id=?1",
+            &[open]
+        )
+        .await,
+        0
+    );
+    fresh.close().await;
+    lite.finish().await;
+}
+
+/// One clone fixture, written once per backend: a label, a milestone and a
+/// task through the API, then task-collection fields, options and views as
+/// rows (live and deleted, shared and private).
+mod clone_fixture {
+    use super::project_harness::json_request;
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+    use uuid::Uuid;
+
+    pub(super) type SeedField = (
+        Uuid,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        &'static str,
+        &'static str,
+        bool,
+    );
+    pub(super) type FieldRow = (Uuid, String, String, Option<String>, String, String);
+    pub(super) type OptionRow = (Uuid, String, String, String, String);
+    pub(super) type ViewRow = (String, String, String, Value, Uuid);
+    pub(super) type StatusRow = (Uuid, String, String, String, Option<i64>);
+    pub(super) type MilestoneRow = (Uuid, String, Option<String>, String);
+
+    /// A project's copied configuration as read back.
+    pub(super) struct Copied {
+        pub collection: (String, String, i64),
+        pub fields: Vec<FieldRow>,
+        pub options: Vec<OptionRow>,
+        pub views: Vec<ViewRow>,
+        pub statuses: Vec<StatusRow>,
+        pub labels: Vec<(Uuid, String, String)>,
+        pub milestones: Vec<MilestoneRow>,
+        pub items: i64,
+    }
+
+    pub(super) struct Seeded {
+        pub label: Uuid,
+        pub milestone: Uuid,
+        pub status: Uuid,
+        pub fields: Vec<SeedField>,
+        pub options: Vec<(Uuid, Uuid, &'static str, &'static str, &'static str, bool)>,
+        pub views: Vec<(Uuid, &'static str, &'static str, &'static str, Value)>,
+    }
+
+    pub(super) async fn api(
+        app: &axum::Router,
+        cookie: &str,
+        ws: Uuid,
+        project: Uuid,
+    ) -> (Uuid, Uuid) {
+        let base = format!("/api/v1/workspaces/{ws}/projects/{project}");
+        let (status, label) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/labels"),
+            Some(json!({"name": "bug", "color": "red"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{label}");
+        let (status, milestone) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/milestones"),
+            Some(json!({"name": "M1", "dueDate": "2031-02-03"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{milestone}");
+        let (status, task) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/tasks"),
+            Some(json!({"title": "Seed task"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{task}");
+        (
+            Uuid::parse_str(label["id"].as_str().unwrap()).unwrap(),
+            Uuid::parse_str(milestone["id"].as_str().unwrap()).unwrap(),
+        )
+    }
+
+    /// Rows to write; `status` is the source's first workflow status.
+    pub(super) fn plan(label: Uuid, milestone: Uuid, status: Uuid) -> Seeded {
+        let (notes, stage, gone) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (alpha, beta, zulu, gamma) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        let board = json!({
+            "query": {
+                "filters": {
+                    "labelId": label.to_string(),
+                    "milestoneId": milestone.to_string(),
+                    "statusId": status.to_string(),
+                    "custom": [{"fieldId": stage.to_string(), "operator": "equals", "value": alpha.to_string()}],
+                },
+                "sort": [{"field": notes.to_string(), "direction": "asc"}],
+            },
+            "groupBy": stage.to_string(),
+        });
+        Seeded {
+            label,
+            milestone,
+            status,
+            fields: vec![
+                (
+                    notes,
+                    "notes",
+                    "Notes",
+                    Some("Free text"),
+                    "text",
+                    "a",
+                    false,
+                ),
+                (stage, "stage", "Stage", None, "select", "b", false),
+                (gone, "gone", "Gone", None, "select", "c", true),
+            ],
+            options: vec![
+                (alpha, stage, "alpha", "Alpha", "a", false),
+                (beta, stage, "beta", "Beta", "b", false),
+                (zulu, stage, "zulu", "Zulu", "c", true),
+                (gamma, gone, "gamma", "Gamma", "a", false),
+            ],
+            views: vec![
+                (Uuid::now_v7(), "shared", "Board", "board", board),
+                (Uuid::now_v7(), "shared", "All", "table", json!({})),
+                (Uuid::now_v7(), "private", "Mine", "table", json!({})),
+            ],
+        }
+    }
+
+    /// The copied configuration of `project`, ids replaced by what they name.
+    pub(super) fn normalize(copied: Copied, owner: Uuid) -> Value {
+        let Copied {
+            collection,
+            fields,
+            options,
+            views,
+            statuses,
+            labels,
+            milestones,
+            items,
+        } = copied;
+        let mut names = std::collections::HashMap::new();
+        for (id, key, ..) in &fields {
+            names.insert(id.to_string(), format!("field:{key}"));
+        }
+        for (id, field, key, ..) in &options {
+            names.insert(id.to_string(), format!("option:{field}/{key}"));
+        }
+        for (id, name, ..) in &statuses {
+            names.insert(id.to_string(), format!("status:{name}"));
+        }
+        for (id, name, _) in &labels {
+            names.insert(id.to_string(), format!("label:{name}"));
+        }
+        for (id, name, ..) in &milestones {
+            names.insert(id.to_string(), format!("milestone:{name}"));
+        }
+        fn rename(value: &Value, names: &std::collections::HashMap<String, String>) -> Value {
+            match value {
+                Value::String(raw) if Uuid::parse_str(raw).is_ok() => Value::String(
+                    names
+                        .get(raw)
+                        .cloned()
+                        .unwrap_or_else(|| "unmapped".to_string()),
+                ),
+                Value::Array(items) => {
+                    Value::Array(items.iter().map(|item| rename(item, names)).collect())
+                }
+                Value::Object(map) => Value::Object(
+                    map.iter()
+                        .map(|(key, item)| (key.clone(), rename(item, names)))
+                        .collect(),
+                ),
+                other => other.clone(),
+            }
+        }
+        json!({
+            "collection": {"kind": collection.0, "name": collection.1, "count": collection.2},
+            "fields": fields.iter().map(|(_, key, name, description, kind, sort)| json!([key, name, description, kind, sort])).collect::<Vec<_>>(),
+            "options": options.iter().map(|(_, field, key, label, sort)| json!([field, key, label, sort])).collect::<Vec<_>>(),
+            "views": views.iter().map(|(visibility, name, kind, config, view_owner)| json!([visibility, name, kind, rename(config, &names), *view_owner == owner])).collect::<Vec<_>>(),
+            "statuses": statuses.iter().map(|(_, name, category, sort, wip)| json!([name, category, sort, wip])).collect::<Vec<_>>(),
+            "labels": labels.iter().map(|(_, name, color)| json!([name, color])).collect::<Vec<_>>(),
+            "milestones": milestones.iter().map(|(_, name, due, sort)| json!([name, due, sort])).collect::<Vec<_>>(),
+            "items": items,
+        })
+    }
+
+    /// What the clone must hold, written down independently of both readers.
+    pub(super) fn assert_expected(snapshot: &Value, source_statuses: &Value) {
+        assert_eq!(
+            snapshot["collection"],
+            json!({"kind": "task", "name": "Copy", "count": 1})
+        );
+        assert_eq!(
+            snapshot["fields"],
+            json!([
+                ["notes", "Notes", "Free text", "text", "a"],
+                ["stage", "Stage", null, "select", "b"],
+            ])
+        );
+        assert_eq!(
+            snapshot["options"],
+            json!([
+                ["stage", "alpha", "Alpha", "a"],
+                ["stage", "beta", "Beta", "b"]
+            ])
+        );
+        let views = snapshot["views"].as_array().unwrap();
+        assert_eq!(views.len(), 2, "private views stay behind: {views:?}");
+        assert_eq!(
+            json!([views[0][0], views[0][1], views[0][2]]),
+            json!(["shared", "All", "table"])
+        );
+        assert_eq!(
+            json!([views[1][0], views[1][1], views[1][2]]),
+            json!(["shared", "Board", "board"])
+        );
+        assert_eq!(views[0][4], json!(true));
+        let board = &views[1][3];
+        assert_eq!(board["groupBy"], "field:stage");
+        assert_eq!(board["query"]["filters"]["labelId"], "label:bug");
+        assert_eq!(board["query"]["filters"]["milestoneId"], "milestone:M1");
+        assert!(board["query"]["filters"]["statusId"]
+            .as_str()
+            .unwrap()
+            .starts_with("status:"));
+        assert_eq!(
+            board["query"]["filters"]["custom"][0]["fieldId"],
+            "field:stage"
+        );
+        assert_eq!(
+            board["query"]["filters"]["custom"][0]["value"],
+            "option:stage/alpha"
+        );
+        assert_eq!(board["query"]["sort"][0]["field"], "field:notes");
+        assert_eq!(snapshot["labels"], json!([["bug", "red"]]));
+        assert_eq!(
+            snapshot["milestones"],
+            json!([["M1", "2031-02-03", snapshot["milestones"][0][2]]])
+        );
+        assert_eq!(snapshot["statuses"], *source_statuses);
+        assert_eq!(snapshot["items"], json!(0), "tasks are not cloned");
+    }
+}
+
+async fn sqlite_seed_configuration(
+    lite: &sqlite_port::Lite,
+    project: uuid::Uuid,
+) -> clone_fixture::Seeded {
+    use sqlite_port::blob;
+    let (label, milestone) =
+        clone_fixture::api(&lite.app, &lite.owner.cookie, lite.ws, project).await;
+    let status: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM statuses WHERE project_id=?1 ORDER BY sort_key LIMIT 1")
+            .bind(blob(project))
+            .fetch_one(&lite.pool)
+            .await
+            .unwrap();
+    let seeded = clone_fixture::plan(label, milestone, uuid::Uuid::from_slice(&status).unwrap());
+    let collection: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM collections WHERE project_id=?1 AND kind='task'")
+            .bind(blob(project))
+            .fetch_one(&lite.pool)
+            .await
+            .unwrap();
+    for (id, key, name, description, kind, sort, deleted) in &seeded.fields {
+        sqlx::query("INSERT INTO collection_fields(id,workspace_id,collection_id,key,name,description,type,sort_key,deleted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CASE WHEN ?9 THEN unixepoch()*1000000 END)")
+            .bind(blob(*id)).bind(blob(lite.ws)).bind(&collection).bind(key).bind(name).bind(description).bind(kind).bind(sort).bind(deleted)
+            .execute(&lite.pool).await.unwrap();
+    }
+    for (id, field, key, label, sort, deleted) in &seeded.options {
+        sqlx::query("INSERT INTO collection_options(id,workspace_id,collection_id,field_id,key,label,sort_key,deleted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,CASE WHEN ?8 THEN unixepoch()*1000000 END)")
+            .bind(blob(*id)).bind(blob(lite.ws)).bind(&collection).bind(blob(*field)).bind(key).bind(label).bind(sort).bind(deleted)
+            .execute(&lite.pool).await.unwrap();
+    }
+    for (id, visibility, name, kind, config) in &seeded.views {
+        sqlx::query("INSERT INTO collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
+            .bind(blob(*id)).bind(blob(lite.ws)).bind(&collection).bind(blob(lite.owner.id)).bind(visibility).bind(name).bind(kind).bind(config.to_string())
+            .execute(&lite.pool).await.unwrap();
+    }
+    seeded
+}
+
+async fn sqlite_configuration_snapshot(
+    pool: &sqlx::SqlitePool,
+    project: uuid::Uuid,
+    owner: uuid::Uuid,
+) -> serde_json::Value {
+    use sqlite_port::blob;
+    use uuid::Uuid;
+    let id = |bytes: Vec<u8>| Uuid::from_slice(&bytes).unwrap();
+    let collections: Vec<(Vec<u8>, String, String)> =
+        sqlx::query_as("SELECT id,kind,name FROM collections WHERE project_id=?1 ORDER BY id")
+            .bind(blob(project))
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let collection = collections[0].0.clone();
+    type RawField = (Vec<u8>, String, String, Option<String>, String, String);
+    let fields: Vec<RawField> = sqlx::query_as(
+        "SELECT id,key,name,description,type,sort_key FROM collection_fields WHERE collection_id=?1 ORDER BY sort_key,id",
+    )
+    .bind(&collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let options: Vec<(Vec<u8>, String, String, String, String)> = sqlx::query_as(
+        "SELECT o.id,f.key,o.key,o.label,o.sort_key FROM collection_options o JOIN collection_fields f ON f.id=o.field_id WHERE o.collection_id=?1 ORDER BY f.key,o.sort_key",
+    )
+    .bind(&collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let views: Vec<(String, String, String, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT visibility,name,type,config,owner_id FROM collection_views WHERE collection_id=?1 ORDER BY name",
+    )
+    .bind(&collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    type RawStatus = (Vec<u8>, String, String, String, Option<i64>);
+    let statuses: Vec<RawStatus> = sqlx::query_as(
+        "SELECT id,name,category,sort_key,wip_limit FROM statuses WHERE project_id=?1 ORDER BY sort_key",
+    )
+    .bind(blob(project))
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let labels: Vec<(Vec<u8>, String, String)> =
+        sqlx::query_as("SELECT id,name,color FROM labels WHERE project_id=?1 ORDER BY name")
+            .bind(blob(project))
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let milestones: Vec<(Vec<u8>, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id,name,due_date,sort_key FROM milestones WHERE project_id=?1 ORDER BY sort_key",
+    )
+    .bind(blob(project))
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let items: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM collection_items WHERE collection_id=?1")
+            .bind(&collection)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    clone_fixture::normalize(
+        clone_fixture::Copied {
+            collection: (
+                collections[0].1.clone(),
+                collections[0].2.clone(),
+                collections.len() as i64,
+            ),
+            fields: fields
+                .into_iter()
+                .map(|r| (id(r.0), r.1, r.2, r.3, r.4, r.5))
+                .collect(),
+            options: options
+                .into_iter()
+                .map(|r| (id(r.0), r.1, r.2, r.3, r.4))
+                .collect(),
+            views: views
+                .into_iter()
+                .map(|r| (r.0, r.1, r.2, serde_json::from_str(&r.3).unwrap(), id(r.4)))
+                .collect(),
+            statuses: statuses
+                .into_iter()
+                .map(|r| (id(r.0), r.1, r.2, r.3, r.4))
+                .collect(),
+            labels: labels.into_iter().map(|r| (id(r.0), r.1, r.2)).collect(),
+            milestones: milestones
+                .into_iter()
+                .map(|r| (id(r.0), r.1, r.2, r.3))
+                .collect(),
+            items,
+        },
+        owner,
+    )
+}
+
+async fn pg_configuration_snapshot(
+    pool: &sqlx::PgPool,
+    project: uuid::Uuid,
+    owner: uuid::Uuid,
+) -> serde_json::Value {
+    use uuid::Uuid;
+    let collections: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id,kind,name FROM fvoci.collections WHERE project_id=$1 ORDER BY id",
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let collection = collections[0].0;
+    let fields: Vec<clone_fixture::FieldRow> = sqlx::query_as(
+        r#"SELECT id,key,name,description,type,sort_key FROM fvoci.collection_fields WHERE collection_id=$1 ORDER BY sort_key COLLATE "C",id"#,
+    )
+    .bind(collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let options: Vec<(Uuid, String, String, String, String)> = sqlx::query_as(
+        r#"SELECT o.id,f.key,o.key,o.label,o.sort_key FROM fvoci.collection_options o JOIN fvoci.collection_fields f ON f.id=o.field_id WHERE o.collection_id=$1 ORDER BY f.key COLLATE "C",o.sort_key COLLATE "C""#,
+    )
+    .bind(collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let views: Vec<(String, String, String, serde_json::Value, Uuid)> = sqlx::query_as(
+        r#"SELECT visibility,name,type,config,owner_id FROM fvoci.collection_views WHERE collection_id=$1 ORDER BY name COLLATE "C""#,
+    )
+    .bind(collection)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let statuses: Vec<(Uuid, String, String, String, Option<i32>)> = sqlx::query_as(
+        r#"SELECT id,name,category,sort_key,wip_limit FROM fvoci.statuses WHERE project_id=$1 ORDER BY sort_key COLLATE "C""#,
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let labels: Vec<(Uuid, String, String)> = sqlx::query_as(
+        r#"SELECT id,name,color FROM fvoci.labels WHERE project_id=$1 ORDER BY name COLLATE "C""#,
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let milestones: Vec<(Uuid, String, Option<String>, String)> = sqlx::query_as(
+        r#"SELECT id,name,due_date::text,sort_key FROM fvoci.milestones WHERE project_id=$1 ORDER BY sort_key COLLATE "C""#,
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let items: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fvoci.collection_items WHERE collection_id=$1")
+            .bind(collection)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    clone_fixture::normalize(
+        clone_fixture::Copied {
+            collection: (
+                collections[0].1.clone(),
+                collections[0].2.clone(),
+                collections.len() as i64,
+            ),
+            fields,
+            options,
+            views,
+            statuses: statuses
+                .into_iter()
+                .map(|r| (r.0, r.1, r.2, r.3, r.4.map(i64::from)))
+                .collect(),
+            labels,
+            milestones,
+            items,
+        },
+        owner,
+    )
+}
+
+/// Clone on SQLite: configuration, collection and root in one write, then
+/// the duplicate key, the uncopyable view and the access refusals leave no
+/// project, collection or journal row behind.
+#[tokio::test]
+async fn sqlite_clone_copies_configuration_and_refuses_without_effects() {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use sqlite_port::{blob, id_of, journal, member_roles, scalar, Lite};
+
+    let lite = Lite::new().await;
+    let (source, _) = lite.project("SRC", "private").await;
+    let seeded = sqlite_seed_configuration(&lite, source).await;
+    let viewer = lite.member(lite.ws, "member", "viewer").await;
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("/projects/{source}/members"),
+            Some(json!({"userId": viewer.id, "role": "viewer"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let clone_path = format!("/projects/{source}/clone");
+
+    let (status, body) = lite
+        .call(
+            "POST",
+            &clone_path,
+            Some(json!({"key": "CPY", "name": " Copy ", "description": "Cloned"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["key"], "CPY");
+    assert_eq!(body["name"], "Copy");
+    assert_eq!(body["visibility"], "private");
+    let copy = id_of(&body["id"]);
+    let root = id_of(&body["rootDocumentId"]);
+
+    let fresh = lite.fresh().await;
+    let source_snapshot = sqlite_configuration_snapshot(&fresh, source, lite.owner.id).await;
+    assert_eq!(
+        source_snapshot["items"],
+        json!(1),
+        "the seeded task is an item"
+    );
+    let snapshot = sqlite_configuration_snapshot(&fresh, copy, lite.owner.id).await;
+    clone_fixture::assert_expected(&snapshot, &source_snapshot["statuses"]);
+    assert_eq!(
+        member_roles(&fresh, copy).await,
+        vec![(lite.owner.id, "lead".to_string())]
+    );
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM documents WHERE id=?1 AND project_id=?2 AND parent_id IS NULL AND title='Copy'",
+            &[root, copy]
+        )
+        .await,
+        1
+    );
+    let created: String = sqlx::query_scalar(
+        "SELECT json_extract(payload,'$.sourceProjectId') FROM events WHERE verb='project.created' AND target_id=?1",
+    )
+    .bind(blob(copy))
+    .fetch_one(&fresh)
+    .await
+    .unwrap();
+    assert_eq!(created, source.to_string());
+    assert_eq!(seeded.views.len(), 3);
+    fresh.close().await;
+
+    // Refusals: duplicate key, a viewer, another tenant, and a shared view
+    // that sorts by a deleted field (the PostgreSQL clone rejects it).
+    let stranger_ws = lite.workspace("strangers").await;
+    let stranger = lite.member(stranger_ws, "owner", "stranger").await;
+    let gone = seeded.fields[2].0;
+    sqlx::query("INSERT INTO collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config) SELECT ?1,workspace_id,id,?2,'shared','Broken','table',?3 FROM collections WHERE project_id=?4 AND kind='task'")
+        .bind(blob(uuid::Uuid::now_v7()))
+        .bind(blob(lite.owner.id))
+        .bind(json!({"query": {"sort": [{"field": gone.to_string(), "direction": "asc"}]}}).to_string())
+        .bind(blob(source))
+        .execute(&lite.pool)
+        .await
+        .unwrap();
+    for (who, key, expected) in [
+        (&lite.owner, "CPY", StatusCode::CONFLICT),
+        (&viewer, "VWR", StatusCode::NOT_FOUND),
+        (&stranger, "STR", StatusCode::NOT_FOUND),
+        (&lite.owner, "BRK", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body) = lite
+            .call(
+                "POST",
+                &clone_path,
+                Some(json!({"key": key, "name": key})),
+                who,
+            )
+            .await;
+        assert_eq!(status, expected, "{key}: {body}");
+    }
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        scalar(&fresh, "SELECT count(*) FROM projects", &[]).await,
+        2
+    );
+    assert_eq!(
+        scalar(&fresh, "SELECT count(*) FROM collections", &[]).await,
+        2
+    );
+    assert_eq!(
+        scalar(&fresh, "SELECT count(*) FROM documents", &[]).await,
+        2
+    );
+    assert_eq!(journal(&fresh, lite.ws, "project.created").await, (2, 2));
+    fresh.close().await;
+    lite.finish().await;
+}
+
+/// The same fixture cloned on PostgreSQL and on SQLite yields the same
+/// collection, fields, options, shared views and items, each read back on a
+/// new connection and checked against written-down constants.
+#[tokio::test]
+async fn pg_and_sqlite_clone_the_same_configuration() {
+    use axum::http::StatusCode;
+    use project_harness::{admin_pool, create_project, json_request, setup_session, TestDb};
+    use serde_json::json;
+    use sqlite_port::{id_of, Lite};
+
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, owner, ws) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let source = id_of(&create_project(app.clone(), &cookie, ws, "SRC", "workspace").await["id"]);
+    let (label, milestone) = clone_fixture::api(&app, &cookie, ws, source).await;
+    let status: uuid::Uuid = sqlx::query_scalar(
+        r#"SELECT id FROM fvoci.statuses WHERE project_id=$1 ORDER BY sort_key COLLATE "C" LIMIT 1"#,
+    )
+    .bind(source)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let seeded = clone_fixture::plan(label, milestone, status);
+    let collection: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM fvoci.collections WHERE project_id=$1 AND kind='task'")
+            .bind(source)
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    for (id, key, name, description, kind, sort, deleted) in &seeded.fields {
+        sqlx::query("INSERT INTO fvoci.collection_fields(id,workspace_id,collection_id,key,name,description,type,sort_key,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $9 THEN now() END)")
+            .bind(id).bind(ws).bind(collection).bind(key).bind(name).bind(description).bind(kind).bind(sort).bind(deleted)
+            .execute(&admin).await.unwrap();
+    }
+    for (id, field, key, label, sort, deleted) in &seeded.options {
+        sqlx::query("INSERT INTO fvoci.collection_options(id,workspace_id,collection_id,field_id,key,label,sort_key,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN now() END)")
+            .bind(id).bind(ws).bind(collection).bind(field).bind(key).bind(label).bind(sort).bind(deleted)
+            .execute(&admin).await.unwrap();
+    }
+    for (id, visibility, name, kind, config) in &seeded.views {
+        sqlx::query("INSERT INTO fvoci.collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(id).bind(ws).bind(collection).bind(owner).bind(visibility).bind(name).bind(kind).bind(config)
+            .execute(&admin).await.unwrap();
+    }
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workspaces/{ws}/projects/{source}/clone"),
+        Some(json!({"key": "CPY", "name": "Copy"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let pg_copy = id_of(&body["id"]);
+    admin.close().await;
+    let reader = admin_pool(&harness).await;
+    let pg_source = pg_configuration_snapshot(&reader, source, owner).await;
+    let pg = pg_configuration_snapshot(&reader, pg_copy, owner).await;
+    reader.close().await;
+
+    let lite = Lite::new().await;
+    let (lite_source, _) = lite.project("SRC", "workspace").await;
+    sqlite_seed_configuration(&lite, lite_source).await;
+    let (status, body) = lite
+        .call(
+            "POST",
+            &format!("/projects/{lite_source}/clone"),
+            Some(json!({"key": "CPY", "name": "Copy"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let fresh = lite.fresh().await;
+    let sqlite_source = sqlite_configuration_snapshot(&fresh, lite_source, lite.owner.id).await;
+    let sqlite = sqlite_configuration_snapshot(&fresh, id_of(&body["id"]), lite.owner.id).await;
+    fresh.close().await;
+
+    assert_eq!(pg_source, sqlite_source);
+    assert_eq!(pg, sqlite);
+    clone_fixture::assert_expected(&pg, &pg_source["statuses"]);
+    clone_fixture::assert_expected(&sqlite, &sqlite_source["statuses"]);
+    lite.finish().await;
+    harness.cleanup().await;
+}
+
+async fn sqlite_project_document(
+    lite: &sqlite_port::Lite,
+    project: uuid::Uuid,
+    parent: uuid::Uuid,
+    title: &str,
+) -> uuid::Uuid {
+    let (status, body) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/documents"),
+            Some(serde_json::json!({"parentId": parent, "title": title})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+    sqlite_port::id_of(&body["id"])
+}
+
+/// Project document move on SQLite: the whole subtree moves, then cycle,
+/// root, depth, cross-project, trashed-parent and access refusals keep it.
+#[tokio::test]
+async fn sqlite_project_document_move_keeps_the_postgres_contract() {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use sqlite_port::{journal, scalar, text, Lite};
+
+    let lite = Lite::new().await;
+    let (project, root) = lite.project("MOVE", "private").await;
+    let (other, other_root) = lite.project("ELSE", "workspace").await;
+    let a = sqlite_project_document(&lite, project, root, "A").await;
+    let b = sqlite_project_document(&lite, project, a, "B").await;
+    let b2 = sqlite_project_document(&lite, project, b, "B2").await;
+    let c = sqlite_project_document(&lite, project, root, "C").await;
+    let foreign = sqlite_project_document(&lite, other, other_root, "Foreign").await;
+    let viewer = lite.member(lite.ws, "member", "viewer").await;
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/members"),
+            Some(json!({"userId": viewer.id, "role": "viewer"})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let stranger_ws = lite.workspace("strangers").await;
+    let stranger = lite.member(stranger_ws, "owner", "stranger").await;
+    let mv = |doc: uuid::Uuid| format!("/projects/{project}/documents/{doc}/move");
+    let label = |id: uuid::Uuid| id.simple().to_string();
+
+    let (status, body) = lite
+        .call("POST", &mv(b), Some(json!({"newParentId": c})), &lite.owner)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["parentId"], c.to_string());
+    assert_eq!(body["displayId"], "MOVE-3");
+    let fresh = lite.fresh().await;
+    let moved = format!("{}.{}.{}", label(root), label(c), label(b));
+    assert_eq!(
+        text(&fresh, "SELECT path FROM documents WHERE id=?1", &[b]).await,
+        Some(moved.clone())
+    );
+    assert_eq!(
+        text(&fresh, "SELECT path FROM documents WHERE id=?1", &[b2]).await,
+        Some(format!("{moved}.{}", label(b2)))
+    );
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM documents WHERE id=?1 AND parent_id=?2",
+            &[b, c]
+        )
+        .await,
+        1
+    );
+    assert_eq!(journal(&fresh, lite.ws, "document.moved").await, (1, 1));
+    fresh.close().await;
+
+    let mut chain = c;
+    for depth in 0..17 {
+        chain = sqlite_project_document(&lite, project, chain, &format!("D{depth}")).await;
+    }
+    for (doc, parent, who, expected, code) in [
+        (
+            c,
+            b2,
+            &lite.owner,
+            StatusCode::BAD_REQUEST,
+            Some("document_cycle"),
+        ),
+        (
+            c,
+            c,
+            &lite.owner,
+            StatusCode::BAD_REQUEST,
+            Some("document_cycle"),
+        ),
+        (
+            root,
+            a,
+            &lite.owner,
+            StatusCode::BAD_REQUEST,
+            Some("root_document_move"),
+        ),
+        (
+            b,
+            chain,
+            &lite.owner,
+            StatusCode::BAD_REQUEST,
+            Some("tree_depth_limit"),
+        ),
+        (b, foreign, &lite.owner, StatusCode::NOT_FOUND, None),
+        (foreign, a, &lite.owner, StatusCode::NOT_FOUND, None),
+        (b, a, &viewer, StatusCode::NOT_FOUND, None),
+        (b, a, &stranger, StatusCode::NOT_FOUND, None),
+    ] {
+        let (status, body) = lite
+            .call("POST", &mv(doc), Some(json!({"newParentId": parent})), who)
+            .await;
+        assert_eq!(status, expected, "{body}");
+        if let Some(code) = code {
+            assert_eq!(body["code"], code, "{body}");
+        }
+    }
+    let (status, _) = lite
+        .call(
+            "POST",
+            &format!("/projects/{project}/documents/{a}/trash"),
+            None,
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = lite
+        .call(
+            "POST",
+            &mv(b2),
+            Some(json!({"newParentId": a})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = lite
+        .call(
+            "POST",
+            &mv(b2),
+            Some(json!({"newParentId": chain})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "a leaf fits at the limit: {body}");
+
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(&fresh, "SELECT path FROM documents WHERE id=?1", &[b]).await,
+        Some(moved)
+    );
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM documents WHERE id=?1 AND parent_id=?2",
+            &[b2, chain]
+        )
+        .await,
+        1
+    );
+    assert_eq!(journal(&fresh, lite.ws, "document.moved").await, (2, 2));
+    fresh.close().await;
+    lite.finish().await;
+}
+
+/// Saved views on SQLite: owner-only rows validated against the project,
+/// listed in the PostgreSQL name order, with the expected-config CAS.
+#[tokio::test]
+async fn sqlite_project_views_keep_the_postgres_contract() {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use sqlite_port::{id_of, scalar, text, Lite};
+
+    let lite = Lite::new().await;
+    let (project, _) = lite.project("VIEW", "workspace").await;
+    let (other, _) = lite.project("ELSE", "workspace").await;
+    let (hidden, _) = lite.project("HIDE", "private").await;
+    let (label, milestone) =
+        clone_fixture::api(&lite.app, &lite.owner.cookie, lite.ws, project).await;
+    let (foreign_label, _) =
+        clone_fixture::api(&lite.app, &lite.owner.cookie, lite.ws, other).await;
+    let status: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM statuses WHERE project_id=?1 ORDER BY sort_key LIMIT 1")
+            .bind(sqlite_port::blob(project))
+            .fetch_one(&lite.pool)
+            .await
+            .unwrap();
+    let status = uuid::Uuid::from_slice(&status).unwrap();
+    let mate = lite.member(lite.ws, "member", "mate").await;
+    let stranger_ws = lite.workspace("strangers").await;
+    let stranger = lite.member(stranger_ws, "owner", "stranger").await;
+    let views = format!("/projects/{project}/views");
+    let filtered = json!({"filters": {"statusId": status, "labelId": label, "milestoneId": milestone, "assigneeId": mate.id}, "sort": [{"field": "priority", "direction": "desc"}]});
+
+    let (status_code, zeta) = lite
+        .call(
+            "POST",
+            &views,
+            Some(json!({"name": "Zeta", "type": "list", "config": filtered})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::CREATED, "{zeta}");
+    assert_eq!(zeta["config"]["filters"]["labelId"], label.to_string());
+    let zeta_id = id_of(&zeta["id"]);
+    let (status_code, alpha) = lite
+        .call(
+            "POST",
+            &views,
+            Some(json!({"name": "alpha", "type": "board", "config": {}})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::CREATED, "{alpha}");
+    let alpha_id = id_of(&alpha["id"]);
+
+    for config in [
+        json!({"filters": {"labelId": foreign_label}}),
+        json!({"filters": {"statusId": uuid::Uuid::now_v7()}}),
+        json!({"filters": {"assigneeId": stranger.id}}),
+        json!({"filters": {"custom": [{"fieldId": uuid::Uuid::now_v7(), "operator": "empty"}]}}),
+    ] {
+        let (status_code, body) = lite
+            .call(
+                "POST",
+                &views,
+                Some(json!({"name": "Bad", "type": "list", "config": config})),
+                &lite.owner,
+            )
+            .await;
+        assert_eq!(status_code, StatusCode::BAD_REQUEST, "{config}: {body}");
+    }
+    for (who, path) in [
+        (&stranger, views.clone()),
+        (&mate, format!("/projects/{hidden}/views")),
+    ] {
+        let (status_code, _) = lite
+            .call(
+                "POST",
+                &path,
+                Some(json!({"name": "Nope", "type": "list", "config": {}})),
+                who,
+            )
+            .await;
+        assert_eq!(status_code, StatusCode::NOT_FOUND);
+        let (status_code, _) = lite.call("GET", &path, None, who).await;
+        assert_eq!(status_code, StatusCode::NOT_FOUND);
+    }
+
+    // PostgreSQL orders names by its collation: "alpha" before "Zeta".
+    let (status_code, list) = lite.call("GET", &views, None, &lite.owner).await;
+    assert_eq!(status_code, StatusCode::OK, "{list}");
+    let names: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "Zeta"]);
+    let (status_code, mine) = lite.call("GET", &views, None, &mate).await;
+    assert_eq!(status_code, StatusCode::OK);
+    assert_eq!(mine["items"], json!([]));
+
+    let view = |id: uuid::Uuid| format!("/views/{id}");
+    let (status_code, _) = lite
+        .call(
+            "PATCH",
+            &view(zeta_id),
+            Some(json!({"name": "Theirs"})),
+            &mate,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::NOT_FOUND);
+    let (status_code, body) = lite
+        .call(
+            "PATCH",
+            &view(zeta_id),
+            Some(json!({"name": "Omega", "config": {"filters": {"openOnly": true}}, "expectedConfig": filtered})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::OK, "{body}");
+    let (status_code, body) = lite
+        .call(
+            "PATCH",
+            &view(zeta_id),
+            Some(json!({"config": {}, "expectedConfig": filtered})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "document_version_mismatch");
+    let (status_code, _) = lite
+        .call(
+            "PATCH",
+            &view(zeta_id),
+            Some(json!({"config": {"filters": {"labelId": foreign_label}}, "expectedConfig": {"filters": {"openOnly": true}}})),
+            &lite.owner,
+        )
+        .await;
+    assert_eq!(status_code, StatusCode::BAD_REQUEST);
+
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        text(
+            &fresh,
+            "SELECT name||'|'||json_extract(config,'$.filters.openOnly') FROM views WHERE id=?1",
+            &[zeta_id]
+        )
+        .await
+        .as_deref(),
+        Some("Omega|1")
+    );
+    fresh.close().await;
+
+    for (who, expected) in [
+        (&mate, StatusCode::NOT_FOUND),
+        (&stranger, StatusCode::NOT_FOUND),
+        (&lite.owner, StatusCode::OK),
+        (&lite.owner, StatusCode::NOT_FOUND),
+    ] {
+        let (status_code, _) = lite.call("DELETE", &view(alpha_id), None, who).await;
+        assert_eq!(status_code, expected);
+    }
+    let fresh = lite.fresh().await;
+    assert_eq!(
+        scalar(
+            &fresh,
+            "SELECT count(*) FROM views WHERE project_id=?1",
+            &[project]
+        )
+        .await,
+        1
+    );
+    fresh.close().await;
+    lite.finish().await;
+}

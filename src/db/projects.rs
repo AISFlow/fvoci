@@ -15,6 +15,7 @@ use crate::db::group_grants::{
     group_project_grant_exists_sql, group_project_grant_roles_select_sql,
 };
 use crate::db::identity::{append_audit, append_event, AuditAppend, EventAppend};
+use crate::db::project_clone::CloneCatalog;
 use crate::db::workspace::{
     membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
 };
@@ -636,6 +637,37 @@ async fn record_project_event_and_audit(
     Ok(())
 }
 
+impl OperationTx<'_, '_> {
+    /// [`record_project_event_and_audit`] through the caller's operation, so a
+    /// family writer appends both rows in its own reserved transaction.
+    async fn record_project_change(
+        &mut self,
+        change: ProjectChangeRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(change.workspace_id),
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.to_string(),
+            target_type: Some(change.target_type.to_string()),
+            target_id: Some(change.target_id),
+            payload: change.payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(change.workspace_id),
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.to_string(),
+            target_type: Some(change.target_type.to_string()),
+            target_id: Some(change.target_id),
+            payload: change.payload,
+            ip: change.client_ip.map(str::to_string),
+        })
+        .await
+    }
+}
+
 pub(crate) fn is_private_lead_violation(err: &sqlx::Error) -> bool {
     err.as_database_error()
         .and_then(|db| db.code())
@@ -1169,6 +1201,187 @@ async fn finish_project_create(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("project write refused: {0:?}")]
+struct ProjectWriteRefusal(ProjectDbError);
+
+/// Finish of every other family project writer: only `Ok(Ok)` commits, and an
+/// uncertain finish is not an ACK. Refusals and driver errors roll back and a
+/// failed rollback keeps the original cause.
+async fn finish_project_write<T>(
+    tx: DbTx,
+    result: Result<Result<T, ProjectDbError>, sqlx::Error>,
+) -> Result<Result<T, ProjectDbError>, sqlx::Error> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(value))
+        }
+        Ok(Err(refusal)) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(ProjectWriteRefusal(refusal))),
+                    cleanup,
+                ));
+            }
+            Ok(Err(refusal))
+        }
+        Err(original) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    Some(Box::new(original)),
+                    cleanup,
+                ));
+            }
+            Err(original)
+        }
+    }
+}
+
+/// Borrow a family transaction as an operation for one named call.
+fn family_op(family: &mut FamilyTx) -> OperationTx<'_, 'static> {
+    OperationTx::SqliteFamily(family)
+}
+
+/// The live project row ([`lock_project`] / [`load_live_project`]). The
+/// reserved SQLite writer already serializes the project writers.
+async fn family_live_project(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+) -> Result<Option<ProjectRow>, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    let rows = family
+        .query(
+            "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+             FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace), Cell::uuid(project)],
+        )
+        .await?;
+    rows.first()
+        .map(|row| project_created_family_row(row, workspace))
+        .transpose()
+}
+
+/// [`direct_project_member_role`]: the user's own row, not group grants.
+async fn family_direct_member_role(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    user: Uuid,
+) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    let rows = family
+        .query(
+            "SELECT role FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+            &[Cell::uuid(workspace), Cell::uuid(project), Cell::uuid(user)],
+        )
+        .await?;
+    Ok(rows
+        .first()
+        .map(|row| row.cell(0)?.string())
+        .transpose()?
+        .as_deref()
+        .and_then(ProjectMemberRole::parse))
+}
+
+/// [`count_project_leads_except`] for one user: lead rows, NULL-user group
+/// grants included.
+async fn family_count_leads_except(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+    except_user: Option<Uuid>,
+) -> Result<i64, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    let rows = family
+        .query(
+            "SELECT count(*) FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND role='lead'
+             AND (?3 IS NULL OR user_id IS NOT ?3)",
+            &[
+                Cell::uuid(workspace),
+                Cell::uuid(project),
+                Cell::optional_uuid(except_user),
+            ],
+        )
+        .await?;
+    rows.first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .integer()
+}
+
+/// Stand-in for the deferred `projects_private_lead_check` and
+/// `project_members_private_lead_check_{del,upd}` constraint triggers, which
+/// SQLite lacks: a live private project must keep a lead row at commit.
+async fn family_private_project_without_lead(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    project: Uuid,
+) -> Result<bool, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    let rows = family
+        .query(
+            "SELECT EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=?1 AND p.id=?2 AND p.deleted_at IS NULL
+             AND p.visibility='private' AND NOT EXISTS(SELECT 1 FROM project_members m
+             WHERE m.workspace_id=p.workspace_id AND m.project_id=p.id AND m.role='lead'))",
+            &[Cell::uuid(workspace), Cell::uuid(project)],
+        )
+        .await?;
+    rows.first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .boolean()
+}
+
+/// [`begin_project_manage`] in a family writer: current credential, live
+/// workspace, then Manage on the live project. The writer is the lock.
+async fn begin_project_manage_family(
+    family: &mut FamilyTx,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    tree_lock: bool,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    family_op(family).set_tenant(workspace_id).await?;
+    family_op(family)
+        .lock_membership_users(&[actor_user_id])
+        .await?;
+    if !family_op(family)
+        .recheck_session(actor_user_id, session_id)
+        .await?
+    {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !family_op(family).workspace_is_live(workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    if tree_lock {
+        family_op(family).lock_tree(workspace_id).await?;
+    }
+    let Some(locked) = family_live_project(family, workspace_id, project_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if !family_op(family)
+        .project_permission_by_id(workspace_id, actor_user_id, project_id)
+        .await?
+        .is_some_and(|permission| permission.at_least(ProjectPermission::Manage))
+    {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(Ok(locked))
+}
+
+/// Current-time expression shared by the family project writers (DB clock).
+macro_rules! family_now {
+    () => {
+        "(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)"
+    };
+}
+
 pub async fn create_project(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1692,6 +1905,464 @@ pub async fn clone_project(
         created_at: row.9,
         updated_at: row.10,
     }))
+}
+
+/// [`clone_project`] for every backend. The family writer creates the clone,
+/// its task collection (`projects_task_collection`), root, members and copied
+/// configuration in one reserved transaction; PostgreSQL is unchanged.
+pub async fn clone_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    source_project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: CloneProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return clone_project(
+            pool,
+            workspace_id,
+            source_project_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family_op(family).set_tenant(workspace_id).await?;
+        let mut users = vec![actor_user_id];
+        if let Some(lead) = input.lead_user_id.filter(|lead| *lead != actor_user_id) {
+            users.push(lead);
+        }
+        family_op(family).lock_membership_users(&users).await?;
+        if !family_op(family)
+            .recheck_session(actor_user_id, session_id)
+            .await?
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !family_op(family).workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !family_op(family)
+            .membership_role(workspace_id, actor_user_id, true)
+            .await?
+            .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        family_op(family).lock_tree(workspace_id).await?;
+        let Some(source) = family_live_project(family, workspace_id, source_project_id).await?
+        else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if !family_op(family)
+            .project_permission_by_id(workspace_id, actor_user_id, source_project_id)
+            .await?
+            .is_some_and(|permission| permission.at_least(ProjectPermission::Manage))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let visibility = input.visibility.unwrap_or(&source.visibility);
+        let description = match input.description {
+            Some(value) => optional_text_to_db(value),
+            None => source.description.clone(),
+        };
+        let icon = match input.icon {
+            Some(value) => optional_text_to_db(value),
+            None => source.icon.clone(),
+        };
+        let project = Uuid::now_v7();
+        let root = Uuid::now_v7();
+        let inserted = family
+            .query(
+                "INSERT INTO projects(id,workspace_id,key,name,description,icon,visibility,status,next_number,created_by)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,'active',1,?8)
+                 ON CONFLICT(workspace_id,key) DO NOTHING RETURNING id",
+                &[
+                    Cell::uuid(project),
+                    Cell::uuid(workspace_id),
+                    Cell::text(input.key),
+                    Cell::text(input.name.trim()),
+                    Cell::optional_text(description.as_deref()),
+                    Cell::optional_text(icon.as_deref()),
+                    Cell::text(visibility),
+                    Cell::uuid(actor_user_id),
+                ],
+            )
+            .await?;
+        if inserted.is_empty() {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+        seed_project_task_collection_family(family, workspace_id, project, input.name.trim())
+            .await?;
+        family
+            .execute(
+                "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')",
+                &[
+                    Cell::uuid(Uuid::now_v7()),
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project),
+                    Cell::uuid(actor_user_id),
+                ],
+            )
+            .await?;
+        if let Some(lead) = input.lead_user_id.filter(|lead| *lead != actor_user_id) {
+            if !family_op(family)
+                .membership_role(workspace_id, lead, false)
+                .await?
+                .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+            {
+                return Ok(Err(ProjectDbError::NotFound));
+            }
+            family
+                .execute(
+                    concat!(
+                        "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'lead')
+                         ON CONFLICT(workspace_id,project_id,user_id) DO UPDATE SET role='lead',updated_at=",
+                        family_now!()
+                    ),
+                    &[
+                        Cell::uuid(Uuid::now_v7()),
+                        Cell::uuid(workspace_id),
+                        Cell::uuid(project),
+                        Cell::uuid(lead),
+                    ],
+                )
+                .await?;
+            family
+                .execute(
+                    concat!(
+                        "UPDATE project_members SET role='member',updated_at=",
+                        family_now!(),
+                        " WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3"
+                    ),
+                    &[
+                        Cell::uuid(workspace_id),
+                        Cell::uuid(project),
+                        Cell::uuid(actor_user_id),
+                    ],
+                )
+                .await?;
+        }
+        let numbers = family
+            .query(
+                concat!(
+                    "UPDATE projects SET next_number=next_number+1,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2 RETURNING next_number-1"
+                ),
+                &[Cell::uuid(workspace_id), Cell::uuid(project)],
+            )
+            .await?;
+        let number = numbers
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .int32()?;
+        family
+            .execute(
+                "INSERT INTO documents(id,workspace_id,title,path,parent_id,sort_key,project_id,number,status,schema_version,content_json,created_by)
+                 VALUES(?1,?2,?3,?4,NULL,'V',?5,?6,'published',?7,?8,?9)",
+                &[
+                    Cell::uuid(root),
+                    Cell::uuid(workspace_id),
+                    Cell::text(input.name.trim()),
+                    Cell::text(to_path_label(root)),
+                    Cell::uuid(project),
+                    Cell::Integer(i64::from(number)),
+                    Cell::Integer(i64::from(DOCUMENT_SCHEMA_VERSION)),
+                    Cell::json(&empty_document_json())?,
+                    Cell::uuid(actor_user_id),
+                ],
+            )
+            .await?;
+        family
+            .execute(
+                concat!(
+                    "UPDATE projects SET root_document_id=?3,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project),
+                    Cell::uuid(root),
+                ],
+            )
+            .await?;
+        if !copy_project_configuration_family(
+            family,
+            workspace_id,
+            source_project_id,
+            project,
+            actor_user_id,
+        )
+        .await?
+        {
+            return Ok(Err(ProjectDbError::InvalidInput));
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project.created",
+                target_type: "project",
+                target_id: project,
+                payload: json!({
+                    "projectId": project.to_string(),
+                    "key": input.key,
+                    "name": input.name.trim(),
+                    "visibility": visibility,
+                    "rootDocumentId": root.to_string(),
+                    "sourceProjectId": source_project_id.to_string(),
+                }),
+                client_ip,
+            })
+            .await?;
+        let rows = family
+            .query(
+                "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+                 FROM projects WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace_id), Cell::uuid(project)],
+            )
+            .await?;
+        Ok(Ok(project_created_family_row(
+            rows.first().ok_or(sqlx::Error::RowNotFound)?,
+            workspace_id,
+        )?))
+    }
+    .await;
+    finish_project_write(tx, result).await
+}
+
+/// Family twin of `project_clone::copy_project_configuration` together with
+/// `collections::copy_task_collection`: workflow and statuses, labels,
+/// milestones, then the live task-collection fields, their live options and
+/// the shared collection views (private views stay with their owner). Tasks,
+/// and so collection items, are not copied. `Ok(false)` is the PostgreSQL
+/// refusal: a missing task collection or a shared view that names something
+/// not copied. Copy order only decides the fresh v7 ids; every reader orders
+/// these rows by name or sort key itself.
+async fn copy_project_configuration_family(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    source: Uuid,
+    dest: Uuid,
+    actor: Uuid,
+) -> Result<bool, sqlx::Error> {
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    let ws = Cell::uuid(workspace);
+    let mut catalog = CloneCatalog::default();
+    let workflows = family
+        .query(
+            "SELECT id FROM workflows WHERE workspace_id=?1 AND project_id=?2",
+            &[ws.clone(), Cell::uuid(source)],
+        )
+        .await?;
+    if let Some(row) = workflows.first() {
+        let source_workflow = row.cell(0)?.id()?;
+        let dest_workflow = Uuid::now_v7();
+        family
+            .execute(
+                "INSERT INTO workflows(id,workspace_id,project_id) VALUES(?1,?2,?3)",
+                &[Cell::uuid(dest_workflow), ws.clone(), Cell::uuid(dest)],
+            )
+            .await?;
+        let statuses = family
+            .query(
+                "SELECT id,name,category,sort_key,wip_limit FROM statuses
+                 WHERE workspace_id=?1 AND workflow_id=?2 ORDER BY sort_key COLLATE BINARY",
+                &[ws.clone(), Cell::uuid(source_workflow)],
+            )
+            .await?;
+        for row in statuses {
+            let id = Uuid::now_v7();
+            catalog.statuses.insert(row.cell(0)?.id()?, id);
+            family
+                .execute(
+                    "INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key,wip_limit)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    &[
+                        Cell::uuid(id),
+                        ws.clone(),
+                        Cell::uuid(dest),
+                        Cell::uuid(dest_workflow),
+                        row.cell(1)?,
+                        row.cell(2)?,
+                        row.cell(3)?,
+                        row.cell(4)?,
+                    ],
+                )
+                .await?;
+        }
+    } else {
+        seed_project_workflow_family(family, workspace, dest).await?;
+    }
+    let labels = family
+        .query(
+            "SELECT id,name,color FROM labels WHERE workspace_id=?1 AND project_id=?2 ORDER BY name COLLATE BINARY,id",
+            &[ws.clone(), Cell::uuid(source)],
+        )
+        .await?;
+    for row in labels {
+        let id = Uuid::now_v7();
+        catalog.labels.insert(row.cell(0)?.id()?, id);
+        family
+            .execute(
+                "INSERT INTO labels(id,workspace_id,project_id,name,color) VALUES(?1,?2,?3,?4,?5)",
+                &[
+                    Cell::uuid(id),
+                    ws.clone(),
+                    Cell::uuid(dest),
+                    row.cell(1)?,
+                    row.cell(2)?,
+                ],
+            )
+            .await?;
+    }
+    let milestones = family
+        .query(
+            "SELECT id,name,due_date,sort_key FROM milestones WHERE workspace_id=?1 AND project_id=?2
+             ORDER BY sort_key COLLATE BINARY,id",
+            &[ws.clone(), Cell::uuid(source)],
+        )
+        .await?;
+    for row in milestones {
+        let id = Uuid::now_v7();
+        catalog.milestones.insert(row.cell(0)?.id()?, id);
+        family
+            .execute(
+                "INSERT INTO milestones(id,workspace_id,project_id,name,due_date,sort_key) VALUES(?1,?2,?3,?4,?5,?6)",
+                &[
+                    Cell::uuid(id),
+                    ws.clone(),
+                    Cell::uuid(dest),
+                    row.cell(1)?,
+                    row.cell(2)?,
+                    row.cell(3)?,
+                ],
+            )
+            .await?;
+    }
+    let pair = family
+        .query(
+            "SELECT s.id,d.id FROM collections s, collections d
+             WHERE s.workspace_id=?1 AND s.project_id=?2 AND s.kind='task'
+               AND d.workspace_id=?1 AND d.project_id=?3 AND d.kind='task'",
+            &[ws.clone(), Cell::uuid(source), Cell::uuid(dest)],
+        )
+        .await?;
+    let Some(pair) = pair.first() else {
+        return Ok(false);
+    };
+    let (source_collection, dest_collection) = (pair.cell(0)?.id()?, pair.cell(1)?.id()?);
+    let fields = family
+        .query(
+            "SELECT id,key,name,description,type,sort_key,deleted_at FROM collection_fields
+             WHERE workspace_id=?1 AND collection_id=?2 ORDER BY sort_key COLLATE BINARY,id",
+            &[ws.clone(), Cell::uuid(source_collection)],
+        )
+        .await?;
+    let options = family
+        .query(
+            "SELECT field_id,key,label,sort_key,id FROM collection_options
+             WHERE workspace_id=?1 AND collection_id=?2 AND deleted_at IS NULL ORDER BY sort_key COLLATE BINARY,id",
+            &[ws.clone(), Cell::uuid(source_collection)],
+        )
+        .await?;
+    for field in fields {
+        if !matches!(field.cell(6)?, Cell::Null) {
+            continue;
+        }
+        let old_field = field.cell(0)?.id()?;
+        let field_id = Uuid::now_v7();
+        catalog.fields.insert(old_field, field_id);
+        let field_type = crate::collections::FieldType::parse(&field.cell(4)?.string()?)
+            .unwrap_or(crate::collections::FieldType::Text);
+        family
+            .execute(
+                "INSERT INTO collection_fields(id,workspace_id,collection_id,key,name,description,type,sort_key)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                &[
+                    Cell::uuid(field_id),
+                    ws.clone(),
+                    Cell::uuid(dest_collection),
+                    field.cell(1)?,
+                    field.cell(2)?,
+                    field.cell(3)?,
+                    Cell::text(field_type.as_str()),
+                    field.cell(5)?,
+                ],
+            )
+            .await?;
+        let mut option_map = field_type
+            .has_options()
+            .then(std::collections::HashMap::new);
+        for option in &options {
+            if option.cell(0)?.id()? != old_field {
+                continue;
+            }
+            let option_id = Uuid::now_v7();
+            if let Some(map) = option_map.as_mut() {
+                map.insert(option.cell(4)?.id()?, option_id);
+            }
+            family
+                .execute(
+                    "INSERT INTO collection_options(id,workspace_id,collection_id,field_id,key,label,sort_key,deleted_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+                    &[
+                        Cell::uuid(option_id),
+                        ws.clone(),
+                        Cell::uuid(dest_collection),
+                        Cell::uuid(field_id),
+                        option.cell(1)?,
+                        option.cell(2)?,
+                        option.cell(3)?,
+                    ],
+                )
+                .await?;
+        }
+        if let Some(map) = option_map {
+            catalog.options_by_field.insert(old_field, map);
+        }
+    }
+    let views = family
+        .query(
+            "SELECT name,type,config FROM collection_views
+             WHERE workspace_id=?1 AND collection_id=?2 AND visibility='shared' ORDER BY name COLLATE BINARY,id",
+            &[ws.clone(), Cell::uuid(source_collection)],
+        )
+        .await?;
+    for view in views {
+        let Some(config) = catalog.remap_collection_config(&view.cell(2)?.value()?) else {
+            return Ok(false);
+        };
+        family
+            .execute(
+                "INSERT INTO collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config)
+                 VALUES(?1,?2,?3,?4,'shared',?5,?6,?7)",
+                &[
+                    Cell::uuid(Uuid::now_v7()),
+                    ws.clone(),
+                    Cell::uuid(dest_collection),
+                    Cell::uuid(actor),
+                    view.cell(0)?,
+                    view.cell(1)?,
+                    Cell::json(&config)?,
+                ],
+            )
+            .await?;
+    }
+    Ok(true)
 }
 
 /// Active selected-project list. Authority, grants and grouped counts share
@@ -2234,6 +2905,179 @@ pub async fn update_project(
     }
 }
 
+/// [`update_project`] for every backend; the family writer keeps the same
+/// refusal order and rechecks the private-lead invariant before commit.
+pub async fn update_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    input: UpdateProjectInput<'_>,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_project(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            input,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family_op(family).set_tenant(workspace_id).await?;
+        let mut users = vec![actor_user_id];
+        if let Some(lead) = input.lead_user_id {
+            users.push(lead);
+        }
+        family_op(family).lock_membership_users(&users).await?;
+        if !family_op(family)
+            .recheck_session(actor_user_id, session_id)
+            .await?
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !family_op(family).workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let Some(locked) = family_live_project(family, workspace_id, project_id).await? else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if locked.status == "archived" {
+            return Ok(Err(ProjectDbError::Archived));
+        }
+        if !family_op(family)
+            .project_permission_by_id(workspace_id, actor_user_id, project_id)
+            .await?
+            .is_some_and(|permission| permission.at_least(ProjectPermission::Manage))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let name = input
+            .name
+            .map(|name| name.trim().to_string())
+            .unwrap_or_else(|| locked.name.clone());
+        let visibility = input
+            .visibility
+            .map(str::to_string)
+            .unwrap_or_else(|| locked.visibility.clone());
+        let description = match input.description {
+            Some(value) => optional_text_to_db(value),
+            None => locked.description.clone(),
+        };
+        let icon = match input.icon {
+            Some(value) => optional_text_to_db(value),
+            None => locked.icon.clone(),
+        };
+        if visibility == "private"
+            && locked.visibility == "workspace"
+            && family_count_leads_except(family, workspace_id, project_id, None).await? == 0
+        {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        if let Some(lead) = input.lead_user_id {
+            if !family_op(family)
+                .membership_role(workspace_id, lead, false)
+                .await?
+                .is_some_and(|role| role.at_least(WorkspaceRole::Member))
+            {
+                return Ok(Err(ProjectDbError::GuestLead));
+            }
+            if family_direct_member_role(family, workspace_id, project_id, lead)
+                .await?
+                .is_none()
+            {
+                return Ok(Err(ProjectDbError::LeadNotMember));
+            }
+            let promoted = family
+                .execute(
+                    concat!(
+                        "UPDATE project_members SET role='lead',updated_at=",
+                        family_now!(),
+                        " WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3"
+                    ),
+                    &[
+                        Cell::uuid(workspace_id),
+                        Cell::uuid(project_id),
+                        Cell::uuid(lead),
+                    ],
+                )
+                .await?;
+            if promoted == 0 {
+                return Ok(Err(ProjectDbError::LeadNotMember));
+            }
+            family
+                .execute(
+                    concat!(
+                        "UPDATE project_members SET role='member',updated_at=",
+                        family_now!(),
+                        " WHERE workspace_id=?1 AND project_id=?2 AND user_id<>?3 AND role='lead'"
+                    ),
+                    &[
+                        Cell::uuid(workspace_id),
+                        Cell::uuid(project_id),
+                        Cell::uuid(lead),
+                    ],
+                )
+                .await?;
+        }
+        let rows = family
+            .query(
+                concat!(
+                    "UPDATE projects SET name=?3,visibility=?4,description=?5,icon=?6,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL
+                     RETURNING id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::text(&name),
+                    Cell::text(&visibility),
+                    Cell::optional_text(description.as_deref()),
+                    Cell::optional_text(icon.as_deref()),
+                ],
+            )
+            .await?;
+        let updated =
+            project_created_family_row(rows.first().ok_or(sqlx::Error::RowNotFound)?, workspace_id)?;
+        if visibility == "private"
+            && family_count_leads_except(family, workspace_id, project_id, None).await? == 0
+        {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project.updated",
+                target_type: "project",
+                target_id: project_id,
+                payload: json!({
+                    "projectId": project_id.to_string(),
+                    "name": updated.name,
+                    "visibility": updated.visibility,
+                }),
+                client_ip,
+            })
+            .await?;
+        if family_private_project_without_lead(family, workspace_id, project_id).await? {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        Ok(Ok(updated))
+    }
+    .await;
+    finish_project_write(tx, result).await
+}
+
 pub async fn list_project_members(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2291,6 +3135,118 @@ pub async fn list_project_members(
             })
         })
         .collect()))
+}
+
+/// [`list_project_members`] for every backend: credential, workspace, View on
+/// the live project and the rows share one family read snapshot. Email order
+/// is bytewise, as PostgreSQL `COLLATE "C"`.
+pub async fn list_project_members_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<ProjectMemberRow>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_project_members(pool, workspace_id, project_id, actor_user_id, session_id)
+            .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family_op(family).set_tenant(workspace_id).await?;
+        if !family_op(family)
+            .session_is_live(actor_user_id, session_id)
+            .await?
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !family_op(family).workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !family_op(family)
+            .project_permission_by_id(workspace_id, actor_user_id, project_id)
+            .await?
+            .is_some_and(|permission| permission.at_least(ProjectPermission::View))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let rows = family
+            .query(
+                "SELECT u.id,u.email,u.given_name,u.family_name,pm.role
+                 FROM project_members pm JOIN users u ON u.id=pm.user_id
+                 WHERE pm.workspace_id=?1 AND pm.project_id=?2 AND pm.user_id IS NOT NULL
+                   AND u.deleted_at IS NULL
+                 ORDER BY u.email COLLATE BINARY",
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?;
+        let mut members = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(role) = ProjectMemberRole::parse(&row.cell(4)?.string()?) {
+                members.push(ProjectMemberRow {
+                    user_id: row.cell(0)?.id()?,
+                    email: row.cell(1)?.string()?,
+                    given_name: row.cell(2)?.string()?,
+                    family_name: row.cell(3)?.optional(Cell::string)?,
+                    role,
+                });
+            }
+        }
+        Ok(Ok(members))
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    project_read_after_rollback(result, cleanup)
+}
+
+/// Shared prologue of the family member writers ([`add_project_member`] and
+/// its siblings): current credential, live workspace, Manage on the project.
+async fn begin_member_change_family(
+    family: &mut FamilyTx,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    target_user_id: Uuid,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    family_op(family).set_tenant(workspace_id).await?;
+    family_op(family)
+        .lock_membership_users(&[actor_user_id, target_user_id])
+        .await?;
+    if !family_op(family)
+        .recheck_session(actor_user_id, session_id)
+        .await?
+    {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !family_op(family).workspace_is_live(workspace_id).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let Some(locked) = family_live_project(family, workspace_id, project_id).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if !family_op(family)
+        .project_permission_by_id(workspace_id, actor_user_id, project_id)
+        .await?
+        .is_some_and(|permission| permission.at_least(ProjectPermission::Manage))
+    {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(Ok(locked))
+}
+
+async fn family_target_can_lead(
+    family: &mut FamilyTx,
+    workspace_id: Uuid,
+    target_user_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    Ok(family_op(family)
+        .membership_role(workspace_id, target_user_id, false)
+        .await?
+        .is_some_and(|role| role.at_least(WorkspaceRole::Member)))
 }
 
 pub async fn add_project_member(
@@ -2381,6 +3337,98 @@ pub async fn add_project_member(
 
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+/// [`add_project_member`] for every backend. PostgreSQL maps any constraint
+/// (duplicate grant or the membership foreign key) to `Conflict`; the family
+/// writer checks both before its insert, in the same order.
+pub async fn add_project_member_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    target_user_id: Uuid,
+    role: ProjectMemberRole,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return add_project_member(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+            role,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(err) = begin_member_change_family(
+            family,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+        )
+        .await?
+        {
+            return Ok(Err(err));
+        }
+        if role == ProjectMemberRole::Lead
+            && !family_target_can_lead(family, workspace_id, target_user_id).await?
+        {
+            return Ok(Err(ProjectDbError::GuestLead));
+        }
+        if family_op(family)
+            .membership_role(workspace_id, target_user_id, false)
+            .await?
+            .is_none()
+        {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+        let inserted = family
+            .query(
+                "INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(workspace_id,project_id,user_id) DO NOTHING RETURNING id",
+                &[
+                    Cell::uuid(Uuid::now_v7()),
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::uuid(target_user_id),
+                    Cell::text(role.as_str()),
+                ],
+            )
+            .await?;
+        if inserted.is_empty() {
+            return Ok(Err(ProjectDbError::Conflict));
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project_member.added",
+                target_type: "project_member",
+                target_id: target_user_id,
+                payload: json!({
+                    "projectId": project_id.to_string(),
+                    "userId": target_user_id.to_string(),
+                    "role": role.as_str(),
+                }),
+                client_ip,
+            })
+            .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_project_write(tx, result).await
 }
 
 pub async fn update_project_member_role(
@@ -2488,6 +3536,110 @@ pub async fn update_project_member_role(
     Ok(Ok(()))
 }
 
+/// [`update_project_member_role`] for every backend.
+pub async fn update_project_member_role_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    target_user_id: Uuid,
+    role: ProjectMemberRole,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_project_member_role(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+            role,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let locked = match begin_member_change_family(
+            family,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+        )
+        .await?
+        {
+            Ok(locked) => locked,
+            Err(err) => return Ok(Err(err)),
+        };
+        let Some(current) =
+            family_direct_member_role(family, workspace_id, project_id, target_user_id).await?
+        else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if role == ProjectMemberRole::Lead
+            && !family_target_can_lead(family, workspace_id, target_user_id).await?
+        {
+            return Ok(Err(ProjectDbError::GuestLead));
+        }
+        if current == ProjectMemberRole::Lead
+            && role != ProjectMemberRole::Lead
+            && locked.visibility == "private"
+            && family_count_leads_except(family, workspace_id, project_id, Some(target_user_id))
+                .await?
+                == 0
+        {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        let updated = family
+            .execute(
+                concat!(
+                    "UPDATE project_members SET role=?4,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::uuid(target_user_id),
+                    Cell::text(role.as_str()),
+                ],
+            )
+            .await?;
+        if updated == 0 {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project_member.role_changed",
+                target_type: "project_member",
+                target_id: target_user_id,
+                payload: json!({
+                    "projectId": project_id.to_string(),
+                    "userId": target_user_id.to_string(),
+                    "fromRole": current.as_str(),
+                    "role": role.as_str(),
+                }),
+                client_ip,
+            })
+            .await?;
+        if family_private_project_without_lead(family, workspace_id, project_id).await? {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        Ok(Ok(()))
+    }
+    .await;
+    finish_project_write(tx, result).await
+}
+
 pub async fn remove_project_member(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2576,6 +3728,96 @@ pub async fn remove_project_member(
         return Err(err);
     }
     Ok(Ok(()))
+}
+
+/// [`remove_project_member`] for every backend.
+pub async fn remove_project_member_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    target_user_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_project_member(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let locked = match begin_member_change_family(
+            family,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            target_user_id,
+        )
+        .await?
+        {
+            Ok(locked) => locked,
+            Err(err) => return Ok(Err(err)),
+        };
+        let Some(current) =
+            family_direct_member_role(family, workspace_id, project_id, target_user_id).await?
+        else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if current == ProjectMemberRole::Lead
+            && locked.visibility == "private"
+            && family_count_leads_except(family, workspace_id, project_id, Some(target_user_id))
+                .await?
+                == 0
+        {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        let deleted = family
+            .execute(
+                "DELETE FROM project_members WHERE workspace_id=?1 AND project_id=?2 AND user_id=?3",
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::uuid(target_user_id),
+                ],
+            )
+            .await?;
+        if deleted == 0 {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project_member.removed",
+                target_type: "project_member",
+                target_id: target_user_id,
+                payload: json!({
+                    "projectId": project_id.to_string(),
+                    "userId": target_user_id.to_string(),
+                    "role": current.as_str(),
+                }),
+                client_ip,
+            })
+            .await?;
+        if family_private_project_without_lead(family, workspace_id, project_id).await? {
+            return Ok(Err(ProjectDbError::LastLead));
+        }
+        Ok(Ok(()))
+    }
+    .await;
+    finish_project_write(tx, result).await
 }
 
 pub async fn get_project_workflow_backend(
@@ -2868,6 +4110,133 @@ pub async fn trash_project(
     Ok(Ok(()))
 }
 
+/// Path of `document` (live or trashed), the root of a [`subtree_ids`] scan.
+///
+/// [`subtree_ids`]: crate::db::documents::subtree_ids
+async fn family_document_path(
+    family: &mut FamilyTx,
+    workspace: Uuid,
+    document: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    family.require_tenant(workspace)?;
+    family
+        .query(
+            "SELECT path FROM documents WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace), Cell::uuid(document)],
+        )
+        .await?
+        .first()
+        .map(|row| row.cell(0)?.string())
+        .transpose()
+}
+
+/// [`trash_project`] for every backend. SQLite's clock is per statement, so
+/// the project's stamp is read back once and bound into the document update:
+/// [`restore_project_backend`] restores exactly the rows that carry it.
+pub async fn trash_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return trash_project(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let locked = match begin_project_manage_family(
+            family,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            true,
+        )
+        .await?
+        {
+            Ok(locked) => locked,
+            Err(err) => return Ok(Err(err)),
+        };
+        let stamp = family
+            .query(
+                concat!(
+                    "UPDATE projects SET deleted_at=",
+                    family_now!(),
+                    ",updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL RETURNING deleted_at"
+                ),
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?;
+        if let Some(root) = locked.root_document_id {
+            if let Some(path) = family_document_path(family, workspace_id, root).await? {
+                let mut trashed = family
+                    .query(
+                        concat!(
+                            "UPDATE documents SET deleted_at=?3,updated_at=",
+                            family_now!(),
+                            " WHERE workspace_id=?1 AND deleted_at IS NULL
+                             AND (path=?2 OR substr(path,1,length(?2)+1)=?2||'.') RETURNING id"
+                        ),
+                        &[Cell::uuid(workspace_id), Cell::text(path), stamp.clone()],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.cell(0)?.id())
+                    .collect::<Result<Vec<_>, sqlx::Error>>()?;
+                trashed.sort_unstable();
+                for id in trashed {
+                    family_op(family)
+                        .record_project_change(ProjectChangeRecord {
+                            workspace_id,
+                            actor_user_id,
+                            verb: "document.trashed",
+                            target_type: "document",
+                            target_id: id,
+                            payload: json!({
+                                "documentId": id.to_string(),
+                                "projectId": project_id.to_string(),
+                            }),
+                            client_ip,
+                        })
+                        .await?;
+                }
+            }
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project.deleted",
+                target_type: "project",
+                target_id: project_id,
+                payload: json!({ "projectId": project_id.to_string() }),
+                client_ip,
+            })
+            .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_project_write(tx, result).await
+}
+
 /// Source `restoreProject`: workspace admins only. Restores documents trashed
 /// together with the project (same stamp); documents trashed on their own stay
 /// in the trash. A project past the trash retention is gone (its documents may
@@ -2980,6 +4349,142 @@ pub async fn restore_project(
     Ok(Ok(row_from_locked(workspace_id, locked)))
 }
 
+/// [`restore_project`] for every backend. Retention is judged by the DB clock.
+pub async fn restore_project_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<ProjectRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return restore_project(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family_op(family).set_tenant(workspace_id).await?;
+        family_op(family)
+            .lock_membership_users(&[actor_user_id])
+            .await?;
+        if !family_op(family)
+            .recheck_session(actor_user_id, session_id)
+            .await?
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !family_op(family).workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !family_op(family)
+            .membership_role(workspace_id, actor_user_id, true)
+            .await?
+            .is_some_and(|role| role.at_least(WorkspaceRole::Admin))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        family_op(family).lock_tree(workspace_id).await?;
+        let rows = family
+            .query(
+                concat!(
+                    "SELECT root_document_id,deleted_at,deleted_at<=",
+                    family_now!(),
+                    "-?3*86400000000 FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NOT NULL"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::Integer(i64::from(crate::db::documents::TRASH_RETENTION_DAYS)),
+                ],
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        let (root, stamp, expired) = (
+            row.cell(0)?.optional(Cell::id)?,
+            row.cell(1)?,
+            row.cell(2)?.boolean()?,
+        );
+        if expired {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        family
+            .execute(
+                concat!(
+                    "UPDATE projects SET deleted_at=NULL,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2"
+                ),
+                &[Cell::uuid(workspace_id), Cell::uuid(project_id)],
+            )
+            .await?;
+        if let Some(root) = root {
+            if let Some(path) = family_document_path(family, workspace_id, root).await? {
+                let mut restored = family
+                    .query(
+                        concat!(
+                            "UPDATE documents SET deleted_at=NULL,updated_at=",
+                            family_now!(),
+                            " WHERE workspace_id=?1 AND deleted_at=?3
+                             AND (path=?2 OR substr(path,1,length(?2)+1)=?2||'.') RETURNING id"
+                        ),
+                        &[Cell::uuid(workspace_id), Cell::text(path), stamp],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| row.cell(0)?.id())
+                    .collect::<Result<Vec<_>, sqlx::Error>>()?;
+                restored.sort_unstable();
+                for id in restored {
+                    family_op(family)
+                        .record_project_change(ProjectChangeRecord {
+                            workspace_id,
+                            actor_user_id,
+                            verb: "document.restored",
+                            target_type: "document",
+                            target_id: id,
+                            payload: json!({
+                                "documentId": id.to_string(),
+                                "projectId": project_id.to_string(),
+                            }),
+                            client_ip,
+                        })
+                        .await?;
+                }
+            }
+        }
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: "project.restored",
+                target_type: "project",
+                target_id: project_id,
+                payload: json!({ "projectId": project_id.to_string() }),
+                client_ip,
+            })
+            .await?;
+        match family_live_project(family, workspace_id, project_id).await? {
+            Some(project) => Ok(Ok(project)),
+            None => Ok(Err(ProjectDbError::NotFound)),
+        }
+    }
+    .await;
+    finish_project_write(tx, result).await
+}
+
 /// Source `archiveProject` / `unarchiveProject`: project status only. Archived
 /// projects are read-only everywhere writes check `status = 'archived'`.
 pub async fn set_project_archived(
@@ -3033,6 +4538,80 @@ pub async fn set_project_archived(
     .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+/// [`set_project_archived`] for every backend.
+pub async fn set_project_archived_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    archived: bool,
+    client_ip: Option<&str>,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return set_project_archived(
+            pool,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            archived,
+            client_ip,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(err) = begin_project_manage_family(
+            family,
+            workspace_id,
+            project_id,
+            actor_user_id,
+            session_id,
+            false,
+        )
+        .await?
+        {
+            return Ok(Err(err));
+        }
+        family
+            .execute(
+                concat!(
+                    "UPDATE projects SET status=?3,updated_at=",
+                    family_now!(),
+                    " WHERE workspace_id=?1 AND id=?2"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::uuid(project_id),
+                    Cell::text(if archived { "archived" } else { "active" }),
+                ],
+            )
+            .await?;
+        family_op(family)
+            .record_project_change(ProjectChangeRecord {
+                workspace_id,
+                actor_user_id,
+                verb: if archived {
+                    "project.archived"
+                } else {
+                    "project.unarchived"
+                },
+                target_type: "project",
+                target_id: project_id,
+                payload: json!({ "projectId": project_id.to_string() }),
+                client_ip,
+            })
+            .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_project_write(tx, result).await
 }
 
 /// Source `listDeletedProjects` (`GET projects?deleted=true`): workspace admins
@@ -3117,6 +4696,62 @@ pub async fn list_deleted_projects(
             },
         )
         .collect()))
+}
+
+/// [`list_deleted_projects`] for every backend; retention by the DB clock.
+pub async fn list_deleted_projects_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<Vec<ProjectRow>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_deleted_projects(pool, workspace_id, actor_user_id, session_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family_op(family).set_tenant(workspace_id).await?;
+        if !family_op(family)
+            .session_is_live(actor_user_id, session_id)
+            .await?
+        {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !family_op(family).workspace_is_live(workspace_id).await? {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !family_op(family)
+            .membership_role(workspace_id, actor_user_id, false)
+            .await?
+            .is_some_and(|role| role.at_least(WorkspaceRole::Admin))
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        let rows = family
+            .query(
+                concat!(
+                    "SELECT id,key,name,description,icon,visibility,root_document_id,status,created_by,created_at,updated_at
+                     FROM projects WHERE workspace_id=?1 AND deleted_at IS NOT NULL AND deleted_at>",
+                    family_now!(),
+                    "-?2*86400000000 ORDER BY deleted_at DESC,id DESC"
+                ),
+                &[
+                    Cell::uuid(workspace_id),
+                    Cell::Integer(i64::from(crate::db::documents::TRASH_RETENTION_DAYS)),
+                ],
+            )
+            .await?;
+        Ok(Ok(rows
+            .iter()
+            .map(|row| project_created_family_row(row, workspace_id))
+            .collect::<Result<Vec<_>, sqlx::Error>>()?))
+    }
+    .await;
+    let cleanup = tx.rollback().await;
+    project_read_after_rollback(result, cleanup)
 }
 
 #[cfg(test)]
@@ -4074,5 +5709,412 @@ mod selected_project_read_tests {
         assert!(
             matches!(source.downcast_ref::<crate::db::backend::RollbackCleanupUnknown>().unwrap().original.as_ref().unwrap().downcast_ref::<sqlx::Error>(),Some(sqlx::Error::Protocol(message)) if message=="original query")
         );
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod remote_project_port_tests {
+    use super::*;
+    use crate::collections::{ProjectViewCreateInput, ProjectViewPatchInput};
+    use crate::db::backend::{DbTransaction, RemoteDatabase};
+    use crate::db::collections::Actor;
+    use crate::db::documents::{CreateDocumentInput, TrashChildrenMode, UpdateDocumentMetaInput};
+    use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+    use crate::db::templates::{ApplyTemplateInput, TemplateKind};
+    use crate::db::{project_documents as docs, project_views as views, templates};
+    use futures_util::FutureExt;
+
+    async fn backend(driver: &LibsqlFinishFixture) -> Backend {
+        Backend::LibsqlRemote(std::sync::Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::new(2).unwrap(),
+        )))
+    }
+
+    async fn integer(db: &Backend, workspace: Uuid, sql: &'static str, args: &[Cell]) -> i64 {
+        let mut tx = db.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(f) = &mut tx else {
+            unreachable!()
+        };
+        f.set_tenant(workspace).unwrap();
+        let rows = f.query(sql, args).await.unwrap();
+        let value = rows[0].cell(0).unwrap().integer().unwrap();
+        tx.rollback().await.unwrap();
+        value
+    }
+
+    /// Every ported project, project-document, view and template writer
+    /// through the official sqld, read back on a new remote connection, and a
+    /// failed audit append that leaves the project unchanged.
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn official_sqld_project_ports_write_read_back_and_roll_back() {
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit pinned official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-projects-sqld-{}", Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let db = backend(&driver).await;
+        let result = std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&db)
+                .await
+                .unwrap();
+            let (ws, owner, mate, cred) = (
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+            );
+            let mut tx = db.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(f) = &mut tx else {
+                unreachable!()
+            };
+            f.replace_system_context(true);
+            for (user, email) in [(owner, "owner@example.invalid"), (mate, "mate@example.invalid")] {
+                f.execute(
+                    "INSERT INTO users(id,email,given_name) VALUES(?1,?2,'Remote')",
+                    &[Cell::uuid(user), Cell::text(email)],
+                )
+                .await
+                .unwrap();
+            }
+            f.execute(
+                "INSERT INTO workspaces(id,slug,name) VALUES(?1,'remote-projects','Remote')",
+                &[Cell::uuid(ws)],
+            )
+            .await
+            .unwrap();
+            for (user, role) in [(owner, "owner"), (mate, "member")] {
+                f.execute(
+                    "INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,?3)",
+                    &[Cell::uuid(ws), Cell::uuid(user), Cell::text(role)],
+                )
+                .await
+                .unwrap();
+            }
+            f.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'remote-project-credential',(unixepoch()+3600)*1000000)", &[Cell::uuid(cred), Cell::uuid(owner)]).await.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+
+            let project = create_project_backend(
+                &db,
+                ws,
+                owner,
+                cred,
+                CreateProjectInput {
+                    key: "REM",
+                    name: "Remote",
+                    visibility: "private",
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let p = project.id;
+            let renamed = update_project_backend(
+                &db,
+                ws,
+                p,
+                owner,
+                cred,
+                UpdateProjectInput {
+                    name: Some(" Renamed "),
+                    visibility: None,
+                    description: Some(Some("About")),
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(renamed.name, "Renamed");
+            add_project_member_backend(&db, ws, p, owner, cred, mate, ProjectMemberRole::Member, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                add_project_member_backend(&db, ws, p, owner, cred, mate, ProjectMemberRole::Viewer, None)
+                    .await
+                    .unwrap(),
+                Err(ProjectDbError::Conflict)
+            ));
+            update_project_member_role_backend(&db, ws, p, owner, cred, mate, ProjectMemberRole::Lead, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let fresh = backend(&driver).await;
+            let members = list_project_members_backend(&fresh, ws, p, owner, cred)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                members.iter().map(|m| (m.user_id, m.role)).collect::<Vec<_>>(),
+                vec![(mate, ProjectMemberRole::Lead), (owner, ProjectMemberRole::Lead)]
+            );
+            fresh.close().await.unwrap();
+            remove_project_member_backend(&db, ws, p, owner, cred, mate, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                update_project_member_role_backend(&db, ws, p, owner, cred, owner, ProjectMemberRole::Member, None)
+                    .await
+                    .unwrap(),
+                Err(ProjectDbError::LastLead)
+            ));
+
+            let new_doc = |title| CreateDocumentInput {
+                parent_id: project.root_document_id,
+                title,
+                icon: None,
+            };
+            let a = docs::create_project_document_backend(&db, ws, p, owner, cred, new_doc("A"), None)
+                .await
+                .unwrap()
+                .unwrap();
+            let b = docs::create_project_document_backend(&db, ws, p, owner, cred, new_doc("B"), None)
+                .await
+                .unwrap()
+                .unwrap();
+            let moved = docs::move_project_document_backend(&db, ws, p, b.id, owner, cred, a.id, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(moved.parent_id, Some(a.id));
+            assert_eq!(moved.path, format!("{}.{}", a.path, to_path_label(b.id)));
+            docs::reorder_project_document_backend(&db, ws, p, a.id, owner, cred, None, None)
+                .await
+                .unwrap()
+                .unwrap();
+            docs::update_project_document_meta_backend(
+                &db,
+                ws,
+                p,
+                a.id,
+                owner,
+                cred,
+                UpdateDocumentMetaInput {
+                    title: Some("Alpha"),
+                    icon: None,
+                    status: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            docs::trash_project_document_backend(&db, ws, p, b.id, owner, cred, TrashChildrenMode::Trash, None)
+                .await
+                .unwrap()
+                .unwrap();
+            docs::restore_project_document_backend(&db, ws, p, b.id, owner, cred, None)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let actor = Actor {
+                user_id: owner,
+                credential_id: cred,
+                client_ip: None,
+            };
+            let view = views::create_view_backend(
+                &db,
+                ws,
+                &actor,
+                p,
+                &ProjectViewCreateInput {
+                    name: "Mine".into(),
+                    view_type: "list".into(),
+                    config: Default::default(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            views::update_view_backend(
+                &db,
+                ws,
+                &actor,
+                view.id,
+                &ProjectViewPatchInput {
+                    name: Some("Renamed view".into()),
+                    config: None,
+                    expected_config: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let fresh = backend(&driver).await;
+            let listed = views::list_views_backend(&fresh, ws, &actor, p)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].name, "Renamed view");
+            fresh.close().await.unwrap();
+            views::delete_view_backend(&db, ws, &actor, view.id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let template = templates::create_template_backend(
+                &db,
+                ws,
+                &actor,
+                TemplateKind::Task,
+                "Remote task",
+                json!({}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let fresh = backend(&driver).await;
+            assert_eq!(
+                templates::list_templates_backend(&fresh, ws, &actor, &[TemplateKind::Task])
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            fresh.close().await.unwrap();
+            let applied = templates::apply_template_backend(
+                &db,
+                ws,
+                &actor,
+                cred,
+                template.id,
+                ApplyTemplateInput {
+                    project_id: Some(p),
+                    parent_id: None,
+                },
+                &[TemplateKind::Task],
+                "web",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(applied.display_id.starts_with("REM-"));
+
+            let copy = clone_project_backend(
+                &db,
+                ws,
+                p,
+                owner,
+                cred,
+                CloneProjectInput {
+                    key: "CPY",
+                    name: "Copy",
+                    visibility: None,
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            set_project_archived_backend(&db, ws, p, owner, cred, true, None)
+                .await
+                .unwrap()
+                .unwrap();
+            set_project_archived_backend(&db, ws, p, owner, cred, false, None)
+                .await
+                .unwrap()
+                .unwrap();
+            trash_project_backend(&db, ws, copy.id, owner, cred, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let fresh = backend(&driver).await;
+            let deleted = list_deleted_projects_backend(&fresh, ws, owner, cred)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(deleted.iter().map(|p| p.id).collect::<Vec<_>>(), [copy.id]);
+            fresh.close().await.unwrap();
+            restore_project_backend(&db, ws, copy.id, owner, cred, None)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let fresh = backend(&driver).await;
+            let ws_cell = Cell::uuid(ws);
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM tasks t JOIN collection_items i ON i.task_id=t.id WHERE t.workspace_id=?1 AND t.project_id=?2", &[ws_cell.clone(), Cell::uuid(p)]).await,
+                1
+            );
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM collections WHERE workspace_id=?1 AND project_id=?2 AND kind='task'", &[ws_cell.clone(), Cell::uuid(copy.id)]).await,
+                1
+            );
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM projects WHERE workspace_id=?1 AND deleted_at IS NULL AND status='active'", std::slice::from_ref(&ws_cell)).await,
+                2
+            );
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM documents WHERE workspace_id=?1 AND id=?2 AND parent_id=?3 AND deleted_at IS NULL", &[ws_cell.clone(), Cell::uuid(b.id), Cell::uuid(a.id)]).await,
+                1
+            );
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM views WHERE workspace_id=?1", std::slice::from_ref(&ws_cell)).await,
+                0
+            );
+            fresh.close().await.unwrap();
+
+            // A failed audit append rolls the project write back.
+            let mut tx = db.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(f) = &mut tx else {
+                unreachable!()
+            };
+            f.set_tenant(ws).unwrap();
+            f.execute("CREATE TRIGGER remote_projects_fail_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'remote project audit failure'); END", &[]).await.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+            let events = integer(&db, ws, "SELECT count(*) FROM events WHERE workspace_id=?1", std::slice::from_ref(&ws_cell)).await;
+            assert!(update_project_backend(
+                &db,
+                ws,
+                p,
+                owner,
+                cred,
+                UpdateProjectInput {
+                    name: Some("Lost"),
+                    visibility: None,
+                    description: None,
+                    icon: None,
+                    lead_user_id: None,
+                },
+                None,
+            )
+            .await
+            .is_err());
+            let fresh = backend(&driver).await;
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM projects WHERE workspace_id=?1 AND id=?2 AND name='Renamed'", &[ws_cell.clone(), Cell::uuid(p)]).await,
+                1
+            );
+            assert_eq!(
+                integer(&fresh, ws, "SELECT count(*) FROM events WHERE workspace_id=?1", std::slice::from_ref(&ws_cell)).await,
+                events
+            );
+            fresh.close().await.unwrap();
+        })
+        .catch_unwind()
+        .await;
+        db.close().await.unwrap();
+        let receipt = driver.finish().await.unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
