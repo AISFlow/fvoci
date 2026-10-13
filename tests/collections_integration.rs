@@ -3618,4 +3618,166 @@ mod sqlite_port_data {
         db.close().await;
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn sqlite_collection_datetime_before_pg_epoch_keeps_sqlx_binding() {
+        let (root, sqlite, app, cookie, user, ws) = fixture().await;
+        let mut docs = Vec::new();
+        for number in 1..=2 {
+            let doc = Uuid::now_v7();
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'Epoch',?3,'a',?4,'draft',2,?5,'{}')").bind(doc.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(doc.simple().to_string()).bind(number).bind(user.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+            docs.push(doc.to_string());
+        }
+        let (when, items, reads, days) =
+            pre_pg_epoch_datetimes(&app, &cookie, ws, [&docs[0], &docs[1]]).await;
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        let mut stored = Vec::new();
+        for item in &items {
+            stored.push(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT value_ts FROM collection_values WHERE item_id=?1 AND field_id=?2",
+                )
+                .bind(
+                    Uuid::parse_str(item.as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .bind(
+                    Uuid::parse_str(when["id"].as_str().unwrap())
+                        .unwrap()
+                        .as_bytes()
+                        .as_slice(),
+                )
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            );
+        }
+        fresh.close().await;
+        sqlite.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_pre_pg_epoch_datetimes(stored, reads, days);
+    }
+}
+
+/// SQLx binds timestamptz as microseconds since 2000-01-01, truncated toward
+/// that epoch, so earlier sub-microsecond input moves later. The first value
+/// also crosses the UTC calendar day.
+async fn pre_pg_epoch_datetimes(
+    app: &axum::Router,
+    cookie: &str,
+    ws: Uuid,
+    docs: [&str; 2],
+) -> (Value, Vec<Value>, Vec<Value>, Value) {
+    let base = format!("/api/v1/workspaces/{ws}/collections");
+    let (status, collection) = call(
+        app,
+        "POST",
+        &base,
+        Some(json!({"kind":"document","name":"Epoch","projectId":null})),
+        cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{collection}");
+    let id = collection["id"].as_str().unwrap();
+    let when = create_field(
+        app,
+        cookie,
+        ws,
+        id,
+        json!({"name":"When","type":"datetime"}),
+    )
+    .await;
+    let (mut items, mut reads) = (Vec::new(), Vec::new());
+    for (doc, input) in docs.into_iter().zip([
+        "1999-12-31T23:59:59.999999999Z",
+        "1969-07-20T20:17:40.000999999Z",
+    ]) {
+        let (status, item) = call(
+            app,
+            "POST",
+            &format!("{base}/{id}/items"),
+            Some(json!({"documentId":doc})),
+            cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{item}");
+        let (status, saved) =
+            put_value(app, cookie, ws, id, &item, &when, json!({"datetime":input})).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let (status, read) = call(
+            app,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/documents/{doc}/collection-item"),
+            None,
+            cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        reads.push(read["values"][when["id"].as_str().unwrap()].clone());
+        items.push(item["id"].clone());
+    }
+    let (status, calendar) = query(
+        app,
+        cookie,
+        ws,
+        id,
+        json!({"config":{"dateBy":when["id"]},"window":{"from":"1999-12-31","to":"2000-01-02","timeZone":"UTC"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{calendar}");
+    (when, items, reads, calendar["days"].clone())
+}
+
+fn assert_pre_pg_epoch_datetimes(stored: Vec<i64>, reads: Vec<Value>, days: Value) {
+    assert_eq!(stored, vec![946684800000000, -14182939999000]);
+    assert_eq!(
+        reads,
+        vec![
+            json!({"datetime":"2000-01-01T00:00:00.000Z"}),
+            json!({"datetime":"1969-07-20T20:17:40.001Z"}),
+        ]
+    );
+    assert_eq!(
+        days,
+        json!([
+            {"date":"1999-12-31","count":0},
+            {"date":"2000-01-01","count":1},
+            {"date":null,"count":0},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn collection_datetime_before_pg_epoch_keeps_sqlx_binding() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _user, ws) = setup_session(&harness).await;
+    let docs = [
+        create_wiki_doc(&app, &cookie, ws, "Epoch boundary").await,
+        create_wiki_doc(&app, &cookie, ws, "Before Unix epoch").await,
+    ];
+    let (when, items, reads, days) =
+        pre_pg_epoch_datetimes(&app, &cookie, ws, [&docs[0], &docs[1]]).await;
+    let admin = admin_pool(&harness).await;
+    let mut stored = Vec::new();
+    for item in &items {
+        stored.push(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT (extract(epoch FROM value_ts) * 1000000)::bigint \
+                 FROM fvoci.collection_values WHERE item_id = $1 AND field_id = $2",
+            )
+            .bind(Uuid::parse_str(item.as_str().unwrap()).unwrap())
+            .bind(Uuid::parse_str(when["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&admin)
+            .await
+            .unwrap(),
+        );
+    }
+    admin.close().await;
+    drop(app);
+    harness.cleanup().await;
+    assert_pre_pg_epoch_datetimes(stored, reads, days);
 }

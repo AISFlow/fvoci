@@ -5824,7 +5824,7 @@ pub async fn restore_task_backend(
 
 // Match the pinned SQLx PostgreSQL chrono binder before entering the lossless
 // family storage codec. Its elapsed microseconds truncate around the PG epoch.
-fn family_pg_bound_instant(value: DateTime<Utc>) -> Result<Cell, sqlx::Error> {
+pub(crate) fn family_pg_bound_instant(value: DateTime<Utc>) -> Result<Cell, sqlx::Error> {
     let epoch = DateTime::from_timestamp(946_684_800, 0).expect("valid PostgreSQL epoch");
     let micros = value
         .signed_duration_since(epoch)

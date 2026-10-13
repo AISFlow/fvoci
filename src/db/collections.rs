@@ -2759,8 +2759,11 @@ async fn family_put_value(
                     Cell::text(crate::db::view_query::format_number(*n)),
                 ),
                 CollectionValue::Date(d) => ("value_date", Cell::text(d.to_string())),
-                // SQLx's PostgreSQL timestamptz bind has microsecond precision.
-                CollectionValue::Datetime(at) => ("value_ts", Cell::Integer(at.timestamp_micros())),
+                // Same instant as the PG writer's SQLx timestamptz bind, which
+                // truncates sub-microseconds toward 2000-01-01, not 1970.
+                CollectionValue::Datetime(at) => {
+                    ("value_ts", crate::db::tasks::family_pg_bound_instant(*at)?)
+                }
                 CollectionValue::Checkbox(b) => ("value_bool", Cell::Integer(i64::from(*b))),
                 _ => unreachable!(),
             };
