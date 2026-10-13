@@ -15,7 +15,7 @@ const owner = {
 };
 
 const PAGE_W = FIXTURE_PAGE_W;
-const PDFJS_ASSETS = "/assets/pdfjs-dist-6.3.289/";
+const PDFJS_ASSETS = "/assets/pdfjs-dist-6.4.299/";
 
 async function uploadAttachment(
   page: Page,
