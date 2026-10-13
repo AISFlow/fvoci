@@ -13,6 +13,7 @@ import {
   encodeUpdate,
   loadBody,
   ownerKey,
+  readRetainedDraft,
   serverContainsLive,
   type OffWikiOwner,
 } from "../../features/documents/off-wiki-draft";
@@ -36,7 +37,7 @@ class ProblemError extends Error {
 }
 const text = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
-  .replace("export function", "function");
+  .replaceAll("export function", "function");
 const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
 const original = {
   actorId: "A",
@@ -119,6 +120,7 @@ function harness() {
     encodeUpdate,
     loadBody,
     ownerKey,
+    readRetainedDraft,
     serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),
@@ -992,3 +994,87 @@ function required<T>(value: T | null | undefined): T {
   if (value == null) throw new Error("Missing required test fixture value");
   return value;
 }
+
+describe("retired dirty OFF draft lifetime", () => {
+  function type(h: ReturnType<typeof harness>, text: string) {
+    const draft = required(h.body.draft.value);
+    const paragraph = draft.doc.getXmlFragment("prosemirror").get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(1, text);
+  }
+  async function reopen(h: ReturnType<typeof harness>, scope: OffWikiOwner = original) {
+    h.scope.value = null;
+    h.scope.value = { ...scope };
+    required(h.reads.at(-1)).pending.resolve(source(scope));
+    await settle();
+  }
+  test("a restored replay rejected by current access keeps the draft as export only and sends nothing more", async () => {
+    for (const status of [401, 403, 404]) {
+      const h = harness();
+      required(h.reads[0]).pending.resolve(source(original));
+      await settle();
+      type(h, " replay private");
+      const first = h.body.save();
+      required(h.writes[0]).pending.reject(new ProblemError(503));
+      expect(await first).toBe(false);
+      await reopen(h);
+      expect(h.body.restored.value).toBe(true);
+      const replay = h.body.save();
+      expect(required(h.writes[1]).command).toEqual(required(h.writes[0]).command);
+      required(h.writes[1]).pending.reject(new ProblemError(status));
+      expect(await replay).toBe(false);
+      expect(h.body.doc.value).toBeNull();
+      expect(h.slots.has(ownerKey(original))).toBe(true);
+      expect(h.body.retained.value?.markdown).toContain("replay private");
+      expect(await h.body.save()).toBe(false);
+      expect(
+        await h.body.createDistinct({ projectId: null, parentId: null, title: "copy" }),
+      ).toBeNull();
+      expect(await h.body.discard()).toBe(false);
+      expect(h.writes).toHaveLength(2);
+      expect(h.creates).toHaveLength(0);
+      h.effects.stop();
+    }
+  });
+  test("a denied read of the same owner exposes only that owner's retained slot", async () => {
+    const h = harness();
+    required(h.reads[0]).pending.resolve(source(original));
+    await settle();
+    type(h, " owned before revoke");
+    h.scope.value = null;
+    h.scope.value = { ...original };
+    required(h.reads.at(-1)).pending.reject(new ProblemError(404));
+    await settle();
+    expect(h.body.doc.value).toBeNull();
+    expect(h.body.retained.value?.markdown).toContain("owned before revoke");
+    h.scope.value = { ...original, actorId: "B", credentialId: "session-B" };
+    expect(h.body.retained.value).toBeNull();
+    required(h.reads.at(-1)).pending.reject(new ProblemError(403));
+    await settle();
+    expect(h.body.retained.value).toBeNull();
+    expect(h.slots.has(ownerKey(original))).toBe(true);
+    h.effects.stop();
+  });
+  test("explicit discard drops the slot, reads the current body and offers nothing on reopen", async () => {
+    const h = harness();
+    required(h.reads[0]).pending.resolve(source(original));
+    await settle();
+    expect(h.body.restored.value).toBe(false);
+    type(h, " discard me");
+    await reopen(h);
+    expect(h.body.restored.value).toBe(true);
+    expect(JSON.stringify(h.body.restoredComparison.value?.mine)).toContain("discard me");
+    const reads = h.reads.length;
+    const discarding = h.body.discard();
+    expect(h.slots.has(ownerKey(original))).toBe(false);
+    expect(h.reads).toHaveLength(reads + 1);
+    required(h.reads.at(-1)).pending.resolve(source(original));
+    expect(await discarding).toBe(true);
+    expect(h.body.restored.value).toBe(false);
+    expect(h.body.dirty.value).toBe(false);
+    expect(JSON.stringify(required(h.body.draft.value).mine)).not.toContain("discard me");
+    await reopen(h);
+    expect(h.body.restored.value).toBe(false);
+    expect(h.writes).toHaveLength(0);
+    h.effects.stop();
+  });
+});

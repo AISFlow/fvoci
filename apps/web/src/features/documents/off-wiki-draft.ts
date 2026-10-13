@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import { independentDraftBody } from "@fvoci/editor/extract";
+import { tiptapDocToMd } from "@fvoci/editor/md";
 import { createFvociExtensions } from "@fvoci/editor/tiptap-schema";
 import { isTiptapDoc } from "@fvoci/editor/json";
 import { z } from "zod";
@@ -37,13 +38,114 @@ type StoredDraft = {
   comparison?: { start: unknown; mine: unknown; current: unknown } | null;
   sourceBuffer?: { text: string; baseV1: string } | null;
 };
+const STORAGE_PREFIX = "fvoci:off-wiki:1:";
 export function ownerKey(owner: OffWikiOwner): string {
   // sessionStorage is a tab-owned storage area. Neither another credential nor
   // another target can read this slot, including after A -> B -> A navigation.
   const identity = [owner.actorId, owner.credentialId, owner.workspaceId, owner.targetId];
   if (owner.kind === "task") identity.push("task");
   if (owner.projectId) identity.push(owner.projectId);
-  return `fvoci:off-wiki:1:${JSON.stringify(identity)}`;
+  return `${STORAGE_PREFIX}${JSON.stringify(identity)}`;
+}
+/** A retired private draft read back for local copy/download only. It is
+ * never a live draft or a save base, and nothing here can send it. */
+export type RetainedOffDraft = { owner: OffWikiOwner; markdown: string; excerpt: string };
+function retainedExport(
+  owner: OffWikiOwner,
+  mine: unknown,
+  sourceText: string | null,
+): RetainedOffDraft {
+  // Unapplied Markdown is newer than the native body it was edited from.
+  const markdown = sourceText ?? (isTiptapDoc(mine) ? tiptapDocToMd(mine) : "");
+  const line = markdown.split("\n").find((value) => value.trim()) ?? "";
+  return { owner, markdown, excerpt: line.trim().slice(0, 80) };
+}
+function parseRetained(raw: string | null, key: string): RetainedOffDraft | null {
+  if (!raw || raw.length > 40 * 1024 * 1024) return null;
+  const saved = JSON.parse(raw) as Partial<Omit<StoredDraft, "format">> & { format: unknown };
+  if (
+    saved.format !== 1 ||
+    !saved.owner ||
+    !saved.start ||
+    typeof saved.mine !== "string" ||
+    ownerKey(saved.owner) !== key
+  )
+    return null;
+  const doc = loadBody(saved.start, saved.owner.targetId);
+  try {
+    Y.applyUpdate(doc, decodeUpdate(saved.mine));
+    if (doc.store.pendingStructs || doc.store.pendingDs) return null;
+    const source = saved.sourceBuffer?.text;
+    return retainedExport(
+      saved.owner,
+      yDocToTiptapJson(doc),
+      typeof source === "string" ? source : null,
+    );
+  } finally {
+    doc.destroy();
+  }
+}
+/** The body without editor mount normalization: block IDs and the empty
+ * document's paragraph are written on mount, not typed by the user. */
+function visibleBody(content: unknown): string {
+  const strip = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (typeof value !== "object" || value === null) return value;
+    const entries: [string, unknown][] = Object.entries(value).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of entries) {
+      if (key !== "attrs" || typeof item !== "object" || item === null) out[key] = strip(item);
+      else {
+        const attrs = Object.entries(item).filter(([name]) => name !== "id");
+        if (attrs.length) out.attrs = strip(Object.fromEntries(attrs));
+      }
+    }
+    return out;
+  };
+  const body = strip(content) as { content?: unknown };
+  const blocks = Array.isArray(body.content) ? body.content : [];
+  const empty =
+    blocks.length === 0 ||
+    (blocks.length === 1 && JSON.stringify(blocks[0]) === '{"type":"paragraph"}');
+  return empty ? "" : JSON.stringify(body);
+}
+/** The exact slot of one owner, as the storage key scopes it. */
+export function readRetainedDraft(
+  storage: Pick<Storage, "getItem"> | null,
+  owner: OffWikiOwner,
+): RetainedOffDraft | null {
+  try {
+    return storage ? parseRetained(storage.getItem(ownerKey(owner)), ownerKey(owner)) : null;
+  } catch {
+    return null;
+  }
+}
+/** This tab's retained slots of one actor and credential only. */
+export function listRetainedDrafts(
+  storage: Pick<Storage, "length" | "key" | "getItem"> | null,
+  actorId: string,
+  credentialId: string,
+): RetainedOffDraft[] {
+  const drafts: RetainedOffDraft[] = [];
+  try {
+    for (let index = 0; storage && index < storage.length; index++) {
+      const key = storage.key(index);
+      if (!key?.startsWith(STORAGE_PREFIX)) continue;
+      let draft: RetainedOffDraft | null = null;
+      try {
+        draft = parseRetained(storage.getItem(key), key);
+      } catch {
+        /* A malformed slot is not exportable; it stays untouched. */
+      }
+      if (draft?.owner.actorId === actorId && draft.owner.credentialId === credentialId)
+        drafts.push(draft);
+    }
+  } catch {
+    /* Unavailable storage lists nothing. */
+  }
+  return drafts;
 }
 export function encodeUpdate(bytes: Uint8Array): string {
   let binary = "";
@@ -102,6 +204,8 @@ export class OffWikiDraft {
   distinct: FrozenDistinct | null = null;
   private acknowledged: string;
   private retired = false;
+  /** A restored slot the user changed: it is offered back, never hidden. */
+  restored = false;
   saving = false;
   creating = false;
   storageError: unknown = null;
@@ -196,6 +300,15 @@ export class OffWikiDraft {
           this.conflictBackup = saved.conflictBackup ?? null;
           this.comparison = saved.comparison ?? null;
           this.sourceBuffer = saved.sourceBuffer ?? null;
+          // Every slot is restored; only one the user changed is offered back.
+          this.restored =
+            !!saved.frozen ||
+            !!saved.distinct ||
+            !!saved.conflictBackup ||
+            !!saved.comparison ||
+            !!saved.sourceBuffer ||
+            saved.start.tailSeq !== current.tailSeq ||
+            visibleBody(saved.start.contentJson) !== visibleBody(yDocToTiptapJson(old));
           if (saved.start.tailSeq !== current.tailSeq) {
             this.latest = current;
             this.comparison = {
@@ -367,6 +480,8 @@ export class OffWikiDraft {
       this.acknowledged = pending.snapshot;
       this.frozen = null;
       this.latest = null;
+      // The restored draft is now the acknowledged base, no longer an offer.
+      this.restored = false;
       this.persist();
       return this.durable;
     } finally {
@@ -486,6 +601,26 @@ export class OffWikiDraft {
     this.sourceBuffer = buffer ? { text: buffer.text, baseV1: encodeUpdate(buffer.baseV1) } : null;
     this.persist();
     this.changed();
+  }
+  /** The live private state as a local export, before access loss retires it. */
+  exportDraft(): RetainedOffDraft {
+    return retainedExport(this.owner, this.mine, this.sourceBuffer?.text ?? null);
+  }
+  /** Only an explicit user choice discards private state, never an in-flight
+   * request's. The slot goes before retirement so nothing rewrites it. */
+  discard(): boolean {
+    if (this.retired || this.saving || this.creating) return false;
+    try {
+      this.storage?.removeItem(ownerKey(this.owner));
+    } catch (error) {
+      this.storageError = error;
+      this.changed();
+      return false;
+    }
+    this.retired = true;
+    this.doc.off("update", this.onUpdate);
+    this.doc.destroy();
+    return true;
   }
   retire(): void {
     this.persist();

@@ -11,13 +11,14 @@ import {
   encodeUpdate,
   loadBody,
   ownerKey,
+  readRetainedDraft,
   serverContainsLive,
 } from "../../features/documents/off-wiki-draft";
 import type { OffWikiOwner } from "../../features/documents/off-wiki-draft";
 import type { BodySaveResult, VersionedBody } from "../../features/documents/versioned-body-api";
 const raw = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
-  .replace("export function", "function");
+  .replaceAll("export function", "function");
 const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
 class ProblemError extends Error {
   constructor(readonly status: number) {
@@ -75,6 +76,7 @@ function harness(storageKind: "null" | "access-denied" | "write-denied") {
     encodeUpdate,
     loadBody,
     ownerKey,
+    readRetainedDraft,
     serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),

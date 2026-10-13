@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { tiptapJsonToYDoc, yDocToTiptapJson } from "@fvoci/editor/collab-tiptap";
 import { FVOCI_YDOC_FRAGMENT } from "@fvoci/editor/collab";
-import { OffWikiDraft, encodeUpdate, loadBody, ownerKey } from "./off-wiki-draft";
+import {
+  OffWikiDraft,
+  encodeUpdate,
+  listRetainedDrafts,
+  loadBody,
+  ownerKey,
+  readRetainedDraft,
+} from "./off-wiki-draft";
 import type { BodySaveCommand, BodySaveResult, VersionedBody } from "./versioned-body-api";
 
 const targetId = "11111111-1111-4111-8111-111111111111";
@@ -623,5 +630,193 @@ describe("OFF wiki native draft owner", () => {
     expect(JSON.stringify(draft.mine)).toContain(" after");
     expect(draft.start.tailSeq).toBe("2");
     draft.retire();
+  });
+});
+
+describe("retired dirty OFF draft policy", () => {
+  function listable(slots: Map<string, string>) {
+    return {
+      get length() {
+        return slots.size;
+      },
+      key: (index: number) => [...slots.keys()][index] ?? null,
+      getItem: (key: string) => slots.get(key) ?? null,
+    };
+  }
+  test("the storage scope key stays actor, credential, workspace, target, kind and project", () => {
+    expect(ownerKey(owner)).toBe(
+      `fvoci:off-wiki:1:${JSON.stringify(["actor", "credential", "workspace", targetId])}`,
+    );
+    expect(ownerKey({ ...owner, kind: "task", projectId: "project" })).toBe(
+      `fvoci:off-wiki:1:${JSON.stringify(["actor", "credential", "workspace", targetId, "task", "project"])}`,
+    );
+    for (const field of ["actorId", "credentialId", "workspaceId", "targetId"] as const)
+      expect(ownerKey({ ...owner, [field]: "other" })).not.toBe(ownerKey(owner));
+  });
+  test("retire keeps the dirty slot; the same owner gets it back as an offer until a save ACK", async () => {
+    const persisted = storage();
+    const initial = source();
+    const first = new OffWikiDraft(owner, initial, persisted, () => {});
+    expect(first.restored).toBe(false);
+    edit(first.doc, " kept after leaving");
+    first.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+    const back = new OffWikiDraft(
+      owner,
+      initial,
+      persisted,
+      () => {},
+      () => commandId,
+    );
+    expect(back.restored).toBe(true);
+    expect(back.hasPrivateState).toBe(true);
+    expect(JSON.stringify(back.mine)).toContain("kept after leaving");
+    expect(await back.save((command) => Promise.resolve(result(command)))).toBe(true);
+    expect(back.restored).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    back.retire();
+  });
+  test("editor mount normalization alone is restored silently, never offered as a draft", () => {
+    const persisted = storage();
+    const empty = source();
+    const blank = new Y.Doc({ gc: false });
+    const legacy = tiptapJsonToYDoc({
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "legacy" }] }],
+    });
+    const bodies = [
+      {
+        ...empty,
+        snapshotV1: encodeUpdate(Y.encodeStateAsUpdate(blank)),
+        contentJson: { type: "doc" },
+      },
+      {
+        ...empty,
+        snapshotV1: encodeUpdate(Y.encodeStateAsUpdate(legacy)),
+        contentJson: yDocToTiptapJson(legacy),
+      },
+    ];
+    blank.destroy();
+    legacy.destroy();
+    for (const [index, body] of bodies.entries()) {
+      const first = new OffWikiDraft(owner, body, persisted, () => {});
+      const fragment = first.doc.getXmlFragment(FVOCI_YDOC_FRAGMENT);
+      // What the editor writes on mount: an ID on the existing or default paragraph.
+      if (index === 0) {
+        const paragraph = new Y.XmlElement("paragraph");
+        paragraph.setAttribute("id", "mounted-block");
+        fragment.insert(0, [paragraph]);
+      } else (fragment.get(0) as Y.XmlElement).setAttribute("id", "mounted-block");
+      expect(first.dirty).toBe(true);
+      first.retire();
+      const back = new OffWikiDraft(owner, body, persisted, () => {});
+      expect(back.hasPrivateState).toBe(true);
+      expect(back.restored).toBe(false);
+      const paragraph = back.doc.getXmlFragment(FVOCI_YDOC_FRAGMENT).get(0) as Y.XmlElement;
+      const run = paragraph.get(0) as Y.XmlText | undefined;
+      if (run) run.insert(run.length, " typed");
+      else paragraph.insert(0, [new Y.XmlText(" typed")]);
+      back.retire();
+      const typed = new OffWikiDraft(owner, body, persisted, () => {});
+      expect(typed.restored).toBe(true);
+      typed.retire();
+      persisted.slots.clear();
+    }
+  });
+  test("only an explicit discard drops the slot, never during a request, and nothing is offered again", async () => {
+    const persisted = storage();
+    const initial = source();
+    const first = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(first.doc, " discard me");
+    first.retire();
+    const back = new OffWikiDraft(owner, initial, persisted, () => {});
+    const pending = deferred<BodySaveResult>();
+    let command!: BodySaveCommand;
+    const saving = back.save((input) => {
+      command = input;
+      return pending.promise;
+    });
+    expect(back.discard()).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+    pending.resolve({ ...result(command), commandId: "wrong" });
+    expect(await saving.catch((error: unknown) => error)).toBeInstanceOf(Error);
+    expect(back.discard()).toBe(true);
+    expect(back.active).toBe(false);
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    back.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(false);
+    expect(back.discard()).toBe(false);
+    const reopened = new OffWikiDraft(owner, initial, persisted, () => {});
+    expect(reopened.restored).toBe(false);
+    expect(reopened.hasPrivateState).toBe(false);
+    expect(JSON.stringify(reopened.mine)).not.toContain("discard me");
+    reopened.retire();
+  });
+  test("a slot that cannot be removed keeps the live draft instead of discarding", () => {
+    const persisted = storage();
+    const draft = new OffWikiDraft(
+      owner,
+      source(),
+      {
+        ...persisted,
+        removeItem: () => {
+          throw new Error("storage unavailable");
+        },
+      },
+      () => {},
+    );
+    edit(draft.doc, " must survive");
+    expect(draft.discard()).toBe(false);
+    expect(draft.active).toBe(true);
+    expect(draft.storageError).toBeInstanceOf(Error);
+    expect(JSON.stringify(draft.mine)).toContain("must survive");
+    draft.retire();
+    expect(persisted.slots.has(ownerKey(owner))).toBe(true);
+  });
+  test("a retained draft exports only its exact slot and lists one actor and credential", () => {
+    const persisted = storage();
+    const initial = source();
+    const mine = new OffWikiDraft(owner, initial, persisted, () => {});
+    edit(mine.doc, " exported text");
+    expect(mine.exportDraft().markdown).toContain("exported text");
+    mine.retire();
+    const otherCredential = { ...owner, credentialId: "credential-2" };
+    const theirs = new OffWikiDraft(otherCredential, initial, persisted, () => {});
+    edit(theirs.doc, " other credential text");
+    theirs.retire();
+    const markdown = new OffWikiDraft(
+      { ...owner, targetId: "draft-2" },
+      { ...initial, targetId: "draft-2" },
+      persisted,
+      () => {},
+    );
+    markdown.setSourceBuffer({
+      text: "# unapplied Markdown",
+      baseV1: Y.encodeStateAsUpdate(markdown.doc),
+    });
+    markdown.retire();
+    persisted.slots.set(ownerKey({ ...owner, targetId: "broken" }), "{not json");
+    persisted.slots.set("unrelated", "{}");
+    const exact = readRetainedDraft(persisted, owner);
+    expect(exact?.markdown).toContain("exported text");
+    expect(exact?.markdown).not.toContain("other credential text");
+    expect(exact?.excerpt).toContain("exported text");
+    expect(readRetainedDraft(persisted, { ...owner, actorId: "B" })).toBeNull();
+    expect(readRetainedDraft(persisted, { ...owner, targetId: "broken" })).toBeNull();
+    expect(readRetainedDraft(null, owner)).toBeNull();
+    const listed = listRetainedDrafts(listable(persisted.slots), "actor", "credential");
+    expect(listed.map((draft) => draft.owner.targetId).sort()).toEqual(
+      ["draft-2", targetId].sort(),
+    );
+    expect(listed.find((draft) => draft.owner.targetId === "draft-2")?.markdown).toBe(
+      "# unapplied Markdown",
+    );
+    expect(listRetainedDrafts(listable(persisted.slots), "actor", "credential-2")).toHaveLength(1);
+    expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
+    expect(listRetainedDrafts(null, "actor", "credential")).toEqual([]);
+    // A slot whose stored owner disagrees with its key is not exported.
+    const moved = persisted.slots.get(ownerKey(owner)) ?? "";
+    persisted.slots.set(ownerKey({ ...owner, actorId: "B" }), moved);
+    expect(listRetainedDrafts(listable(persisted.slots), "B", "credential")).toEqual([]);
   });
 });

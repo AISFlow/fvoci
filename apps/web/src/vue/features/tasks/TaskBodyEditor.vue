@@ -21,7 +21,7 @@ import { projectDocumentsQuery } from "@/features/projects/queries";
 import { compareRevisionProjections } from "@/features/documents/revision-diff";
 import { documentPath, wikiDisplayId } from "@/lib/href";
 import type { OffDraftCreateResponse } from "@/features/documents/document-api";
-import type { useOffWikiBody } from "../../composables/useOffWikiBody";
+import { useRetainedDraftExport, type useOffWikiBody } from "../../composables/useOffWikiBody";
 import { loadErrorMessage, ProblemError } from "@/lib/api";
 import { collabBadge, collabRefusalNote } from "@/features/documents/collab-badge";
 import type { CollabUser } from "@/features/documents/collab-model";
@@ -77,6 +77,22 @@ const offComparisons = computed(() => {
     ),
   ];
 });
+const restoredChanges = computed(() => {
+  const bodies = props.offBody?.restoredComparison.value;
+  if (!bodies) return null;
+  const projection = (id: string, contentJson: unknown) => ({
+    id,
+    targetKind: "task",
+    targetId: props.taskId,
+    contentJson,
+  });
+  return compareRevisionProjections(
+    projection("start", bodies.start),
+    projection("mine", bodies.mine),
+    UNIQUE_ID_NODE_TYPES,
+  );
+});
+const { note: draftExportNote, run: exportDraft } = useRetainedDraftExport();
 
 const { mentionItems, entityResolver } = useEditorEntities(
   () => props.workspaceId,
@@ -414,6 +430,46 @@ async function persistBody(): Promise<void> {
     <p v-if="offBody && offBody.storageError.value" role="alert">{{
       t("doc.off.storageFailed")
     }}</p>
+    <section
+      v-if="offBody && offBody.restored.value"
+      class="document-off-compare"
+      data-testid="off-draft-restored"
+    >
+      <p role="status">{{ t("doc.off.restored") }}</p>
+      <details v-if="restoredChanges">
+        <summary>{{ t("doc.off.restoredChanges") }}</summary>
+        <p v-for="limit in restoredChanges.limits" :key="limit">{{ t(`version.diff.${limit}`) }}</p>
+        <div v-for="change in restoredChanges.changes" :key="change.key">
+          <p
+            >{{ t(`version.diff.${change.kind}`) }} ·
+            {{ (change.after ?? change.before)?.blockId }}</p
+          >
+          <del>{{ change.before?.text }}</del> → <ins>{{ change.after?.text }}</ins>
+        </div>
+      </details>
+      <UButton
+        size="sm"
+        color="neutral"
+        variant="outline"
+        :disabled="offBody.saving.value || offBody.creating.value"
+        @click="offBody.discard"
+        >{{ t("doc.off.discard") }}</UButton
+      >
+    </section>
+    <section
+      v-if="offBody && offBody.retained.value"
+      class="document-off-compare"
+      data-testid="off-draft-retained"
+    >
+      <p role="alert">{{ t("doc.off.retained") }}</p>
+      <UButton size="sm" @click="exportDraft(offBody.retained.value, 'copy')">{{
+        t("doc.off.copyDraft")
+      }}</UButton>
+      <UButton size="sm" @click="exportDraft(offBody.retained.value, 'download')">{{
+        t("doc.off.downloadDraft")
+      }}</UButton>
+      <p v-if="draftExportNote" role="status">{{ draftExportNote }}</p>
+    </section>
     <UButton
       v-if="offBody && (!offBody.doc.value || !offBody.writable.value) && !offBody.loading.value"
       @click="offBody.load"

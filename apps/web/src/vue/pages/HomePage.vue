@@ -9,6 +9,8 @@ import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
+import { listRetainedDrafts } from "@/features/documents/off-wiki-draft";
+import { useRetainedDraftExport } from "../composables/useOffWikiBody";
 import AuthenticatedLegalNav from "../features/legal/AuthenticatedLegalNav.vue";
 import EmptyWorkspace from "../features/workspace/EmptyWorkspace.vue";
 import WorkspaceCreateDialog from "../features/workspace/WorkspaceCreateDialog.vue";
@@ -32,6 +34,23 @@ const workspaces = useQuery(() => ({ ...workspacesQuery, enabled: ready.value })
 
 const denied = computed(() => route.query.denied === "workspace");
 const items = computed(() => workspaces.data.value?.items ?? []);
+// This tab's OFF drafts of the current actor and credential whose workspace
+// the fresh list no longer grants. Local reads only: export, never send.
+const retainedDrafts = computed(() => {
+  const actor = me.data.value;
+  if (!denied.value || !actor?.userId || !actor.sessionId || !workspaces.isSuccess.value) return [];
+  let storage: Storage;
+  try {
+    storage = window.sessionStorage;
+  } catch {
+    return [];
+  }
+  const granted = new Set(items.value.map((item) => item.id));
+  return listRetainedDrafts(storage, actor.userId, actor.sessionId).filter(
+    (draft) => !granted.has(draft.owner.workspaceId),
+  );
+});
+const { note: draftExportNote, run: exportDraft } = useRetainedDraftExport();
 const leaving = computed(
   () => setup.data.value?.needed === true || (ready.value && me.isError.value),
 );
@@ -102,6 +121,28 @@ async function createWorkspace(input: { name: string; slug: string }): Promise<v
         {{ t("common.dismiss") }}
       </button>
     </div>
+    <section
+      v-if="retainedDrafts.length > 0"
+      class="border-b border-default px-4 py-2 text-sm"
+      data-testid="off-draft-retained-list"
+    >
+      <p class="break-keep">{{ t("doc.off.retainedList") }}</p>
+      <div
+        v-for="draft in retainedDrafts"
+        :key="`${draft.owner.workspaceId}:${draft.owner.targetId}:${draft.owner.projectId ?? ''}:${draft.owner.kind ?? 'document'}`"
+        class="mt-2 flex flex-wrap items-center gap-2"
+        data-testid="off-draft-retained"
+      >
+        <span class="min-w-0 break-all text-muted">{{ draft.excerpt }}</span>
+        <UButton size="sm" @click="exportDraft(draft, 'copy')">{{
+          t("doc.off.copyDraft")
+        }}</UButton>
+        <UButton size="sm" @click="exportDraft(draft, 'download')">{{
+          t("doc.off.downloadDraft")
+        }}</UButton>
+      </div>
+      <p v-if="draftExportNote" role="status" class="mt-2">{{ draftExportNote }}</p>
+    </section>
     <div
       v-if="items.length > 0 && (logoutError || navigation.error.value)"
       role="alert"
