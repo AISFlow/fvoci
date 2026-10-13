@@ -56,7 +56,8 @@ fn tls_config(roots: rustls::RootCertStore) -> rustls::ClientConfig {
 mod tests {
     //! The shared client against a loopback rustls server whose leaf
     //! (`tests/fixtures/remote-tls/server.pem`, SAN `IP:127.0.0.1`) is issued
-    //! by a test CA that no public root store holds.
+    //! by a test CA that no public root store holds, or whose leaf claims a
+    //! public root as issuer without its key.
     use super::*;
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -113,6 +114,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         let key = PrivateKeyDer::from_pem_file(fixture("server.key")).unwrap();
+        tls_server_with(chain, key)
+    }
+
+    /// [`tls_server`] presenting `chain` and `key`.
+    fn tls_server_with(
+        chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> (SocketAddr, JoinHandle<Result<String, String>>) {
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -194,6 +203,65 @@ mod tests {
             .roots
             .iter()
             .any(|anchor| anchor.subject.as_ref() == ISRG_ROOT_X1));
+    }
+
+    /// Test only, trusted by nothing: a leaf (SAN `IP:127.0.0.1`, valid
+    /// 2026-2126) whose issuer is ISRG Root X1 by name but which a throwaway
+    /// RSA key signed, and its key. Made with OpenSSL 3.5:
+    /// `openssl req -x509 -newkey rsa:2048` with `string_mask = nombstr` and
+    /// the subject above for the issuer, then `openssl x509 -req -sha256`
+    /// for an EC P-256 key with `serverAuth`.
+    const FORGED_ISRG_LEAF: &str = "-----BEGIN CERTIFICATE-----
+MIICqjCCAZKgAwIBAgIBAjANBgkqhkiG9w0BAQsFADBPMQswCQYDVQQGEwJVUzEp
+MCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNV
+BAMTDElTUkcgUm9vdCBYMTAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAwMDAw
+MFowITEfMB0GA1UEAwwWRlZPQ0kgZm9yZ2VkIElTUkcgbGVhZjBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABF1bHLcVjZFFe72io1PROpecZyFnJUztOWWMB1XAkxGC
+VGZuOy9Xblvet0QZln0tDWHUL+lZ64F3biMuLgxQeWijgYcwgYQwDAYDVR0TAQH/
+BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDwYDVR0R
+BAgwBocEfwAAATAdBgNVHQ4EFgQUSbdJGK2mL7v//lJgtkfxfnsDjiowHwYDVR0j
+BBgwFoAUQWPVm06xBj/221zrUMHUSHI+tocwDQYJKoZIhvcNAQELBQADggEBAECU
+4/xIvVZWSm+fKSDcJQuamH6Bu3h/yLwUP2t9Lg4T6hEZPjhS87Vg2ueVswNiIrtp
+Esf8O8JdSC8I+ADZGU/Iix4JD6JnigukMd3h9JNjljGgL2mtfgRvr7ru1mqm+eg+
+n6Jms+v9OjSCV+DtB0SWrpBEbZJpAjyoXmQYUVmfnRFAcFTmaWpUevZ/98TaH+ix
+l6ExWf/5uOweryqfcDYIFouvANVoAXDqP8ZjV+28NRa9GVbA3mnFfAqGcmhujF/E
+S2pPvyd63BmsH8hr5onT2Y+Vj8Vey/cbkLnHCA8iV6dQgPErvTMtH9+Jtr2pIzWf
+qjebJLJU/lC/uwqozR4=
+-----END CERTIFICATE-----
+";
+    const FORGED_ISRG_LEAF_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg82WIuNSMU4DEbRuh
+FiB49E40jYn3tgvhUx1/8SIMbUShRANCAARdWxy3FY2RRXu9oqNT0TqXnGchZyVM
+7TlljAdVwJMRglRmbjsvV25b3rdEGZZ9LQ1h1C/pWeuBd24jLi4MUHlo
+-----END PRIVATE KEY-----
+";
+
+    /// The root store `client()` really uses. With ISRG Root X1 in it, the
+    /// forged leaf's issuer is found and its signature fails; without it,
+    /// the issuer is unknown, as for the test CA below.
+    #[tokio::test]
+    async fn client_finds_isrg_root_x1_and_refuses_a_forged_signature() {
+        let leaf = CertificateDer::from_pem_slice(FORGED_ISRG_LEAF.as_bytes()).unwrap();
+        assert!(leaf
+            .windows(ISRG_ROOT_X1.len())
+            .any(|name| name == ISRG_ROOT_X1));
+        let key = PrivateKeyDer::from_pem_slice(FORGED_ISRG_LEAF_KEY.as_bytes()).unwrap();
+        let (address, server) = tls_server_with(vec![leaf], key);
+        let error = client()
+            .get(format!("https://{address}/"))
+            .send()
+            .await
+            .expect_err("the leaf is not ISRG Root X1's");
+        assert!(
+            matches!(
+                rustls_error(&error),
+                Some(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::BadSignature
+                ))
+            ),
+            "{error:?}"
+        );
+        finish(server).await.expect_err("handshake must fail");
     }
 
     #[tokio::test]
