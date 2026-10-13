@@ -240,6 +240,119 @@ pub async fn list_workspace_events(
     }))
 }
 
+pub async fn list_workspace_events_backend(
+    backend: &crate::db::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+    cursor: Option<EventCursor>,
+    limit: i64,
+) -> Result<Result<WorkspaceEventPage, WorkspaceDbError>, sqlx::Error> {
+    use crate::db::backend::{Backend, DbTransaction, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return list_workspace_events(pool, workspace_id, actor_user_id, session_id, cursor, limit)
+            .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op=tx.operation();op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id,session_id).await? {return Ok(Err(WorkspaceDbError::Forbidden));}
+        if !op.membership_role(workspace_id,actor_user_id,false).await?.is_some_and(|r|r.at_least(WorkspaceRole::Admin)) {return Ok(Err(WorkspaceDbError::Forbidden));}
+        if !op.workspace_is_live(workspace_id).await? {return Ok(Err(WorkspaceDbError::NotFound));}
+        let DbTransaction::SqliteFamily(family)=&mut tx else {unreachable!()};
+        let after=cursor.unwrap_or(EventCursor{xact:0,seq:0});
+        if after.xact!=0 {return Ok(Ok(WorkspaceEventPage {items:Vec::new(),next_cursor:None}));}
+        let mut items=Vec::new();let mut last=None;let mut has_more=false;
+        let mut scan_after=after.seq;
+        'scan: loop {
+        let rows=family.query("SELECT id,seq,verb,workspace_id,actor_user_id,target_type,target_id,payload,channel,created_at FROM events WHERE workspace_id=?1 AND seq>?2 ORDER BY seq LIMIT 128",&[Cell::uuid(workspace_id),Cell::Integer(scan_after)]).await?;
+        let full_batch=rows.len()==128;
+        for row in rows {
+            scan_after=row.cell(1)?.integer()?;
+            let payload=row.cell(7)?.value()?;let kind=row.cell(5)?.optional(Cell::string)?;let id=row.cell(6)?.optional(Cell::id)?;
+            let reference=family_event_project(family,workspace_id,&payload,kind.as_deref(),id).await?;
+            let Some(project)=reference else {continue;};
+            if let Some(project)=project {
+                if !OperationTx::SqliteFamily(&mut *family).project_permission_by_id(workspace_id,actor_user_id,project).await?.is_some_and(|p|p.at_least(crate::projects::ProjectPermission::View)) {continue;}
+            }
+            if items.len()>=limit as usize {has_more=true;break 'scan;}
+            last=Some(EventCursor{xact:0,seq:row.cell(1)?.integer()?});
+            items.push(WorkspaceEventRow {id:row.cell(0)?.id()?,verb:row.cell(2)?.string()?,workspace_id:row.cell(3)?.optional(Cell::id)?,actor_user_id:row.cell(4)?.optional(Cell::id)?,target_type:kind,target_id:id,payload,channel:row.cell(8)?.string()?,created_at:row.cell(9)?.datetime()?});
+        }
+        if !full_batch {break;}
+        }
+        Ok(Ok(WorkspaceEventPage {items,next_cursor:if has_more{last}else{None}}))
+    }.await;
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            match result {
+                Err(error) => Some(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+                Ok(Err(refusal)) => Some(Box::new(sqlx::Error::Protocol(format!(
+                    "workspace events refusal: {refusal:?}"
+                )))
+                    as Box<dyn std::error::Error + Send + Sync>),
+                Ok(Ok(_)) => None,
+            },
+            cleanup,
+        ));
+    }
+    result
+}
+
+/// Outer None is a malformed reference (fail closed); inner None is an event
+/// without a project, including a reference whose target no longer exists.
+async fn family_event_project(
+    tx: &mut crate::db::backend::FamilyTx,
+    ws: Uuid,
+    payload: &Value,
+    target_kind: Option<&str>,
+    target_id: Option<Uuid>,
+) -> Result<Option<Option<Uuid>>, sqlx::Error> {
+    use crate::db::codec::Cell;
+    let reference = [
+        ("projectId", "project"),
+        ("documentId", "document"),
+        ("taskId", "task"),
+    ]
+    .into_iter()
+    .find_map(|(key, kind)| {
+        payload.get(key).and_then(Value::as_str).map(|raw| {
+            (
+                kind,
+                (raw.len() == 36)
+                    .then(|| Uuid::parse_str(raw).ok())
+                    .flatten(),
+            )
+        })
+    });
+    let (kind, id) = match reference {
+        Some((kind, Some(id))) => (kind, id),
+        Some((_, None)) => return Ok(None),
+        None => match (target_kind, target_id) {
+            (Some(kind @ ("task" | "document" | "attachment" | "comment")), Some(id)) => (kind, id),
+            _ => return Ok(Some(None)),
+        },
+    };
+    if kind == "project" {
+        return Ok(Some(Some(id)));
+    }
+    let sql=match kind {
+        "document"=>"SELECT project_id FROM documents WHERE workspace_id=?1 AND id=?2",
+        "task"=>"SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2",
+        "attachment"=>"SELECT COALESCE(d.project_id,t.project_id) FROM attachments a LEFT JOIN documents d ON d.workspace_id=a.workspace_id AND d.id=a.document_id LEFT JOIN tasks t ON t.workspace_id=a.workspace_id AND t.id=a.task_id WHERE a.workspace_id=?1 AND a.id=?2",
+        "comment"=>"SELECT COALESCE(d.project_id,t.project_id) FROM comments a LEFT JOIN documents d ON d.workspace_id=a.workspace_id AND d.id=a.document_id LEFT JOIN tasks t ON t.workspace_id=a.workspace_id AND t.id=a.task_id WHERE a.workspace_id=?1 AND a.id=?2",
+        _=>unreachable!(),
+    };
+    let rows = tx.query(sql, &[Cell::uuid(ws), Cell::uuid(id)]).await?;
+    Ok(Some(
+        rows.first()
+            .map(|r| r.cell(0)?.optional(Cell::id))
+            .transpose()?
+            .flatten(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

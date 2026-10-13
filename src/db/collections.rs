@@ -402,6 +402,22 @@ pub async fn list_collections(
     Ok(Ok(items))
 }
 
+pub async fn list_collections_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+) -> DbResult<Vec<CollectionRow>> {
+    if let Backend::Postgres(pool) = backend {
+        return list_collections(pool, workspace_id, actor).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_list_collections(family, workspace_id, actor).await;
+    finish_collection(tx, result, false).await
+}
+
 pub async fn create_collection(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -459,6 +475,23 @@ pub async fn create_collection(
     .await?;
     tx.commit().await?;
     Ok(Ok(collection))
+}
+
+pub async fn create_collection_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    input: &CollectionCreateInput,
+) -> DbResult<CollectionRow> {
+    if let Backend::Postgres(pool) = backend {
+        return create_collection(pool, workspace_id, actor, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_create_collection(family, workspace_id, actor, input).await;
+    finish_collection(tx, result, true).await
 }
 
 type OptionTuple = (Uuid, Uuid, String, String, String, Option<DateTime<Utc>>);
@@ -554,6 +587,23 @@ pub async fn list_fields(
     let fields = load_fields(&mut tx, workspace_id, collection_id).await?;
     tx.commit().await?;
     Ok(Ok(fields))
+}
+
+pub async fn list_fields_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+) -> DbResult<Vec<FieldRow>> {
+    if let Backend::Postgres(pool) = backend {
+        return list_fields(pool, workspace_id, actor, collection_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_list_fields(family, workspace_id, actor, collection_id).await;
+    finish_collection(tx, result, false).await
 }
 
 fn pad_sort_key(index: usize) -> String {
@@ -692,6 +742,24 @@ pub async fn create_field(
     Ok(created.ok_or(CollectionDbError::NotFound))
 }
 
+pub async fn create_field_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    input: &FieldCreateInput,
+) -> DbResult<FieldRow> {
+    if let Backend::Postgres(pool) = backend {
+        return create_field(pool, workspace_id, actor, collection_id, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_create_field(family, workspace_id, actor, collection_id, input).await;
+    finish_collection(tx, result, true).await
+}
+
 pub async fn patch_field(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -820,6 +888,26 @@ pub async fn patch_field(
         .find(|row| row.id == field_id);
     tx.commit().await?;
     Ok(updated.ok_or(CollectionDbError::NotFound))
+}
+
+pub async fn patch_field_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    field_id: Uuid,
+    input: &FieldPatchInput,
+) -> DbResult<FieldRow> {
+    if let Backend::Postgres(pool) = backend {
+        return patch_field(pool, workspace_id, actor, collection_id, field_id, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result =
+        family_patch_field(family, workspace_id, actor, collection_id, field_id, input).await;
+    finish_collection(tx, result, true).await
 }
 
 /// Resolved attach/value target: its project and the actor's level on it.
@@ -1027,6 +1115,24 @@ pub async fn attach_item(
     Ok(Ok(item))
 }
 
+pub async fn attach_item_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    target: AttachTarget,
+) -> DbResult<ItemRow> {
+    if let Backend::Postgres(pool) = backend {
+        return attach_item(pool, workspace_id, actor, collection_id, target).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_attach_item(family, workspace_id, actor, collection_id, target).await;
+    finish_collection(tx, result, true).await
+}
+
 pub async fn put_value(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -1105,6 +1211,25 @@ pub async fn put_value(
     write_value(&mut tx, workspace_id, &item, &field, &input.value).await?;
     tx.commit().await?;
     Ok(Ok(item.version + 1))
+}
+
+pub async fn put_value_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    item_id: Uuid,
+    input: &ValueInput,
+) -> DbResult<i32> {
+    if let Backend::Postgres(pool) = backend {
+        return put_value(pool, workspace_id, actor, collection_id, item_id, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_put_value(family, workspace_id, actor, collection_id, item_id, input).await;
+    finish_collection(tx, result, true).await
 }
 
 async fn validate_value(
@@ -1392,6 +1517,23 @@ pub async fn list_views(
     }))
 }
 
+pub async fn list_views_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+) -> DbResult<ViewList> {
+    if let Backend::Postgres(pool) = backend {
+        return list_views(pool, workspace_id, actor, collection_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_list_views(family, workspace_id, actor, collection_id).await;
+    finish_collection(tx, result, false).await
+}
+
 /// Row lock on a collection view before its owner/visibility checks, so a
 /// concurrent visibility change cannot slip between the check and the write.
 async fn lock_view(
@@ -1545,6 +1687,25 @@ pub async fn save_view(
     Ok(Ok(view))
 }
 
+pub async fn save_view_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    view_id: Option<Uuid>,
+    input: &CollectionViewInput,
+) -> DbResult<CollectionViewRow> {
+    if let Backend::Postgres(pool) = backend {
+        return save_view(pool, workspace_id, actor, collection_id, view_id, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_save_view(family, workspace_id, actor, collection_id, view_id, input).await;
+    finish_collection(tx, result, true).await
+}
+
 pub async fn remove_view(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -1609,6 +1770,24 @@ pub async fn remove_view(
     Ok(Ok(()))
 }
 
+pub async fn remove_view_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    view_id: Uuid,
+) -> DbResult<()> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_view(pool, workspace_id, actor, collection_id, view_id).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_remove_view(family, workspace_id, actor, collection_id, view_id).await;
+    finish_collection(tx, result, true).await
+}
+
 #[derive(Debug, Clone)]
 pub struct ItemLookup {
     pub item: Option<ItemRow>,
@@ -1651,6 +1830,23 @@ pub async fn item_for_target(
     }))
 }
 
+pub async fn item_for_target_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    target: AttachTarget,
+) -> DbResult<ItemLookup> {
+    if let Backend::Postgres(pool) = backend {
+        return item_for_target(pool, workspace_id, actor, target).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_item_for_target(family, workspace_id, actor, target).await;
+    finish_collection(tx, result, false).await
+}
+
 pub async fn project_collection(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
@@ -1691,6 +1887,23 @@ pub async fn project_collection(
         can_edit: access.permission.at_least(ProjectPermission::Edit) && !access.archived,
         can_manage: access.permission == ProjectPermission::Manage,
     }))
+}
+
+pub async fn project_collection_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    actor: &Actor,
+    project_id: Uuid,
+) -> DbResult<ProjectCollection> {
+    if let Backend::Postgres(pool) = backend {
+        return project_collection(pool, workspace_id, actor, project_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTransaction::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let result = family_project_collection(family, workspace_id, actor, project_id).await;
+    finish_collection(tx, result, false).await
 }
 
 /// Source `transferSharedViewOwnership`: a removed member's shared views stay
@@ -1904,4 +2117,1080 @@ pub(crate) async fn copy_task_collection(
         .await?;
     }
     Ok(Ok(()))
+}
+
+use crate::db::backend::{Backend, DbTransaction, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+
+macro_rules! family_check {
+    ($value:expr) => {
+        match $value {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        }
+    };
+}
+
+pub(crate) async fn finish_collection<T>(
+    tx: DbTx,
+    result: DbResult<T>,
+    write: bool,
+) -> DbResult<T> {
+    if write && matches!(result, Ok(Ok(_))) {
+        tx.commit_with_cleanup()
+            .await
+            .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    } else if let Err(cleanup) = tx.rollback().await {
+        let original = match result {
+            Err(error) => Some(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+            Ok(Err(refusal)) => Some(Box::new(sqlx::Error::Protocol(format!(
+                "collection refusal: {refusal:?}"
+            ))) as Box<dyn std::error::Error + Send + Sync>),
+            Ok(Ok(_)) => None,
+        };
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            original, cleanup,
+        ));
+    }
+    result
+}
+
+pub(crate) async fn family_begin_member(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    write: bool,
+) -> DbResult<WorkspaceRole> {
+    let mut op = OperationTx::SqliteFamily(tx);
+    op.set_tenant(ws).await?;
+    let live = if write {
+        op.recheck_session(actor.user_id, actor.credential_id)
+            .await?
+    } else {
+        op.session_is_live(actor.user_id, actor.credential_id)
+            .await?
+    };
+    if !live || !op.workspace_is_live(ws).await? {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    Ok(op
+        .membership_role(ws, actor.user_id, write)
+        .await?
+        .ok_or(CollectionDbError::NotFound))
+}
+
+pub(crate) async fn family_scope_access(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    user: Uuid,
+    role: WorkspaceRole,
+    project: Option<Uuid>,
+) -> Result<Option<ScopeAccess>, sqlx::Error> {
+    tx.require_tenant(ws)?;
+    let Some(project) = project else {
+        return Ok(Some(ScopeAccess {
+            permission: workspace_base_permission(role),
+            archived: false,
+        }));
+    };
+    let rows = tx
+        .query(
+            "SELECT status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+            &[Cell::uuid(ws), Cell::uuid(project)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let archived = row.cell(0)?.string()? == "archived";
+    let permission = OperationTx::SqliteFamily(tx)
+        .project_permission_by_id(ws, user, project)
+        .await?
+        .unwrap_or(ProjectPermission::None);
+    Ok(Some(ScopeAccess {
+        permission,
+        archived,
+    }))
+}
+
+fn family_collection_row(row: &FamilyRow) -> Result<CollectionRow, sqlx::Error> {
+    Ok(collection_from((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.optional(Cell::id)?,
+        row.cell(3)?.string()?,
+        row.cell(4)?.string()?,
+        row.cell(5)?.int32()?,
+        row.cell(6)?.optional(Cell::datetime)?,
+    )))
+}
+
+async fn family_find_collection(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    id: Uuid,
+) -> Result<Option<CollectionRow>, sqlx::Error> {
+    tx.require_tenant(ws)?;
+    tx.query(
+        "SELECT id,workspace_id,project_id,kind,name,version,deleted_at FROM collections WHERE workspace_id=?1 AND id=?2",
+        &[Cell::uuid(ws), Cell::uuid(id)],
+    )
+    .await?
+    .first()
+    .map(family_collection_row)
+    .transpose()
+}
+
+async fn family_guest_wiki_collection(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: Uuid,
+    collection: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let rows=tx.query("SELECT document_id FROM collection_items WHERE workspace_id=?1 AND collection_id=?2 AND document_id IS NOT NULL", &[Cell::uuid(ws),Cell::uuid(collection)]).await?;
+    for row in rows {
+        if OperationTx::SqliteFamily(&mut *tx)
+            .document_permission(ws, actor, row.cell(0)?.id()?, true)
+            .await?
+            .at_least(ProjectPermission::View)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) async fn family_require_collection(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    role: WorkspaceRole,
+    id: Uuid,
+    need: Need,
+) -> DbResult<(CollectionRow, ScopeAccess)> {
+    let Some(collection) = family_find_collection(tx, ws, id)
+        .await?
+        .filter(|c| c.deleted_at.is_none())
+    else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    let Some(access) =
+        family_scope_access(tx, ws, actor.user_id, role, collection.project_id).await?
+    else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    let readable = access.permission.at_least(ProjectPermission::View)
+        || (collection.project_id.is_none()
+            && role == WorkspaceRole::Guest
+            && family_guest_wiki_collection(tx, ws, actor.user_id, id).await?);
+    if !readable {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    if need == Need::Edit {
+        tx.require_writer()?;
+        if !access.permission.at_least(ProjectPermission::Edit) {
+            return Ok(Err(CollectionDbError::Forbidden));
+        }
+        if access.archived {
+            return Ok(Err(CollectionDbError::ProjectArchived));
+        }
+    }
+    Ok(Ok((collection, access)))
+}
+
+async fn family_audit(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    verb: &str,
+    kind: &str,
+    id: Uuid,
+    payload: Value,
+) -> Result<(), sqlx::Error> {
+    OperationTx::SqliteFamily(tx)
+        .append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(ws),
+            actor_user_id: Some(actor.user_id),
+            verb: verb.into(),
+            target_type: Some(kind.into()),
+            target_id: Some(id),
+            payload,
+            ip: actor.client_ip.map(|ip| ip.to_string()),
+        })
+        .await
+}
+
+pub(crate) async fn family_load_fields(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    collection: Uuid,
+) -> Result<Vec<FieldRow>, sqlx::Error> {
+    tx.require_tenant(ws)?;
+    let args = [Cell::uuid(ws), Cell::uuid(collection)];
+    let fields=tx.query("SELECT id,collection_id,key,name,description,type,version,sort_key,deleted_at FROM collection_fields WHERE workspace_id=?1 AND collection_id=?2 ORDER BY sort_key COLLATE BINARY,id",&args).await?;
+    let options=tx.query("SELECT field_id,id,key,label,sort_key,deleted_at FROM collection_options WHERE workspace_id=?1 AND collection_id=?2 ORDER BY sort_key COLLATE BINARY,id",&args).await?;
+    fields
+        .iter()
+        .map(|f| {
+            let id = f.cell(0)?.id()?;
+            let mut selected = Vec::new();
+            for o in &options {
+                if o.cell(0)?.id()? == id {
+                    selected.push(OptionRow {
+                        id: o.cell(1)?.id()?,
+                        key: o.cell(2)?.string()?,
+                        label: o.cell(3)?.string()?,
+                        sort_key: o.cell(4)?.string()?,
+                        deleted_at: o.cell(5)?.optional(Cell::datetime)?,
+                    });
+                }
+            }
+            Ok(FieldRow {
+                id,
+                collection_id: f.cell(1)?.id()?,
+                key: f.cell(2)?.string()?,
+                name: f.cell(3)?.string()?,
+                description: f.cell(4)?.optional(Cell::string)?,
+                field_type: FieldType::parse(&f.cell(5)?.string()?)
+                    .ok_or_else(|| sqlx::Error::Protocol("invalid field type".into()))?,
+                version: f.cell(6)?.int32()?,
+                sort_key: f.cell(7)?.string()?,
+                deleted_at: f.cell(8)?.optional(Cell::datetime)?,
+                options: selected,
+            })
+        })
+        .collect()
+}
+
+async fn family_upsert_option(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    collection: Uuid,
+    field: Uuid,
+    option: &OptionRow,
+) -> Result<(), sqlx::Error> {
+    tx.query("INSERT INTO collection_options(id,workspace_id,collection_id,field_id,key,label,sort_key,deleted_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET label=excluded.label,sort_key=excluded.sort_key,deleted_at=excluded.deleted_at",&[Cell::uuid(option.id),Cell::uuid(ws),Cell::uuid(collection),Cell::uuid(field),Cell::text(&option.key),Cell::text(&option.label),Cell::text(&option.sort_key),option.deleted_at.map(|at| Cell::Integer(at.timestamp_micros())).unwrap_or(Cell::Null)]).await?;
+    Ok(())
+}
+
+pub(crate) async fn family_require_target(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    role: WorkspaceRole,
+    target: AttachTarget,
+    need: Need,
+) -> DbResult<TargetInfo> {
+    let (id, table) = match target {
+        AttachTarget::Document(id) => (id, "documents"),
+        AttachTarget::Task(id) => (id, "tasks"),
+    };
+
+    let rows=tx.query(match table {"tasks"=>"SELECT project_id,deleted_at,archived_at FROM tasks WHERE workspace_id=?1 AND id=?2",_=>"SELECT project_id,deleted_at,NULL FROM documents WHERE workspace_id=?1 AND id=?2"},&[Cell::uuid(ws),Cell::uuid(id)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    if !matches!(row.cell(1)?, Cell::Null) {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    let project = row.cell(0)?.optional(Cell::id)?;
+    let task_archived = !matches!(row.cell(2)?, Cell::Null);
+    let access = match (target, project) {
+        (AttachTarget::Document(id), None) => ScopeAccess {
+            permission: OperationTx::SqliteFamily(&mut *tx)
+                .document_permission(ws, actor.user_id, id, true)
+                .await?,
+            archived: false,
+        },
+        _ => match family_scope_access(tx, ws, actor.user_id, role, project).await? {
+            Some(a) => a,
+            None => return Ok(Err(CollectionDbError::NotFound)),
+        },
+    };
+    if !access.permission.at_least(ProjectPermission::View) {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    if need == Need::Edit {
+        tx.require_writer()?;
+        if !access.permission.at_least(ProjectPermission::Edit) {
+            return Ok(Err(CollectionDbError::Forbidden));
+        }
+        if access.archived {
+            return Ok(Err(CollectionDbError::ProjectArchived));
+        }
+        if task_archived {
+            return Ok(Err(CollectionDbError::TaskArchived));
+        }
+    }
+    Ok(Ok(TargetInfo {
+        project_id: project,
+        can_edit: access.permission.at_least(ProjectPermission::Edit)
+            && !access.archived
+            && !task_archived,
+    }))
+}
+
+fn family_item_row(row: &FamilyRow) -> Result<ItemRow, sqlx::Error> {
+    Ok(item_from((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.optional(Cell::id)?,
+        row.cell(3)?.optional(Cell::id)?,
+        row.cell(4)?.int32()?,
+    )))
+}
+
+async fn family_find_item(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    target: AttachTarget,
+) -> Result<Option<ItemRow>, sqlx::Error> {
+    let (id, column) = match target {
+        AttachTarget::Document(id) => (id, "document_id"),
+        AttachTarget::Task(id) => (id, "task_id"),
+    };
+    tx.query(match column {"task_id"=>"SELECT id,collection_id,document_id,task_id,version FROM collection_items WHERE workspace_id=?1 AND task_id=?2",_=>"SELECT id,collection_id,document_id,task_id,version FROM collection_items WHERE workspace_id=?1 AND document_id=?2"},&[Cell::uuid(ws),Cell::uuid(id)]).await?.first().map(family_item_row).transpose()
+}
+
+fn family_view_row(row: &FamilyRow) -> Result<CollectionViewRow, sqlx::Error> {
+    Ok(view_from((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.id()?,
+        row.cell(3)?.string()?,
+        row.cell(4)?.string()?,
+        row.cell(5)?.string()?,
+        row.cell(6)?.value()?,
+        row.cell(7)?.int32()?,
+    )))
+}
+
+async fn family_visible_views(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    collection: Uuid,
+    user: Uuid,
+) -> Result<Vec<CollectionViewRow>, sqlx::Error> {
+    let rows=tx.query("SELECT id,collection_id,owner_id,visibility,name,type,config,version FROM collection_views WHERE workspace_id=?1 AND collection_id=?2 AND (owner_id=?3 OR visibility='shared')",&[Cell::uuid(ws),Cell::uuid(collection),Cell::uuid(user)]).await?;
+    let mut views = rows
+        .iter()
+        .map(family_view_row)
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    crate::db::tasks::family_sort_names(&mut views, |v| (&v.name, v.id))?;
+    Ok(views)
+}
+
+// An ID write needs only its target row; name order belongs to the list.
+async fn family_visible_view(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    collection: Uuid,
+    user: Uuid,
+    id: Uuid,
+) -> Result<Option<CollectionViewRow>, sqlx::Error> {
+    tx.query("SELECT id,collection_id,owner_id,visibility,name,type,config,version FROM collection_views WHERE workspace_id=?1 AND collection_id=?2 AND (owner_id=?3 OR visibility='shared') AND id=?4",&[Cell::uuid(ws),Cell::uuid(collection),Cell::uuid(user),Cell::uuid(id)]).await?.first().map(family_view_row).transpose()
+}
+
+async fn family_list_collections(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+) -> DbResult<Vec<CollectionRow>> {
+    let role = family_check!(family_begin_member(tx, ws, actor, false).await?);
+    let rows=tx.query("SELECT id,workspace_id,project_id,kind,name,version,deleted_at FROM collections WHERE workspace_id=?1 AND deleted_at IS NULL",&[Cell::uuid(ws)]).await?;
+    let mut items = Vec::new();
+    for row in &rows {
+        let collection = family_collection_row(row)?;
+        let visible = if collection.project_id.is_some() {
+            family_scope_access(tx, ws, actor.user_id, role, collection.project_id)
+                .await?
+                .is_some_and(|a| a.permission.at_least(ProjectPermission::View))
+        } else {
+            role != WorkspaceRole::Guest
+                || family_guest_wiki_collection(tx, ws, actor.user_id, collection.id).await?
+        };
+        if visible {
+            items.push(collection);
+        }
+    }
+    crate::db::tasks::family_sort_names(&mut items, |c| (&c.name, c.id))?;
+    Ok(Ok(items))
+}
+
+async fn family_create_collection(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    input: &CollectionCreateInput,
+) -> DbResult<CollectionRow> {
+    if input.kind == CollectionKind::Task {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    let Some(access) = family_scope_access(tx, ws, actor.user_id, role, input.project_id).await?
+    else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    if !access.permission.at_least(ProjectPermission::View) {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    if !access.permission.at_least(ProjectPermission::Edit) {
+        return Ok(Err(CollectionDbError::Forbidden));
+    }
+    if access.archived {
+        return Ok(Err(CollectionDbError::ProjectArchived));
+    }
+    let rows=tx.query("INSERT INTO collections(id,workspace_id,project_id,kind,name) VALUES(?1,?2,?3,?4,?5) RETURNING id,workspace_id,project_id,kind,name,version,deleted_at",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(ws),Cell::optional_uuid(input.project_id),Cell::text(input.kind.as_str()),Cell::text(&input.name)]).await?;
+    let collection = family_collection_row(rows.first().ok_or(sqlx::Error::RowNotFound)?)?;
+    family_audit(tx,ws,actor,"collection.created","collection",collection.id,json!({"name":collection.name,"kind":collection.kind.as_str(),"projectId":collection.project_id})).await?;
+    Ok(Ok(collection))
+}
+
+async fn family_list_fields(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+) -> DbResult<Vec<FieldRow>> {
+    let role = family_check!(family_begin_member(tx, ws, actor, false).await?);
+    family_check!(family_require_collection(tx, ws, actor, role, collection, Need::Read).await?);
+    Ok(Ok(family_load_fields(tx, ws, collection).await?))
+}
+
+async fn family_create_field(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+    input: &FieldCreateInput,
+) -> DbResult<FieldRow> {
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    family_check!(family_require_collection(tx, ws, actor, role, collection, Need::Edit).await?);
+    let fields = family_load_fields(tx, ws, collection).await?;
+    if fields.len() >= FIELDS_PER_COLLECTION_MAX {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    let key = input
+        .key
+        .clone()
+        .unwrap_or_else(|| format!("f_{}", fields.len() + 1));
+    if fields.iter().any(|f| f.key == key) {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    let id = Uuid::now_v7();
+    tx.query("INSERT INTO collection_fields(id,workspace_id,collection_id,key,name,description,type,sort_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[Cell::uuid(id),Cell::uuid(ws),Cell::uuid(collection),Cell::text(&key),Cell::text(&input.name),Cell::optional_text(input.description.as_deref()),Cell::text(input.field_type.as_str()),Cell::text(pad_sort_key(fields.len()))]).await?;
+    for (index, label) in input.options.iter().enumerate() {
+        family_upsert_option(
+            tx,
+            ws,
+            collection,
+            id,
+            &OptionRow {
+                id: Uuid::now_v7(),
+                key: format!("o_{}", index + 1),
+                label: label.clone(),
+                sort_key: pad_sort_key(index),
+                deleted_at: None,
+            },
+        )
+        .await?;
+    }
+    family_audit(
+        tx,
+        ws,
+        actor,
+        "collection_field.created",
+        "collection_field",
+        id,
+        json!({"collectionId":collection,"key":key,"type":input.field_type.as_str()}),
+    )
+    .await?;
+    Ok(family_load_fields(tx, ws, collection)
+        .await?
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or(CollectionDbError::NotFound))
+}
+
+async fn family_attach_item(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+    target: AttachTarget,
+) -> DbResult<ItemRow> {
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    let (scope, _) = family_check!(
+        family_require_collection(tx, ws, actor, role, collection, Need::Edit).await?
+    );
+    if !matches!(
+        (scope.kind, target),
+        (CollectionKind::Document, AttachTarget::Document(_))
+            | (CollectionKind::Task, AttachTarget::Task(_))
+    ) {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    let info = family_check!(family_require_target(tx, ws, actor, role, target, Need::Edit).await?);
+    if info.project_id != scope.project_id {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    if let Some(existing) = family_find_item(tx, ws, target).await? {
+        return Ok(if existing.collection_id == collection {
+            Ok(existing)
+        } else {
+            Err(CollectionDbError::InvalidInput)
+        });
+    }
+    let (doc, task) = match target {
+        AttachTarget::Document(id) => (Some(id), None),
+        AttachTarget::Task(id) => (None, Some(id)),
+    };
+    let rows=tx.query("INSERT INTO collection_items(id,workspace_id,collection_id,document_id,task_id) VALUES(?1,?2,?3,?4,?5) RETURNING id,collection_id,document_id,task_id,version",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(ws),Cell::uuid(collection),Cell::optional_uuid(doc),Cell::optional_uuid(task)]).await?;
+    Ok(Ok(family_item_row(
+        rows.first().ok_or(sqlx::Error::RowNotFound)?,
+    )?))
+}
+
+async fn family_put_value(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+    item_id: Uuid,
+    input: &ValueInput,
+) -> DbResult<i32> {
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    let (_, access) = family_check!(
+        family_require_collection(tx, ws, actor, role, collection, Need::Read).await?
+    );
+    if access.archived {
+        return Ok(Err(CollectionDbError::ProjectArchived));
+    }
+    let rows=tx.query("SELECT id,collection_id,document_id,task_id,version FROM collection_items WHERE workspace_id=?1 AND id=?2 AND collection_id=?3",&[Cell::uuid(ws),Cell::uuid(item_id),Cell::uuid(collection)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    let item = family_item_row(row)?;
+    let target = match (item.document_id, item.task_id) {
+        (Some(id), _) => AttachTarget::Document(id),
+        (_, Some(id)) => AttachTarget::Task(id),
+        _ => return Ok(Err(CollectionDbError::NotFound)),
+    };
+    family_check!(family_require_target(tx, ws, actor, role, target, Need::Edit).await?);
+    if item.version != input.expected_version {
+        return Ok(Err(CollectionDbError::VersionConflict));
+    }
+    let Some(field) = family_load_fields(tx, ws, collection)
+        .await?
+        .into_iter()
+        .find(|f| f.id == input.field_id && f.deleted_at.is_none())
+    else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    if field.version != input.expected_field_version {
+        return Ok(Err(CollectionDbError::VersionConflict));
+    }
+    if !input.value.fits(field.field_type) {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    match &input.value {
+        CollectionValue::Options(ids) => {
+            if ids.iter().collect::<HashSet<_>>().len() != ids.len()
+                || (field.field_type == FieldType::Select && ids.len() > 1)
+            {
+                return Ok(Err(CollectionDbError::InvalidInput));
+            }
+            let previous=tx.query("SELECT option_id FROM collection_choices WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3",&[Cell::uuid(ws),Cell::uuid(item_id),Cell::uuid(field.id)]).await?.iter().map(|r|r.cell(0)?.id()).collect::<Result<Vec<_>,sqlx::Error>>()?;
+            if ids.iter().any(|id| {
+                !field
+                    .options
+                    .iter()
+                    .any(|o| o.id == *id && (o.deleted_at.is_none() || previous.contains(id)))
+            }) {
+                return Ok(Err(CollectionDbError::InvalidInput));
+            }
+        }
+        CollectionValue::Users(ids) => {
+            if ids.iter().collect::<HashSet<_>>().len() != ids.len()
+                || (field.field_type == FieldType::User && ids.len() > 1)
+            {
+                return Ok(Err(CollectionDbError::InvalidInput));
+            }
+            for id in ids {
+                if tx
+                    .query(
+                        "SELECT 1 FROM memberships WHERE workspace_id=?1 AND user_id=?2",
+                        &[Cell::uuid(ws), Cell::uuid(*id)],
+                    )
+                    .await?
+                    .is_empty()
+                {
+                    return Ok(Err(CollectionDbError::InvalidInput));
+                }
+            }
+        }
+        _ => {}
+    }
+    for table in [
+        "collection_values",
+        "collection_choices",
+        "collection_people",
+    ] {
+        tx.query(
+            match table {"collection_values"=>"DELETE FROM collection_values WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3","collection_choices"=>"DELETE FROM collection_choices WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3","collection_people"=>"DELETE FROM collection_people WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3",_=>unreachable!()},
+            &[Cell::uuid(ws), Cell::uuid(item_id), Cell::uuid(field.id)],
+        )
+        .await?;
+    }
+    let args = [
+        Cell::uuid(ws),
+        Cell::uuid(collection),
+        Cell::uuid(item_id),
+        Cell::uuid(field.id),
+        Cell::text(field.field_type.as_str()),
+    ];
+    match &input.value {
+        CollectionValue::Null => {}
+        CollectionValue::Options(ids) | CollectionValue::Users(ids) => {
+            let (table, _column) = if matches!(input.value, CollectionValue::Users(_)) {
+                ("collection_people", "user_id")
+            } else {
+                ("collection_choices", "option_id")
+            };
+            for id in ids {
+                let mut values = args.to_vec();
+                values.push(Cell::uuid(*id));
+                tx.query(match table {"collection_people"=>"INSERT INTO collection_people(workspace_id,collection_id,item_id,field_id,field_type,user_id) VALUES(?1,?2,?3,?4,?5,?6)",_=>"INSERT INTO collection_choices(workspace_id,collection_id,item_id,field_id,field_type,option_id) VALUES(?1,?2,?3,?4,?5,?6)"},&values).await?;
+            }
+        }
+        scalar => {
+            let (column, value) = match scalar {
+                CollectionValue::Text(s) => ("value_text", Cell::text(s)),
+                CollectionValue::Number(n) => (
+                    "value_number",
+                    Cell::text(crate::db::view_query::format_number(*n)),
+                ),
+                CollectionValue::Date(d) => ("value_date", Cell::text(d.to_string())),
+                // Same instant as the PG writer's SQLx timestamptz bind, which
+                // truncates sub-microseconds toward 2000-01-01, not 1970.
+                CollectionValue::Datetime(at) => {
+                    ("value_ts", crate::db::tasks::family_pg_bound_instant(*at)?)
+                }
+                CollectionValue::Checkbox(b) => ("value_bool", Cell::Integer(i64::from(*b))),
+                _ => unreachable!(),
+            };
+            let mut values = args.to_vec();
+            values.push(value);
+            tx.query(match column {"value_text"=>"INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_text) VALUES(?1,?2,?3,?4,?5,?6)","value_number"=>"INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_number) VALUES(?1,?2,?3,?4,?5,?6)","value_date"=>"INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_date) VALUES(?1,?2,?3,?4,?5,?6)","value_ts"=>"INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_ts) VALUES(?1,?2,?3,?4,?5,?6)","value_bool"=>"INSERT INTO collection_values(workspace_id,collection_id,item_id,field_id,field_type,value_bool) VALUES(?1,?2,?3,?4,?5,?6)",_=>unreachable!()},&values).await?;
+        }
+    }
+    tx.query("UPDATE collection_items SET version=version+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(ws),Cell::uuid(item_id)]).await?;
+    Ok(Ok(item.version + 1))
+}
+
+async fn family_item_for_target(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    target: AttachTarget,
+) -> DbResult<ItemLookup> {
+    let role = family_check!(family_begin_member(tx, ws, actor, false).await?);
+    let info = family_check!(family_require_target(tx, ws, actor, role, target, Need::Read).await?);
+    let item = family_find_item(tx, ws, target).await?;
+    let values = match &item {
+        Some(i) => crate::db::collection_query::family_load_item_values(tx, ws, &[i.id])
+            .await?
+            .into_iter()
+            .map(|(_, f, v)| (f, v))
+            .collect(),
+        None => Vec::new(),
+    };
+    Ok(Ok(ItemLookup {
+        item,
+        values,
+        can_edit: info.can_edit,
+    }))
+}
+
+async fn family_project_collection(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    project: Uuid,
+) -> DbResult<ProjectCollection> {
+    let role = family_check!(family_begin_member(tx, ws, actor, false).await?);
+    let Some(access) = family_scope_access(tx, ws, actor.user_id, role, Some(project))
+        .await?
+        .filter(|a| a.permission.at_least(ProjectPermission::View))
+    else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    let rows=tx.query("SELECT id,workspace_id,project_id,kind,name,version,deleted_at FROM collections WHERE workspace_id=?1 AND project_id=?2 AND kind='task'",&[Cell::uuid(ws),Cell::uuid(project)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    Ok(Ok(ProjectCollection {
+        collection: family_collection_row(row)?,
+        can_edit: access.permission.at_least(ProjectPermission::Edit) && !access.archived,
+        can_manage: access.permission == ProjectPermission::Manage,
+    }))
+}
+
+async fn family_list_views(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+) -> DbResult<ViewList> {
+    let role = family_check!(family_begin_member(tx, ws, actor, false).await?);
+    let (_, access) = family_check!(
+        family_require_collection(tx, ws, actor, role, collection, Need::Read).await?
+    );
+    let items = family_visible_views(tx, ws, collection, actor.user_id).await?;
+    Ok(Ok(ViewList {
+        can_save: !access.archived,
+        can_manage: !access.archived && access.permission == ProjectPermission::Manage,
+        items,
+    }))
+}
+
+async fn family_patch_field(
+    tx: &mut FamilyTx,
+    workspace_id: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    field_id: Uuid,
+    input: &FieldPatchInput,
+) -> DbResult<FieldRow> {
+    let role = family_check!(family_begin_member(tx, workspace_id, actor, true).await?);
+    family_check!(
+        family_require_collection(tx, workspace_id, actor, role, collection_id, Need::Edit).await?
+    );
+    let fields = family_load_fields(tx, workspace_id, collection_id).await?;
+    let Some(field) = fields.into_iter().find(|field| field.id == field_id) else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    if field.version != input.expected_version {
+        return Ok(Err(CollectionDbError::VersionConflict));
+    }
+    let mut options = field.options.clone();
+    if let Some(patches) = &input.options {
+        if !field.field_type.has_options() {
+            return Ok(Err(CollectionDbError::InvalidInput));
+        }
+        // Every existing option must be listed by its stable id exactly once.
+        let ids: Vec<Uuid> = patches.iter().filter_map(|patch| patch.id).collect();
+        let unique: HashSet<Uuid> = ids.iter().copied().collect();
+        if unique.len() != ids.len()
+            || ids
+                .iter()
+                .any(|id| !field.options.iter().any(|option| option.id == *id))
+            || field
+                .options
+                .iter()
+                .any(|option| !unique.contains(&option.id))
+        {
+            return Ok(Err(CollectionDbError::InvalidInput));
+        }
+        // Option keys are unique per field: new options continue after the
+        // highest key ever used so a revived slot never collides.
+        let mut last_key = field
+            .options
+            .iter()
+            .filter_map(|option| option.key.strip_prefix("o_")?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        let now = crate::db::tasks::family_clock(tx).await?;
+        options = patches
+            .iter()
+            .enumerate()
+            .map(|(index, patch)| {
+                let old = patch
+                    .id
+                    .and_then(|id| field.options.iter().find(|option| option.id == id));
+                OptionRow {
+                    id: patch.id.unwrap_or_else(Uuid::now_v7),
+                    key: match old {
+                        Some(old) => old.key.clone(),
+                        None => {
+                            last_key += 1;
+                            format!("o_{last_key}")
+                        }
+                    },
+                    label: patch.label.clone(),
+                    sort_key: pad_sort_key(index),
+                    deleted_at: if patch.deleted {
+                        Some(old.and_then(|old| old.deleted_at).unwrap_or(now))
+                    } else {
+                        None
+                    },
+                }
+            })
+            .collect();
+    }
+    let deleted = input.deleted.unwrap_or(field.deleted_at.is_some());
+    let description = match &input.description {
+        None => field.description.clone(),
+        Some(value) => value.clone(),
+    };
+    tx.query("UPDATE collection_fields SET name=?3,description=?4,deleted_at=CASE WHEN ?5 THEN COALESCE(deleted_at,(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000)) ELSE NULL END,version=version+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace_id),Cell::uuid(field_id),Cell::text(input.name.as_deref().unwrap_or(&field.name)),Cell::optional_text(description.as_deref()),Cell::Integer(i64::from(deleted))]).await?;
+    if input.options.is_some() {
+        for option in &options {
+            family_upsert_option(tx, workspace_id, collection_id, field_id, option).await?;
+        }
+    }
+    family_audit(
+        tx,
+        workspace_id,
+        actor,
+        "collection_field.updated",
+        "collection_field",
+        field_id,
+        json!({"collectionId": collection_id, "deleted": deleted, "version": field.version + 1}),
+    )
+    .await?;
+    let updated = family_load_fields(tx, workspace_id, collection_id)
+        .await?
+        .into_iter()
+        .find(|row| row.id == field_id);
+    Ok(updated.ok_or(CollectionDbError::NotFound))
+}
+
+pub(crate) async fn family_validate_query_config(
+    collection: &CollectionRow,
+    fields: &[FieldRow],
+    config: &QueryConfig,
+    day_given: bool,
+    window: Option<&CalendarWindow>,
+) -> DbResult<()> {
+    let live = |id| fields.iter().find(|f| f.id == id && f.deleted_at.is_none());
+    match config.group_by {
+        Some(GroupBy::Status) if collection.kind != CollectionKind::Task => {
+            return Ok(Err(CollectionDbError::InvalidInput))
+        }
+        Some(GroupBy::Field(id))
+            if !live(id).is_some_and(|f| f.field_type == FieldType::Select) =>
+        {
+            return Ok(Err(CollectionDbError::InvalidInput))
+        }
+        _ => {}
+    }
+    match config.date_by {
+        Some(DateBy::Due | DateBy::Start) if collection.kind != CollectionKind::Task => {
+            return Ok(Err(CollectionDbError::InvalidInput))
+        }
+        Some(DateBy::Field(id))
+            if !live(id)
+                .is_some_and(|f| matches!(f.field_type, FieldType::Date | FieldType::Datetime)) =>
+        {
+            return Ok(Err(CollectionDbError::InvalidInput))
+        }
+        _ => {}
+    }
+    if day_given && window.is_none() {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    if let Some(w) = window {
+        if config.date_by.is_none()
+            || w.from >= w.to
+            || (w.to - w.from).num_days() > WINDOW_DAYS_MAX
+            || !crate::db::tasks::family_collection_zone_known(&w.time_zone)?
+        {
+            return Ok(Err(CollectionDbError::InvalidInput));
+        }
+    }
+    Ok(Ok(()))
+}
+
+async fn family_save_view(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    view_id: Option<Uuid>,
+    input: &CollectionViewInput,
+) -> DbResult<CollectionViewRow> {
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    let (collection, access) = family_check!(
+        family_require_collection(tx, ws, actor, role, collection_id, Need::Read).await?
+    );
+    if access.archived {
+        return Ok(Err(CollectionDbError::ProjectArchived));
+    }
+    let fields = family_load_fields(tx, ws, collection_id).await?;
+    family_check!(
+        family_validate_query_config(&collection, &fields, &input.config, false, None).await?
+    );
+    if crate::db::view_query::prepare_selected_collection_view(
+        tx,
+        ViewScope {
+            workspace_id: ws,
+            project_id: collection.project_id,
+            collection_id: Some(collection_id),
+            kind: collection.root_kind(),
+        },
+        &input.config.query,
+    )
+    .await?
+    .is_err()
+    {
+        return Ok(Err(CollectionDbError::InvalidInput));
+    }
+    let manage = access.permission == ProjectPermission::Manage;
+    if input.visibility == Visibility::Shared && !manage {
+        return Ok(Err(CollectionDbError::Forbidden));
+    }
+    let rows = if let Some(id) = view_id {
+        let Some(old) = family_visible_view(tx, ws, collection_id, actor.user_id, id).await? else {
+            return Ok(Err(CollectionDbError::NotFound));
+        };
+        if old.visibility != input.visibility.as_str() && old.owner_id != actor.user_id {
+            return Ok(Err(CollectionDbError::InvalidInput));
+        }
+        if old.visibility == "shared" && !manage {
+            return Ok(Err(CollectionDbError::Forbidden));
+        }
+        if old.visibility != "shared" && old.owner_id != actor.user_id {
+            return Ok(Err(CollectionDbError::NotFound));
+        }
+        let Some(expected) = input.expected_version else {
+            return Ok(Err(CollectionDbError::InvalidInput));
+        };
+        tx.query("UPDATE collection_views SET name=?4,type=?5,visibility=?6,config=?7,version=version+1,updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f'),4,3) AS INTEGER)*1000) WHERE workspace_id=?1 AND id=?2 AND version=?3 RETURNING id,collection_id,owner_id,visibility,name,type,config,version",&[Cell::uuid(ws),Cell::uuid(id),Cell::Integer(i64::from(expected)),Cell::text(&input.name),Cell::text(input.view_type.as_str()),Cell::text(input.visibility.as_str()),Cell::json(&input.config.to_json())?]).await?
+    } else {
+        tx.query("INSERT INTO collection_views(id,workspace_id,collection_id,owner_id,visibility,name,type,config) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) RETURNING id,collection_id,owner_id,visibility,name,type,config,version",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(ws),Cell::uuid(collection_id),Cell::uuid(actor.user_id),Cell::text(input.visibility.as_str()),Cell::text(&input.name),Cell::text(input.view_type.as_str()),Cell::json(&input.config.to_json())?]).await?
+    };
+    let Some(r) = rows.first() else {
+        return Ok(Err(CollectionDbError::VersionConflict));
+    };
+    let view = family_view_row(r)?;
+    if view.visibility == "shared" {
+        family_audit(
+            tx,
+            ws,
+            actor,
+            if view_id.is_some() {
+                "collection_view.updated"
+            } else {
+                "collection_view.created"
+            },
+            "collection_view",
+            view.id,
+            json!({"collectionId":collection_id,"name":view.name,"version":view.version}),
+        )
+        .await?;
+    }
+    Ok(Ok(view))
+}
+
+async fn family_remove_view(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    collection: Uuid,
+    id: Uuid,
+) -> DbResult<()> {
+    let role = family_check!(family_begin_member(tx, ws, actor, true).await?);
+    let (_, access) = family_check!(
+        family_require_collection(tx, ws, actor, role, collection, Need::Read).await?
+    );
+    if access.archived {
+        return Ok(Err(CollectionDbError::ProjectArchived));
+    }
+    let Some(old) = family_visible_view(tx, ws, collection, actor.user_id, id).await? else {
+        return Ok(Err(CollectionDbError::NotFound));
+    };
+    if old.visibility == "shared" && access.permission != ProjectPermission::Manage {
+        return Ok(Err(CollectionDbError::Forbidden));
+    }
+    if old.visibility != "shared" && old.owner_id != actor.user_id {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    tx.query(
+        "DELETE FROM collection_views WHERE workspace_id=?1 AND collection_id=?2 AND id=?3",
+        &[Cell::uuid(ws), Cell::uuid(collection), Cell::uuid(id)],
+    )
+    .await?;
+    if old.visibility == "shared" {
+        family_audit(
+            tx,
+            ws,
+            actor,
+            "collection_view.deleted",
+            "collection_view",
+            id,
+            json!({"collectionId":collection,"name":old.name}),
+        )
+        .await?;
+    }
+    Ok(Ok(()))
+}
+
+/// Explicit official-sqld controls, outside registered remote cohorts.
+#[cfg(all(test, feature = "db-tests"))]
+mod port_data_sdk_tests {
+    use super::*;
+    use crate::db::{backend::RemoteDatabase, libsql_finish_fixture::LibsqlFinishFixture};
+    use futures_util::FutureExt;
+    use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+
+    async fn backend(driver: &LibsqlFinishFixture) -> Backend {
+        Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            NonZeroU32::new(1).unwrap(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn selected_port_data_sdk_precision_export_secrets_and_refusals() {
+        let sqld = PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("port-data-sdk-{}", Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let db = backend(&driver).await;
+        let body=std::panic::AssertUnwindSafe(async {
+            crate::db::migrate::initialize_family_backend_for_test(&db).await.unwrap();
+            let ws=Uuid::now_v7();let user=Uuid::now_v7();let credential=Uuid::now_v7();let doc=Uuid::now_v7();
+            let mut tx=db.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family)=&mut tx else{unreachable!()};
+            family.execute("INSERT INTO workspaces(id,slug,name) VALUES(?1,'data-sdk','Data SDK')",&[Cell::uuid(ws)]).await.unwrap();
+            family.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'data-sdk@example.invalid','Data SDK')",&[Cell::uuid(user)]).await.unwrap();
+            family.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')",&[Cell::uuid(ws),Cell::uuid(user)]).await.unwrap();
+            family.execute("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'synthetic-data-sdk',unixepoch()*1000000+3600000000)",&[Cell::uuid(credential),Cell::uuid(user)]).await.unwrap();
+            family.execute("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES(?1,?2,'SDK document',?3,'a',1,'published',2,?4,'{}')",&[Cell::uuid(doc),Cell::uuid(ws),Cell::text(doc.simple().to_string()),Cell::uuid(user)]).await.unwrap();
+            tx.commit().await.unwrap();
+            let actor=Actor{user_id:user,credential_id:credential,client_ip:None};
+            let collection=create_collection_backend(&db,ws,&actor,&CollectionCreateInput{name:"SDK".into(),kind:CollectionKind::Document,project_id:None}).await.unwrap().unwrap();
+            let field=create_field_backend(&db,ws,&actor,collection.id,&crate::collections::parse_field_create(&json!({"name":"Decimal","type":"number"})).unwrap()).await.unwrap().unwrap();
+            let item=attach_item_backend(&db,ws,&actor,collection.id,AttachTarget::Document(doc)).await.unwrap().unwrap();
+            let input=crate::collections::parse_value_input(&json!({"fieldId":field.id,"expectedVersion":1,"expectedFieldVersion":1,"value":{"number":0.000000000000000123456789}})).unwrap();
+            assert_eq!(put_value_backend(&db,ws,&actor,collection.id,item.id,&input).await.unwrap().unwrap(),2);
+            let fresh=backend(&driver).await;
+            let lookup=item_for_target_backend(&fresh,ws,&actor,AttachTarget::Document(doc)).await.unwrap().unwrap();
+            assert_eq!(lookup.values,vec![(field.id,json!({"number":0.000000000000000123456789}))]);
+            assert_eq!(put_value_backend(&fresh,ws,&actor,collection.id,item.id,&input).await.unwrap(),Err(CollectionDbError::VersionConflict));
+            assert!(matches!(list_fields_backend(&fresh,Uuid::now_v7(),&actor,collection.id).await.unwrap(),Err(CollectionDbError::NotFound)));
+            let snapshot=crate::db::workspace_export::load_export_snapshot_backend(&fresh,ws,user,credential).await.unwrap().unwrap();
+            assert_eq!(snapshot.documents.len(),1);
+            let report=crate::secret_verify::verify_sealed_secrets_backend(&fresh,None).await.unwrap();
+            assert_eq!(report.user_mfa.checked,0);
+            let mut tx=fresh.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family)=&mut tx else{unreachable!()};
+            family.execute("UPDATE sessions SET revoked_at=1 WHERE id=?1",&[Cell::uuid(credential)]).await.unwrap();tx.commit().await.unwrap();
+            assert!(matches!(put_value_backend(&fresh,ws,&actor,collection.id,item.id,&input).await.unwrap(),Err(CollectionDbError::NotFound)));
+            fresh.close().await.unwrap();
+        }).catch_unwind().await;
+        let close = db.close().await;
+        let finish = driver.finish().await;
+        if let Err(primary) = body {
+            assert!(close.is_ok());
+            assert!(finish.is_ok());
+            std::panic::resume_unwind(primary);
+        }
+        close.unwrap();
+        assert!(finish.unwrap().sqld_reaped);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

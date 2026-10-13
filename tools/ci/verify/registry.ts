@@ -28,6 +28,8 @@ export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> =
     "web-native-checks",
     "workspace-browser-build",
     "workspace-browser-shard",
+    "collaboration-main-build",
+    "collaboration-test-build",
     "collaboration-build",
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -35,7 +37,7 @@ export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> =
     "collaboration-postgres-off",
     "collaboration-sqlite-off",
   ],
-  rust: ["fast", "native-arm64", "postgres-build", "postgres", "collaboration"],
+  rust: ["fast", "fast-sqlite", "native-arm64", "postgres-build", "postgres", "collaboration"],
   documents: ["native-extraction"],
   "collab-engine": ["native-collab-engine"],
   install: ["install-image", "install-smoke", "backup-restore-smoke", "upgrade-smoke-arm64"],
@@ -237,13 +239,14 @@ export function sqlitePrefixCacheSteps(saver = false): Mapping[] {
   return steps;
 }
 
-export function rustFastCacheSteps(): Mapping[] {
+export function rustFastCacheSteps(job = "fast"): Mapping[] {
   const steps: Mapping[] = [];
-  for (const [name, directory, identity, stepId] of [
-    ["server", "target/default", "fast-default-test", "default_cache"],
-    ["clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"],
-    ["SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"],
+  for (const [owner, name, directory, identity, stepId] of [
+    ["fast", "server", "target/default", "fast-default-test", "default_cache"],
+    ["fast", "clippy", "target/clippy", "fast-db-tests-clippy", "clippy_cache"],
+    ["fast-sqlite", "SQLite library", "target/db-lib", "fast-db-tests-lib-test", "db_lib_cache"],
   ] as const) {
+    if (owner !== job) continue;
     steps.push({
       name: `Restore ${name} build outputs`,
       id: stepId,
@@ -357,7 +360,6 @@ function verifyRunnersAndCaches(file: string, data: Mapping): string[] {
   const errors: string[] = [];
   const jobs = get(data, "jobs");
   if (!isMapping(jobs)) return errors;
-  const fastSaves = rustFastCacheSteps().filter((_, index) => index % 2 === 1);
   const sqliteSaver = sqlitePrefixCacheSteps(true)[2];
   for (const [jobId, job] of Object.entries(jobs)) {
     if (!isMapping(job)) continue;
@@ -384,8 +386,10 @@ function verifyRunnersAndCaches(file: string, data: Mapping): string[] {
       if (get(cache, "path") === RHWP_SOURCE_CACHE) continue;
       const exempt =
         (file === "rust.yml" &&
-          jobId === "fast" &&
-          fastSaves.some((save) => deepEqual(step, save))) ||
+          ["fast", "fast-sqlite"].includes(jobId) &&
+          rustFastCacheSteps(jobId)
+            .filter((_, index) => index % 2 === 1)
+            .some((save) => deepEqual(step, save))) ||
         (file === "rust.yml" && jobId === "postgres-build" && deepEqual(step, sqliteSaver));
       if (exempt) continue;
       for (const field of ["key", "restore-keys"]) {

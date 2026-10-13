@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 type Step = {
+  name?: string;
   id?: string;
   uses?: string;
   run?: string;
@@ -40,6 +41,7 @@ const root = resolve(import.meta.dir, "../..");
 const contracts = {
   rust: {
     fast: "select_fast",
+    "fast-sqlite": "select_fast_sqlite",
     "native-arm64": "select_native_arm64",
     "postgres-build": "select_postgres",
     postgres: "select_postgres",
@@ -51,6 +53,8 @@ const contracts = {
     "web-native-checks": "select_web_checks",
     "workspace-browser-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
+    "collaboration-main-build": "select_collaboration_main_build",
+    "collaboration-test-build": "select_collaboration_test_build",
     "collaboration-build": "select_collaboration_build",
     "collaboration-install-on": "select_collaboration_install_on",
     "collaboration-postgres-on": "select_collaboration_postgres_on",
@@ -76,6 +80,24 @@ function load(name: string): Workflow {
   // Repository YAML is the fixture; Bun owns parsing. This is not a YAML schema validator.
   return parsed as Workflow;
 }
+
+test("Rust SQLite controls have an independent budget without duplicating the default build", () => {
+  const rust = load("rust");
+  const fast = job(rust, "fast");
+  const sqlite = job(rust, "fast-sqlite");
+  assert.deepEqual(needs(sqlite), ["ci-plan"]);
+  assert.ok(needs(job(rust, "rust-ci-gate")).includes("fast-sqlite"));
+  assert.equal(sqlite.if, "needs.ci-plan.outputs.select_fast_sqlite == 'true'");
+  assert.equal(
+    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (54 exact tests)")
+      .run,
+    "xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
+  );
+  assert.ok(!fast.steps.some((step) => step.run?.includes(" selected-library ")));
+  oneStep(fast, (step) => step.run === "cargo test --locked --offline --lib --bin fvoci-server");
+  oneStep(fast, (step) => step.run === "cargo test --locked --offline --test markdown_process");
+  assert.ok(!sqlite.steps.some((step) => step.env?.CARGO_TARGET_DIR === "target/default"));
+});
 
 function job(workflow: Workflow, id: string): Job {
   const value = workflow.jobs[id];
@@ -839,16 +861,27 @@ test("Web build-cache writers keep unique keys", () => {
   uniqueBuildCacheWriters(load("web"));
 });
 for (const path of ["target", "crates/collab-engine/target"])
-  test(`negative: browser build reuses the collaboration ${path} cache key`, () => {
+  test(`negative: Web build writers collide on the ${path} cache key`, () => {
     const workflow = load("web");
     const save = (name: string) =>
       oneStep(
         job(workflow, name),
         (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
       );
-    const ordinary = save("workspace-browser-build"),
-      selected = save("collaboration-build");
+    const ordinary = save("workspace-browser-build");
+    // The normalized producer has no long-term helper cache. Keep testing the
+    // writer collision policy if another helper writer is introduced later.
+    const selected =
+      path === "target" ? save("collaboration-test-build") : structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
+    if (path !== "target") {
+      assert.ok(
+        !job(workflow, "collaboration-build").steps.some((step) => step.with?.path === path),
+      );
+      selected.with.key = "independent-helper-writer";
+      job(workflow, "collaboration-build").steps.push(selected);
+      uniqueBuildCacheWriters(workflow);
+    }
     ordinary.with.key = selected.with.key;
     expect(() => {
       uniqueBuildCacheWriters(workflow);

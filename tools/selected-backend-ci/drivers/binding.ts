@@ -35,6 +35,10 @@ const isTrue = (value: unknown) => value === true;
 const wikiSpec = "apps/web/e2e-pending/workspace-wiki-selected-backend.spec.ts";
 const offSpec = "apps/web/e2e-pending/workspace-off-selected-backend.spec.ts";
 const offSpecSha256 = "3345890f670f6462a6b14931a335de49b62b3c8355bdeece699d030b2869cff7";
+export const restoreSpec = "e2e-pending/v060-sqlite-revision-restore.spec.ts";
+export const restoreBrowserTitle =
+  "SQLite ON revision restore: matching ACK, immutable history and fresh client readback";
+const restoreSpecSha256 = "5e0e539eefc477f03665f6324ec6b853e3a6d645b3b891e41fa16a6f7f122e4d";
 
 export type Lane = "install" | "postgres" | "sqlite";
 export interface Manifest {
@@ -182,6 +186,38 @@ export function validateOffReport(report: unknown, backend: string): string[] {
   return cases;
 }
 
+export function validateRestoreReport(report: unknown): void {
+  assert.ok(sha(join(root, "apps/web", restoreSpec)) === restoreSpecSha256);
+  const r = report as {
+    config: { workers: number };
+    errors: unknown;
+    stats: Record<string, unknown>;
+    suites: OffSuite[];
+  };
+  assert.ok(jsonInteger(r.config, "workers") && r.config.workers === 1 && deepEquals(r.errors, []));
+  assert.ok(r.stats.expected === 1);
+  assert.ok(["unexpected", "flaky", "skipped"].every((key) => r.stats[key] === 0));
+  const cases: OffCase[] = [];
+  const visit = (suites: OffSuite[]) => {
+    for (const suite of suites) {
+      cases.push(...(suite.specs ?? []));
+      visit(suite.suites ?? []);
+    }
+  };
+  visit(r.suites);
+  assert.ok(cases.length === 1);
+  const item = cases[0];
+  assert.ok(item && basename(item.file) === basename(restoreSpec) && item.ok === true);
+  assert.ok(item.title === restoreBrowserTitle);
+  assert.ok(item.tests.length === 1);
+  const test = item.tests[0];
+  assert.ok(test && test.expectedStatus === "passed" && test.results.length === 1);
+  const result = test.results[0];
+  assert.ok(
+    result && result.status === "passed" && result.retry === 0 && deepEquals(result.errors, []),
+  );
+}
+
 const git = async (...args: string[]) =>
   (await command(["git", "-c", "safe.directory=" + root, "-C", root, ...args])).stdout;
 
@@ -257,7 +293,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(deepEquals(before, after) && before.head === m.source && before.tree === m.tree);
   assert.ok(Object.keys(before.tracked).length && Object.keys(before.external).length);
   assert.ok(
-    before.tracked[wikiSpec] === "550a196a4563ff74e68dc4339803f4c06c1be1a39698c08a183ce418b155299f",
+    before.tracked[wikiSpec] === "a7420e70fd8dada0662849c46a42bbf27e3a2c05f079214e2bc7cdaad4703198",
   );
   const flow: unknown = m.flow ?? "on";
   assert.ok(flow === "on" || flow === "off");

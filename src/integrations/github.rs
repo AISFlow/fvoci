@@ -15,7 +15,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use regex::Regex;
 use ring::hkdf;
 use ring::rand::SystemRandom;
@@ -28,7 +28,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::auth::password::Keyring;
-use crate::db::backend::Backend;
+use crate::db::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::Cell;
 use crate::db::context::{
     lock_membership_users, recheck_session, restore_system, set_system, set_tenant,
 };
@@ -40,6 +41,7 @@ use crate::db::outbox::{
 };
 use crate::db::projects::{lock_project, project_permission};
 use crate::db::task_activity::record_task_activity;
+use crate::db::tasks::CreateTaskInput;
 use crate::db::workspace::workspace_is_live;
 use crate::outbox::{DeliveryMode, OutboxConsumer, OutboxProcessError};
 use crate::projects::ProjectPermission;
@@ -459,6 +461,66 @@ pub async fn get_installation(
     Ok(Ok(installation))
 }
 
+pub async fn get_installation_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Option<String>, IntegrationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return get_installation(pool, workspace, actor, credential).await;
+    }
+    let Some(mut tx) = github_begin(backend, workspace, actor, credential, false).await? else {
+        return Ok(Err(IntegrationDbError::NotFound));
+    };
+    let rows = github_family(&mut tx)?
+        .query(
+            "SELECT installation_id FROM github_installations WHERE workspace_id=?1",
+            &[Cell::uuid(workspace)],
+        )
+        .await?;
+    let result = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(Ok(result))
+}
+
+fn github_commit_error(error: crate::db::backend::CommitUnknown) -> sqlx::Error {
+    sqlx::Error::AnyDriverError(Box::new(error))
+}
+
+fn github_family(tx: &mut DbTx) -> Result<&mut FamilyTx, sqlx::Error> {
+    match tx {
+        DbTx::SqliteFamily(tx) => Ok(tx),
+        _ => Err(sqlx::Error::Protocol(
+            "expected integration family transaction".into(),
+        )),
+    }
+}
+
+async fn github_begin(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    write: bool,
+) -> Result<Option<DbTx>, sqlx::Error> {
+    let mut tx = if write {
+        backend.begin_write().await?
+    } else {
+        backend.begin_read().await?
+    };
+    tx.operation().set_tenant(workspace).await?;
+    if !tx
+        .operation()
+        .webhook_manager(workspace, actor, credential, write)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    Ok(Some(tx))
+}
+
 /// Manage check for `install` (the redirect URL is built outside the tx).
 pub async fn check_manager(
     pool: &PgPool,
@@ -473,10 +535,26 @@ pub async fn check_manager(
     Ok(ok)
 }
 
+pub async fn check_manager_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return check_manager(pool, workspace, actor, credential).await;
+    }
+    let Some(tx) = github_begin(backend, workspace, actor, credential, false).await? else {
+        return Ok(false);
+    };
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(true)
+}
+
 /// A fresh install nonce: 256 random bits, base64url.
 pub fn new_install_nonce() -> String {
     let mut bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut bytes);
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -519,6 +597,28 @@ pub async fn begin_install(
     Ok(Ok(()))
 }
 
+pub async fn begin_install_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    nonce: &str,
+) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return begin_install(pool, workspace, actor, credential, nonce).await;
+    }
+    let Some(mut tx) = github_begin(backend, workspace, actor, credential, true).await? else {
+        return Ok(Err(IntegrationDbError::NotFound));
+    };
+    let family = github_family(&mut tx)?;
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    family.execute("DELETE FROM github_install_states WHERE workspace_id=?1 AND expires_at<=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000", &[Cell::uuid(workspace)]).await?;
+    family.execute("INSERT INTO github_install_states(nonce_hash,workspace_id,user_id,session_id,expires_at) VALUES(?1,?2,?3,?4,(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)+?5)", &[Cell::text(crate::auth::token::hash_token(nonce)),Cell::uuid(workspace),Cell::uuid(actor),Cell::uuid(credential),Cell::Integer(STATE_TTL_MS*1000)]).await?;
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(Ok(()))
+}
+
 pub async fn remove_installation(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -557,6 +657,45 @@ pub async fn remove_installation(
     )
     .await?;
     tx.commit().await?;
+    Ok(Ok(()))
+}
+
+pub async fn remove_installation_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    client_ip: Option<&str>,
+) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_installation(pool, workspace, actor, credential, client_ip).await;
+    }
+    let Some(mut tx) = github_begin(backend, workspace, actor, credential, true).await? else {
+        return Ok(Err(IntegrationDbError::NotFound));
+    };
+    let rows = github_family(&mut tx)?
+        .query(
+            "DELETE FROM github_installations WHERE workspace_id=?1 RETURNING installation_id",
+            &[Cell::uuid(workspace)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    };
+    tx.operation()
+        .append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: "github.uninstalled".into(),
+            target_type: None,
+            target_id: None,
+            payload: json!({"installationId":row.cell(0)?.string()?}),
+            ip: client_ip.map(str::to_string),
+        })
+        .await?;
+    tx.commit().await.map_err(github_commit_error)?;
     Ok(Ok(()))
 }
 
@@ -654,6 +793,74 @@ pub async fn complete_install(
     Ok(Ok(()))
 }
 
+pub async fn complete_install_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    nonce: &str,
+    installation: &str,
+) -> Result<Result<(), IntegrationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return complete_install(pool, workspace, actor, credential, nonce, installation).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let family = github_family(&mut tx)?;
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    let rows=family.query("DELETE FROM github_install_states WHERE nonce_hash=?1 AND workspace_id=?2 AND user_id=?3 AND session_id=?4 RETURNING expires_at>unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000", &[Cell::text(crate::auth::token::hash_token(nonce)),Cell::uuid(workspace),Cell::uuid(actor),Cell::uuid(credential)]).await?;
+    let consumed = rows
+        .first()
+        .map(|r| r.cell(0)?.boolean())
+        .transpose()?
+        .unwrap_or(false);
+    // Match PG: an expired or retired actor's matched nonce stays consumed.
+    if !consumed
+        || !tx
+            .operation()
+            .webhook_manager(workspace, actor, credential, true)
+            .await?
+    {
+        tx.commit().await.map_err(github_commit_error)?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let rows=github_family(&mut tx)?.query("SELECT workspace_id,installation_id FROM github_installations WHERE workspace_id=?1 OR installation_id=?2", &[Cell::uuid(workspace),Cell::text(installation)]).await?;
+    if let Some(row) = rows.first() {
+        let same = row.cell(0)?.id()? == workspace && row.cell(1)?.string()? == installation;
+        tx.commit().await.map_err(github_commit_error)?;
+        return Ok(if same {
+            Ok(())
+        } else {
+            Err(IntegrationDbError::Conflict)
+        });
+    }
+    github_family(&mut tx)?
+        .execute(
+            "INSERT INTO github_installations(id,workspace_id,installation_id) VALUES(?1,?2,?3)",
+            &[
+                Cell::uuid(Uuid::now_v7()),
+                Cell::uuid(workspace),
+                Cell::text(installation),
+            ],
+        )
+        .await?;
+    tx.operation()
+        .append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: "github.installed".into(),
+            target_type: None,
+            target_id: None,
+            payload: json!({"installationId":installation}),
+            ip: None,
+        })
+        .await?;
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(Ok(()))
+}
+
 #[derive(Debug, Clone)]
 pub struct IssueLinkRow {
     pub id: Uuid,
@@ -663,7 +870,7 @@ pub struct IssueLinkRow {
 }
 
 pub fn repo_is_valid(repo: &str) -> bool {
-    (3..=200).contains(&repo.chars().count()) && REPO_RE.is_match(repo)
+    (3..=200).contains(&repo.chars().count()) && !repo.contains('\0') && REPO_RE.is_match(repo)
 }
 
 /// Serializes the inbound create-or-update of one issue with a concurrent
@@ -758,6 +965,68 @@ pub async fn link_issue(
         task_id,
         repo: repo.to_string(),
         issue_number,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn link_issue_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    task: Uuid,
+    repo: &str,
+    issue: i32,
+) -> Result<Result<IssueLinkRow, IntegrationDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return link_issue(pool, workspace, actor, credential, task, repo, issue).await;
+    }
+    let repo = repo.trim();
+    if !repo_is_valid(repo) || repo.contains('\0') || issue < 1 {
+        return Ok(Err(IntegrationDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    tx.operation().lock_membership_users(&[actor]).await?;
+    if !tx.operation().recheck_session(actor, credential).await?
+        || !tx.operation().workspace_is_live(workspace).await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let rows = github_family(&mut tx)?
+        .query(
+            "SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace), Cell::uuid(task)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    };
+    let project = row.cell(0)?.id()?;
+    // PG link_issue accepts archived projects; only the current edit grant matters.
+    if !tx
+        .operation()
+        .project_permission_by_id(workspace, actor, project)
+        .await?
+        .is_some_and(|p| p.at_least(ProjectPermission::Edit))
+    {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::NotFound));
+    }
+    let id = Uuid::now_v7();
+    let inserted=github_family(&mut tx)?.execute("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING", &[Cell::uuid(id),Cell::uuid(workspace),Cell::uuid(task),Cell::text(repo),Cell::Integer(i64::from(issue))]).await?;
+    if inserted == 0 {
+        tx.rollback().await?;
+        return Ok(Err(IntegrationDbError::InvalidInput));
+    }
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(Ok(IssueLinkRow {
+        id,
+        task_id: task,
+        repo: repo.into(),
+        issue_number: issue,
     }))
 }
 
@@ -901,6 +1170,322 @@ pub async fn handle_webhook(
     };
     tx.commit().await?;
     Ok(outcome)
+}
+
+pub async fn handle_webhook_backend(
+    backend: &Backend,
+    github: &GithubConfig,
+    body: &[u8],
+    signature: Option<&str>,
+    event_name: Option<&str>,
+    delivery_id: Option<&str>,
+) -> Result<InboundOutcome, InboundError> {
+    if let Backend::Postgres(pool) = backend {
+        return handle_webhook(pool, github, body, signature, event_name, delivery_id).await;
+    }
+    if !github.verify_webhook_signature(body, signature) {
+        return Err(InboundError::Signature);
+    }
+    if event_name == Some("ping") {
+        return Ok(InboundOutcome::Ignored);
+    }
+    let payload: Value = serde_json::from_slice(body).map_err(|_| InboundError::Invalid)?;
+    if !payload.is_object()
+        || issue_from_payload(&payload)
+            .is_some_and(|i| i.title.contains('\0') || i.repo.contains('\0'))
+    {
+        return Err(InboundError::Invalid);
+    }
+    let mut tx = backend.begin_write().await?;
+    let previous = tx.operation().set_system().await?;
+    let family = github_family(&mut tx)?;
+    family.require_writer()?;
+    family.require_system_context()?;
+    if let Some(delivery) = delivery_id.and_then(|d| Uuid::parse_str(d).ok()) {
+        if family
+            .execute(
+                "INSERT INTO github_deliveries(delivery_id) VALUES(?1) ON CONFLICT DO NOTHING",
+                &[Cell::uuid(delivery)],
+            )
+            .await?
+            == 0
+        {
+            tx.rollback().await?;
+            return Ok(InboundOutcome::Duplicate);
+        }
+    }
+    let Some(installation) = installation_id_of(&payload) else {
+        tx.commit().await.map_err(github_commit_error)?;
+        return Ok(InboundOutcome::Ignored);
+    };
+    let rows = family
+        .query(
+            "SELECT workspace_id FROM github_installations WHERE installation_id=?1",
+            &[Cell::text(installation)],
+        )
+        .await?;
+    tx.operation().restore_system(previous).await?;
+    let Some(row) = rows.first() else {
+        tx.commit().await.map_err(github_commit_error)?;
+        return Ok(InboundOutcome::Ignored);
+    };
+    let workspace = row.cell(0)?.id()?;
+    tx.operation().set_tenant(workspace).await?;
+    let action = payload.get("action").and_then(Value::as_str);
+    let outcome = match event_name {
+        Some("installation") if matches!(action, Some("deleted" | "suspend")) => {
+            github_family(&mut tx)?
+                .execute(
+                    "DELETE FROM github_installations WHERE workspace_id=?1",
+                    &[Cell::uuid(workspace)],
+                )
+                .await?;
+            InboundOutcome::Applied
+        }
+        Some("issues" | "pull_request") => match action {
+            Some(action) => apply_issue_event_family(&mut tx, workspace, action, &payload).await?,
+            None => InboundOutcome::Ignored,
+        },
+        _ => InboundOutcome::Ignored,
+    };
+    tx.commit().await.map_err(github_commit_error)?;
+    Ok(outcome)
+}
+
+async fn family_statuses(
+    tx: &mut DbTx,
+    workspace: Uuid,
+    project: Uuid,
+) -> Result<Vec<StatusRow>, sqlx::Error> {
+    github_family(tx)?.query("SELECT id,name,category FROM statuses WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY,id", &[Cell::uuid(workspace),Cell::uuid(project)]).await?.iter().map(|r|Ok(StatusRow {id:r.cell(0)?.id()?,name:r.cell(1)?.string()?,category:r.cell(2)?.string()?})).collect()
+}
+
+async fn family_end_sort_key(
+    tx: &mut DbTx,
+    workspace: Uuid,
+    project: Uuid,
+    status: Uuid,
+    exclude: Option<Uuid>,
+) -> Result<Option<String>, sqlx::Error> {
+    let rows=github_family(tx)?.query("SELECT sort_key FROM tasks WHERE workspace_id=?1 AND project_id=?2 AND status_id=?3 AND deleted_at IS NULL AND (?4 IS NULL OR id<>?4) ORDER BY sort_key COLLATE BINARY DESC LIMIT 1", &[Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(status),Cell::optional_uuid(exclude)]).await?;
+    let last = rows.first().map(|r| r.cell(0)?.string()).transpose()?;
+    Ok(between(last.as_deref(), None).ok())
+}
+
+async fn record_webhook_task_event_family(
+    op: &mut OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    verb: &str,
+    task: Uuid,
+    payload: Value,
+) -> Result<(), sqlx::Error> {
+    op.append_event_channel(
+        EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: Some(workspace),
+            actor_user_id: Some(actor),
+            verb: verb.into(),
+            target_type: Some("task".into()),
+            target_id: Some(task),
+            payload: payload.clone(),
+        },
+        "webhook",
+    )
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some("task".into()),
+        target_id: Some(task),
+        payload,
+        ip: None,
+    })
+    .await
+}
+
+async fn create_linked_task_family(
+    tx: &mut DbTx,
+    workspace: Uuid,
+    actor: Uuid,
+    issue: &Issue,
+) -> Result<InboundOutcome, sqlx::Error> {
+    let rows=github_family(tx)?.query("SELECT id FROM projects WHERE workspace_id=?1 AND status='active' AND deleted_at IS NULL ORDER BY created_at,id LIMIT 1", &[Cell::uuid(workspace)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    let project = row.cell(0)?.id()?;
+    let statuses = family_statuses(tx, workspace, project).await?;
+    let Some(status) = (if issue.state == "closed" {
+        done_status(&statuses)
+    } else {
+        default_status(&statuses)
+    })
+    .cloned() else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    // PG ignores an exhausted end sort key before allocating a number.
+    if family_end_sort_key(tx, workspace, project, status.id, None)
+        .await?
+        .is_none()
+    {
+        return Ok(InboundOutcome::Ignored);
+    }
+    let task = Uuid::now_v7();
+    let clipped = clip_title(&issue.title);
+    let input = CreateTaskInput {
+        title: &clipped,
+        task_type: "task",
+        priority: "none",
+        status_id: Some(status.id),
+        start_date: None,
+        due_date: None,
+        parent_id: None,
+        milestone_id: None,
+        recurrence: None,
+    };
+    // The shared leaf allocates the number and inserts the row and its task
+    // collection item (PG tasks_collection_item) in this writer. The gates
+    // above leave its refusals unreachable; any refusal follows the number
+    // allocation, so it aborts the writer rather than commit an Ignored.
+    if tx
+        .operation()
+        .insert_task_row_family(workspace, project, actor, &input, task)
+        .await?
+        .is_err()
+    {
+        return Err(sqlx::Error::Protocol("webhook task insert refused".into()));
+    }
+    let title = input.title.trim();
+    let rows = github_family(tx)?
+        .query(
+            "SELECT number FROM tasks WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace), Cell::uuid(task)],
+        )
+        .await?;
+    let number = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .cell(0)?
+        .int32()?;
+    github_family(tx)?.execute("INSERT INTO github_issue_links(id,workspace_id,task_id,repo,issue_number) VALUES(?1,?2,?3,?4,?5)", &[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task),Cell::text(&issue.repo),Cell::Integer(i64::from(issue.number))]).await?;
+    record_webhook_task_event_family(&mut tx.operation(),workspace,actor,"task.created",task,json!({"taskId":task.to_string(),"projectId":project.to_string(),"number":number,"statusId":status.id.to_string(),"title":title})).await?;
+    crate::db::tasks::family_record_task_activity(
+        github_family(tx)?,
+        workspace,
+        task,
+        actor,
+        "webhook",
+        None,
+        &ActivitySnapshot::new(),
+    )
+    .await?;
+    Ok(InboundOutcome::Applied)
+}
+
+async fn apply_issue_event_family(
+    tx: &mut DbTx,
+    workspace: Uuid,
+    action: &str,
+    payload: &Value,
+) -> Result<InboundOutcome, sqlx::Error> {
+    let Some(issue) = issue_from_payload(payload) else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    if !matches!(action, "opened" | "edited" | "closed" | "reopened") {
+        return Ok(InboundOutcome::Ignored);
+    }
+    let family = github_family(tx)?;
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    let rows=family.query("SELECT m.user_id FROM memberships m JOIN users u ON u.id=m.user_id AND u.deleted_at IS NULL WHERE m.workspace_id=?1 ORDER BY (m.role='owner') DESC,m.created_at,m.user_id LIMIT 1", &[Cell::uuid(workspace)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    let actor = row.cell(0)?.id()?;
+    let rows=family.query("SELECT task_id FROM github_issue_links WHERE workspace_id=?1 AND repo=?2 AND issue_number=?3", &[Cell::uuid(workspace),Cell::text(&issue.repo),Cell::Integer(i64::from(issue.number))]).await?;
+    let Some(row) = rows.first() else {
+        return if matches!(action, "opened" | "edited") {
+            create_linked_task_family(tx, workspace, actor, &issue).await
+        } else {
+            Ok(InboundOutcome::Ignored)
+        };
+    };
+    let task = row.cell(0)?.id()?;
+    let rows=family.query("SELECT t.project_id,t.title,t.status_id,t.archived_at IS NOT NULL,p.status FROM tasks t JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id WHERE t.workspace_id=?1 AND t.id=?2 AND t.deleted_at IS NULL AND p.deleted_at IS NULL", &[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    if row.cell(3)?.boolean()? || row.cell(4)?.string()? == "archived" {
+        return Ok(InboundOutcome::Ignored);
+    }
+    let project = row.cell(0)?.id()?;
+    let title = row.cell(1)?.string()?;
+    let status = row.cell(2)?.id()?;
+    let statuses = family_statuses(tx, workspace, project).await?;
+    let Some(current) = statuses.iter().find(|s| s.id == status).cloned() else {
+        return Ok(InboundOutcome::Ignored);
+    };
+    let before = snapshot(&title, &current);
+    let mut new_title = title.clone();
+    let mut new_status = current.clone();
+    let mut changed = false;
+    if matches!(action, "opened" | "edited") && !issue.title.is_empty() {
+        let clipped = clip_title(&issue.title);
+        if clipped != title {
+            github_family(tx)?.execute("UPDATE tasks SET title=?3,version=version+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(task),Cell::text(&clipped)]).await?;
+            record_webhook_task_event_family(
+                &mut tx.operation(),
+                workspace,
+                actor,
+                "task.updated",
+                task,
+                json!({"taskId":task.to_string(),"title":clipped}),
+            )
+            .await?;
+            new_title = clipped;
+            changed = true;
+        }
+    }
+    if action != "edited" {
+        let closed = action == "closed" || (action == "opened" && issue.state == "closed");
+        let target = if closed {
+            done_status(&statuses)
+        } else {
+            default_status(&statuses)
+        };
+        let allowed = if closed {
+            current.category != "done"
+        } else {
+            matches!(current.category.as_str(), "done" | "canceled")
+        };
+        if let Some(target) = target.filter(|s| allowed && s.id != current.id).cloned() {
+            if let Some(sort) =
+                family_end_sort_key(tx, workspace, project, target.id, Some(task)).await?
+            {
+                github_family(tx)?.execute("UPDATE tasks SET status_id=?3,sort_key=?4,version=version+1,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(target.id),Cell::text(sort)]).await?;
+                record_webhook_task_event_family(&mut tx.operation(),workspace,actor,"task.updated",task,json!({"taskId":task.to_string(),"from":current.id.to_string(),"to":target.id.to_string()})).await?;
+                new_status = target;
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Ok(InboundOutcome::Ignored);
+    }
+    crate::db::tasks::family_record_task_activity(
+        github_family(tx)?,
+        workspace,
+        task,
+        actor,
+        "webhook",
+        Some(&before),
+        &snapshot(&new_title, &new_status),
+    )
+    .await?;
+    Ok(InboundOutcome::Applied)
 }
 
 async fn first_owner(
@@ -1645,6 +2230,11 @@ mod tests {
         let a = state_key_from_secret(&"s".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
         let b = state_key_from_secret(&"t".repeat(STATE_SECRET_MIN_BYTES)).expect("key");
         assert_ne!(a, b);
+        // Longer than the SHA-256 block, so HMAC hashes the key first (OpenSSL value).
+        assert_eq!(
+            hex::encode(state_key_from_secret(&"s".repeat(100)).expect("key")),
+            "7a0bda0ae5492f2a190a96f06253e5d41bd985e18c039ad782dc4f15ff736c54"
+        );
         let keys = Keyring::parse_named(
             r#"{"k1":"0101010101010101010101010101010101010101010101010101010101010101","k2":"0202020202020202020202020202020202020202020202020202020202020202"}"#,
             "k1",
@@ -1695,6 +2285,11 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(b"whsec").expect("key");
         mac.update(body);
         let good = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        // OpenSSL HMAC-SHA256("whsec", body), as GitHub sends it.
+        assert_eq!(
+            good,
+            "sha256=2f699952c2a984b0b1c395407dd9a2cca9dccec77a6d328bd3ca78a87c111739"
+        );
         assert!(github.verify_webhook_signature(body, Some(&good)));
         assert!(!github.verify_webhook_signature(b"{}", Some(&good)));
         assert!(!github.verify_webhook_signature(body, Some(&good.to_uppercase())));

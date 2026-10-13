@@ -57,6 +57,13 @@ const RELAYS = ["notifications", "mail", "push", "webhooks", "github"];
 
 const same = (a: unknown, b: unknown) => deepEquals(a, b, true);
 
+/** Persist barrier request IDs and append operation IDs are independent. */
+export function nativeReceiptsRetained(before: unknown[], after: unknown[]): boolean {
+  return (
+    before.length >= 2 && before.every((receipt) => after.some((fresh) => same(receipt, fresh)))
+  );
+}
+
 /** One native witness bound to each complete singleton row fingerprint. */
 function vapidInitialization(before: unknown, after: unknown): boolean {
   if (!isRecord(before) || !isRecord(after)) return false;
@@ -105,6 +112,7 @@ export interface Audit {
   namespaces: string[];
   actors: Record<string, string>;
   workspaces: Record<string, string>;
+  documents?: Record<string, string>;
   servers: Record_[];
   targetSha256: string;
   serverStarts: number;
@@ -174,11 +182,53 @@ const ids = (rows: unknown[]) => new Set(rows.map((row) => get(row, 0, 1)));
 const setEquals = (a: Set<unknown>, b: Set<unknown>) =>
   a.size === b.size && [...a].every((item) => b.has(item));
 
+// The native witness binds the exact producer tuple/payload to the whole row
+// fingerprint. An exception still needs the actor or resource allocated by
+// this UI run; unknown globals and system writes remain refused.
+type ProjectionTargets = {
+  documents: Map<string, string>;
+  tasks: Map<string, string>;
+};
+function witnessedEventOperation(
+  refs: unknown,
+  audit: Audit,
+  workspaces: Set<string>,
+  targets: ProjectionTargets,
+): unknown[] | null {
+  if (!isRecord(refs) || !isRecord(refs.eventWitness)) return null;
+  const witness = refs.eventWitness;
+  const spaces = list(refs, "workspaces"),
+    people = list(refs, "actors");
+  const target = witness.target;
+  if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
+  const sequence = witness.sequence;
+  if (integer(sequence) <= 0n) return null;
+  if (
+    witness.class === "actor-login" &&
+    spaces.length === 0 &&
+    people.length === 1 &&
+    people[0] === target &&
+    Object.hasOwn(audit.actors, target)
+  )
+    return [sequence, ["null"], ["blob", target]];
+  if (
+    (witness.class === "document-projection" || witness.class === "task-projection") &&
+    spaces.length === 1 &&
+    people.length === 0 &&
+    typeof spaces[0] === "string" &&
+    workspaces.has(spaces[0]) &&
+    targets[witness.class === "document-projection" ? "documents" : "tasks"].get(target) ===
+      spaces[0]
+  )
+    return [sequence, ["blob", spaces[0]], ["null"]];
+  return null;
+}
+
 export function allocatedRows(
   before: unknown,
   after: unknown,
   audit: Audit,
-): [Set<string>, Set<string>] {
+): [Set<string>, Set<string>, ProjectionTargets] {
   const oldUsers = ids(list(before, "operations", "users"));
   const oldSpaces = ids(list(before, "operations", "workspaces"));
   const addedUsers = list(after, "operations", "users").filter(
@@ -218,16 +268,46 @@ export function allocatedRows(
         same(row[2], ["text", "team"]), "UI_WORKSPACE_ROWS_CHANGED");
   }
   const actors = new Set(Object.keys(audit.actors));
+  const targets: ProjectionTargets = {
+    documents: new Map(Object.entries(audit.documents ?? {})),
+    tasks: new Map(),
+  };
+  // A projection exception needs either the ON browser/native seed or a new
+  // complete native resource row created by this run's allocated actor in its
+  // allocated team/personal workspace. A preexisting or foreign resource is
+  // never inferred from an event's workspace alone.
+  for (const table of ["documents", "tasks"] as const) {
+    const previous = record(before, "fingerprints", table);
+    for (const [hash, count] of Object.entries(record(after, "fingerprints", table))) {
+      if (Object.hasOwn(previous, hash)) continue;
+      const refs = get(after, "allocations", table, hash);
+      const id = get(refs, "self"),
+        spaces = list(refs, "workspaces"),
+        people = list(refs, "actors");
+      require(count === 1 &&
+        typeof id === "string" &&
+        /^[a-f0-9]{32}$/.test(id) &&
+        spaces.length === 1 &&
+        typeof spaces[0] === "string" &&
+        workspaces.has(spaces[0]) &&
+        people.length > 0 &&
+        subset(people, actors), "UI_FOREIGN_RESOURCE_ALLOCATION");
+      const existing = targets[table].get(id);
+      require(existing === undefined || existing === spaces[0], "UI_ALLOCATION_CHANGED");
+      targets[table].set(id, spaces[0]);
+    }
+  }
   const events = new Set<string>();
   const beforeEvents = record(before, "fingerprints", "events");
   for (const [sha, refs] of Object.entries(record(after, "allocations", "events"))) {
     if (!Object.hasOwn(beforeEvents, sha)) {
       const spaces = list(refs, "workspaces"),
         people = list(refs, "actors");
-      require(spaces.length > 0 &&
+      require((spaces.length > 0 &&
         subset(spaces, workspaces) &&
         people.length > 0 &&
-        subset(people, actors), "UI_FOREIGN_EVENT");
+        subset(people, actors)) ||
+        witnessedEventOperation(refs, audit, workspaces, targets) !== null, "UI_FOREIGN_EVENT");
       events.add(get(refs, "self") as string);
     }
   }
@@ -257,7 +337,7 @@ export function allocatedRows(
           truthy(get(refs, "events")), "UI_UNSCOPED_ROW_ADDITION");
     }
   }
-  return [workspaces, actors];
+  return [workspaces, actors, targets];
 }
 
 // One JSON object at the start of `value`; trailing text is ignored.
@@ -371,7 +451,7 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   require(get(before, "startupHazards") === 0 &&
     get(after, "startupHazards") === 0 &&
     get(after, "liveOutboxLeases") === 0, "UI_FOREIGN_OR_UNRELEASED_OWNER");
-  const [workspaces, actors] = allocatedRows(before, after, audit);
+  const [workspaces, actors, targets] = allocatedRows(before, after, audit);
   const first = singleton(get(b, "event_sequence")),
     last = singleton(get(a, "event_sequence"));
   require(first <= last && last <= first + 10000n, "UI_EVENT_COUNTER_RESET");
@@ -382,13 +462,22 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
     addedEvents.map((row) => integer(get(row, 0))),
     expectedEvents,
   ), "UI_EVENT_COUNTER_UNEXPLAINED");
+  const witnessed = new Set(
+    Object.entries(record(after, "allocations", "events"))
+      .filter(([hash]) => !Object.hasOwn(record(before, "fingerprints", "events"), hash))
+      .flatMap(([, refs]) => {
+        const row = witnessedEventOperation(refs, audit, workspaces, targets);
+        return row === null ? [] : [canonical(row)];
+      }),
+  );
   for (const row of addedEvents)
-    require(Array.isArray(row) &&
+    require((Array.isArray(row) &&
       row.length === 3 &&
       get(row, 1, 0) === "blob" &&
       workspaces.has(get(row, 1, 1) as string) &&
       get(row, 2, 0) === "blob" &&
-      actors.has(get(row, 2, 1) as string), "UI_FOREIGN_EVENT");
+      actors.has(get(row, 2, 1) as string)) ||
+      witnessed.has(canonical(row)), "UI_FOREIGN_EVENT");
   const firstFence = singleton(get(b, "collab_fence_counter")),
     lastFence = singleton(get(a, "collab_fence_counter"));
   require(firstFence <= lastFence && lastFence <= firstFence + 10000n, "UI_FENCE_COUNTER_RESET");

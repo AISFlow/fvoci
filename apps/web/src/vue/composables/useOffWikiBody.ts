@@ -2,17 +2,32 @@ import { computed, inject, markRaw, onScopeDispose, ref, shallowRef, watch } fro
 import * as Y from "yjs";
 import {
   OffWikiDraft,
+  adoptMovedDraft,
   decodeUpdate,
+  listRetainedDrafts,
   loadBody,
   ownerKey,
+  readRetainedDraft,
   serverContainsLive,
   type OffWikiOwner,
   type DraftDestination,
+  type RetainedOffDraft,
 } from "@/features/documents/off-wiki-draft";
 import { createDocumentFromDraft } from "@/features/documents/document-api";
 import { readVersionedBody, saveVersionedBody } from "@/features/documents/versioned-body-api";
 import { ProblemError } from "@/lib/api";
+import { held, tabStorage, unstored } from "./useOffWikiBodySlots";
 import { sourceDraftAuthRetiredKey } from "./useSourceDraftGuard";
+
+const denied = (failure: unknown) =>
+  failure instanceof ProblemError && [401, 403, 404].includes(failure.status);
+
+/** This tab's retained drafts of one actor and credential, read locally only. */
+export function listRetainedOffDrafts(actorId: string, credentialId: string): RetainedOffDraft[] {
+  return listRetainedDrafts(tabStorage(), actorId, credentialId).map(
+    (draft) => held(draft) ?? draft,
+  );
+}
 
 /** An authorized wiki page owns one local native history document. Identity
  * changes retire both its pending HTTP callbacks and its editor, including ABA.
@@ -25,6 +40,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   // Read the current injected authority after awaits; never retain its narrowed value.
   const isAuthRetired = () => authRetired.value;
   const draft = shallowRef<OffWikiDraft | null>(null);
+  const retained = shallowRef<RetainedOffDraft | null>(null);
+  // The private draft of an owner the view dropped, for retainedFor only.
+  const lost = shallowRef<RetainedOffDraft | null>(null);
+  // The draft this target had before a move, left at its old key because the
+  // tab storage refused the new one: export only until an open with room.
+  const unmoved = shallowRef<RetainedOffDraft | null>(null);
   const error = shallowRef<unknown>(null);
   const loading = ref(false);
   const revision = ref(0);
@@ -40,8 +61,29 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     abort = null;
     draft.value?.retire();
     draft.value = null;
+    retained.value = null;
+    unmoved.value = null;
     loading.value = false;
     error.value = null;
+    generation.value++;
+  }
+  // Only private state is a draft; a clean body is the server's, not an export.
+  function exportOf(current: OffWikiDraft | null): RetainedOffDraft | null {
+    if (!current?.active || !current.hasPrivateState) return null;
+    try {
+      return current.exportDraft();
+    } catch {
+      // Never block retirement; the tab slot still holds the draft.
+      return null;
+    }
+  }
+  /** Lost access keeps the owned draft in its tab slot and switches it to
+   * export only; nothing sends it again before a fresh authorized read. */
+  function deny(current: OffWikiDraft) {
+    const kept = exportOf(current);
+    current.retire();
+    draft.value = null;
+    retained.value = held(kept ?? readRetainedDraft(tabStorage(), current.owner));
     generation.value++;
   }
   async function load() {
@@ -69,12 +111,9 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         isAuthRetired()
       )
         return;
-      let storage: Storage | null = null;
-      try {
-        storage = window.sessionStorage;
-      } catch {
-        /* The editor still retains its in-memory draft. */
-      }
+      // Storage that refuses a write leaves that slot in this page's memory.
+      const storage = tabStorage();
+      retained.value = null;
       const mounted = draft.value;
       if (
         mounted?.active &&
@@ -87,12 +126,26 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         mounted.observeAuthorizedBody(current);
       } else {
         mounted?.retire();
-        draft.value = markRaw(new OffWikiDraft(scope, current, storage, changed));
+        // A target moved to another project component brings its draft along
+        // once the tab storage takes it under the new key.
+        unmoved.value = null;
+        adoptMovedDraft(storage, scope, current, (left) => (unmoved.value = held(left)));
+        const next = new OffWikiDraft(scope, current, storage, changed);
+        // A slot only memory holds is offered back like any other. Writing it
+        // again lets the storage take it now, or keeps its warning.
+        if (unstored(ownerKey(scope))) next.persist();
+        draft.value = markRaw(next);
         generation.value++;
       }
     } catch (failure) {
       if (started === lifetime) {
-        if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) retire();
+        if (denied(failure)) {
+          const mounted = draft.value;
+          const kept =
+            mounted && ownerKey(mounted.owner) === ownerKey(scope) ? exportOf(mounted) : null;
+          retire();
+          retained.value = held(kept ?? readRetainedDraft(tabStorage(), scope));
+        }
         error.value = failure;
       }
     } finally {
@@ -109,7 +162,11 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
       ]);
     },
     () => {
+      // An owner the view dropped (its document was refused) keeps this page's
+      // private draft for export even when storage refused it; others never do.
+      const kept = owner() || isAuthRetired() ? null : (exportOf(draft.value) ?? retained.value);
       retire();
+      lost.value = held(kept);
       return load();
     },
     { immediate: true, flush: "sync" },
@@ -117,7 +174,12 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
   onScopeDispose(retire);
   function beforeUnload(event: Event) {
     const current = draft.value;
-    if (current?.storageError && (current.dirty || current.sourceBuffer || current.distinct))
+    if (
+      (current?.storageError && (current.dirty || current.sourceBuffer || current.distinct)) ||
+      retained.value?.unstored ||
+      lost.value?.unstored ||
+      unmoved.value?.unstored
+    )
       event.preventDefault();
   }
   if (typeof window !== "undefined") window.addEventListener("beforeunload", beforeUnload);
@@ -147,11 +209,8 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     } catch (failure) {
       if (draft.value !== current || !isActive()) return false;
       error.value = failure;
-      if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) {
-        current.retire();
-        draft.value = null;
-        generation.value++;
-      } else if (failure instanceof ProblemError && failure.status === 409) {
+      if (denied(failure)) deny(current);
+      else if (failure instanceof ProblemError && failure.status === 409) {
         // This is a fresh authorized read, not an oracle for an uncertain commit.
         // A confirmed 409 has already rolled back the rejected writer.
         const started = lifetime;
@@ -167,14 +226,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
             current.conflict(latest);
         } catch (readFailure) {
           if (started === lifetime) {
-            if (
-              readFailure instanceof ProblemError &&
-              [401, 403, 404].includes(readFailure.status)
-            ) {
-              current.retire();
-              draft.value = null;
-              generation.value++;
-            }
+            if (denied(readFailure)) deny(current);
             error.value = readFailure;
           }
         }
@@ -212,11 +264,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         const commandId = current.distinct?.body.commandId;
         if (commandId) current.distinctRefused(commandId);
       }
-      if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) {
-        current.retire();
-        draft.value = null;
-        generation.value++;
-      }
+      if (denied(failure)) deny(current);
       // Unknown finish has no fresh-observer recovery: retry the frozen command.
       return null;
     }
@@ -225,6 +273,24 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     draft.value?.editCurrent();
     generation.value++;
     error.value = null;
+  }
+  /** The user's explicit discard: drop the tab slot, then read the current body. */
+  async function discard(): Promise<boolean> {
+    const current = draft.value;
+    if (!current?.discard()) return false;
+    draft.value = null;
+    generation.value++;
+    error.value = null;
+    await load();
+    return true;
+  }
+  /** A refused owner's export-only draft: this page's own copy first, else
+   * that owner's slot in the tab or, when storage refused it, in memory. */
+  function retainedFor(scope: OffWikiOwner): RetainedOffDraft | null {
+    const key = ownerKey(scope);
+    for (const kept of [retained.value, lost.value])
+      if (kept && ownerKey(kept.owner) === key) return kept;
+    return held(readRetainedDraft(tabStorage(), scope));
   }
   async function verifyCommitted(): Promise<boolean> {
     const current = draft.value;
@@ -254,11 +320,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     } catch (failure) {
       if (started === lifetime) {
         error.value = failure;
-        if (failure instanceof ProblemError && [401, 403, 404].includes(failure.status)) {
-          current.retire();
-          draft.value = null;
-          generation.value++;
-        }
+        if (denied(failure)) deny(current);
       }
       return false;
     }
@@ -272,7 +334,19 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
     save,
     createDistinct,
     editCurrent,
+    discard,
     verifyCommitted,
+    retained: computed(() => retained.value),
+    unmoved: computed(() => unmoved.value),
+    retainedFor,
+    restored: value((current) => current.restored && current.hasPrivateState, false),
+    restoredComparison: value(
+      (current) =>
+        current.restored && current.hasPrivateState
+          ? { start: current.start.contentJson, mine: current.mine }
+          : null,
+      null,
+    ),
     doc: value((current) => current.doc, null),
     writable: value((current) => current.start.writable, false),
     dirty: value((current) => current.dirty, false),

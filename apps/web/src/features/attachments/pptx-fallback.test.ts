@@ -142,7 +142,7 @@ await test("renderer placeholders: linked, grouped, rotated and missing pictures
   // Grouped: the viewport is in the child space the group transform scales, as the rect is.
   assert.match(
     svg,
-    /<g transform="translate\(100\.00 300\.00\) scale\(2\.000000 2\.000000\)"><g data-pptx-fallback="image"><rect x="10\.00" y="10\.00" width="24\.00" height="24\.00" [^>]*\/><title>[^<]*<\/title><svg x="10" y="10" width="24" height="24" viewBox="10 10 24 24" overflow="hidden"><text x="22\.00" y="22\.00" [^>]*>picture \(link: https:\/\/example\.com\/pptx-tracker\.png\)<\/text><\/svg><\/g>/,
+    /<g transform="translate\(100\.00 300\.00\) scale\(2\.000000 2\.000000\)"><g data-pptx-shape-id="4"><g data-pptx-fallback="image"><rect x="10\.00" y="10\.00" width="24\.00" height="24\.00" [^>]*\/><title>[^<]*<\/title><svg x="10" y="10" width="24" height="24" viewBox="10 10 24 24" overflow="hidden"><text x="22\.00" y="22\.00" [^>]*>picture \(link: https:\/\/example\.com\/pptx-tracker\.png\)<\/text><\/svg><\/g>/,
   );
   // Rotated: the viewport sits inside the rotated group, with the rect.
   assert.match(

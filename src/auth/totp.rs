@@ -4,7 +4,7 @@
 //! token compare and RFC 4648 base32 come from `totp-rs`; the matching step is
 //! returned so the caller can claim it (replay block, `db::mfa::claim_step`).
 
-use rand::RngCore;
+use rand::Rng;
 use totp_rs::{Algorithm, Builder, Secret, Totp};
 
 pub const TOTP_STEP_SECONDS: i64 = 30;

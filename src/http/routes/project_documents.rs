@@ -17,8 +17,11 @@ use crate::auth::session::SessionUser;
 use crate::db::documents::{CreateDocumentInput, UpdateDocumentMetaInput};
 use crate::db::project_documents::{
     create_project_document_backend, get_project_document_backend,
-    list_project_document_tree_backend, move_project_document, reorder_project_document,
-    restore_project_document, trash_project_document, update_project_document_meta,
+    list_project_document_tree_backend, move_project_document_backend as move_project_document,
+    reorder_project_document_backend as reorder_project_document,
+    restore_project_document_backend as restore_project_document,
+    trash_project_document_backend as trash_project_document,
+    update_project_document_meta_backend as update_project_document_meta,
 };
 use crate::documents::export::ExportFormat;
 use crate::error::{AppError, ProblemCode};
@@ -302,12 +305,7 @@ async fn patch_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = update_project_document_meta(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,
@@ -348,12 +346,7 @@ async fn move_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = move_project_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,
@@ -390,12 +383,7 @@ async fn trash_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = trash_project_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,
@@ -430,12 +418,7 @@ async fn restore_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = restore_project_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,
@@ -471,12 +454,7 @@ async fn sort_document(
     .await?;
     let ip = peer_ip(peer.ip());
     let result = reorder_project_document(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/project_documents.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         project_id,
         document_id,

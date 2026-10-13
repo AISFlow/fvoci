@@ -18,7 +18,7 @@ yrs_source_kind = "fvoci-owned-same-version-source-patch"
 yrs_source_path = "../vendor/yrs-0.28.0"
 yrs_source_provenance = "../vendor/yrs-0.28.0/PROVENANCE.json"
 yrs_source_review_v4_patch_sha256 = "1491d18424f719d5bbecfcfe8f53467141c779ea41299ff1bf22ee8c1ff43c2f"
-yjs = "13.6.32"
+yjs = "13.6.33"
 fragment = "prosemirror"
 encoding_v1 = 1
 offset_kind = "utf16"
@@ -60,7 +60,7 @@ worker = ["dep:yrs"]
 test-hang = ["worker"]
 
 [dependencies]
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 libc = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

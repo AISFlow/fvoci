@@ -4,6 +4,9 @@ use chrono::NaiveDate;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::backend::{Backend, DbTx};
+use super::codec::Cell;
+
 use crate::db::context::{lock_membership_users, recheck_session, session_is_live, set_tenant};
 use crate::db::workspace::{
     membership_role, membership_role_for_update, workspace_is_live, WorkspaceRole,
@@ -77,6 +80,71 @@ pub async fn list_workspace_holidays(
     }))
 }
 
+pub async fn list_workspace_holidays_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<HolidayList, HolidayDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_workspace_holidays(pool, workspace, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    tx.operation().set_tenant(workspace).await?;
+    let role = match holiday_access(&mut tx, workspace, actor, credential, false).await? {
+        Ok(role) => role,
+        Err(error) => {
+            tx.rollback().await?;
+            return Ok(Err(error));
+        }
+    };
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let items = family
+        .query(
+            "SELECT date FROM workspace_holidays WHERE workspace_id=?1 ORDER BY date",
+            &[Cell::uuid(workspace)],
+        )
+        .await?
+        .iter()
+        .map(|r| r.cell(0)?.date())
+        .collect::<Result<_, _>>()?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(Ok(HolidayList {
+        items,
+        can_edit: role.at_least(WorkspaceRole::Admin),
+    }))
+}
+
+async fn holiday_access(
+    tx: &mut DbTx,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    write: bool,
+) -> Result<Result<WorkspaceRole, HolidayDbError>, sqlx::Error> {
+    let mut op = tx.operation();
+    if write {
+        op.lock_membership_users(&[actor]).await?;
+    }
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(HolidayDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(HolidayDbError::NotFound));
+    }
+    let Some(role) = op.membership_role(workspace, actor, write).await? else {
+        return Ok(Err(HolidayDbError::NotFound));
+    };
+    if write && !role.at_least(WorkspaceRole::Admin) {
+        return Ok(Err(HolidayDbError::NotFound));
+    }
+    Ok(Ok(role))
+}
+
 pub async fn add_workspace_holiday(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -95,6 +163,19 @@ pub async fn add_workspace_holiday(
     .await
 }
 
+pub async fn add_workspace_holiday_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    date: NaiveDate,
+) -> Result<Result<(), HolidayDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return add_workspace_holiday(pool, workspace, actor, credential, date).await;
+    }
+    mutate_holiday_backend(backend, workspace, actor, credential, date, false).await
+}
+
 pub async fn remove_workspace_holiday(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -103,6 +184,45 @@ pub async fn remove_workspace_holiday(
     on_date: NaiveDate,
 ) -> Result<Result<(), HolidayDbError>, sqlx::Error> {
     mutate_holiday(pool, workspace_id, actor_user_id, session_id, on_date, true).await
+}
+
+pub async fn remove_workspace_holiday_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    date: NaiveDate,
+) -> Result<Result<(), HolidayDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return remove_workspace_holiday(pool, workspace, actor, credential, date).await;
+    }
+    mutate_holiday_backend(backend, workspace, actor, credential, date, true).await
+}
+
+async fn mutate_holiday_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    date: NaiveDate,
+    remove: bool,
+) -> Result<Result<(), HolidayDbError>, sqlx::Error> {
+    let mut tx = backend.begin_write().await?;
+    tx.operation().set_tenant(workspace).await?;
+    if let Err(error) = holiday_access(&mut tx, workspace, actor, credential, true).await? {
+        tx.rollback().await?;
+        return Ok(Err(error));
+    }
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_tenant(workspace)?;
+    family.execute(if remove {"DELETE FROM workspace_holidays WHERE workspace_id=?1 AND date=?2"} else {"INSERT INTO workspace_holidays(workspace_id,date) VALUES(?1,?2) ON CONFLICT DO NOTHING"}, &[Cell::uuid(workspace),Cell::text(date.format("%Y-%m-%d").to_string())]).await?;
+    tx.commit()
+        .await
+        .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+    Ok(Ok(()))
 }
 
 async fn mutate_holiday(

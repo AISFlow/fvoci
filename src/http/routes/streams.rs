@@ -25,11 +25,10 @@ use crate::http::guard::check_origin;
 use crate::http::routes::tasks::{internal, require_session};
 use crate::http::state::AppState;
 use crate::streams::{
-    initial_access_cursor_backend, initial_cursor, poll_access_events_backend, poll_task_events,
-    poll_workspace_task_events, project_stream_access, task_stream_wire_hint,
-    workspace_stream_access, workspace_stream_access_backend, BackendAccessCursor, EventCursor,
-    StreamAccess, StreamAcquireError, StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY,
-    STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
+    initial_access_cursor_backend, poll_access_events_backend, poll_task_events_backend,
+    poll_workspace_task_events_backend, project_stream_access_backend, task_stream_wire_hint,
+    workspace_stream_access_backend, BackendAccessCursor, StreamAccess, StreamAcquireError,
+    StreamGuard, StreamHub, STREAM_CHANNEL_CAPACITY, STREAM_KEEPALIVE, STREAM_POLL_INTERVAL,
 };
 
 #[cfg(feature = "db-tests")]
@@ -121,29 +120,15 @@ async fn workspace_task_stream(
     )
     .await?;
     admit(
-        workspace_stream_access(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/streams.rs")
-                .map_err(internal)?,
-            workspace_id,
-            user_id,
-            session_id,
-        )
-        .await,
+        workspace_stream_access_backend(&state.auth.db.pool, workspace_id, user_id, session_id)
+            .await,
     )?;
 
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/streams.rs")
-        .map_err(internal)?
-        .clone();
+    let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool).await.map_err(internal)?;
+    let cursor = initial_access_cursor_backend(&pool)
+        .await
+        .map_err(internal)?;
     let stream = workspace_task_sse_stream(
         hub,
         pool,
@@ -185,7 +170,7 @@ enum Delivery {
 
 struct WorkspaceTaskSseStream {
     queue_rx: tokio::sync::mpsc::Receiver<WorkspaceStreamItem>,
-    pool: sqlx::PgPool,
+    pool: crate::db::backend::Backend,
     auth: WorkspaceTaskAuth,
     pending: Option<WorkspaceStreamItem>,
     authorize: Option<Pin<Box<dyn Future<Output = Delivery> + Send>>>,
@@ -236,7 +221,7 @@ impl Stream for WorkspaceTaskSseStream {
 /// a hint queued before a revocation commits is never delivered. Errors fail
 /// closed and end the stream; the client resyncs on reconnect.
 fn authorize_workspace_item(
-    pool: &sqlx::PgPool,
+    pool: &crate::db::backend::Backend,
     auth: WorkspaceTaskAuth,
     item: &WorkspaceStreamItem,
 ) -> Pin<Box<dyn Future<Output = Delivery> + Send>> {
@@ -252,9 +237,10 @@ fn authorize_workspace_item(
             session_id,
         } = auth;
         let access = match project_id {
-            None => workspace_stream_access(&pool, workspace_id, user_id, session_id).await,
+            None => workspace_stream_access_backend(&pool, workspace_id, user_id, session_id).await,
             Some(project_id) => {
-                project_stream_access(&pool, workspace_id, project_id, user_id, session_id).await
+                project_stream_access_backend(&pool, workspace_id, project_id, user_id, session_id)
+                    .await
             }
         };
         match (project_id, access) {
@@ -282,9 +268,9 @@ fn workspace_item_to_event(item: WorkspaceStreamItem) -> Event {
 
 fn workspace_task_sse_stream(
     hub: Arc<StreamHub>,
-    pool: sqlx::PgPool,
+    pool: crate::db::backend::Backend,
     auth: WorkspaceTaskAuth,
-    cursor: EventCursor,
+    cursor: BackendAccessCursor,
     guard: StreamGuard,
 ) -> WorkspaceTaskSseStream {
     let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
@@ -304,7 +290,7 @@ fn workspace_task_sse_stream(
             }
             // Credential, membership and per-project View share one
             // transaction, so a revocation stops hints within one tick.
-            match poll_workspace_task_events(
+            match poll_workspace_task_events_backend(
                 &producer_pool,
                 auth.workspace_id,
                 auth.user_id,
@@ -373,13 +359,8 @@ async fn project_task_stream(
     )
     .await?;
     admit(
-        project_stream_access(
-            state
-                .auth
-                .db
-                .pool
-                .postgres("src/http/routes/streams.rs")
-                .map_err(internal)?,
+        project_stream_access_backend(
+            &state.auth.db.pool,
             workspace_id,
             project_id,
             user_id,
@@ -388,15 +369,11 @@ async fn project_task_stream(
         .await,
     )?;
 
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/streams.rs")
-        .map_err(internal)?
-        .clone();
+    let pool = state.auth.db.pool.clone();
     let hub = state.streams.clone();
-    let cursor = initial_cursor(&pool).await.map_err(internal)?;
+    let cursor = initial_access_cursor_backend(&pool)
+        .await
+        .map_err(internal)?;
     let stream = task_sse_stream(
         hub,
         pool,
@@ -507,7 +484,7 @@ enum TaskStreamQueueItem {
 
 #[derive(Clone)]
 struct TaskStreamAuth {
-    pool: sqlx::PgPool,
+    pool: crate::db::backend::Backend,
     workspace_id: Uuid,
     project_id: Uuid,
     user_id: Uuid,
@@ -579,7 +556,8 @@ fn authorize_queue_item(
         TaskStreamQueueItem::Open | TaskStreamQueueItem::TaskHint { .. } => Box::pin(async move {
             // Fail closed: a DB error withholds the item like a denial.
             matches!(
-                project_stream_access(&pool, workspace_id, project_id, user_id, session_id).await,
+                project_stream_access_backend(&pool, workspace_id, project_id, user_id, session_id)
+                    .await,
                 Ok(StreamAccess::Allowed)
             )
         }),
@@ -619,12 +597,12 @@ fn record_task_hint_enqueued(_workspace_id: Uuid, _project_id: Uuid) {}
 #[allow(clippy::too_many_arguments)]
 fn task_sse_stream(
     hub: Arc<StreamHub>,
-    pool: sqlx::PgPool,
+    pool: crate::db::backend::Backend,
     workspace_id: Uuid,
     project_id: Uuid,
     user_id: Uuid,
     session_id: Uuid,
-    cursor: EventCursor,
+    cursor: BackendAccessCursor,
     guard: StreamGuard,
 ) -> TaskAuthorizedSseStream {
     let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CAPACITY);
@@ -661,7 +639,7 @@ fn task_sse_stream(
             }
             // The credential check shares the poll transaction, so a revoked
             // session or token ends the stream within one tick.
-            match poll_task_events(
+            match poll_task_events_backend(
                 &pool,
                 workspace_id,
                 project_id,

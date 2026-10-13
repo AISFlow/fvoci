@@ -15,7 +15,7 @@ import {
   type PptxWorkerResponse,
   type RemotePptxDeck,
 } from "./pptx-client.ts";
-import { buildChartPptx, HOSTILE_PPTX_MARKUP } from "./pptx-hostile-fixture.ts";
+import { buildChartPptx, HOSTILE_PPTX_MARKUP, rendererText } from "./pptx-hostile-fixture.ts";
 import { innerSlideSvg } from "./pptx-svg.ts";
 import { buildFixturePptx, DEFAULT_PPTX_TEXT, FIXTURE_PPTX_FILLER } from "./pptx-test-fixture.ts";
 
@@ -146,9 +146,20 @@ await test("hostile chart markup comes back from the worker only inside the imag
   const slide = (await deck.render(0)) as { status: "ok"; svg: string };
   assert.equal(slide.status, "ok");
   assert.ok(!slide.svg.includes("script"));
-  assert.ok(innerSlideSvg(slide.svg)?.includes(HOSTILE_PPTX_MARKUP.prefixedScript));
+  const inner = innerSlideSvg(slide.svg);
+  assert.ok(inner?.includes(rendererText(HOSTILE_PPTX_MARKUP.prefixedScript)));
+  assert.ok(!inner.includes(HOSTILE_PPTX_MARKUP.prefixedScript));
   deck.close();
   await worker.exited;
+  // Markup the renderer does emit as is (the fixture's `javascript:` link): also only inside the image.
+  const linkWorker = threadWorker();
+  const linked = await openedIn(linkWorker, buildFixturePptx());
+  const first = (await linked.render(0)) as { status: "ok"; svg: string };
+  assert.equal(first.status, "ok");
+  assert.ok(!first.svg.includes("javascript:"));
+  assert.ok(innerSlideSvg(first.svg)?.includes('<a href="javascript:alert(1)"'));
+  linked.close();
+  await linkWorker.exited;
 });
 
 await test("cap and format failures come back from the worker, which is then terminated", async () => {

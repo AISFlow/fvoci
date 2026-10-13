@@ -342,7 +342,7 @@ fn skip_gc_revision_snapshot_restores_deleted_text() {
             );
         }
         Err(status) => panic!(
-            "concrete Yjs 13.6.32 snapshot incompatibility with yrs 0.28.0+small-client: {status:?} fixture=fixtures/revision_snapshot.bin ({} bytes). Do not vendor a new parser.",
+            "concrete Yjs 13.6.33 snapshot incompatibility with yrs 0.28.0+small-client: {status:?} fixture=fixtures/revision_snapshot.bin ({} bytes). Do not vendor a new parser.",
             snap.len()
         ),
     }

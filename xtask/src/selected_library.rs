@@ -166,7 +166,7 @@ pub fn result_error(filter: &str, code: i32, output: &str) -> Option<&'static st
 
 /// `cargo test --no-run` of the root library with Cargo's JSON on stdout and
 /// rendered diagnostics on stderr; returns the executable records.
-fn build(target_dir: Option<&str>) -> Result<Vec<Value>, String> {
+pub(crate) fn build(target_dir: Option<&str>) -> Result<Vec<Value>, String> {
     let mut command = Command::new("cargo");
     command.args([
         "test",
@@ -202,7 +202,7 @@ fn build(target_dir: Option<&str>) -> Result<Vec<Value>, String> {
 /// `rerun-if-env-changed` (ring: CARGO_PKG_NAME, CARGO_MANIFEST_DIR, ...), and
 /// Cargo compares its own environment, so passing them on would rebuild ring
 /// and its dependents in the shared target directory.
-fn without_outer_package_env(command: &mut Command) {
+pub(crate) fn without_outer_package_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
         let Some(key) = key.to_str() else { continue };
         if key.starts_with("CARGO_PKG_")

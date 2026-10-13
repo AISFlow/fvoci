@@ -1,6 +1,182 @@
 #![cfg(feature = "db-tests")]
 #![allow(dead_code)]
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
+#[tokio::test]
+async fn sqlite_holidays_and_ics_http_rotation_expiry_and_tenant_refusal() {
+    let f = integrations_family::Fixture::new().await;
+    let app = f.app(std::sync::Arc::new(
+        fvoci_server::integrations::Integrations::disabled(),
+    ));
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let (status, list) = json_request(
+        app.clone(),
+        "GET",
+        &format!("{base}/holidays"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["canEdit"], true);
+    for _ in 0..2 {
+        let (status, _) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/holidays"),
+            Some(json!({"date":"2026-12-25"})),
+            Some(&f.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let fresh = f.fresh().await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workspace_holidays")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{}/holidays/2026-12-25", Uuid::now_v7()),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{base}/holidays/2026-12-25"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, first) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/ics-token"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first_path = url::Url::parse(first["url"].as_str().unwrap())
+        .unwrap()
+        .path()
+        .to_string();
+    let (status, second) = json_request(
+        app.clone(),
+        "POST",
+        &format!("{base}/ics-token"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let path = url::Url::parse(second["url"].as_str().unwrap())
+        .unwrap()
+        .path()
+        .to_string();
+    let (project, backlog, _) = f.seed_project().await;
+    let task = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by,due_date) VALUES(?1,?2,?3,1,'Assigned calendar task',?4,'a0',1,'{\"type\":\"doc\",\"content\":[]}',?5,'2026-12-25')").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&fresh).await.unwrap();
+    sqlx::query("INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)")
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(task.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, _, calendar) = raw_request(app.clone(), "GET", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(calendar)
+        .unwrap()
+        .contains("Assigned calendar task"));
+    assert_eq!(
+        raw_request(app.clone(), "GET", &first_path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    for (method, expected) in [
+        ("GET", StatusCode::OK),
+        ("HEAD", StatusCode::OK),
+        ("OPTIONS", StatusCode::NO_CONTENT),
+        ("PROPFIND", StatusCode::MULTI_STATUS),
+        ("REPORT", StatusCode::MULTI_STATUS),
+    ] {
+        assert_eq!(
+            raw_request(app.clone(), method, &path, None).await.0,
+            expected
+        );
+    }
+    sqlx::query("UPDATE ics_tokens SET expires_at=unixepoch()*1000000-1")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_request(app.clone(), "GET", &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+/// Same-workspace refusal: a member reads the holidays but only an admin
+/// writes them (PG `mutate_holiday`).
+#[tokio::test]
+async fn sqlite_holiday_writes_refuse_same_workspace_member() {
+    let f = integrations_family::Fixture::new().await;
+    let app = f.app(std::sync::Arc::new(
+        fvoci_server::integrations::Integrations::disabled(),
+    ));
+    let path = format!("/api/v1/workspaces/{}/holidays", f.workspace);
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date":"2026-12-25"})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, member) = f.member("member").await;
+    let (status, list) = json_request(app.clone(), "GET", &path, None, Some(&member)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["canEdit"], false);
+    let fresh = f.fresh().await;
+    let counts = "SELECT (SELECT group_concat(date) FROM workspace_holidays),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)";
+    let before: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before.0, "2026-12-25");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date":"2026-12-31"})),
+        Some(&member),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{path}/2026-12-25"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before, after);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
@@ -226,6 +402,55 @@ async fn holidays_crud_permissions_and_dependency_lag() {
     .await;
     assert_eq!(status, StatusCode::OK, "{dep_ok}");
 
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PG twin of `sqlite_holiday_writes_refuse_same_workspace_member`.
+#[tokio::test]
+async fn holiday_writes_refuse_same_workspace_member() {
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let path = format!("/api/v1/workspaces/{workspace_id}/holidays");
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date": "2026-12-25"})),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let member = add_workspace_user(&admin, workspace_id, "member", "hol-writer").await;
+    let (status, list) = json_request(app.clone(), "GET", &path, None, Some(&member.cookie)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["canEdit"], false);
+    let counts = "SELECT (SELECT string_agg(date::text, ',' ORDER BY date) FROM fvoci.workspace_holidays), (SELECT count(*) FROM fvoci.events), (SELECT count(*) FROM fvoci.audit_log)";
+    let before: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before.0, "2026-12-25");
+    let (status, body) = json_request(
+        app.clone(),
+        "POST",
+        &path,
+        Some(json!({"date": "2026-12-31"})),
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let (status, body) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{path}/2026-12-25"),
+        None,
+        Some(&member.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (String, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before, after);
     admin.close().await;
     harness.cleanup().await;
 }

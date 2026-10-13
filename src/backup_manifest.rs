@@ -1,11 +1,11 @@
 //! Offline backup manifest creation and restore preflight. No database or server setup.
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path};
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -142,7 +142,15 @@ fn file_entry(path: &Path, expected_name: &str) -> Result<FileEntry> {
     }
     let mut input = File::open(path).map_err(|_| format!("cannot read {expected_name}"))?;
     let mut hash = Sha256::new();
-    io::copy(&mut input, &mut hash).map_err(|_| format!("cannot hash {expected_name}"))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(format!("cannot hash {expected_name}")),
+        }
+    }
     Ok(FileEntry {
         path: expected_name.into(),
         size_bytes: metadata.len(),
@@ -458,6 +466,21 @@ mod tests {
         let path = std::env::temp_dir().join(format!("fvoci-backup-test-{}", uuid::Uuid::now_v7()));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn file_entry_streams_the_sha256_of_the_whole_file() {
+        let dir = scratch();
+        let path = dir.join("db.dump");
+        // Several read buffers long; sha256sum value.
+        fs::write(&path, vec![b'a'; 100_000]).unwrap();
+        let entry = file_entry(&path, "db.dump").unwrap();
+        assert_eq!(entry.size_bytes, 100_000);
+        assert_eq!(
+            entry.sha256,
+            "6d1cf22d7cc09b085dfc25ee1a1f3ae0265804c607bc2074ad253bcc82fd81ee"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn write_tar(path: &Path, name: &str, kind: tar::EntryType) {

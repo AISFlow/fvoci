@@ -106,22 +106,24 @@ pub fn effective_permission(
         .unwrap_or(ProjectPermission::None)
 }
 
+// PostgreSQL text refuses NUL; the SQLite family would store it. Refuse it
+// here so every backend answers 400 before any write.
 pub fn name_is_valid(name: &str) -> bool {
     let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 200
+    !trimmed.is_empty() && !name.contains('\0') && trimmed.chars().count() <= 200
 }
 
 pub fn description_is_valid(value: Option<&str>) -> bool {
     match value {
         None => true,
-        Some(raw) => raw.chars().count() <= 2000,
+        Some(raw) => !raw.contains('\0') && raw.chars().count() <= 2000,
     }
 }
 
 pub fn icon_is_valid(value: Option<&str>) -> bool {
     match value {
         None => true,
-        Some(raw) => raw.chars().count() <= 50,
+        Some(raw) => !raw.contains('\0') && raw.chars().count() <= 50,
     }
 }
 

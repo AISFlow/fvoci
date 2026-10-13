@@ -1,18 +1,10 @@
-// Selected SQLite library cohort: the exact filters the fast job must execute. The
+// Selected SQLite library cohort: the exact filters fast-sqlite must execute. The
 // per-test result rule (a zero-match or ignored test is not execution) lives in
 // xtask/src/selected_library.rs, which runs them.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  type Mapping,
-  type VerifyContext,
-  field,
-  indexOfSame,
-  rustJobs,
-  same,
-  steps,
-} from "./rust-common.ts";
+import { type Mapping, type VerifyContext, field, rustJobs, same, steps } from "./rust-common.ts";
 import { RUST_XTASK } from "./rust-shared.ts";
 
 export const RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)";
@@ -89,11 +81,25 @@ export function verifySelectedLibraryExecution(
       "rust: selected library registry must retain all54 exact filters (original44 prefix and member10)",
     );
   }
-  const fast = jobs.fast;
-  const list = steps(fast);
+  for (const name of ["fast", "fast-sqlite"]) {
+    const job = jobs[name];
+    if (field(job, "timeout-minutes") !== 19) {
+      errors.push(`rust: ${name} must retain its independent 19 minute budget`);
+    }
+    if (field(job, "env") !== undefined || field(job, "services") !== undefined) {
+      errors.push(
+        `rust: selected library ${name} job must not add an environment or service override`,
+      );
+    }
+  }
+  const list = steps(jobs["fast-sqlite"]);
   const matches = list.filter((step) => step.name === RUST_SELECTED_LIBRARY_STEP);
-  if (matches.length !== 1) {
-    errors.push("rust: selected library step must appear exactly once in fast");
+  const elsewhere = Object.entries(jobs).some(
+    ([name, job]) =>
+      name !== "fast-sqlite" && steps(job).some((step) => step.name === RUST_SELECTED_LIBRARY_STEP),
+  );
+  if (matches.length !== 1 || elsewhere) {
+    errors.push("rust: selected library step must appear exactly once, only in fast-sqlite");
     return errors;
   }
   const expected = { name: RUST_SELECTED_LIBRARY_STEP, run: RUST_SELECTED_LIBRARY_RUN + "\n" };
@@ -102,16 +108,15 @@ export function verifySelectedLibraryExecution(
       "rust: selected library step must keep exact unconditional command without extra env or flags",
     );
   }
-  const plain = list.flatMap((step, index) =>
-    same(step, RUST_DEFAULT_LIBRARY_STEP) ? [index] : [],
+  const plain = Object.entries(jobs).flatMap(([name, job]) =>
+    steps(job)
+      .filter((step) => same(step, RUST_DEFAULT_LIBRARY_STEP))
+      .map(() => name),
   );
-  if (plain.length !== 1 || (plain[0] ?? 0) >= indexOfSame(list, matches[0])) {
+  if (!same(plain, ["fast"])) {
     errors.push(
-      "rust: selected library step must preserve preceding default plain library command",
+      "rust: selected library split must preserve the default plain library command only in fast",
     );
-  }
-  if (field(fast, "env") !== undefined) {
-    errors.push("rust: selected library fast job must not add an environment override");
   }
   return errors;
 }

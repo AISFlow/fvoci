@@ -89,6 +89,7 @@ impl Backend {
                     tx,
                     write_reserved: true,
                     tenant: None,
+                    transfer_pair: None,
                     system_context: false,
                 }))
             }),
@@ -119,6 +120,7 @@ impl Backend {
                     tx,
                     write_reserved: false,
                     tenant: None,
+                    transfer_pair: None,
                     system_context: false,
                 }))
             }),
@@ -267,6 +269,7 @@ pub struct LocalTx {
     tx: Transaction<'static, Sqlite>,
     write_reserved: bool,
     tenant: Option<uuid::Uuid>,
+    transfer_pair: Option<(uuid::Uuid, uuid::Uuid)>,
     system_context: bool,
 }
 
@@ -314,6 +317,50 @@ impl FamilyTx {
             ))
         }
     }
+    /// Registers the two locators of one personal transfer. This only scopes
+    /// subsequent named operations: it grants neither actor authority nor a
+    /// writer reservation. The product rechecks both sides in this transaction.
+    pub(crate) fn scope_transfer_pair(
+        &mut self,
+        source: uuid::Uuid,
+        destination: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let (tenant, pair) = match self {
+            Self::Local(tx) => (&mut tx.tenant, &mut tx.transfer_pair),
+            Self::Remote(tx) => (&mut tx.tenant, &mut tx.transfer_pair),
+        };
+        if source == destination || pair.is_some() || tenant.is_some_and(|id| id != source) {
+            return Err(sqlx::Error::Protocol(
+                "transaction transfer pair cannot change".into(),
+            ));
+        }
+        *pair = Some((source, destination));
+        // Keep global-only operations fail-closed even before the first switch.
+        *tenant = Some(source);
+        Ok(())
+    }
+
+    /// The exception to ordinary tenant pinning is closed over exactly the
+    /// registered pair. A rejected switch leaves the current locator intact.
+    pub(crate) fn switch_transfer_tenant(
+        &mut self,
+        workspace: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let (tenant, pair) = match self {
+            Self::Local(tx) => (&mut tx.tenant, tx.transfer_pair),
+            Self::Remote(tx) => (&mut tx.tenant, tx.transfer_pair),
+        };
+        if !pair
+            .is_some_and(|(source, destination)| workspace == source || workspace == destination)
+        {
+            return Err(sqlx::Error::Protocol(
+                "workspace is outside transaction transfer pair".into(),
+            ));
+        }
+        *tenant = Some(workspace);
+        Ok(())
+    }
+
     pub(crate) fn set_tenant(&mut self, workspace: uuid::Uuid) -> Result<(), sqlx::Error> {
         let tenant = match self {
             Self::Local(tx) => &mut tx.tenant,
@@ -353,11 +400,19 @@ impl FamilyTx {
                 .execute(&mut *tx.tx)
                 .await
                 .map(|r| r.rows_affected()),
-            Self::Remote(tx) => tx
-                .connection()
-                .execute(statement, remote_params(args))
+            Self::Remote(tx) => {
+                let args = remote_params(args);
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        connection
+                            .execute(statement, args)
+                            .await
+                            .map_err(remote_error)
+                    },
+                )
                 .await
-                .map_err(remote_error),
+            }
         }
     }
     /// Only the migration registry supplies compiled, fixed DDL. This keeps
@@ -369,12 +424,19 @@ impl FamilyTx {
         self.require_writer()?;
         match self {
             Self::Local(tx) => sqlx::raw_sql(sql).execute(&mut *tx.tx).await.map(|_| ()),
-            Self::Remote(tx) => tx
-                .connection()
-                .execute_batch(sql)
+            Self::Remote(tx) => {
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        connection
+                            .execute_batch(sql)
+                            .await
+                            .map(|_| ())
+                            .map_err(remote_error)
+                    },
+                )
                 .await
-                .map(|_| ())
-                .map_err(remote_error),
+            }
         }
     }
     pub(crate) async fn query(
@@ -388,16 +450,22 @@ impl FamilyTx {
                 .await
                 .map(|rows| rows.into_iter().map(FamilyRow::Local).collect()),
             Self::Remote(tx) => {
-                let mut rows = tx
-                    .connection()
-                    .query(statement, remote_params(args))
-                    .await
-                    .map_err(remote_error)?;
-                let mut result = Vec::new();
-                while let Some(row) = rows.next().await.map_err(remote_error)? {
-                    result.push(FamilyRow::Remote(row));
-                }
-                Ok(result)
+                let args = remote_params(args);
+                tx.run(
+                    RemoteOperationKind::Statement,
+                    move |connection| async move {
+                        let mut rows = connection
+                            .query(statement, args)
+                            .await
+                            .map_err(remote_error)?;
+                        let mut result = Vec::new();
+                        while let Some(row) = rows.next().await.map_err(remote_error)? {
+                            result.push(FamilyRow::Remote(row));
+                        }
+                        Ok(result)
+                    },
+                )
+                .await
             }
         }
     }
@@ -445,6 +513,7 @@ pub struct RemoteDatabase {
     database: libsql::Database,
     max_connections: u32,
     admission: Arc<Semaphore>,
+    acquire_timeout: std::time::Duration,
     cleanup: Mutex<JoinSet<Result<(), sqlx::Error>>>,
     lifecycle: Mutex<RemoteLifecycle>,
     idle: Notify,
@@ -493,6 +562,7 @@ impl RemoteDatabase {
             database,
             max_connections: max.get(),
             admission: Arc::new(Semaphore::new(max.get() as usize)),
+            acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
             cleanup: Mutex::new(JoinSet::new()),
             lifecycle: Mutex::new(RemoteLifecycle {
                 closing: false,
@@ -504,6 +574,17 @@ impl RemoteDatabase {
             idle: Notify::new(),
             close_serial: tokio::sync::Mutex::new(()),
         }
+    }
+
+    #[cfg(all(test, feature = "db-tests"))]
+    fn from_test_driver_with_acquire_timeout(
+        database: libsql::Database,
+        max: std::num::NonZeroU32,
+        acquire_timeout: std::time::Duration,
+    ) -> Self {
+        let mut remote = Self::from_test_driver(database, max);
+        remote.acquire_timeout = acquire_timeout;
+        remote
     }
 
     pub async fn connect(
@@ -531,6 +612,7 @@ impl RemoteDatabase {
             database,
             max_connections: max_connections.max(1),
             admission: Arc::new(Semaphore::new(max_connections.max(1) as usize)),
+            acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
             cleanup: Mutex::new(JoinSet::new()),
             lifecycle: Mutex::new(RemoteLifecycle {
                 closing: false,
@@ -553,12 +635,18 @@ impl RemoteDatabase {
         off_body: bool,
     ) -> Result<RemoteTx, sqlx::Error> {
         self.reap_finished();
-        let permit = self
-            .admission
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| sqlx::Error::PoolClosed)?;
+        // OFF must wait for earlier streams to settle and exclude later ones,
+        // including ordinary reads. Tokio's fair semaphore reserves the same
+        // complete capacity used to size this database's admission. Its wait
+        // uses the existing sibling SQLx pools' acquire bound and error kind.
+        let permits = if off_body { self.max_connections } else { 1 };
+        let permit = tokio::time::timeout(
+            self.acquire_timeout,
+            self.admission.clone().acquire_many_owned(permits),
+        )
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
+        .map_err(|_| sqlx::Error::PoolClosed)?;
         {
             let mut state = self
                 .lifecycle
@@ -584,12 +672,14 @@ impl RemoteDatabase {
         let conn = self.database.connect().map_err(remote_error)?;
         // Own the cleanup guard before BEGIN can reach the server. Cancellation
         // never returns this connection/stream to another request.
-        let tx = RemoteTx {
+        let mut tx = RemoteTx {
             connection: Some(conn),
+            pending: None,
             lease: Some(lease),
             owner: self.clone(),
             write_reserved: write,
             tenant: None,
+            transfer_pair: None,
             system_context: false,
             finish_started: false,
             #[cfg(test)]
@@ -600,22 +690,30 @@ impl RemoteDatabase {
         } else {
             "PRAGMA foreign_keys=ON; BEGIN;"
         };
-        tx.connection()
-            .execute_batch(control)
-            .await
-            .map_err(remote_error)?;
-        let mut fk = tx
-            .connection()
-            .query("PRAGMA foreign_keys", ())
-            .await
-            .map_err(remote_error)?;
-        let enabled = fk
-            .next()
-            .await
-            .map_err(remote_error)?
-            .ok_or(sqlx::Error::RowNotFound)?
-            .get::<i64>(0)
-            .map_err(remote_error)?;
+        let enabled = tx
+            .run(
+                RemoteOperationKind::Statement,
+                move |connection| async move {
+                    connection
+                        .execute_batch(control)
+                        .await
+                        .map_err(remote_error)?;
+                    let mut fk = connection
+                        .query("PRAGMA foreign_keys", ())
+                        .await
+                        .map_err(remote_error)?;
+                    let enabled = fk
+                        .next()
+                        .await
+                        .map_err(remote_error)?
+                        .ok_or(sqlx::Error::RowNotFound)?
+                        .get::<i64>(0)
+                        .map_err(remote_error)?;
+                    while fk.next().await.map_err(remote_error)?.is_some() {}
+                    Ok(enabled)
+                },
+            )
+            .await?;
         if enabled != 1 {
             return Err(sqlx::Error::Protocol(
                 "remote transaction foreign keys are disabled".into(),
@@ -709,12 +807,15 @@ impl RemoteDatabase {
     }
 }
 
-/// Connection is deliberately neither Clone nor exposed to concurrent callers.
+/// The transaction is never Clone or exposed to concurrent callers. Its SDK
+/// handle is shared only with its single owned operation and tracked cleanup.
 pub struct RemoteTx {
     write_reserved: bool,
     tenant: Option<uuid::Uuid>,
+    transfer_pair: Option<(uuid::Uuid, uuid::Uuid)>,
     system_context: bool,
     connection: Option<libsql::Connection>,
+    pending: Option<tokio::task::JoinHandle<RemoteOperationOutcome>>,
     lease: Option<RemoteLease>,
     owner: Arc<RemoteDatabase>,
     // The pinned SDK may Close/reset its baton before returning a finish
@@ -726,7 +827,68 @@ pub struct RemoteTx {
         tokio::sync::oneshot::Receiver<()>,
     )>,
 }
+enum RemoteOperationOutcome {
+    OperationSucceeded,
+    FinishSucceeded,
+    Failed,
+}
+enum RemoteOperationKind {
+    Statement,
+    Finish,
+}
 impl RemoteTx {
+    // The SDK rotates its baton only after reading a response. Dropping its
+    // request future after the server accepted that baton loses the successor.
+    // Keep one operation owned until its response/rows are consumed;
+    // cancellation transfers its join to tracked cleanup. Main's existing
+    // shutdown deadline still bounds Backend::close.
+    async fn run<R, F>(
+        &mut self,
+        kind: RemoteOperationKind,
+        operation: impl FnOnce(libsql::Connection) -> F + Send + 'static,
+    ) -> Result<R, sqlx::Error>
+    where
+        R: Send + 'static,
+        F: std::future::Future<Output = Result<R, sqlx::Error>> + Send + 'static,
+    {
+        self.join_pending().await?;
+        let connection = self.connection().clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.pending = Some(tokio::spawn(async move {
+            let result = operation(connection).await;
+            let outcome = match (result.is_ok(), kind) {
+                (true, RemoteOperationKind::Finish) => RemoteOperationOutcome::FinishSucceeded,
+                (true, RemoteOperationKind::Statement) => {
+                    RemoteOperationOutcome::OperationSucceeded
+                }
+                (false, _) => RemoteOperationOutcome::Failed,
+            };
+            let _ = send.send(result);
+            outcome
+        }));
+        let result = receive.await;
+        self.join_pending().await?;
+        result.map_err(|_| {
+            sqlx::Error::Protocol("owned remote operation ended without a result".into())
+        })?
+    }
+
+    async fn join_pending(&mut self) -> Result<(), sqlx::Error> {
+        let result = match self.pending.as_mut() {
+            Some(task) => task.await,
+            None => return Ok(()),
+        };
+        self.pending.take();
+        if let Err(error) = result {
+            self.finish_started = true;
+            self.owner.record_cleanup(Err(error));
+            return Err(sqlx::Error::Protocol(
+                "owned remote operation task failed".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn connection(&self) -> &libsql::Connection {
         self.connection
             .as_ref()
@@ -734,20 +896,31 @@ impl RemoteTx {
     }
     async fn finish(mut self, control: &'static str) -> Result<(), sqlx::Error> {
         self.finish_started = true;
-        self.connection()
-            .execute_batch(control)
-            .await
-            .map_err(remote_error)?;
+        self.run(RemoteOperationKind::Finish, move |connection| async move {
+            connection
+                .execute_batch(control)
+                .await
+                .map(|_| ())
+                .map_err(remote_error)
+        })
+        .await?;
         self.connection.take();
         self.lease.take();
         Ok(())
     }
     async fn commit_with_cleanup(mut self) -> Result<(), CommitCleanupUnknown> {
         self.finish_started = true;
-        if let Err(error) = self.connection().execute_batch("COMMIT").await {
-            let source = CommitUnknown {
-                source: remote_error(error),
-            };
+        if let Err(error) = self
+            .run(RemoteOperationKind::Finish, |connection| async move {
+                connection
+                    .execute_batch("COMMIT")
+                    .await
+                    .map(|_| ())
+                    .map_err(remote_error)
+            })
+            .await
+        {
+            let source = CommitUnknown { source: error };
             // The SDK hides the original Close receipt on an error. Quarantine
             // and retain explicit uncertainty; never submit a possible NEW
             // stream ROLLBACK or observe as though original finish was proved.
@@ -775,6 +948,7 @@ impl RemoteTx {
         let connection = self.connection.take()?;
         let lease = self.lease.take();
         let finish_started = self.finish_started;
+        let pending = self.pending.take();
         let owner = self.owner.clone();
         #[cfg(test)]
         let pause = self.cleanup_pause.take();
@@ -789,7 +963,22 @@ impl RemoteTx {
                     let _ = entered.send(());
                     let _ = go.await;
                 }
-                let result = if finish_started {
+                let operation = match pending {
+                    Some(task) => Some(task.await),
+                    None => None,
+                };
+                let result = if operation.as_ref().is_some_and(Result::is_err) {
+                    owner
+                        .lifecycle
+                        .lock()
+                        .expect("remote lifecycle mutex poisoned")
+                        .unconfirmed_finish = true;
+                    Err(Arc::new(sqlx::Error::Protocol(
+                        "owned remote operation task failed before cleanup".into(),
+                    )))
+                } else if finish_started
+                    && !matches!(operation, Some(Ok(RemoteOperationOutcome::FinishSucceeded)))
+                {
                     owner
                         .lifecycle
                         .lock()
@@ -798,6 +987,11 @@ impl RemoteTx {
                     // No post-finish SQL cleanup call was made. SDK Drop
                     // Close has no public outcome; missing proof is a distinct
                     // service state, never a fabricated attempt error.
+                    Ok(())
+                } else if finish_started {
+                    // The cancelled caller cannot receive an ACK, but this
+                    // exact owned task consumed an actual successful SDK
+                    // COMMIT/ROLLBACK result. No fresh SQL proves settlement.
                     Ok(())
                 } else {
                     connection
@@ -835,6 +1029,360 @@ impl Drop for RemoteTx {
 }
 
 #[cfg(all(test, feature = "db-tests"))]
+mod remote_cancel_sqld_tests {
+    use super::*;
+    use std::future::Future;
+
+    fn family(tx: &mut DbTx) -> &mut FamilyTx {
+        match tx {
+            DbTransaction::SqliteFamily(family) => family,
+            _ => panic!("remote family required"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn normal_and_off_admission_expire_without_releasing_unsettled_operation() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-admission-expiry-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let remote = Arc::new(RemoteDatabase::from_test_driver_with_acquire_timeout(
+            database,
+            std::num::NonZeroU32::MIN,
+            std::time::Duration::ZERO,
+        ));
+        let backend = Backend::LibsqlRemote(remote.clone());
+        let mut predecessor = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let mut query = Box::pin(family(&mut predecessor).query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(predecessor);
+        for off in [false, true] {
+            let result = remote.begin_admitted(false, off).await;
+            assert!(matches!(result, Err(sqlx::Error::PoolTimedOut)));
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            assert_eq!(remote.admission.available_permits(), 0);
+            assert!(!remote.lifecycle.lock().unwrap().unconfirmed_finish);
+        }
+        gate.release_response();
+        let closed = backend.close().await;
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(closed.is_ok());
+        assert_eq!(backend.connection_stats().unwrap().size, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn off_admission_waits_for_owned_cleanup_and_excludes_later_requests() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-off-admission-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::new(2).unwrap(),
+        )));
+        let mut predecessor = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let mut query = Box::pin(family(&mut predecessor).query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(predecessor);
+        let mut off = Box::pin(backend.begin_off_body());
+        let waited = matches!(
+            std::future::poll_fn(|cx| { std::task::Poll::Ready(off.as_mut().poll(cx)) }).await,
+            std::task::Poll::Pending
+        );
+        gate.release_response();
+        let excluded = if waited {
+            let off = off.await.unwrap();
+            let mut later = Box::pin(backend.begin_read());
+            let excluded = matches!(
+                std::future::poll_fn(|cx| { std::task::Poll::Ready(later.as_mut().poll(cx)) })
+                    .await,
+                std::task::Poll::Pending
+            );
+            off.rollback().await.unwrap();
+            later.await.unwrap().rollback().await.unwrap();
+            excluded
+        } else {
+            false
+        };
+        let closed = backend.close().await;
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(closed.is_ok());
+        assert!(waited, "OFF must wait for actual predecessor cleanup instead of immediately refusing a healthy concurrent request");
+        assert!(
+            excluded,
+            "OFF must retain exclusive admission through its original finish"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn cancelled_successful_finish_retains_same_owned_sdk_result() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        for control in ["COMMIT", "ROLLBACK"] {
+            let root =
+                std::env::temp_dir().join(format!("fvoci-finish-cancel-{}", uuid::Uuid::now_v7()));
+            let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+            let database = driver.database().await.unwrap();
+            let remote = Arc::new(RemoteDatabase::from_test_driver(
+                database,
+                std::num::NonZeroU32::MIN,
+            ));
+            let backend = Backend::LibsqlRemote(remote.clone());
+            let mut tx = backend.begin_write().await.unwrap();
+            family(&mut tx)
+                .execute("CREATE TABLE finish_probe(value INTEGER)", &[])
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let mut tx = backend.begin_write().await.unwrap();
+            family(&mut tx)
+                .execute("INSERT INTO finish_probe VALUES (941)", &[])
+                .await
+                .unwrap();
+            let gate = driver.arm_query_response(control);
+            let mut finish = Box::pin(async move {
+                if control == "COMMIT" {
+                    tx.commit().await.map_err(|error| error.source)
+                } else {
+                    tx.rollback().await
+                }
+            });
+            tokio::select! {
+                response = gate.wait_upstream_response() => response.unwrap(),
+                _ = &mut finish => panic!("genuine sqld finish reply must remain gated"),
+            }
+            drop(finish);
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            gate.release_response();
+            // The original lease is released only after its owned operation
+            // and cleanup finish. No timer or alternate connection proves it.
+            let settled = remote.admission.clone().acquire_owned().await.unwrap();
+            drop(settled);
+            let observed = match backend.begin_off_body().await {
+                Ok(mut fresh) => {
+                    let rows = family(&mut fresh)
+                        .query("SELECT count(*) FROM finish_probe", &[])
+                        .await
+                        .unwrap();
+                    let count = rows[0].cell(0).unwrap().integer().unwrap();
+                    fresh.rollback().await.unwrap();
+                    Some(count)
+                }
+                Err(_) => None,
+            };
+            let closed = backend.close().await;
+            let receipt = driver.finish().await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(
+                receipt.sqld_reaped
+                    && receipt.proxy_joined
+                    && receipt.upstream_closed
+                    && receipt.proxy_closed
+            );
+            assert_eq!(
+                observed,
+                Some(i64::from(control == "COMMIT")),
+                "cancelled caller discarded an actually successful owned SDK finish"
+            );
+            assert!(
+                closed.is_ok(),
+                "actual successful finish must settle normally"
+            );
+            assert!(receipt
+                .exchanges
+                .iter()
+                .all(|exchange| exchange.upstream_status == Some(200)));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn panicked_operation_is_failed_settlement_without_new_rollback() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-operation-panic-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut tx = backend.begin_read().await.unwrap();
+        let DbTransaction::SqliteFamily(FamilyTx::Remote(ref mut remote_tx)) = tx else {
+            panic!("remote required")
+        };
+        remote_tx.pending = Some(tokio::spawn(async {
+            panic!("controlled owned-operation panic")
+        }));
+        drop(tx);
+        let closed = backend.close().await;
+        let stats = backend.connection_stats().unwrap();
+        let Backend::LibsqlRemote(ref remote) = backend else {
+            panic!("remote required")
+        };
+        assert!(remote.lifecycle.lock().unwrap().unconfirmed_finish);
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            closed.is_err(),
+            "a panicked owner must never attest settlement"
+        );
+        assert_eq!(stats.size, 0);
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert!(!receipt
+            .exchanges
+            .iter()
+            .any(|exchange| exchange.request["requests"]
+                .as_array()
+                .is_some_and(
+                    |requests| requests.iter().any(|request| request["batch"]["steps"]
+                        .as_array()
+                        .is_some_and(|steps| steps.iter().any(|step| step["stmt"]["sql"]
+                            .as_str()
+                            .is_some_and(
+                                |sql| sql.trim().trim_end_matches(';').trim() == "ROLLBACK"
+                            ))))
+                )));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn cancelled_query_keeps_rotated_baton_until_owned_rollback() {
+        cancel_query(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn expired_close_keeps_unknown_operation_admission_until_settled() {
+        cancel_query(true).await;
+    }
+
+    async fn cancel_query(expired: bool) {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root =
+            std::env::temp_dir().join(format!("fvoci-query-cancel-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let database = driver.database().await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            database,
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut tx = backend.begin_read().await.unwrap();
+        let gate = driver.arm_query_response("SELECT 941");
+        let DbTransaction::SqliteFamily(ref mut family) = tx else {
+            panic!("remote family required")
+        };
+        let mut query = Box::pin(family.query("SELECT 941", &[]));
+        tokio::select! {
+            response = gate.wait_upstream_response() => response.unwrap(),
+            _ = &mut query => panic!("genuine sqld reply must remain gated"),
+        }
+        drop(query);
+        drop(tx);
+        if expired {
+            // Simulate an already expired caller-owned shutdown deadline;
+            // cancelling close must not abort its service-owned cleanup join.
+            assert!(
+                tokio::time::timeout_at(tokio::time::Instant::now(), backend.close())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(backend.connection_stats().unwrap().size, 1);
+            let Backend::LibsqlRemote(ref remote) = backend else {
+                panic!("remote required")
+            };
+            assert_eq!(remote.admission.available_permits(), 0);
+            assert!(remote.lifecycle.lock().unwrap().closing);
+            println!(
+                "TURSO_CANCELLED_QUERY close_deadline=EXPIRED settlement=UNKNOWN admission=HELD"
+            );
+        }
+        gate.release_response();
+        let closed = backend.close().await;
+        let stats = backend.connection_stats().unwrap();
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            receipt.sqld_reaped
+                && receipt.proxy_joined
+                && receipt.upstream_closed
+                && receipt.proxy_closed
+        );
+        assert_eq!(stats.size, 0, "owned cleanup must release stream admission");
+        assert!(
+            closed.is_ok(),
+            "cancelled query lost its rotated baton before rollback"
+        );
+        assert!(receipt
+            .exchanges
+            .iter()
+            .all(|exchange| exchange.upstream_status == Some(200)));
+        assert!(receipt
+            .exchanges
+            .iter()
+            .any(|exchange| exchange.request["requests"]
+                .as_array()
+                .is_some_and(
+                    |requests| requests.iter().any(|request| request["batch"]["steps"]
+                        .as_array()
+                        .is_some_and(|steps| steps.iter().any(|step| step["stmt"]["sql"]
+                            .as_str()
+                            .is_some_and(
+                                |sql| sql.trim().trim_end_matches(';').trim() == "ROLLBACK"
+                            ))))
+                )));
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
 pub(crate) mod maintenance_claim_driver_tests {
     // Transport fixture, NOT Turso: pinned SDK emits real pipeline requests;
     // maintained full SQLite initializer/engine executes the actual SQL. Only
@@ -850,6 +1398,101 @@ pub(crate) mod maintenance_claim_driver_tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, Ordering};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn transfer_pair_keeps_third_tenants_and_reader_writes_closed() {
+        let f = Fixture::new().await;
+        let pool = f.model.lock().await.pool.clone();
+        let (source, destination, third) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        for backend in [Backend::Sqlite(pool.clone()), f.backend.clone()] {
+            let mut ordinary = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut ordinary else {
+                unreachable!()
+            };
+            family.set_tenant(source).unwrap();
+            assert!(matches!(
+                family.set_tenant(destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(source));
+            ordinary.rollback().await.unwrap();
+
+            let mut scoped = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut scoped else {
+                unreachable!()
+            };
+            assert!(matches!(
+                family.switch_transfer_tenant(destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            family.scope_transfer_pair(source, destination).unwrap();
+            assert_eq!(family.tenant(), Some(source));
+            family.switch_transfer_tenant(destination).unwrap();
+            family.require_tenant(destination).unwrap();
+            assert!(family.require_tenant(source).is_err());
+            assert!(matches!(
+                family.switch_transfer_tenant(third),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.scope_transfer_pair(source, third),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.scope_transfer_pair(source, destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert!(matches!(
+                family.set_tenant(source),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(destination));
+            family.switch_transfer_tenant(source).unwrap();
+            family.require_tenant(source).unwrap();
+            scoped.rollback().await.unwrap();
+
+            let mut other = backend.begin_write().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut other else {
+                unreachable!()
+            };
+            family.set_tenant(third).unwrap();
+            assert!(matches!(
+                family.scope_transfer_pair(source, destination),
+                Err(sqlx::Error::Protocol(_))
+            ));
+            assert_eq!(family.tenant(), Some(third));
+            other.rollback().await.unwrap();
+
+            let mut reader = backend.begin_read().await.unwrap();
+            let DbTransaction::SqliteFamily(family) = &mut reader else {
+                unreachable!()
+            };
+            family.scope_transfer_pair(source, destination).unwrap();
+            family.switch_transfer_tenant(destination).unwrap();
+            let denied = reader
+                .operation()
+                .append_event(crate::db::identity::EventAppend {
+                    id: Uuid::now_v7(),
+                    workspace_id: Some(destination),
+                    actor_user_id: None,
+                    verb: "scope.probe".into(),
+                    target_type: None,
+                    target_id: None,
+                    payload: json!({}),
+                })
+                .await;
+            assert!(matches!(denied, Err(sqlx::Error::Protocol(_))));
+            reader.rollback().await.unwrap();
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        f.shutdown(false, false).await;
+    }
 
     struct Stream {
         conn: sqlx::SqliteConnection,
@@ -1224,7 +1867,7 @@ pub(crate) mod maintenance_claim_driver_tests {
         let first = requests.len().saturating_sub(128);
         let records = requests.iter().enumerate().skip(first).map(|(index, body)| {
             let baton = body["baton"].as_str().map(|baton| {
-                format!("{:x}", Sha256::digest(baton.as_bytes()))
+                hex::encode(Sha256::digest(baton.as_bytes()))
             });
             let wire_requests = body["requests"].as_array().map_or_else(
                 || vec![body],
@@ -1377,6 +2020,7 @@ pub(crate) mod maintenance_claim_driver_tests {
                 database,
                 max_connections: 1,
                 admission: Arc::new(Semaphore::new(1)),
+                acquire_timeout: sqlx::pool::PoolOptions::<Sqlite>::new().get_acquire_timeout(),
                 cleanup: Mutex::new(JoinSet::new()),
                 lifecycle: Mutex::new(RemoteLifecycle {
                     closing: false,
@@ -1536,8 +2180,10 @@ pub(crate) mod maintenance_claim_driver_tests {
             let tx = RemoteTx {
                 write_reserved: true,
                 tenant: None,
+                transfer_pair: None,
                 system_context: false,
                 connection: Some(owner.database.connect().unwrap()),
+                pending: None,
                 lease: Some(RemoteLease {
                     _permit: permit,
                     owner: owner.clone(),
@@ -1939,5 +2585,389 @@ pub(crate) mod maintenance_claim_driver_tests {
         );
         drop(model);
         f.close().await;
+    }
+}
+
+#[cfg(test)]
+mod remote_tls {
+    //! Handshakes of the vendored libsql rustls connector
+    //! (`vendor/libsql-0.9.30/src/tls.rs`) through `RemoteDatabase::connect`.
+    //! Fixture certificates: `tests/fixtures/remote-tls/`.
+    use super::RemoteDatabase;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+
+    const TOKEN: &str = "fvoci-remote-tls-fixture-token";
+    const CHILD: &str = "FVOCI_REMOTE_TLS_CHILD";
+    const ANSWER: &str = "remote TLS fixture answer";
+
+    #[tokio::test]
+    async fn remote_builder_uses_platform_roots_without_dialing() {
+        // build() loads the platform trust store and constructs the rustls
+        // client. It does not open a socket.
+        libsql::Builder::new_remote("https://example.invalid".into(), "token".into())
+            .build()
+            .await
+            .expect("platform roots should build a remote client");
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/remote-tls")
+            .join(name)
+    }
+
+    fn trust_environment() -> [Option<std::ffi::OsString>; 3] {
+        ["SSL_CERT_FILE", "SSL_CERT_DIR", CHILD].map(std::env::var_os)
+    }
+
+    /// Runs `case` only in a fresh copy of this test binary whose sole trust
+    /// store is `roots`. Every remote build reads the process-wide
+    /// `SSL_CERT_FILE`, so it is set for that child alone.
+    fn trusting(test: &str, roots: &Path, case: impl std::future::Future<Output = ()>) {
+        if let Some(selected) = std::env::var_os(CHILD) {
+            assert_eq!(selected, test);
+            return tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(case);
+        }
+        let selector = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let parent = trust_environment();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &selector, "--test-threads=1"])
+            .env(CHILD, test)
+            .env("SSL_CERT_FILE", roots)
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .unwrap();
+        assert_eq!(
+            trust_environment(),
+            parent,
+            "parent trust environment changed"
+        );
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success()
+                && stdout.contains(&format!("test {selector} ... ok"))
+                && stdout.contains("test result: ok. 1 passed"),
+            "{selector} child {}:\n{stdout}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// The product build, then the first Hrana round trip. Building never
+    /// dials, so every handshake outcome surfaces here.
+    async fn first_query(url: String) -> libsql::Error {
+        let remote = match RemoteDatabase::connect(url, TOKEN.into(), 1).await {
+            Ok(remote) => remote,
+            Err(error) => panic!("remote build failed: {error}"),
+        };
+        let connection = remote.database.connect().expect("remote connect is lazy");
+        match connection.query("select 1", ()).await {
+            Ok(_) => panic!("no fixture server answers a query"),
+            Err(error) => error,
+        }
+    }
+
+    /// The `RemoteDatabase::connect` error of a trust store without roots.
+    async fn build_refusal() -> std::io::Error {
+        let error =
+            match RemoteDatabase::connect("https://127.0.0.1:1".into(), TOKEN.into(), 1).await {
+                Ok(_) => panic!("built a remote client without a trusted root"),
+                Err(sqlx::Error::AnyDriverError(error)) => error,
+                Err(error) => panic!("unexpected build error: {error}"),
+            };
+        match error.downcast::<libsql::Error>().map(|error| *error) {
+            Ok(libsql::Error::InvalidTlsConfiguration(error)) => error,
+            other => panic!("unexpected build error: {other:?}"),
+        }
+    }
+
+    /// Accepts one connection on `ip` with the `leaf` chain. Returns the
+    /// request it decrypted and answered, or why the handshake ended.
+    fn tls_server(ip: IpAddr, leaf: &str) -> (SocketAddr, JoinHandle<Result<String, String>>) {
+        let chain = CertificateDer::pem_file_iter(fixture(leaf))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_file(fixture("server.key")).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .unwrap();
+        let listener = TcpListener::bind((ip, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut tls = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            while tls.is_handshaking() {
+                tls.complete_io(&mut tcp)
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut stream = rustls::StreamOwned::new(tls, tcp);
+            let request = read_request(&mut stream);
+            let answer = format!(
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ANSWER}",
+                ANSWER.len()
+            );
+            stream.write_all(answer.as_bytes()).unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+            Ok(request)
+        });
+        (address, server)
+    }
+
+    fn read_request(stream: &mut impl Read) -> String {
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let mut request = String::from_utf8(head).unwrap();
+        let length = request
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|length| length.trim().parse::<usize>().unwrap())
+            })
+            .expect("request content-length");
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        request.push_str(std::str::from_utf8(&body).unwrap());
+        request
+    }
+
+    /// Accepts one connection on a plaintext listener. Returns every byte the
+    /// client sent before it dropped the connection.
+    fn plaintext_server() -> (SocketAddr, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut seen = vec![0; 64 * 1024];
+            let read = tcp.read(&mut seen).unwrap_or(0);
+            seen.truncate(read);
+            // What a plaintext HTTP server answers to bytes it cannot parse.
+            let _ = tcp.write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            let _ = tcp.read_to_end(&mut seen);
+            seen
+        });
+        (address, server)
+    }
+
+    /// Joins a fixture server after the client is done. One throwaway
+    /// connection releases a server that the client never reached; the
+    /// client's own connection is ahead of it in the accept queue.
+    async fn finish<T: Send + 'static>(address: SocketAddr, server: JoinHandle<T>) -> T {
+        drop(std::net::TcpStream::connect(address));
+        tokio::task::spawn_blocking(move || server.join().unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// Returns the client error and the server's handshake failure.
+    async fn handshake_refusal(ip: IpAddr, leaf: &str) -> (String, String) {
+        let (address, server) = tls_server(ip, leaf);
+        let error = first_query(format!("https://{address}")).await;
+        let seen = finish(address, server).await;
+        assert!(matches!(error, libsql::Error::Hrana(_)), "{error:?}");
+        let refusal = seen.expect_err("the server decrypted a request");
+        (error.to_string(), refusal)
+    }
+
+    async fn plaintext_refusal(scheme: &str) {
+        let (address, server) = plaintext_server();
+        let error = first_query(format!("{scheme}://{address}")).await;
+        let seen = finish(address, server).await;
+        assert!(matches!(error, libsql::Error::Hrana(_)), "{error:?}");
+        let error = error.to_string();
+        assert!(
+            error.contains(
+                "error trying to connect: received corrupt message of type InvalidContentType"
+            ),
+            "{error}"
+        );
+        // A TLS handshake record, never the plaintext request or its token.
+        assert_eq!(seen.first(), Some(&0x16), "{seen:?}");
+        let seen = String::from_utf8_lossy(&seen).to_ascii_lowercase();
+        for leaked in ["authorization", TOKEN, "select 1"] {
+            assert!(!seen.contains(leaked), "plaintext server saw {leaked}");
+        }
+    }
+
+    #[test]
+    fn trusted_test_ca_completes_the_handshake() {
+        trusting(
+            "trusted_test_ca_completes_the_handshake",
+            &fixture("ca.pem"),
+            async {
+                let (address, server) = tls_server(Ipv4Addr::LOCALHOST.into(), "server.pem");
+                let error = first_query(format!("https://{address}")).await;
+                let request = finish(address, server)
+                    .await
+                    .expect("handshake with the trusted test CA");
+                assert!(request.starts_with("POST /"), "{request}");
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains(&format!("\r\nauthorization: bearer {TOKEN}\r\n")),
+                    "{request}"
+                );
+                assert!(request.contains("select 1"), "{request}");
+                // The fixture's answer came back through the same TLS stream.
+                assert!(
+                    error.to_string().contains(&format!(
+                        "api error: `status=503 Service Unavailable, body={ANSWER}`"
+                    )),
+                    "{error:?}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn untrusted_ca_is_refused() {
+        trusting("untrusted_ca_is_refused", &fixture("other-ca.pem"), async {
+            let (error, refusal) =
+                handshake_refusal(Ipv4Addr::LOCALHOST.into(), "server.pem").await;
+            assert!(
+                error.contains("error trying to connect: invalid peer certificate: UnknownIssuer"),
+                "{error}"
+            );
+            assert_eq!(refusal, "received fatal alert: UnknownCA");
+        });
+    }
+
+    #[test]
+    fn ipv4_name_mismatch_is_refused() {
+        trusting("ipv4_name_mismatch_is_refused", &fixture("ca.pem"), async {
+            let (error, refusal) =
+                handshake_refusal(Ipv4Addr::LOCALHOST.into(), "wrong-name.pem").await;
+            assert!(
+                error.contains(
+                    "invalid peer certificate: certificate not valid for name \"127.0.0.1\""
+                ),
+                "{error}"
+            );
+            assert_eq!(refusal, "received fatal alert: BadCertificate");
+        });
+    }
+
+    #[test]
+    fn bracketed_ipv6_name_mismatch_is_refused() {
+        trusting(
+            "bracketed_ipv6_name_mismatch_is_refused",
+            &fixture("ca.pem"),
+            async {
+                let (error, refusal) =
+                    handshake_refusal(Ipv6Addr::LOCALHOST.into(), "wrong-name.pem").await;
+                // The connector strips the URL brackets: an IP name, not
+                // "invalid dnsname".
+                assert!(
+                    error.contains(
+                        "invalid peer certificate: certificate not valid for name \"::1\""
+                    ),
+                    "{error}"
+                );
+                assert_eq!(refusal, "received fatal alert: BadCertificate");
+            },
+        );
+    }
+
+    #[test]
+    fn https_to_a_plaintext_server_is_refused() {
+        trusting(
+            "https_to_a_plaintext_server_is_refused",
+            &fixture("ca.pem"),
+            plaintext_refusal("https"),
+        );
+    }
+
+    #[test]
+    fn libsql_to_a_plaintext_server_is_refused() {
+        trusting(
+            "libsql_to_a_plaintext_server_is_refused",
+            &fixture("ca.pem"),
+            plaintext_refusal("libsql"),
+        );
+    }
+
+    #[test]
+    fn empty_trust_store_refuses_to_build() {
+        trusting(
+            "empty_trust_store_refuses_to_build",
+            Path::new("/dev/null"),
+            async {
+                let error = build_refusal().await;
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(
+                    error.to_string(),
+                    "no valid native root CA certificates found (0 invalid)"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn unreadable_trust_store_refuses_to_build() {
+        let missing = fixture("missing.pem");
+        assert!(!missing.exists());
+        trusting("unreadable_trust_store_refuses_to_build", &missing, async {
+            // The upstream connector panicked here instead.
+            let error = build_refusal().await;
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("could not load certs from file "),
+                "{error}"
+            );
+        });
+    }
+
+    #[test]
+    fn fixture_leaves_verify_now_and_in_2100() {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_file(fixture("ca.pem")).unwrap())
+            .unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        // 2100-01-01T00:00:00Z; the fixtures are valid until 2126-01-01.
+        let horizon = UnixTime::since_unix_epoch(std::time::Duration::from_secs(4_102_444_800));
+        for (leaf, name) in [
+            ("server.pem", "127.0.0.1"),
+            ("wrong-name.pem", "wrong-name.invalid"),
+        ] {
+            let certificate = CertificateDer::from_pem_file(fixture(leaf)).unwrap();
+            let name = ServerName::try_from(name).unwrap();
+            for at in [UnixTime::now(), horizon] {
+                if let Err(error) = verifier.verify_server_cert(&certificate, &[], &name, &[], at) {
+                    panic!("{leaf} at {at:?}: {error}; regenerate per tests/fixtures/remote-tls/README.md");
+                }
+            }
+        }
     }
 }

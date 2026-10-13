@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use sqlx::{PgPool, Postgres, Transaction};

@@ -786,6 +786,8 @@ export const knownOnBrowserTest =
   "selected normal main: Vue setup, stable wiki create, native persist, manual revision and fresh actor readback";
 export const knownRestartBrowserTest =
   "selected normal main restart: fresh actor reads persisted native history and manual revision";
+const knownRestoreBrowserTest =
+  "SQLite ON revision restore: matching ACK, immutable history and fresh client readback";
 const knownBrowserSuffixes = [
   "e2e-pending/workspace-wiki-selected-backend.spec.ts",
   "e2e-pending/workspace-wiki-selected-auxiliary.ts",
@@ -822,9 +824,21 @@ function locationOf(result: Json): Json | null {
 // Reads the reporter's errorLocation fields only. Stacks and messages are never
 // parsed; a missing location stays null. `report` comes from io.read so its
 // integers keep their source tokens.
-export function knownBrowserCheckpoint(report: unknown, restart = false): BrowserCheckpoint {
+export function knownBrowserCheckpoint(
+  report: unknown,
+  restart: boolean | "sqlite-restore" = false,
+): BrowserCheckpoint {
   const integral = jsonInteger;
-  const title = restart ? knownRestartBrowserTest : knownOnBrowserTest;
+  const title =
+    restart === "sqlite-restore"
+      ? knownRestoreBrowserTest
+      : restart
+        ? knownRestartBrowserTest
+        : knownOnBrowserTest;
+  const suffixes =
+    restart === "sqlite-restore"
+      ? (["e2e-pending/v060-sqlite-revision-restore.spec.ts"] as const)
+      : knownBrowserSuffixes;
   const empty = (state: string): BrowserCheckpoint => ({
     known_browser_test: null,
     known_browser_status: null,
@@ -846,7 +860,7 @@ export function knownBrowserCheckpoint(report: unknown, restart = false): Browse
       if (Array.isArray(suite.suites)) stack.push(...(suite.suites as unknown[]));
     }
     const matched = found.filter(
-      (spec) => spec.title === title && knownSource(spec.file, knownBrowserSuffixes[0]),
+      (spec) => spec.title === title && knownSource(spec.file, suffixes[0]),
     );
     if (matched.length !== 1) return empty("spec-mismatch");
     const tests = matched[0]?.tests;
@@ -867,7 +881,7 @@ export function knownBrowserCheckpoint(report: unknown, restart = false): Browse
       (location.line as number) >= 1 &&
       (location.line as number) <= 10000
     ) {
-      const suffix = knownBrowserSuffixes.find((item) => knownSource(location.file, item));
+      const suffix = suffixes.find((item) => knownSource(location.file, item));
       if (suffix !== undefined) checkpoint = suffix + ":" + String(location.line);
     }
     return {

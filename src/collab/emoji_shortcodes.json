@@ -1,7 +1,7 @@
 {
   "source": {
     "package": "@tiptap/extension-emoji",
-    "version": "3.31.3",
+    "version": "3.31.4",
     "license": "MIT",
     "repository": "https://github.com/ueberdosis/tiptap",
     "entryCount": 2850

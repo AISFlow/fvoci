@@ -7,6 +7,113 @@
 //! adapter to a local receiver. The receiver is reached with an explicit test-only allow-list
 //! `Outbound`; the product always passes `Outbound::without_allow_list()`.
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
+#[tokio::test]
+async fn sqlite_push_registration_readback_duplicate_cap_and_current_authorization() {
+    use fvoci_server::{
+        db::backend::Backend,
+        push::db::{register_subscription_backend, PushSubscriptionRow},
+    };
+    let f = integrations_family::Fixture::new().await;
+    let subscription = PushSubscriptionRow {
+        endpoint: "https://push.example.com/one".into(),
+        p256dh: URL_SAFE_NO_PAD.encode([4u8; 65]),
+        auth: URL_SAFE_NO_PAD.encode([7u8; 16]),
+    };
+    let app = f.app(Arc::new(
+        fvoci_server::integrations::Integrations::disabled(),
+    ));
+    let body = json!({"endpoint":subscription.endpoint,"keys":{"p256dh":subscription.p256dh,"auth":subscription.auth}});
+    let (status, _) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/workspaces/{}/push-subscriptions", f.workspace),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_request(
+        app,
+        "PUT",
+        &format!("/api/v1/workspaces/{}/push-subscriptions", Uuid::now_v7()),
+        Some(body),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let fresh = f.fresh().await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(register_subscription_backend(
+        &Backend::Sqlite(fresh.clone()),
+        f.workspace,
+        f.user,
+        f.session,
+        &subscription
+    )
+    .await
+    .unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    for i in 0..22 {
+        let mut next = subscription.clone();
+        next.endpoint = format!("https://push.example.com/device-{i}");
+        assert!(register_subscription_backend(
+            &f.auth.db.pool,
+            f.workspace,
+            f.user,
+            f.session,
+            &next
+        )
+        .await
+        .unwrap());
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 20);
+    assert!(!register_subscription_backend(
+        &f.auth.db.pool,
+        Uuid::now_v7(),
+        f.user,
+        f.session,
+        &subscription
+    )
+    .await
+    .unwrap());
+    sqlx::query("UPDATE sessions SET revoked_at=unixepoch()*1000000 WHERE id=?1")
+        .bind(f.session.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(!register_subscription_backend(
+        &f.auth.db.pool,
+        f.workspace,
+        f.user,
+        f.session,
+        &subscription
+    )
+    .await
+    .unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM push_subscriptions")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 20);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 #[path = "support/project_harness.rs"]
 mod project_harness;
 

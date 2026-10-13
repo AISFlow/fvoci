@@ -12,11 +12,20 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import process from "node:process";
-import { checkpointPrefix, preparationSteps, publicCheckpoint, root, sha } from "../io.ts";
+import {
+  checkpointPrefix,
+  preparationSteps,
+  publicCheckpoint,
+  root,
+  sha,
+  parseJson,
+} from "../io.ts";
 import { laneRetirement } from "../runtime.ts";
+import { discoverGroups } from "../../web-e2e/groups.ts";
 import type { Current } from "./binding.ts";
+import { restoreSpec, restoreBrowserTitle, validateRestoreReport } from "./binding.ts";
 import { runtimeError } from "./common.ts";
 import type { Child, CommandOptions, Completed, Row } from "./common.ts";
 import {
@@ -48,6 +57,30 @@ function directory(): string {
   return path;
 }
 const ok = (stdout = ""): Completed => ({ returncode: 0, stdout, stderr: "" });
+function restoreReport() {
+  return {
+    config: { workers: 1 },
+    errors: [],
+    stats: { expected: 1, unexpected: 0, flaky: 0, skipped: 0 },
+    suites: [
+      {
+        specs: [
+          {
+            file: restoreSpec,
+            title: restoreBrowserTitle,
+            ok: true,
+            tests: [
+              {
+                expectedStatus: "passed",
+                results: [{ status: "passed", retry: 0, errors: [] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
 const rejection = (outcome: Promise<unknown>) =>
   outcome.then(
     (value: unknown) => ({ resolved: value }),
@@ -162,6 +195,14 @@ function world(
       const [tool, verb] = args;
       if (tool === bun && verb === "--eval") return Promise.resolve(ok(chromium + "\n"));
       if (tool === bun) {
+        if (args.includes(restoreSpec)) {
+          logged(commandOptions, "  1 passed\n");
+          writeFileSync(
+            commandOptions?.env?.PLAYWRIGHT_JSON_OUTPUT_FILE as string,
+            JSON.stringify(restoreReport()),
+          );
+          return Promise.resolve(ok());
+        }
         const exit = options.browserExit ?? 0;
         logged(commandOptions, exit ? "  1 failed\n" : "  1 passed (3.0s)\n");
         writeFileSync(
@@ -240,6 +281,99 @@ const lastLine = (fixture: World) =>
   JSON.parse(fixture.emitted.at(-1) as string) as Record<string, unknown>;
 
 describe("selected sqlite driver body", () => {
+  test("restore config uses the allocated output directory and one exact spec", async () => {
+    const run = directory();
+    const childEnv: Record<string, string | undefined> = {
+      ...process.env,
+      CI: "true",
+      FVOCI_E2E_SELECTED_BACKEND: "sqlite",
+      FVOCI_E2E_SELECTED_FLOW: "on",
+      FVOCI_E2E_RESULT_DIR: run,
+    };
+    delete childEnv.JEST_WORKER_ID;
+    delete childEnv.FVOCI_E2E_PENDING;
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--eval",
+        'import config from "./apps/web/e2e-pending/revision-restore-playwright.config.ts"; ' +
+          "console.log(JSON.stringify({testDir:config.testDir,testMatch:config.testMatch," +
+          "outputDir:config.outputDir,trace:config.use?.trace,workers:config.workers,retries:config.retries}));",
+      ],
+      { cwd: root, env: childEnv, stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exit).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      testDir: ".",
+      testMatch: "**/v060-sqlite-revision-restore.spec.ts",
+      outputDir: join(run, "playwright-output"),
+      trace: "retain-on-failure",
+      workers: 1,
+      retries: 0,
+    });
+  });
+  test("selected restore is absent from normal workspace browser discovery", () => {
+    expect(
+      discoverGroups()
+        .flat()
+        .some((spec) => basename(spec) === basename(restoreSpec)),
+    ).toBe(false);
+  });
+  test("restore report requires the one exact case with no skips or retries", () => {
+    expect(() => {
+      validateRestoreReport(parseJson(JSON.stringify(restoreReport())));
+    }).not.toThrow();
+    const oneCase = (r: ReturnType<typeof restoreReport>) => {
+      const item = r.suites[0]?.specs[0];
+      if (!item) throw new Error("Missing fixture case");
+      return item;
+    };
+    const oneResult = (r: ReturnType<typeof restoreReport>) => {
+      const result = oneCase(r).tests[0]?.results[0];
+      if (!result) throw new Error("Missing fixture result");
+      return result;
+    };
+    const changes = [
+      (r: ReturnType<typeof restoreReport>) => {
+        r.stats.expected = 0;
+        r.suites = [];
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        r.stats.skipped = 1;
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        r.stats.flaky = 1;
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        oneCase(r).title = "unexpected test";
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        oneResult(r).retry = 1;
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        oneResult(r).status = "skipped";
+      },
+      (r: ReturnType<typeof restoreReport>) => {
+        const suite = r.suites[0];
+        if (!suite) throw new Error("Missing fixture suite");
+        suite.specs.push(structuredClone(oneCase(r)));
+      },
+    ];
+    for (const change of changes) {
+      const report = restoreReport();
+      change(report);
+      expect(() => {
+        validateRestoreReport(parseJson(JSON.stringify(report)));
+      }).toThrow();
+    }
+  });
   for (const flow of ["on", "off"] as const)
     test(`an ${flow} pass is a qualified runtime retirement`, async () => {
       const fixture = world(flow);
@@ -249,6 +383,14 @@ describe("selected sqlite driver body", () => {
       expect(receipt.cleanup_errors).toEqual([]);
       expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
       expect(receipt.actual_browser_tests).toBe(flow === "off" ? 8 : 1);
+      const restoreCalls = fixture.calls.filter((args) => args.includes(restoreSpec));
+      expect(restoreCalls.length).toBe(flow === "on" ? 1 : 0);
+      if (flow === "on") {
+        const args = restoreCalls[0] as string[];
+        expect(args[args.indexOf("--config") + 1]).toBe(
+          "e2e-pending/revision-restore-playwright.config.ts",
+        );
+      }
       expect(receipt.actual_migration_rows).toEqual(realMigrations());
       expect(laneRetirement(fixture.run, "sqlite", flow, SOURCE, TREE, OWNER, 0).qualified).toBe(
         true,
@@ -282,6 +424,81 @@ describe("selected sqlite driver body", () => {
       true,
     );
     expect(fixture.calls.some((args) => args[1] === "rm")).toBe(true);
+  });
+
+  test("restore output EACCES is public-safe even before JSON reporting starts", async () => {
+    const fixture = world("on", {
+      command: (args) =>
+        args.includes(restoreSpec)
+          ? {
+              returncode: 1,
+              stdout: `EACCES: permission denied, mkdir '/${PRIVATE}/test-results'\n`,
+              stderr: "",
+            }
+          : undefined,
+    });
+    expect(await runMain(fixture)).toBe(1);
+    const receipt = receiptOf(fixture.run);
+    expect(receipt).toMatchObject({
+      browser_exit: 0,
+      observed_failed_exit: 1,
+      restore_browser_exit: 1,
+      restore_failure_code: "PLAYWRIGHT_OUTPUT_EACCES",
+      browser_report_state: "report-missing",
+      known_browser_checkpoint: null,
+      cleanup_errors: [],
+      owned_container_absent: true,
+    });
+    expect(receipt.current_schema_server_restart).toBeUndefined();
+    const log = join(fixture.run, "restore-browser.log");
+    expect(receipt.original_body_log_sha256).toBe(sha(log));
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    expect(lastLine(fixture)).toMatchObject({
+      restore_failure_code: "PLAYWRIGHT_OUTPUT_EACCES",
+      restore_browser_exit: 1,
+      browser_report_state: "report-missing",
+    });
+    expect(fixture.emitted.join("")).not.toContain(PRIVATE);
+  });
+
+  test("a restore assertion keeps its exit, private report and public source location", async () => {
+    const fixture = world("on", {
+      command(args) {
+        if (!args.includes(restoreSpec)) return undefined;
+        const report = restoreReport();
+        const spec = report.suites[0]?.specs[0];
+        if (!spec) throw new Error("missing restore case");
+        spec.ok = false;
+        const result = spec.tests[0]?.results[0];
+        if (!result) throw new Error("missing restore result");
+        Object.assign(result, {
+          status: "failed",
+          errorLocation: { file: restoreSpec, line: 83 },
+          error: { message: PRIVATE, stack: PRIVATE },
+        });
+        writeFileSync(
+          join(fixture.run, "restore-playwright-result.private.json"),
+          JSON.stringify(report),
+        );
+        return { returncode: 7, stdout: PRIVATE, stderr: "" };
+      },
+    });
+    expect(await runMain(fixture)).toBe(7);
+    const report = join(fixture.run, "restore-playwright-result.private.json");
+    expect(statSync(report).mode & 0o777).toBe(0o600);
+    expect(receiptOf(fixture.run)).toMatchObject({
+      browser_exit: 0,
+      restore_browser_exit: 7,
+      sqlite_restore_report_sha256: sha(report),
+      browser_report_state: "matched",
+      known_browser_test: restoreBrowserTitle,
+      known_browser_status: "failed",
+      known_browser_checkpoint: restoreSpec + ":83",
+      observed_failed_exit: 7,
+      cleanup_errors: [],
+    });
+    expect(lastLine(fixture).known_browser_checkpoint).toBe(restoreSpec + ":83");
+    expect(fixture.emitted.join("")).not.toContain(PRIVATE);
   });
 
   test("a refused grant creates no run root and no container", async () => {

@@ -24,7 +24,7 @@ use crate::api::dto::{
 use crate::auth::password::verify_password;
 use crate::auth::token::{hash_token, token_hashes_eq};
 use crate::auth::totp;
-use crate::db::identity::password_hash_by_id;
+use crate::db::identity::password_hash_by_id_backend;
 use crate::db::mfa::{
     self, ChallengeCheck, DisableOutcome, EnableOutcome, MfaRow, SecondFactor, SetupOutcome,
 };
@@ -158,17 +158,9 @@ async fn confirm_password(
     user_id: Uuid,
     current: Option<&str>,
 ) -> Result<PasswordCheck, AppError> {
-    let Some(stored) = password_hash_by_id(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/mfa.rs")
-            .map_err(internal)?,
-        user_id,
-    )
-    .await
-    .map_err(internal)?
+    let Some(stored) = password_hash_by_id_backend(&state.auth.db.pool, user_id)
+        .await
+        .map_err(internal)?
     else {
         return Ok(PasswordCheck::None);
     };
@@ -193,17 +185,9 @@ async fn status(
     jar: CookieJar,
 ) -> Result<Json<MfaStatusOutput>, AppError> {
     let auth = session(&state, &headers, &jar).await?;
-    let row = mfa::find(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/mfa.rs")
-            .map_err(internal)?,
-        auth.user_id,
-    )
-    .await
-    .map_err(internal)?;
+    let row = mfa::find_backend(&state.auth.db.pool, auth.user_id)
+        .await
+        .map_err(internal)?;
     let enabled = row.as_ref().is_some_and(|r| r.enabled_at.is_some());
     Ok(Json(MfaStatusOutput {
         enabled,
@@ -216,20 +200,10 @@ async fn status(
 }
 
 async fn session_created_recently(state: &AppState, session_id: Uuid) -> Result<bool, AppError> {
-    let created: Option<(chrono::DateTime<Utc>,)> =
-        sqlx::query_as("SELECT created_at FROM fvoci.sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_optional(
-                state
-                    .auth
-                    .db
-                    .pool
-                    .postgres("src/http/routes/mfa.rs")
-                    .map_err(internal)?,
-            )
-            .await
-            .map_err(internal)?;
-    Ok(created.is_some_and(|(at,)| (Utc::now() - at).num_seconds() <= FRESH_AUTH_SECS))
+    let created = crate::db::identity::session_created_at_backend(&state.auth.db.pool, session_id)
+        .await
+        .map_err(internal)?;
+    Ok(created.is_some_and(|at| (Utc::now() - at).num_seconds() <= FRESH_AUTH_SECS))
 }
 
 async fn setup(
@@ -266,13 +240,8 @@ async fn setup(
     let hashes: Vec<String> = recovery.iter().map(|c| hash_token(c)).collect();
     let sealed = secret_box::seal(keyring, &hex::encode(raw), &user_mfa_context(auth.user_id))
         .map_err(|_| AppError::internal())?;
-    match mfa::setup(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/mfa.rs")
-            .map_err(internal)?,
+    match mfa::setup_backend(
+        &state.auth.db.pool,
         auth.user_id,
         auth.credential_id,
         &sealed,
@@ -314,13 +283,10 @@ async fn enable(
     .await?;
     let Json(body) = body.map_err(AppError::from)?;
     let code = mfa_code(&body.code)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/mfa.rs")
+    let pool = &state.auth.db.pool;
+    let row = mfa::find_backend(pool, auth.user_id)
+        .await
         .map_err(internal)?;
-    let row = mfa::find(pool, auth.user_id).await.map_err(internal)?;
     let Some(row) = row.filter(|r| r.enabled_at.is_none()) else {
         return Err(problem(ProblemCode::MfaNotSetup));
     };
@@ -339,7 +305,7 @@ async fn enable(
             || secret_box::open(keyring, sealed, &context)
                 .is_ok_and(|hex_secret| token_hashes_eq(&hex_secret, &expected_hex))
     };
-    match mfa::enable(
+    match mfa::enable_backend(
         pool,
         auth.user_id,
         auth.credential_id,
@@ -378,16 +344,14 @@ async fn disable(
     if current.is_none() && code.is_none() {
         return Err(AppError::with_source(ProblemCode::InvalidInput, "/"));
     }
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/mfa.rs")
+    let pool = &state.auth.db.pool;
+    let row = mfa::find_backend(pool, auth.user_id)
+        .await
         .map_err(internal)?;
-    let row = mfa::find(pool, auth.user_id).await.map_err(internal)?;
     let Some(row) = row.filter(|r| r.enabled_at.is_some()) else {
         return Err(problem(ProblemCode::MfaNotEnabled));
     };
+    let ip = peer_ip(peer.ip());
     let confirmed = match confirm_password(&state, auth.user_id, current.as_deref()).await? {
         PasswordCheck::Ok => true,
         PasswordCheck::Invalid => false,
@@ -395,9 +359,27 @@ async fn disable(
         PasswordCheck::None => match code.as_deref() {
             Some(code) => match check_code(&identity, &row, code)? {
                 Some((factor, hash)) => {
-                    mfa::claim_factor_standalone(pool, auth.user_id, factor, hash.as_deref())
-                        .await
-                        .map_err(internal)?
+                    return match mfa::disable_with_factor_backend(
+                        pool,
+                        auth.user_id,
+                        auth.credential_id,
+                        row.enabled_at.expect("enabled MFA row"),
+                        factor,
+                        hash.as_deref(),
+                        Some(&ip),
+                    )
+                    .await
+                    .map_err(internal)?
+                    {
+                        Some(DisableOutcome::Ok) => Ok(Json(OkResponse { ok: true })),
+                        Some(DisableOutcome::SessionGone) => {
+                            Err(problem(ProblemCode::AuthenticationRequired))
+                        }
+                        Some(DisableOutcome::NotEnabled) => {
+                            Err(problem(ProblemCode::MfaNotEnabled))
+                        }
+                        None => Err(problem(ProblemCode::MfaConfirmInvalid)),
+                    };
                 }
                 None => false,
             },
@@ -407,8 +389,7 @@ async fn disable(
     if !confirmed {
         return Err(problem(ProblemCode::MfaConfirmInvalid));
     }
-    let ip = peer_ip(peer.ip());
-    match mfa::disable(pool, auth.user_id, auth.credential_id, Some(&ip))
+    match mfa::disable_backend(pool, auth.user_id, auth.credential_id, Some(&ip))
         .await
         .map_err(internal)?
     {
@@ -436,14 +417,9 @@ async fn verify(
         ));
     }
     let code = mfa_code(&body.code)?;
-    let pool = state
-        .auth
-        .db
-        .pool
-        .postgres("src/http/routes/mfa.rs")
-        .map_err(internal)?;
+    let pool = &state.auth.db.pool;
     let token_hash = hash_token(&body.mfa_token);
-    let Some((user_id, generation)) = mfa::peek_challenge(pool, &token_hash)
+    let Some((user_id, generation)) = mfa::peek_challenge_backend(pool, &token_hash)
         .await
         .map_err(internal)?
     else {
@@ -453,20 +429,20 @@ async fn verify(
     // mint new challenge tokens at will. It is counted in the database so it
     // holds across restarts and replicas (source: shared Redis limiter).
     if let Some(retry_after) =
-        mfa::verify_attempt(pool, user_id, MFA_VERIFY_PER_USER, MFA_VERIFY_WINDOW_SECS)
+        mfa::verify_attempt_backend(pool, user_id, MFA_VERIFY_PER_USER, MFA_VERIFY_WINDOW_SECS)
             .await
             .map_err(internal)?
     {
         return Err(AppError::rate_limited(retry_after));
     }
-    let row = mfa::find(pool, user_id).await.map_err(internal)?;
+    let row = mfa::find_backend(pool, user_id).await.map_err(internal)?;
     let Some((row, enabled_at)) = row.and_then(|r| r.enabled_at.map(|at| (r, at))) else {
         return Err(problem(ProblemCode::MfaInvalid));
     };
     let Some((factor, recovery_hash)) = check_code(&identity, &row, &code)? else {
         return Err(problem(ProblemCode::MfaInvalid));
     };
-    let issued = mfa::complete_challenge(
+    let issued = mfa::complete_challenge_backend(
         pool,
         ChallengeCheck {
             token_hash: &token_hash,

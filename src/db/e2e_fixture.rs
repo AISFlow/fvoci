@@ -289,6 +289,78 @@ fn instance_config_witness(
     }))
 }
 
+// Narrow witnesses for the current producers whose events intentionally
+// omit a workspace or actor. The complete row remains bound by its fingerprint;
+// no payload or unrecognized verb is copied into the witness.
+fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let target = match cell("target_id")? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    let payload = cell("payload")?.value()?;
+    let class = match (
+        cell("verb")?,
+        cell("channel")?,
+        cell("target_type")?,
+        cell("workspace_id")?,
+        cell("actor_user_id")?,
+    ) {
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if verb == "auth.login"
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string(),"method":"password"}) =>
+        {
+            "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Blob(workspace),
+            Cell::Null,
+        ) if verb == "document.updated"
+            && channel == "system"
+            && kind == "document"
+            && workspace.len() == 16
+            && payload == json!({"documentId":target.to_string(),"collab":true}) =>
+        {
+            "document-projection"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Blob(workspace),
+            Cell::Null,
+        ) if verb == "task.updated"
+            && channel == "system"
+            && kind == "task"
+            && workspace.len() == 16
+            && payload == json!({"taskId":target.to_string(),"collab":true}) =>
+        {
+            "task-projection"
+        }
+        _ => return Ok(Value::Null),
+    };
+    Ok(
+        json!({"class":class,"sequence":exact(cell("seq")?.clone()),"target":hex::encode(target.as_bytes())}),
+    )
+}
+
 fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let FamilyRow::Remote(remote) = row else {
         return Err(refused());
@@ -298,9 +370,13 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let mut events = Vec::new();
     let mut own_id = None;
     let mut consumer = None;
+    let mut event_columns = Vec::new();
     for i in 0..remote.column_count() {
         let name = remote.column_name(i).ok_or_else(refused)?;
         let cell = row.cell(i as usize)?;
+        if table == "events" {
+            event_columns.push((name.to_string(), cell.clone()));
+        }
         let destination = match name {
             "workspace_id"
             | "personal_workspace_id"
@@ -317,7 +393,12 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
                 Cell::Blob(bytes) if bytes.len() == 16 => ids.push(hex::encode(bytes)),
                 _ => return Err(refused()),
             }
-        } else if name == "id" && matches!(table, "users" | "workspaces" | "events") {
+        } else if name == "id"
+            && matches!(
+                table,
+                "users" | "workspaces" | "events" | "documents" | "tasks"
+            )
+        {
             let bytes = cell.bytes()?;
             if bytes.len() != 16 {
                 return Err(refused());
@@ -327,9 +408,11 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
             consumer = Some(cell.string()?);
         }
     }
-    Ok(
-        json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer}),
-    )
+    let mut allocation = json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer});
+    if table == "events" {
+        allocation["eventWitness"] = event_witness(&event_columns)?;
+    }
+    Ok(allocation)
 }
 
 // Private, typed projections for the three audited global counters and their
@@ -854,6 +937,94 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_witness_accepts_only_exact_login_and_projection_producers() {
+        let target = Uuid::from_u128(1);
+        let workspace = Uuid::from_u128(2);
+        let columns = |kind: &str| {
+            let projection = kind != "login";
+            vec![
+                ("seq".into(), Cell::Integer(1)),
+                ("target_id".into(), Cell::uuid(target)),
+                (
+                    "workspace_id".into(),
+                    if projection {
+                        Cell::uuid(workspace)
+                    } else {
+                        Cell::Null
+                    },
+                ),
+                (
+                    "actor_user_id".into(),
+                    if projection {
+                        Cell::Null
+                    } else {
+                        Cell::uuid(target)
+                    },
+                ),
+                (
+                    "verb".into(),
+                    Cell::text(match kind {
+                        "document" => "document.updated",
+                        "task" => "task.updated",
+                        _ => "auth.login",
+                    }),
+                ),
+                (
+                    "channel".into(),
+                    Cell::text(if projection { "system" } else { "web" }),
+                ),
+                (
+                    "target_type".into(),
+                    Cell::text(if projection { kind } else { "user" }),
+                ),
+                (
+                    "payload".into(),
+                    Cell::json(&match kind {
+                        "document" => json!({"documentId":target.to_string(),"collab":true}),
+                        "task" => json!({"taskId":target.to_string(),"collab":true}),
+                        _ => json!({"userId":target.to_string(),"method":"password"}),
+                    })
+                    .unwrap(),
+                ),
+            ]
+        };
+        for kind in ["login", "document", "task"] {
+            let input = columns(kind);
+            let witness = event_witness(&input).unwrap();
+            assert_eq!(
+                witness["class"],
+                match kind {
+                    "document" => "document-projection",
+                    "task" => "task-projection",
+                    _ => "actor-login",
+                }
+            );
+            assert_eq!(witness["target"], hex::encode(target.as_bytes()));
+            assert!(!witness.to_string().contains("payload"));
+            for name in ["verb", "channel", "target_type", "payload"] {
+                let mut wrong = input.clone();
+                wrong
+                    .iter_mut()
+                    .find(|(column, _)| column == name)
+                    .unwrap()
+                    .1 = Cell::text(if name == "payload" {
+                    "{}"
+                } else {
+                    "PRIVATE_EVENT_CANARY"
+                });
+                assert_eq!(event_witness(&wrong).unwrap(), Value::Null, "{name}");
+            }
+            let mut wrong = input.clone();
+            wrong
+                .iter_mut()
+                .find(|(column, _)| column == "actor_user_id")
+                .unwrap()
+                .1 = Cell::uuid(workspace);
+            assert_eq!(event_witness(&wrong).unwrap(), Value::Null);
+        }
+    }
 
     #[test]
     fn instance_config_witness_binds_other_columns_without_vapid_values() {

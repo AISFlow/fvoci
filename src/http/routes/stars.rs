@@ -18,8 +18,8 @@ use crate::api::dto::{
     StarListResponse,
 };
 use crate::db::stars::{
-    add_star, kind_str, list_recent, list_stars_backend, remove_star, RecentItem, StarDbError,
-    StarItem, StarTarget, RECENT_DEFAULT_LIMIT, RECENT_MAX_LIMIT,
+    add_star_backend, kind_str, list_recent_backend, list_stars_backend, remove_star_backend,
+    RecentItem, StarDbError, StarItem, StarTarget, RECENT_DEFAULT_LIMIT, RECENT_MAX_LIMIT,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access};
@@ -165,13 +165,8 @@ async fn create_star_route(
     let Json(body) = body.map_err(AppError::from)?;
     let target = parse_star_target(&body)?;
     let kinds = allowed_content_kinds(&auth);
-    let item = add_star(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/stars.rs")
-            .map_err(internal)?,
+    let item = add_star_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -194,13 +189,8 @@ async fn remove_star_route(
     let auth =
         require_request_auth(&state, &headers, &jar, Access::Any, Some(workspace_id)).await?;
     let kinds = allowed_content_kinds(&auth);
-    remove_star(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/stars.rs")
-            .map_err(internal)?,
+    remove_star_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
@@ -225,13 +215,8 @@ async fn list_recent_route(
     let Query(query) = query.map_err(AppError::from)?;
     let limit = parse_recent_limit(query.limit.as_deref())?;
     let kinds = allowed_content_kinds(&auth);
-    let items = list_recent(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/stars.rs")
-            .map_err(internal)?,
+    let items = list_recent_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,

@@ -57,7 +57,7 @@ impl Inputs {
             let meta = std::fs::symlink_metadata(file).unwrap();
             assert!(meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0);
             assert_eq!(
-                format!("{:x}", Sha256::digest(std::fs::read(file).unwrap())),
+                hex::encode(Sha256::digest(std::fs::read(file).unwrap())),
                 required(name),
                 "fresh candidate executable differs from root receipt"
             );
@@ -110,10 +110,10 @@ impl Inputs {
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
             let meta = std::fs::symlink_metadata(&target).unwrap();
             assert!(meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0);
-            let digest = format!("{:x}", Sha256::digest(std::fs::read(&target).unwrap()));
+            let digest = hex::encode(Sha256::digest(std::fs::read(&target).unwrap()));
             assert_eq!(
                 digest,
-                format!("{:x}", Sha256::digest(std::fs::read(source).unwrap())),
+                hex::encode(Sha256::digest(std::fs::read(source).unwrap())),
                 "staged copy differs from the candidate executable"
             );
             if let Some(name) = receipt {

@@ -5,7 +5,7 @@ type MeasureTextWidth = (font: string, text: string) => number;
 
 /**
  * `@rhwp/core` README contract: register `globalThis.measureTextWidth` (canvas
- * `measureText`) before the first layout. 0.8.6 lays out SVG with its own
+ * `measureText`) before the first layout. 0.8.7 lays out SVG with its own
  * embedded font metrics and does not call the hook; it is kept because the
  * package still documents it as required. rhwp runs in a worker, which has
  * no `document`, so the hook measures on an `OffscreenCanvas`.

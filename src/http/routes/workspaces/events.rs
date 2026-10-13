@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::api::dto::{WorkspaceEventListQuery, WorkspaceEventListResponse, WorkspaceEventOutput};
 use crate::db::workspace_events::{
-    decode_event_cursor, encode_event_cursor, list_workspace_events,
+    decode_event_cursor, encode_event_cursor, list_workspace_events_backend,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::state::AppState;
@@ -70,13 +70,8 @@ pub(super) async fn list_workspace_events_route(
         }
         Some(raw) => Some(decode_event_cursor(raw).ok_or_else(invalid_cursor)?),
     };
-    let page = list_workspace_events(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/workspaces/events.rs")
-            .map_err(internal)?,
+    let page = list_workspace_events_backend(
+        &state.auth.db.pool,
         workspace_id,
         user_id,
         session_id,

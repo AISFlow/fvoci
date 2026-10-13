@@ -199,6 +199,92 @@ pub async fn query_collection(
     }
 }
 
+pub async fn query_collection_backend(
+    backend: &Backend,
+    ws: Uuid,
+    actor: &Actor,
+    collection_id: Uuid,
+    q: &QueryInput,
+) -> DbResult<QueryResult> {
+    if let Backend::Postgres(pool) = backend {
+        return query_collection(pool, ws, actor, collection_id, q).await;
+    }
+    let cursor = match &q.cursor {
+        Some(raw) => match decode_cursor(raw) {
+            Ok(c) => Some(c),
+            Err(_) => return Ok(Err(CollectionDbError::InvalidCursor)),
+        },
+        None => None,
+    };
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTransaction::SqliteFamily(family)=&mut tx else {unreachable!()};
+        let role=match family_begin_member(family,ws,actor,false).await?{Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        let (collection,access)=match family_require_collection(family,ws,actor,role,collection_id,Need::Read).await?{Ok(v)=>v,Err(e)=>return Ok(Err(e))};
+        let fields=family_load_fields(family,ws,collection_id).await?;
+        if let Err(e)=family_validate_query_config(&collection,&fields,&q.config,q.day.is_some(),q.window.as_ref()).await?{return Ok(Err(e));}
+        let scope=ViewScope{workspace_id:ws,project_id:collection.project_id,collection_id:Some(collection_id),kind:collection.root_kind()};
+        let plan=match crate::db::view_query::prepare_selected_collection_view(family,scope,&q.config.query).await?{Ok(v)=>v,Err(_)=>return Ok(Err(CollectionDbError::InvalidInput))};
+        let names=family.query("SELECT timezone FROM users WHERE id=?1",&[Cell::uuid(actor.user_id)]).await?;
+        let name=names.first().ok_or(sqlx::Error::RowNotFound)?.cell(0)?.string()?;
+        let zone=TaskTimeZone::from_name(&name)?;
+        let window_zone=TaskTimeZone::from_name(q.window.as_ref().map(|w|w.time_zone.as_str()).unwrap_or("UTC"))?;
+        let as_of=match &cursor {Some(c)=>c.as_of,None=>crate::db::tasks::family_clock(family).await?};
+        let fingerprint=sha256_hex(&json!({"policy":"collection-family-1","ws":ws,"userId":actor.user_id,"id":collection_id,"asOf":as_of.to_rfc3339(),"zone":zone.name,"config":q.config.to_json(),"window":q.window.as_ref().map(|w|json!([w.from,w.to,w.time_zone])),"group":q.group,"day":q.day,"fields":fields.iter().map(|f|json!([f.id,f.version])).collect::<Vec<_>>(),"catalog":plan.catalog.iter().map(|f|json!([f.id,f.field_type,f.version])).collect::<Vec<_>>()}).to_string());
+        if cursor.as_ref().is_some_and(|c|c.f!=fingerprint){return Ok(Err(CollectionDbError::InvalidCursor));}
+        let task=collection.kind==CollectionKind::Task;
+        let args=family_standard_args(ws,collection_id,actor,&q.config.query,task);
+        let sql=if task {"SELECT i.id,r.id,r.title,r.number,COALESCE(p.key,'WIKI'),r.type,r.status_id,r.start_date,r.due_date,r.due_at,r.sort_key,r.created_at,r.updated_at,s.sort_key,r.priority,i.version FROM collection_items i JOIN tasks r ON r.workspace_id=i.workspace_id AND r.id=i.task_id LEFT JOIN projects p ON p.workspace_id=r.workspace_id AND p.id=r.project_id LEFT JOIN statuses s ON s.workspace_id=r.workspace_id AND s.id=r.status_id WHERE i.workspace_id=?1 AND i.collection_id=?2 AND r.deleted_at IS NULL AND r.archived_at IS NULL AND (?3 IS NULL OR i.id=?3) AND (?4 IS NULL OR i.id>?4) AND (?5 IS NULL OR r.type=?5) AND (?6 IS NULL OR r.priority=?6) AND (?7 IS NULL OR r.status_id=?7) AND (?8 IS NULL OR r.milestone_id=?8) AND (?9=0 OR s.category NOT IN ('done','canceled')) AND (?10 IS NULL OR EXISTS(SELECT 1 FROM task_labels a WHERE a.workspace_id=r.workspace_id AND a.task_id=r.id AND a.label_id=?10)) AND (?11 IS NULL OR EXISTS(SELECT 1 FROM task_assignees a WHERE a.workspace_id=r.workspace_id AND a.task_id=r.id AND a.user_id=?11)) ORDER BY i.id LIMIT 32"}else{"SELECT i.id,r.id,r.title,r.number,COALESCE(p.key,'WIKI'),NULL,NULL,NULL,NULL,NULL,r.sort_key,r.created_at,r.updated_at,NULL,NULL,i.version FROM collection_items i JOIN documents r ON r.workspace_id=i.workspace_id AND r.id=i.document_id LEFT JOIN projects p ON p.workspace_id=r.workspace_id AND p.id=r.project_id WHERE i.workspace_id=?1 AND i.collection_id=?2 AND r.deleted_at IS NULL AND (?3 IS NULL OR i.id=?3) AND (?4 IS NULL OR i.id>?4) ORDER BY i.id LIMIT 32"};
+        let selected=|r:&QueryRow|q.group.as_ref().is_none_or(|g|g==&r.group)&&q.day.as_ref().is_none_or(|d|d==&r.date);
+        let mut anchor=None;
+        if let Some(c)=&cursor {
+            let mut bound=args.clone();bound[2]=Cell::uuid(c.id);
+            let raw=family.query(sql,&bound).await?;
+            if let Some(raw)=raw.first(){if let Ok(row)=family_query_row(family,ws,actor,role,raw,&collection,&plan,q,&zone,&window_zone).await? {if row.key_hash==c.key&&selected(&row.row){anchor=Some(row.key);}}}
+            if anchor.is_none(){return Ok(Err(CollectionDbError::InvalidCursor));}
+        }
+        let mut rows=Vec::new();let mut count=0i64;let mut buckets=HashMap::<Option<String>,i64>::new();let mut date_counts=std::collections::BTreeMap::<Option<NaiveDate>,i64>::new();let mut preview_by_day=std::collections::BTreeMap::<Option<NaiveDate>,Vec<FamilyQueryRow>>::new();
+        let mut after=None;
+        loop {
+            let mut bound=args.clone();bound[3]=Cell::optional_uuid(after);
+            let batch=family.query(sql,&bound).await?;
+            if batch.is_empty(){break;}
+            for source in &batch {
+                after=Some(source.cell(0)?.id()?);
+                let row=match family_query_row(family,ws,actor,role,source,&collection,&plan,q,&zone,&window_zone).await?{Ok(row)=>row,Err(_)=>continue};
+                count+=1;*buckets.entry(row.row.group.clone()).or_default()+=1;*date_counts.entry(row.row.date).or_default()+=1;
+                if q.window.is_some(){let preview=FamilyQueryRow {row:row.row.clone(),key:TaskPageKey {id:row.key.id,cells:row.key.cells.clone()},key_hash:row.key_hash.clone()};family_retain_query(preview_by_day.entry(row.row.date).or_default(),preview,CALENDAR_PREVIEW_PER_DAY as usize,&plan)?;}
+                if selected(&row.row)&&match &anchor {Some(a)=>crate::db::tasks::family_collection_compare(&row.key,a,&plan.sort)?==std::cmp::Ordering::Greater,None=>true}{family_retain_query(&mut rows,row,q.limit as usize+1,&plan)?;}
+            }
+            if batch.len()<32{break;}
+        }
+        let mut catalog=Vec::<(Option<String>,String,bool)>::new();
+        match q.config.group_by {
+            Some(GroupBy::Status)=>{for r in family.query("SELECT id,name FROM statuses WHERE workspace_id=?1 AND project_id=?2 ORDER BY sort_key COLLATE BINARY,id",&[Cell::uuid(ws),Cell::optional_uuid(collection.project_id)]).await?{catalog.push((Some(r.cell(0)?.id()?.to_string()),r.cell(1)?.string()?,false));}},
+            Some(GroupBy::Field(id))=>{if let Some(field)=fields.iter().find(|f|f.id==id){catalog.extend(field.options.iter().map(|o|(Some(o.id.to_string()),o.label.clone(),o.deleted_at.is_some())));}},None=>{}
+        }
+        if q.config.group_by!=Some(GroupBy::Status){catalog.push((None,String::new(),false));}
+        let mut days=Vec::new();let mut previews=Vec::new();
+        if let Some(w)=&q.window {let mut day=w.from;while day<w.to {days.push((Some(day),date_counts.get(&Some(day)).copied().unwrap_or(0)));if let Some(v)=preview_by_day.remove(&Some(day)){previews.extend(v.into_iter().map(|v|v.row));}day=day.succ_opt().ok_or_else(||sqlx::Error::Protocol("calendar date overflow".into()))?;}
+            days.push((None,date_counts.get(&None).copied().unwrap_or(0)));if let Some(v)=preview_by_day.remove(&None){previews.extend(v.into_iter().map(|v|v.row));}
+        }
+        let mut has_more=rows.len()>q.limit as usize;rows.truncate(q.limit as usize);
+        let ids:Vec<_>=rows.iter().map(|r|r.row.id).chain(previews.iter().map(|r|r.id)).collect();
+        let values=family_load_item_values(family,ws,&ids).await?;
+        for r in &mut rows {r.row.values=values.iter().filter(|(i,_,_)|*i==r.row.id).map(|(_,f,v)|(*f,v.clone())).collect();}
+        if let Some(DateBy::Field(field))=q.config.date_by{for r in &mut previews {r.values=values.iter().filter(|(i,f,_)|*i==r.id&&*f==field).map(|(_,f,v)|(*f,v.clone())).collect();}}
+        let mut used=4096+days.len()*48+previews.iter().map(|r|512+r.title.len()*6).sum::<usize>()+catalog.iter().map(|c|128+c.1.len()*6).sum::<usize>()+rows.len()*40;
+        let mut keep=0;for r in &rows {let bytes=512+r.row.title.len()*6+r.row.values.iter().map(|(_,v)|v.to_string().len()+40).sum::<usize>();if used+bytes>QUERY_RESPONSE_BYTES{break;}used+=bytes;keep+=1;}
+        if !rows.is_empty(){keep=keep.max(1);}
+        if keep<rows.len(){rows.truncate(keep);has_more=true;}
+        let next_cursor=if has_more{rows.last().map(|r|encode_cursor(&TaskListCursor{id:r.row.id,key:r.key_hash.clone(),f:fingerprint,as_of}))}else{None};
+        let items:Vec<_>=rows.into_iter().map(|r|r.row).collect();
+        let groups=catalog.into_iter().map(|(id,name,deleted)|QueryGroup {count:buckets.get(&id).copied().unwrap_or(0),item_ids:items.iter().filter(|r|r.group==id).map(|r|r.id).collect(),id,name,deleted}).collect();
+        Ok(Ok(QueryResult {can_edit:!access.archived&&access.permission.at_least(ProjectPermission::Edit),days,items,groups,count,next_cursor,previews}))
+    }.await;
+    finish_collection(tx, result, false).await
+}
+
 async fn run(
     tx: &mut Transaction<'_, Postgres>,
     ws: Uuid,
@@ -686,4 +772,307 @@ async fn run(
         next_cursor,
         previews,
     }))
+}
+
+/// Exact storage decode shared by detail and query readback. Decimal TEXT is
+/// parsed directly as JSON; SQLite REAL never participates in the value path.
+pub(crate) async fn family_load_item_values(
+    tx: &mut crate::db::backend::FamilyTx,
+    ws: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Value)>, sqlx::Error> {
+    use crate::db::codec::Cell;
+    tx.require_tenant(ws)?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let args = [Cell::uuid(ws), crate::db::view_query::selected_ids(ids)];
+    let rows=tx.query("SELECT item_id,field_id,field_type,value_text,value_number,value_date,value_ts,value_bool FROM collection_values WHERE workspace_id=?1 AND hex(item_id) IN (SELECT value FROM json_each(?2))",&args).await?;
+    let mut values = Vec::new();
+    for row in rows {
+        let value = match row.cell(2)?.string()?.as_str() {
+            "text" | "paragraph" => json!({"text":row.cell(3)?.string()?}),
+            "number" => {
+                let number: serde_json::Number = serde_json::from_str(&row.cell(4)?.string()?)
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                json!({"number":number})
+            }
+            "date" => json!({"date":row.cell(5)?.date()?.to_string()}),
+            "datetime" => {
+                json!({"datetime":crate::collections::iso_millis(row.cell(6)?.datetime()?)})
+            }
+            "checkbox" => json!({"checkbox":row.cell(7)?.boolean()?}),
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    "invalid collection scalar type".into(),
+                ))
+            }
+        };
+        values.push((row.cell(0)?.id()?, row.cell(1)?.id()?, value));
+    }
+    for (table, _column, key) in [
+        ("collection_choices", "option_id", "options"),
+        ("collection_people", "user_id", "users"),
+    ] {
+        let rows=tx.query(match table {"collection_people"=>"SELECT item_id,field_id,user_id FROM collection_people WHERE workspace_id=?1 AND hex(item_id) IN (SELECT value FROM json_each(?2)) ORDER BY item_id,field_id,user_id",_=>"SELECT item_id,field_id,option_id FROM collection_choices WHERE workspace_id=?1 AND hex(item_id) IN (SELECT value FROM json_each(?2)) ORDER BY item_id,field_id,option_id"},&args).await?;
+        let mut sets = std::collections::BTreeMap::<(Uuid, Uuid), Vec<Uuid>>::new();
+        for row in rows {
+            sets.entry((row.cell(0)?.id()?, row.cell(1)?.id()?))
+                .or_default()
+                .push(row.cell(2)?.id()?);
+        }
+        values.extend(
+            sets.into_iter()
+                .map(|((item, field), ids)| (item, field, json!({key:ids}))),
+        );
+    }
+    Ok(values)
+}
+
+use crate::db::backend::{Backend, DbTransaction, FamilyTx};
+use crate::db::codec::{Cell, FamilyRow};
+use crate::db::collections::{
+    family_begin_member, family_load_fields, family_require_collection, family_require_target,
+    family_validate_query_config, finish_collection,
+};
+use crate::db::tasks::{TaskOrderCell, TaskPageKey, TaskScalar, TaskTimeZone};
+use crate::db::view_query::{CustomPolicy, SelectedTaskView};
+use crate::tasks::list_query::{SortDirection, SortField};
+
+struct FamilyQueryRow {
+    row: QueryRow,
+    key: TaskPageKey,
+    key_hash: String,
+}
+
+fn family_scalar_token(value: &TaskScalar) -> String {
+    match value {
+        TaskScalar::Text(s) => s.clone(),
+        TaskScalar::Number(n) => n.normalized().to_string(),
+        TaskScalar::Date(d) => d.to_string(),
+        TaskScalar::Instant(at) => at.to_rfc3339(),
+        TaskScalar::Boolean(b) => b.to_string(),
+        TaskScalar::Integer(n) => n.to_string(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_query_row(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    actor: &Actor,
+    role: crate::db::workspace::WorkspaceRole,
+    source: &FamilyRow,
+    collection: &crate::db::collections::CollectionRow,
+    plan: &SelectedTaskView,
+    q: &QueryInput,
+    zone: &TaskTimeZone,
+    window_zone: &TaskTimeZone,
+) -> DbResult<FamilyQueryRow> {
+    use crate::collections::AttachTarget;
+    let item = source.cell(0)?.id()?;
+    let root = source.cell(1)?.id()?;
+    let task = collection.kind == CollectionKind::Task;
+    let target = if task {
+        AttachTarget::Task(root)
+    } else {
+        AttachTarget::Document(root)
+    };
+    let info = match family_require_target(tx, ws, actor, role, target, Need::Read).await? {
+        Ok(v) => v,
+        Err(_) => return Ok(Err(CollectionDbError::NotFound)),
+    };
+    let title = source.cell(2)?.string()?;
+    let f = &q.config.query.filters;
+    if let Some(needle) = &f.title {
+        if !crate::db::tasks::family_title_contains(&title, needle)? {
+            return Ok(Err(CollectionDbError::NotFound));
+        }
+    }
+    let start = source.cell(7)?.optional(Cell::date)?;
+    let due_date = source.cell(8)?.optional(Cell::date)?;
+    let due_at = source.cell(9)?.optional(Cell::datetime)?;
+    let due = due_date.or(due_at.map(|at| zone.date(at)).transpose()?);
+    if f.due_before
+        .is_some_and(|before| !due.is_some_and(|d| d <= before))
+    {
+        return Ok(Err(CollectionDbError::NotFound));
+    }
+    let scalar_rows=tx.query("SELECT field_id,field_type,value_text,value_number,value_date,value_ts,value_bool FROM collection_values WHERE workspace_id=?1 AND item_id=?2",&[Cell::uuid(ws),Cell::uuid(item)]).await?;
+    let mut scalars = HashMap::new();
+    for r in scalar_rows {
+        let scalar = match r.cell(1)?.string()?.as_str() {
+            "text" | "paragraph" => TaskScalar::Text(r.cell(2)?.string()?),
+            "number" => TaskScalar::Number(crate::db::tasks::decimal_value(&r.cell(3)?.string()?)?),
+            "date" => TaskScalar::Date(r.cell(4)?.date()?),
+            "datetime" => TaskScalar::Instant(r.cell(5)?.datetime()?),
+            "checkbox" => TaskScalar::Boolean(r.cell(6)?.boolean()?),
+            _ => return Err(sqlx::Error::Protocol("invalid collection scalar".into())),
+        };
+        scalars.insert(r.cell(0)?.id()?, scalar);
+    }
+    for (field, policy) in &plan.predicates {
+        let matched = match policy {
+            CustomPolicy::Scalar { equals, .. } => {
+                scalars.get(field)
+                    == equals
+                        .as_ref()
+                        .map(TaskScalar::from_policy)
+                        .transpose()?
+                        .as_ref()
+            }
+            CustomPolicy::Set { people, equals } => {
+                let (table, _column) = if *people {
+                    ("collection_people", "user_id")
+                } else {
+                    ("collection_choices", "option_id")
+                };
+                let rows=tx.query(match table {"collection_people"=>"SELECT EXISTS(SELECT 1 FROM collection_people WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3 AND (?4 IS NULL OR user_id=?4))",_=>"SELECT EXISTS(SELECT 1 FROM collection_choices WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3 AND (?4 IS NULL OR option_id=?4))"},&[Cell::uuid(ws),Cell::uuid(item),Cell::uuid(*field),Cell::optional_uuid(*equals)]).await?;
+                rows.first()
+                    .ok_or(sqlx::Error::RowNotFound)?
+                    .cell(0)?
+                    .boolean()?
+                    == equals.is_some()
+            }
+        };
+        if !matched {
+            return Ok(Err(CollectionDbError::NotFound));
+        }
+    }
+    let status = source.cell(6)?.optional(Cell::id)?;
+    let group=match q.config.group_by {
+        None=>None,Some(GroupBy::Status)=>status.map(|id|id.to_string()),Some(GroupBy::Field(field))=>tx.query("SELECT option_id FROM collection_choices WHERE workspace_id=?1 AND item_id=?2 AND field_id=?3 LIMIT 1",&[Cell::uuid(ws),Cell::uuid(item),Cell::uuid(field)]).await?.first().map(|r|r.cell(0)?.id().map(|id|id.to_string())).transpose()?,
+    };
+    let date = match q.config.date_by {
+        None => None,
+        Some(DateBy::Due) => due_date.or(due_at.map(|at| window_zone.date(at)).transpose()?),
+        Some(DateBy::Start) => start,
+        Some(DateBy::Field(id)) => match scalars.get(&id) {
+            Some(TaskScalar::Date(d)) => Some(*d),
+            Some(TaskScalar::Instant(at)) => Some(window_zone.date(*at)?),
+            _ => None,
+        },
+    };
+    if let Some(window) = &q.window {
+        if date.is_some_and(|d| d < window.from || d >= window.to) {
+            return Ok(Err(CollectionDbError::NotFound));
+        }
+    }
+    let mut cells = Vec::new();
+    for term in &plan.sort {
+        let value = match term.field {
+            SortField::Field(id) => scalars.get(&id).cloned(),
+            SortField::Title => Some(TaskScalar::Text(title.clone())),
+            SortField::Number => Some(TaskScalar::Integer(source.cell(3)?.int32()?)),
+            SortField::Rank => Some(TaskScalar::Text(source.cell(10)?.string()?)),
+            SortField::Created => Some(TaskScalar::Instant(source.cell(11)?.datetime()?)),
+            SortField::Updated => Some(TaskScalar::Instant(source.cell(12)?.datetime()?)),
+            SortField::Due => due.map(TaskScalar::Date),
+            SortField::Status => source
+                .cell(13)?
+                .optional(Cell::string)?
+                .map(TaskScalar::Text),
+            SortField::Priority => source
+                .cell(14)?
+                .optional(Cell::string)?
+                .and_then(|p| {
+                    ["none", "low", "medium", "high", "urgent"]
+                        .iter()
+                        .position(|v| *v == p)
+                })
+                .map(|n| TaskScalar::Integer(n as i32)),
+        };
+        cells.push(TaskOrderCell {
+            value,
+            desc: term.direction == SortDirection::Desc,
+        });
+    }
+    let key = TaskPageKey { cells, id: item };
+    crate::db::tasks::family_collection_compare(&key, &key, &plan.sort)?;
+    let key_hash = sha256_hex(
+        &json!(key
+            .cells
+            .iter()
+            .map(|c| c.value.as_ref().map(family_scalar_token))
+            .collect::<Vec<_>>())
+        .to_string(),
+    );
+    Ok(Ok(FamilyQueryRow {
+        row: QueryRow {
+            id: item,
+            document_id: (!task).then_some(root),
+            task_id: task.then_some(root),
+            display_id: format!("{}-{}", source.cell(4)?.string()?, source.cell(3)?.int32()?),
+            title,
+            task_type: source.cell(5)?.optional(Cell::string)?,
+            status_id: status,
+            start_date: start,
+            due_date,
+            due_at,
+            version: source.cell(15)?.int32()?,
+            group,
+            date,
+            can_edit: info.can_edit,
+            values: Vec::new(),
+        },
+        key,
+        key_hash,
+    }))
+}
+
+fn family_retain_query(
+    rows: &mut Vec<FamilyQueryRow>,
+    row: FamilyQueryRow,
+    capacity: usize,
+    plan: &SelectedTaskView,
+) -> Result<(), sqlx::Error> {
+    let mut low = 0;
+    let mut high = rows.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if crate::db::tasks::family_collection_compare(&rows[middle].key, &row.key, &plan.sort)?
+            == std::cmp::Ordering::Less
+        {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if low < capacity {
+        rows.insert(low, row);
+        rows.truncate(capacity);
+    }
+    Ok(())
+}
+
+fn family_standard_args(
+    ws: Uuid,
+    collection: Uuid,
+    actor: &Actor,
+    query: &crate::tasks::list_query::ViewQuery,
+    task: bool,
+) -> Vec<Cell> {
+    use crate::tasks::list_query::AssigneeFilter;
+    let mut args = vec![
+        Cell::uuid(ws),
+        Cell::uuid(collection),
+        Cell::Null,
+        Cell::Null,
+    ];
+    if task {
+        let f = &query.filters;
+        args.extend([
+            Cell::optional_text(f.task_type.as_deref()),
+            Cell::optional_text(f.priority.as_deref()),
+            Cell::optional_uuid(f.status_id),
+            Cell::optional_uuid(f.milestone_id),
+            Cell::Integer(i64::from(f.open_only)),
+            Cell::optional_uuid(f.label_id),
+            Cell::optional_uuid(f.assignee_id.as_ref().map(|a| match a {
+                AssigneeFilter::Me => actor.user_id,
+                AssigneeFilter::User(id) => *id,
+            })),
+        ]);
+    }
+    args
 }

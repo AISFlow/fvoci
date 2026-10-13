@@ -1,5 +1,8 @@
 //! Durable person-wide stopwatch. Reuses the existing membership/credential
 //! writer fence and task/project lock order. No process-local run state.
+use crate::db::backend::{Backend, DbTx, FamilyTx};
+use crate::db::codec::Cell;
+use crate::db::tasks::{family_clock, family_task_change, family_task_write};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
@@ -257,6 +260,72 @@ pub async fn set_estimate(
     Ok(Ok(output))
 }
 
+pub async fn set_estimate_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    body: &TaskEstimateCommandBody,
+) -> DbResult<TaskEstimate> {
+    if let Backend::Postgres(pool) = backend {
+        return set_estimate(pool, workspace, task, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if body.minutes.is_some_and(|v| v < 0)
+        || !note_reason_valid(&None, &body.reason)
+        || body
+            .expected
+            .unit
+            .as_deref()
+            .is_some_and(|u| u != "minutes")
+    {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, false).await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+        let digest = hash("estimate.minutes", Some(workspace), Some(task), body)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        let before = family_estimate(family, workspace, task).await?;
+        if before != body.expected {
+            return Ok(Err(TimerDbError::Conflict("estimate_changed")));
+        }
+        let output = family_persist_estimate(
+            family,
+            workspace,
+            task,
+            actor,
+            body.request_id,
+            before,
+            body.minutes,
+            body.reason.trim(),
+        )
+        .await?;
+        let value = timer_value(&output)?;
+        family_timer_receipt(family, actor, body.request_id, &digest, None, &value).await?;
+        Ok(Ok(output))
+    }
+    .await;
+    finish_timer(tx, result).await
+}
+
 /// Shared only by the two real estimate consumers, inside their already
 /// authorized/locked transaction. This does not acquire a different fence.
 #[allow(clippy::too_many_arguments)] // Explicit locator, raw CAS baseline and correction reason.
@@ -385,6 +454,95 @@ pub async fn create_plan_task(
     Ok(Ok(output))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_plan_task_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    document: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    body: &StudyPlanTaskBody,
+    task: CreateTaskInput<'_>,
+    request_hash: &str,
+) -> DbResult<StudyPlanTaskOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return create_plan_task(
+            pool,
+            workspace,
+            document,
+            actor,
+            credential,
+            body,
+            task,
+            request_hash,
+        )
+        .await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if body.minutes.is_some_and(|v| v < 0) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let outcome = match crate::db::task_origins::create_document_task_operation(
+            &mut tx.operation(),
+            workspace,
+            actor,
+            credential,
+            DocumentTaskRequest {
+                document_id: document,
+                project_id: body.project_id,
+                request_id: body.request_id,
+                self_assign: body.self_assign,
+                anchor: body.anchor.as_deref(),
+                request_hash,
+                task,
+            },
+            None,
+            "web",
+        )
+        .await?
+        {
+            Ok(outcome) => outcome,
+            Err(e) => return Ok(Err(TimerDbError::Origin(e))),
+        };
+
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let DocumentTaskOutcome::Created(task) = &outcome {
+            if body.expected_session_id != credential {
+                return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+            }
+            if let Some(minutes) = body.minutes {
+                let before = family_estimate(family, workspace, *task).await?;
+                family_persist_estimate(
+                    family,
+                    workspace,
+                    *task,
+                    actor,
+                    body.request_id,
+                    before,
+                    Some(minutes),
+                    "plan_explicit_minutes",
+                )
+                .await?;
+            }
+        }
+        let task_id = outcome.task_id();
+        let rows=family.query("SELECT t.number,p.key FROM tasks t JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id WHERE t.workspace_id=?1 AND t.id=?2 AND t.deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task_id)]).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        Ok(Ok(StudyPlanTaskOutput {
+            task_id,
+            number: row.cell(0)?.int32()?,
+            project_key: row.cell(1)?.string()?,
+        }))
+    }.await;
+    finish_timer(tx, result).await
+}
+
 pub async fn task_state(
     pool: &PgPool,
     workspace: Uuid,
@@ -406,6 +564,59 @@ pub async fn task_state(
     let state = state_in(&mut tx, workspace, task, actor, can_control).await?;
     tx.commit().await?;
     Ok(Ok(state))
+}
+
+pub async fn task_state_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> DbResult<TaskTimerState> {
+    if let Backend::Postgres(pool) = backend {
+        return task_state(pool, workspace, task, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let can_control = match crate::db::task_ops::family_time_capability(
+            family, workspace, task, actor, credential,
+        )
+        .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(TimerDbError::Project(e))),
+        };
+        let active = family_unfinished(family, actor).await?;
+        let busy_elsewhere = active
+            .as_ref()
+            .is_some_and(|r| r.workspace_id != workspace || r.task_id != task);
+        let run = active.filter(|r| r.workspace_id == workspace && r.task_id == task);
+        let records = family_timer_records(family, workspace, task, actor).await?;
+        let actual_milliseconds = records
+            .iter()
+            .filter_map(|r| {
+                r.ended_at
+                    .map(|end| end.timestamp_millis() - r.started_at.timestamp_millis())
+            })
+            .try_fold(0i64, |sum, v| {
+                sum.checked_add(v)
+                    .ok_or_else(|| sqlx::Error::Protocol("timer total overflow".into()))
+            })?;
+        Ok(Ok(TaskTimerState {
+            server_now: family_clock(family).await?,
+            run,
+            busy_elsewhere,
+            legacy_open: family_legacy_open(family, actor).await?,
+            can_control,
+            actual_milliseconds,
+            estimate: family_estimate(family, workspace, task).await?,
+        }))
+    }
+    .await;
+    finish_timer(tx, result).await
 }
 
 pub async fn owner_state(pool: &PgPool, actor: Uuid, session: Uuid) -> DbResult<OwnerTimerState> {
@@ -437,6 +648,63 @@ pub async fn owner_state(pool: &PgPool, actor: Uuid, session: Uuid) -> DbResult<
     Ok(Ok(result))
 }
 
+pub async fn owner_state_backend(
+    backend: &Backend,
+    actor: Uuid,
+    credential: Uuid,
+) -> DbResult<OwnerTimerState> {
+    if let Backend::Postgres(pool) = backend {
+        return owner_state(pool, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family.replace_system_context(true);
+        if !family_timer_self(family, actor, credential).await? {
+            return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
+        }
+
+        let run = family_unfinished(family, actor).await?;
+        let (run_id, version, status) = run
+            .as_ref()
+            .map(|r| (Some(r.id), Some(r.version), Some(r.status)))
+            .unwrap_or_default();
+        let visible_run = if let Some(run) = run {
+            if crate::db::task_ops::family_time_capability(
+                family,
+                run.workspace_id,
+                run.task_id,
+                actor,
+                credential,
+            )
+            .await?
+            .is_ok()
+            {
+                Some(run)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let ids=family.query("SELECT time_entry_id FROM task_timer_legacy_open WHERE user_id=?1 ORDER BY time_entry_id",&[Cell::uuid(actor)]).await?.iter().map(|r|r.cell(0)?.id()).collect::<Result<Vec<_>,sqlx::Error>>()?;
+
+        Ok(Ok(OwnerTimerState {
+            server_now: family_clock(family).await?,
+            run_id,
+            version,
+            status,
+            visible_run,
+            legacy_open: !ids.is_empty(),
+            legacy_open_ids: ids,
+        }))
+    }.await;
+    finish_timer(tx, result).await
+}
+
 fn hash<T: serde::Serialize>(
     kind: &str,
     workspace: Option<Uuid>,
@@ -452,7 +720,7 @@ fn hash<T: serde::Serialize>(
     }
     let value = serde_json::to_vec(&(kind, workspace, task, semantic))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    Ok(format!("{:x}", Sha256::digest(value)))
+    Ok(hex::encode(Sha256::digest(value)))
 }
 
 /// Receipts are read only after current credential and target permission are
@@ -733,6 +1001,155 @@ pub async fn command(
     Ok(Ok(output))
 }
 
+pub async fn command_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    body: &TimerCommandBody,
+) -> DbResult<TimerCommandOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return command(pool, workspace, task, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if !command_valid(body) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, false).await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+
+        let digest = hash("timer", Some(workspace), Some(task), body)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        let active = family_unfinished(family, actor).await?;
+        let at = family_clock(family).await?;
+        let mut regression = false;
+        let mut closed_segment = None;
+        let mut closed_note = body.note.clone();
+
+        let (id, status, version) = if body.operation == TimerOperation::Start {
+            if active.is_some() || family_legacy_open(family, actor).await? {
+                return Ok(Err(TimerDbError::Conflict("timer_busy")));
+            }
+            let run = TimerRunOutput {
+                id: Uuid::now_v7(),
+                workspace_id: workspace,
+                task_id: task,
+                status: TimerStatus::Running,
+                version: 1,
+                started_at: at,
+                running_since: Some(at),
+                elapsed_milliseconds: 0,
+                note: body.note.clone(),
+            };
+
+            family.execute("INSERT INTO task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,note) VALUES(?1,?2,?3,?4,'running',1,?5,?6)",&[Cell::uuid(run.id),Cell::uuid(actor),Cell::uuid(workspace),Cell::uuid(task),Cell::instant(at)?,Cell::optional_text(run.note.as_deref())]).await?;
+
+            family_open_segment(family, &run, actor, at).await?;
+            (run.id, run.status, run.version)
+        } else {
+            let Some(mut run) = active else {
+                return Ok(Err(TimerDbError::Conflict("timer_version")));
+            };
+            if Some(run.id) != body.run_id
+                || run.workspace_id != workspace
+                || run.task_id != task
+                || run.version != body.expected_version
+            {
+                return Ok(Err(TimerDbError::Conflict("timer_version")));
+            }
+
+            let Some(status) = transition(run.status, body.operation) else {
+                return Ok(Err(TimerDbError::Conflict("timer_transition")));
+            };
+            if body.note.is_some() {
+                run.note = body.note.clone();
+            }
+            closed_note = run.note.clone();
+
+            if run.status == TimerStatus::Running {
+                (regression, closed_segment) =
+                    family_close_segment(family, &run, actor, at, true).await?;
+            }
+            if body.operation == TimerOperation::Resume {
+                family_open_segment(family, &run, actor, at).await?;
+            }
+            let version = run.version + 1;
+            family.execute("UPDATE task_timer_runs SET status=?3,version=?4,note=?5,stopped_at=?6 WHERE id=?1 AND user_id=?2",&[Cell::uuid(run.id),Cell::uuid(actor),Cell::text(status.as_str()),Cell::Integer(i64::from(version)),Cell::optional_text(run.note.as_deref()),if status==TimerStatus::Stopped{Cell::instant(at.max(run.started_at))?}
+    else{Cell::Null}
+    ]).await?;
+            (run.id, status, version)
+        };
+        let output = TimerCommandOutput {
+            run_id: id,
+            version,
+            status,
+            server_now: at,
+        };
+        let value = timer_value(&output)?;
+        let mut after = value.clone();
+        after["recordId"] = json!(closed_segment);
+        after["kind"] = json!("segment");
+        after["note"] = json!(closed_note);
+
+        family_timer_audit(
+            family,
+            actor,
+            body.request_id,
+            Some(workspace),
+            Some(task),
+            None,
+            status.as_str(),
+            json!({"runId":body.run_id,"expectedVersion":body.expected_version}
+            ),
+            after,
+            if regression {
+                "server_clock_regression_clamped"
+            } else {
+                "user_command"
+            },
+        )
+        .await?;
+
+        family_task_change(
+            family,
+            TaskChangeRecord {
+                workspace_id: workspace,
+                actor_user_id: actor,
+                verb: "task.timer.changed",
+                target_type: "task",
+                target_id: task,
+                payload: json!({"runId":id,"version":version,"status":status}
+                ),
+                client_ip: None,
+            },
+        )
+        .await?;
+
+        family_timer_receipt(family, actor, body.request_id, &digest, Some(id), &value).await?;
+        Ok(Ok(output))
+    }.await;
+    finish_timer(tx, result).await
+}
+
 pub async fn cleanup(
     pool: &PgPool,
     actor: Uuid,
@@ -816,6 +1233,80 @@ pub async fn cleanup(
     .await?;
     tx.commit().await?;
     Ok(Ok(output))
+}
+
+pub async fn cleanup_backend(
+    backend: &Backend,
+    actor: Uuid,
+    credential: Uuid,
+    body: &TimerCleanupBody,
+) -> DbResult<TimerCommandOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return cleanup(pool, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if body.expected_version <= 0 || body.expected_version == i32::MAX {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family.replace_system_context(true);
+        if !family_timer_self(family, actor, credential).await? {
+            return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
+        }
+
+        let digest = hash("cleanup", None, None, body)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        let Some(run) = family_unfinished(family, actor).await? else {
+            return Ok(Err(TimerDbError::Conflict("timer_version")));
+        };
+        if run.id != body.run_id || run.version != body.expected_version {
+            return Ok(Err(TimerDbError::Conflict("timer_version")));
+        }
+
+        let at = family_clock(family).await?;
+        let (regression, closed) = family_close_segment(family, &run, actor, at, false).await?;
+        let version = run.version + 1;
+        family.execute("UPDATE task_timer_runs SET status='stopped',version=?3,stopped_at=?4 WHERE id=?1 AND user_id=?2",&[Cell::uuid(run.id),Cell::uuid(actor),Cell::Integer(i64::from(version)),Cell::instant(at.max(run.started_at))?]).await?;
+
+        let output = TimerCommandOutput {
+            run_id: run.id,
+            version,
+            status: TimerStatus::Stopped,
+            server_now: at,
+        };
+        let value = timer_value(&output)?;
+        family_timer_audit(family,actor,body.request_id,None,None,None,"cleanup",json!({"version":run.version}
+    ),json!({"runId":run.id,"version":version,"status":"stopped","recordId":closed,"kind":"segment","note":run.note}
+    ),if regression{"self_cleanup_clock_regression_clamped"}
+    else{"explicit_self_cleanup"}
+    ).await?;
+
+        family_timer_receipt(
+            family,
+            actor,
+            body.request_id,
+            &digest,
+            Some(run.id),
+            &value,
+        )
+        .await?;
+        Ok(Ok(output))
+    }.await;
+    finish_timer(tx, result).await
 }
 
 // Effective personal ranges overlay append-only corrections. Original server
@@ -1208,6 +1699,135 @@ pub async fn history(
     Ok(Ok(result))
 }
 
+pub async fn history_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    query: &TimerHistoryQuery,
+) -> DbResult<TimerHistory> {
+    if let Backend::Postgres(pool) = backend {
+        return history(pool, workspace, task, actor, credential, query).await;
+    }
+    if !range_valid(query.from, query.to) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            crate::db::task_ops::family_time_capability(family, workspace, task, actor, credential)
+                .await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+        let zone = family_timer_zone(family, actor).await?;
+        let cursor = match &query.cursor {
+            None => None,
+            Some(value) if value.len() > 4096 => return Ok(Err(TimerDbError::InvalidInput)),
+            Some(value) => match URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<HistoryCursor>(&bytes).ok())
+            {
+                Some(c)
+                    if c.version == 1
+                        && c.fingerprint.len() == 64
+                        && c.fingerprint
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                        && c.actor == actor
+                        && c.workspace == workspace
+                        && c.task == task
+                        && c.from == query.from
+                        && c.to == query.to
+                        && c.zone == zone =>
+                {
+                    if c.session != credential {
+                        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+                    }
+                    Some(c)
+                }
+                _ => return Ok(Err(TimerDbError::InvalidInput)),
+            },
+        };
+        let from = crate::db::tasks::family_timer_midnight(&zone, query.from)?;
+        let to = crate::db::tasks::family_timer_midnight(
+            &zone,
+            query
+                .to
+                .succ_opt()
+                .ok_or_else(|| sqlx::Error::Protocol("timer range out of bounds".into()))?,
+        )?;
+        let mut records = family_timer_records(family, workspace, task, actor)
+            .await?
+            .into_iter()
+            .filter(|r| {
+                r.started_at < to
+                    && (r.ended_at.is_none_or(|e| e > from)
+                        || (r.kind == TimeRecordKind::Segment
+                            && r.ended_at == Some(r.started_at)
+                            && r.started_at >= from))
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| (a.id, kind_text(a.kind)).cmp(&(b.id, kind_text(b.kind))));
+        let fingerprint = hex::encode(Sha256::digest(
+            serde_json::to_vec(&records).map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
+        ));
+        if cursor
+            .as_ref()
+            .is_some_and(|c| c.fingerprint != fingerprint)
+        {
+            return Ok(Err(TimerDbError::Conflict("timer_history_changed")));
+        }
+        records.retain(|r| {
+            cursor.as_ref().is_none_or(|c| {
+                (r.started_at, r.id, kind_text(r.kind)) < (c.started_at, c.id, kind_text(c.kind))
+            })
+        });
+        records.sort_by(|a, b| {
+            (b.started_at, b.id, kind_text(b.kind)).cmp(&(a.started_at, a.id, kind_text(a.kind)))
+        });
+        let more = records.len() > 100;
+        records.truncate(100);
+        let next_cursor = if more {
+            records
+                .last()
+                .map(|last| {
+                    serde_json::to_vec(&HistoryCursor {
+                        version: 1,
+                        session: credential,
+                        fingerprint,
+                        actor,
+                        workspace,
+                        task,
+                        from: query.from,
+                        to: query.to,
+                        zone,
+                        started_at: last.started_at,
+                        id: last.id,
+                        kind: last.kind,
+                    })
+                    .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+                    .map_err(|e| sqlx::Error::Protocol(e.to_string()))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(Ok(TimerHistory {
+            server_now: family_clock(family).await?,
+            items: records,
+            next_cursor,
+        }))
+    }
+    .await;
+    finish_timer(tx, result).await
+}
+
 pub async fn summary(
     pool: &PgPool,
     workspace: Uuid,
@@ -1258,6 +1878,105 @@ pub async fn summary(
     };
     tx.commit().await?;
     Ok(Ok(result))
+}
+
+pub async fn summary_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    query: &TimerSummaryQuery,
+) -> DbResult<TimerSummary> {
+    if let Backend::Postgres(pool) = backend {
+        return summary(pool, workspace, task, actor, credential, query).await;
+    }
+    if !range_valid(query.from, query.to) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            crate::db::task_ops::family_time_capability(family, workspace, task, actor, credential)
+                .await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+
+        let zone = family_timer_zone(family, actor).await?;
+        let at = family_clock(family).await?;
+        let records = family_timer_records(family, workspace, task, actor).await?;
+        let mut days = Vec::new();
+        let mut date = query.from;
+
+        loop {
+            let next = date
+                .succ_opt()
+                .ok_or_else(|| sqlx::Error::Protocol("timer range out of bounds".into()))?;
+            let a = crate::db::tasks::family_timer_midnight(&zone, date)?.timestamp_millis();
+            let b = crate::db::tasks::family_timer_midnight(&zone, next)?.timestamp_millis();
+            let mut milliseconds = 0i64;
+
+            for record in &records {
+                if record.kind == TimeRecordKind::Manual && record.ended_at.is_none() {
+                    continue;
+                }
+                let start = record.started_at.timestamp_millis();
+                let end = record
+                    .ended_at
+                    .unwrap_or(at.max(record.started_at))
+                    .timestamp_millis();
+                if start < b && end > a {
+                    milliseconds = milliseconds
+                        .checked_add((end.min(b) - start.max(a)).max(0))
+                        .ok_or_else(|| sqlx::Error::Protocol("timer total overflow".into()))?;
+                }
+            }
+
+            days.push(TimerDayTotal { date, milliseconds });
+            if date == query.to {
+                break;
+            }
+            date = next;
+        }
+        let unfinished=!family.query("SELECT id FROM task_timer_runs WHERE workspace_id=?1 AND task_id=?2 AND user_id=?3 AND status<>'stopped'",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor)]).await?.is_empty();
+
+        let total_milliseconds = days.iter().try_fold(0i64, |sum, d| {
+            sum.checked_add(d.milliseconds)
+                .ok_or_else(|| sqlx::Error::Protocol("timer total overflow".into()))
+        })?;
+        let unresolved_manual = records
+            .iter()
+            .any(|r| r.kind == TimeRecordKind::Manual && r.ended_at.is_none());
+
+        Ok(Ok(TimerSummary {
+            server_now: at,
+            time_zone: zone,
+            days,
+            total_milliseconds,
+            unfinished,
+            unresolved_manual,
+        }))
+    }.await;
+    finish_timer(tx, result).await
+}
+async fn family_timer_zone(tx: &mut FamilyTx, actor: Uuid) -> Result<String, sqlx::Error> {
+    let rows = tx
+        .query(
+            "SELECT timezone FROM users WHERE id=?1",
+            &[Cell::uuid(actor)],
+        )
+        .await?;
+    crate::db::tasks::family_timer_zone_name(
+        &rows
+            .first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .cell(0)?
+            .string()?,
+    )
 }
 
 fn note_reason_valid(note: &Option<String>, reason: &str) -> bool {
@@ -1415,6 +2134,93 @@ pub async fn create_manual(
     Ok(Ok(output))
 }
 
+pub async fn create_manual_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    body: &TimerManualBody,
+) -> DbResult<TimerRecordOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return create_manual(pool, workspace, task, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if !note_reason_valid(&body.note, &body.reason) {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, false).await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+
+        let digest = hash("manual", Some(workspace), Some(task), body)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        let Some((start, end)) = effective_range(body.started_at, body.ended_at) else {
+            return Ok(Err(TimerDbError::InvalidInput));
+        };
+        let Some(seconds) = crate::db::task_ops::time_entry_duration_seconds(start, end) else {
+            return Ok(Err(TimerDbError::InvalidInput));
+        };
+        let at = family_clock(family).await?;
+        if end > at {
+            return Ok(Err(TimerDbError::InvalidInput));
+        }
+
+        let id = Uuid::now_v7();
+        family.execute("INSERT INTO time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[Cell::uuid(id),Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor),Cell::instant(start)?,Cell::instant(end)?,Cell::Integer(i64::from(seconds)),Cell::optional_text(body.note.as_deref())]).await?;
+
+        let record = TimeRecord {
+            id,
+            kind: TimeRecordKind::Manual,
+            started_at: start,
+            ended_at: Some(end),
+            run_id: None,
+            note: body.note.clone(),
+            revision: 0,
+            reserved_legacy: false,
+        };
+        family_timer_audit(
+            family,
+            actor,
+            body.request_id,
+            Some(workspace),
+            Some(task),
+            Some(id),
+            "time.manual",
+            Value::Null,
+            submitted_range_audit(&record, body.started_at, body.ended_at),
+            body.reason.trim(),
+        )
+        .await?;
+        let output = TimerRecordOutput {
+            server_now: at,
+            record,
+        };
+        let value = timer_value(&output)?;
+        family_timer_hint(family, workspace, task, actor).await?;
+        family_timer_receipt(family, actor, body.request_id, &digest, None, &value).await?;
+        Ok(Ok(output))
+    }.await;
+    finish_timer(tx, result).await
+}
+
 pub async fn correct(
     pool: &PgPool,
     workspace: Uuid,
@@ -1552,6 +2358,322 @@ pub async fn correct(
     Ok(Ok(output))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn correct_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    id: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    body: &TimeCorrectionBody,
+) -> DbResult<TimerRecordOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return correct(pool, workspace, task, id, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    if !note_reason_valid(&body.note, &body.reason)
+        || body.expected_revision < 0
+        || body.expected_revision == i64::MAX
+    {
+        return Ok(Err(TimerDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, false).await?
+        {
+            return Ok(Err(TimerDbError::Project(e)));
+        }
+
+        let mut semantic = timer_value(body)?;
+        semantic["recordId"] = json!(id);
+        let digest = hash("correct", Some(workspace), Some(task), &semantic)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        let Some((start, end)) = effective_range(body.started_at, body.ended_at) else {
+            return Ok(Err(TimerDbError::InvalidInput));
+        };
+        if i32::try_from((end - start).num_milliseconds().div_euclid(1000)).is_err() {
+            return Ok(Err(TimerDbError::InvalidInput));
+        }
+
+        let Some(before) = family_timer_records(family, workspace, task, actor)
+            .await?
+            .into_iter()
+            .find(|r| r.id == id && r.kind == body.kind)
+        else {
+            return Ok(Err(TimerDbError::Project(ProjectDbError::NotFound)));
+        };
+
+        if before.started_at != body.expected_started_at
+            || before.ended_at != body.expected_ended_at
+            || before.note != body.expected_note
+            || before.revision != body.expected_revision
+        {
+            return Ok(Err(TimerDbError::Conflict("time_record_version")));
+        }
+
+        if before.kind == TimeRecordKind::Segment && before.ended_at.is_none() {
+            return Ok(Err(TimerDbError::Conflict("timer_interval_running")));
+        }
+        let at = family_clock(family).await?;
+        if end > at {
+            return Ok(Err(TimerDbError::InvalidInput));
+        }
+        if before.kind == TimeRecordKind::Manual && before.ended_at.is_none() {
+            let Some(seconds) =
+                crate::db::task_ops::time_entry_duration_seconds(before.started_at, end)
+            else {
+                return Ok(Err(TimerDbError::InvalidInput));
+            };
+            family.execute("UPDATE time_entries SET ended_at=?5,duration_seconds=?6 WHERE workspace_id=?1 AND task_id=?2 AND user_id=?3 AND id=?4",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor),Cell::uuid(id),Cell::instant(end)?,Cell::Integer(i64::from(seconds))]).await?;
+        }
+
+        let record = TimeRecord {
+            id,
+            kind: before.kind,
+            started_at: start,
+            ended_at: Some(end),
+            run_id: before.run_id,
+            note: body.note.clone(),
+            revision: before.revision + 1,
+            reserved_legacy: false,
+        };
+
+        family_timer_audit(
+            family,
+            actor,
+            body.request_id,
+            Some(workspace),
+            Some(task),
+            (before.kind == TimeRecordKind::Manual).then_some(id),
+            "time.correct",
+            record_audit(&before),
+            submitted_range_audit(&record, body.started_at, body.ended_at),
+            body.reason.trim(),
+        )
+        .await?;
+        let output = TimerRecordOutput {
+            server_now: at,
+            record,
+        };
+        let value = timer_value(&output)?;
+        family_timer_hint(family, workspace, task, actor).await?;
+        family_timer_receipt(
+            family,
+            actor,
+            body.request_id,
+            &digest,
+            before.run_id,
+            &value,
+        )
+        .await?;
+        Ok(Ok(output))
+    }.await;
+    finish_timer(tx, result).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_persist_estimate(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    request: Uuid,
+    before: TaskEstimate,
+    minutes: Option<i32>,
+    reason: &str,
+) -> Result<TaskEstimate, sqlx::Error> {
+    let value = minutes.map(|v| v.to_string());
+    tx.execute("UPDATE tasks SET estimate=?3,estimate_unit=CASE WHEN ?3 IS NULL THEN NULL ELSE 'minutes' END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::optional_text(value.as_deref())]).await?;
+
+    let output = family_estimate(tx, workspace, task).await?;
+    family_timer_audit(
+        tx,
+        actor,
+        request,
+        Some(workspace),
+        Some(task),
+        None,
+        "task.estimate.minutes",
+        timer_value(&before)?,
+        timer_value(&output)?,
+        reason,
+    )
+    .await?;
+    family_task_change(
+        tx,
+        TaskChangeRecord {
+            workspace_id: workspace,
+            actor_user_id: actor,
+            verb: "task.updated",
+            target_type: "task",
+            target_id: task,
+            payload: json!({"taskId":task,"estimate":output.value,"estimateUnit":output.unit}),
+            client_ip: None,
+        },
+    )
+    .await?;
+    Ok(output)
+}
+async fn family_timer_hint(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+) -> Result<(), sqlx::Error> {
+    family_task_change(
+        tx,
+        TaskChangeRecord {
+            workspace_id: workspace,
+            actor_user_id: actor,
+            verb: "task.timer.changed",
+            target_type: "task",
+            target_id: task,
+            payload: json!({"taskId":task,"hint":"time"}),
+            client_ip: None,
+        },
+    )
+    .await
+}
+
+async fn family_timer_records(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+) -> Result<Vec<TimeRecord>, sqlx::Error> {
+    tx.require_tenant(workspace)?;
+    let rows=tx.query("SELECT s.id,'segment',s.started_at,s.ended_at,s.run_id,COALESCE(e.note,r.note),0 FROM task_timer_segments s JOIN task_timer_runs r ON r.id=s.run_id AND r.user_id=s.user_id LEFT JOIN time_entries e ON e.workspace_id=s.workspace_id AND e.id=s.time_entry_id WHERE s.workspace_id=?1 AND s.task_id=?2 AND s.user_id=?3 UNION ALL SELECT e.id,'manual',e.started_at,e.ended_at,NULL,e.note,EXISTS(SELECT 1 FROM task_timer_legacy_open l WHERE l.time_entry_id=e.id AND l.user_id=?3) FROM time_entries e WHERE e.workspace_id=?1 AND e.task_id=?2 AND e.user_id=?3 AND NOT EXISTS(SELECT 1 FROM task_timer_segments s WHERE s.time_entry_id=e.id)",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor)]).await?;
+
+    let mut records = rows
+        .iter()
+        .map(|r| {
+            record((
+                r.cell(0)?.id()?,
+                r.cell(1)?.string()?,
+                r.cell(2)?.datetime()?,
+                r.cell(3)?.optional(Cell::datetime)?,
+                r.cell(4)?.optional(Cell::id)?,
+                r.cell(5)?.optional(Cell::string)?,
+                0,
+                r.cell(6)?.boolean()?,
+            ))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let audits = tx
+        .query(
+            "SELECT id,verb,after_value FROM task_timer_audit WHERE user_id=?1 ORDER BY id",
+            &[Cell::uuid(actor)],
+        )
+        .await?;
+    let mut notes = std::collections::HashMap::new();
+    let mut corrections = std::collections::HashMap::<(Uuid, String), (i64, Uuid, Value)>::new();
+    for row in audits {
+        let value = row.cell(2)?.value()?;
+        let Some(id) = value
+            .get("recordId")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        if row.cell(1)?.string()? == "time.correct" {
+            let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+                continue;
+            };
+            let revision = value
+                .get("revision")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| sqlx::Error::Protocol("invalid correction revision".into()))?;
+            let audit = row.cell(0)?.id()?;
+            let entry =
+                corrections
+                    .entry((id, kind.into()))
+                    .or_insert((revision, audit, value.clone()));
+            if (revision, audit) > (entry.0, entry.1) {
+                *entry = (revision, audit, value);
+            }
+        } else {
+            notes.insert(id, value);
+        }
+    }
+    for record in &mut records {
+        if record.kind == TimeRecordKind::Segment {
+            if let Some(value) = notes.get(&record.id) {
+                record.note =
+                    decode_timer_result(value.get("note").cloned().unwrap_or(Value::Null))?;
+            }
+        }
+        if let Some((revision, _, value)) =
+            corrections.get(&(record.id, kind_text(record.kind).into()))
+        {
+            record.started_at = decode_timer_result(
+                value
+                    .get("startedAt")
+                    .cloned()
+                    .ok_or_else(|| sqlx::Error::Protocol("missing correction start".into()))?,
+            )?;
+            record.ended_at = decode_timer_result(
+                value
+                    .get("endedAt")
+                    .cloned()
+                    .ok_or_else(|| sqlx::Error::Protocol("missing correction end".into()))?,
+            )?;
+            record.note = decode_timer_result(value.get("note").cloned().unwrap_or(Value::Null))?;
+            record.revision = *revision;
+        }
+    }
+    Ok(records)
+}
+
+pub(crate) async fn apply_self_corrections_family(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    rows: &mut [crate::db::task_ops::TimeEntryRow],
+) -> Result<(), sqlx::Error> {
+    let records = family_timer_records(tx, workspace, task, actor).await?;
+    let projections=tx.query("SELECT time_entry_id,id FROM task_timer_segments WHERE workspace_id=?1 AND task_id=?2 AND user_id=?3 AND time_entry_id IS NOT NULL",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor)]).await?.iter().map(|r|Ok((r.cell(0)?.id()?,r.cell(1)?.id()?))).collect::<Result<std::collections::HashMap<_,_>,sqlx::Error>>()?;
+
+    for row in rows {
+        if row.workspace_id != workspace || row.task_id != task || row.user_id != actor {
+            continue;
+        }
+        let id = projections.get(&row.id).copied().unwrap_or(row.id);
+        if let Some(record) = records.iter().find(|r| r.id == id && r.revision > 0) {
+            if let Some(end) = record.ended_at {
+                row.started_at = record.started_at;
+                row.ended_at = Some(end);
+                row.note = record.note.clone();
+                row.duration_seconds = Some(
+                    i32::try_from(
+                        (end - record.started_at)
+                            .num_milliseconds()
+                            .div_euclid(1000),
+                    )
+                    .map_err(|_| sqlx::Error::Protocol("corrected duration out of range".into()))?,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn release_legacy(
     pool: &PgPool,
     actor: Uuid,
@@ -1613,4 +2735,287 @@ pub async fn release_legacy(
     receipt(&mut tx, actor, body.request_id, &digest, None, &value).await?;
     tx.commit().await?;
     Ok(Ok(result))
+}
+
+pub async fn release_legacy_backend(
+    backend: &Backend,
+    actor: Uuid,
+    credential: Uuid,
+    body: &LegacyReleaseBody,
+) -> DbResult<LegacyReleaseOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return release_legacy(pool, actor, credential, body).await;
+    }
+    if body.expected_actor_id != actor {
+        return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        family.replace_system_context(true);
+        if !family_timer_self(family, actor, credential).await? {
+            return Ok(Err(TimerDbError::Project(ProjectDbError::Forbidden)));
+        }
+        let digest = hash("legacy-release", None, None, body)?;
+        match family_timer_replay(family, actor, body.request_id, &digest).await? {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(value)) => return Ok(Ok(decode_timer_result(value)?)),
+            Ok(None) => {}
+        }
+        if body.expected_session_id != credential {
+            return Ok(Err(TimerDbError::Conflict("timer_context_changed")));
+        }
+        if family
+            .execute(
+                "DELETE FROM task_timer_legacy_open WHERE user_id=?1 AND time_entry_id=?2",
+                &[Cell::uuid(actor), Cell::uuid(body.time_entry_id)],
+            )
+            .await?
+            != 1
+        {
+            return Ok(Err(TimerDbError::Conflict("timer_legacy_changed")));
+        }
+        let output = LegacyReleaseOutput {
+            server_now: family_clock(family).await?,
+            time_entry_id: body.time_entry_id,
+            released: true,
+        };
+        let value = timer_value(&output)?;
+        family_timer_audit(
+            family,
+            actor,
+            body.request_id,
+            None,
+            None,
+            Some(body.time_entry_id),
+            "legacy.release",
+            json!({"reserved":true}),
+            value.clone(),
+            "explicit_release_original_range_unresolved",
+        )
+        .await?;
+        family_timer_receipt(family, actor, body.request_id, &digest, None, &value).await?;
+        Ok(Ok(output))
+    }
+    .await;
+    finish_timer(tx, result).await
+}
+
+fn timer_value(value: &impl serde::Serialize) -> Result<Value, sqlx::Error> {
+    serde_json::to_value(value).map_err(|e| sqlx::Error::Protocol(e.to_string()))
+}
+fn decode_timer_result<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, sqlx::Error> {
+    serde_json::from_value(value).map_err(|e| sqlx::Error::Protocol(e.to_string()))
+}
+#[derive(Debug, thiserror::Error)]
+#[error("timer operation refused: {0:?}")]
+struct TimerRefusal(TimerDbError);
+async fn finish_timer<T>(tx: DbTx, result: DbResult<T>) -> DbResult<T> {
+    match result {
+        Ok(Ok(value)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|e| sqlx::Error::AnyDriverError(Box::new(e)))?;
+            Ok(Ok(value))
+        }
+        result => {
+            if let Err(cleanup) = tx.rollback().await {
+                let original: Option<Box<dyn std::error::Error + Send + Sync>> = match result {
+                    Err(e) => Some(Box::new(e)),
+                    Ok(Err(e)) => Some(Box::new(TimerRefusal(e))),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                return Err(crate::db::backend::rollback_cleanup_unknown(
+                    original, cleanup,
+                ));
+            }
+            result
+        }
+    }
+}
+
+async fn family_timer_self(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    tx.require_system_context()?;
+    tx.query("SELECT EXISTS(SELECT 1 FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=?1 AND s.id=?2 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)",&[Cell::uuid(actor),Cell::uuid(credential)]).await?[0].cell(0)?.boolean()
+}
+async fn family_unfinished(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+) -> Result<Option<TimerRunOutput>, sqlx::Error> {
+    let rows=tx.query("SELECT r.id,r.workspace_id,r.task_id,r.status,r.version,r.started_at,r.note,min(s.started_at) FILTER(WHERE s.ended_at IS NULL),COALESCE(sum((s.ended_at-s.started_at)/1000) FILTER(WHERE s.ended_at IS NOT NULL),0) FROM task_timer_runs r LEFT JOIN task_timer_segments s ON s.run_id=r.id AND s.user_id=r.user_id WHERE r.user_id=?1 AND r.status<>'stopped' GROUP BY r.id",&[Cell::uuid(actor)]).await?;
+
+    rows.first()
+        .map(|r| {
+            decode_run((
+                r.cell(0)?.id()?,
+                r.cell(1)?.id()?,
+                r.cell(2)?.id()?,
+                r.cell(3)?.string()?,
+                r.cell(4)?.int32()?,
+                r.cell(5)?.datetime()?,
+                r.cell(6)?.optional(Cell::string)?,
+                r.cell(7)?.optional(Cell::datetime)?,
+                r.cell(8)?.integer()?,
+            ))
+        })
+        .transpose()
+}
+async fn family_legacy_open(tx: &mut FamilyTx, actor: Uuid) -> Result<bool, sqlx::Error> {
+    Ok(!tx
+        .query(
+            "SELECT time_entry_id FROM task_timer_legacy_open WHERE user_id=?1 LIMIT 1",
+            &[Cell::uuid(actor)],
+        )
+        .await?
+        .is_empty())
+}
+pub(crate) async fn family_person_has_unfinished(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+) -> Result<bool, sqlx::Error> {
+    Ok(family_unfinished(tx, actor).await?.is_some() || family_legacy_open(tx, actor).await?)
+}
+async fn family_timer_replay(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    request: Uuid,
+    digest: &str,
+) -> DbResult<Option<Value>> {
+    let rows=tx.query("SELECT request_hash,restored_from_archive,run_id,result FROM task_timer_commands WHERE user_id=?1 AND request_id=?2",&[Cell::uuid(actor),Cell::uuid(request)]).await?;
+
+    let Some(row) = rows.first() else {
+        return Ok(Ok(None));
+    };
+    if row.cell(0)?.string()? != digest {
+        return Ok(Err(TimerDbError::Conflict("request_mismatch")));
+    }
+    if row.cell(1)?.optional(Cell::id)?.is_some() {
+        return Ok(Err(TimerDbError::Conflict("timer_retired")));
+    }
+    let run = row.cell(2)?.optional(Cell::id)?;
+    let value = row.cell(3)?.value()?;
+    if let Some(run) = run {
+        if tx
+            .query(
+                "SELECT id FROM task_timer_runs WHERE id=?1 AND user_id=?2",
+                &[Cell::uuid(run), Cell::uuid(actor)],
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(Err(TimerDbError::Conflict("timer_retired")));
+        }
+    } else if value.get("runId").is_some()
+        || value.pointer("/record/runId").is_some_and(|v| !v.is_null())
+    {
+        return Ok(Err(TimerDbError::Conflict("timer_retired")));
+    }
+    Ok(Ok(Some(value)))
+}
+async fn family_timer_receipt(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    request: Uuid,
+    digest: &str,
+    run: Option<Uuid>,
+    value: &Value,
+) -> Result<(), sqlx::Error> {
+    tx.execute("INSERT INTO task_timer_commands(user_id,request_id,request_hash,run_id,result) VALUES(?1,?2,?3,?4,?5)",&[Cell::uuid(actor),Cell::uuid(request),Cell::text(digest),Cell::optional_uuid(run),Cell::json(value)?]).await?;
+
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+async fn family_timer_audit(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    request: Uuid,
+    workspace: Option<Uuid>,
+    task: Option<Uuid>,
+    entry: Option<Uuid>,
+    verb: &str,
+    before: Value,
+    after: Value,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    tx.execute("INSERT INTO task_timer_audit(id,user_id,request_id,workspace_id,task_id,time_entry_id,verb,before_value,after_value,reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(actor),Cell::uuid(request),Cell::optional_uuid(workspace),Cell::optional_uuid(task),Cell::optional_uuid(entry),Cell::text(verb),Cell::json(&before)?,Cell::json(&after)?,Cell::text(reason)]).await?;
+
+    Ok(())
+}
+async fn family_open_segment(
+    tx: &mut FamilyTx,
+    run: &TimerRunOutput,
+    actor: Uuid,
+    at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    tx.execute("INSERT INTO task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at) VALUES(?1,?2,?3,?4,?5,?6)",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(run.id),Cell::uuid(actor),Cell::uuid(run.workspace_id),Cell::uuid(run.task_id),Cell::instant(at)?]).await?;
+
+    Ok(())
+}
+async fn family_close_segment(
+    tx: &mut FamilyTx,
+    run: &TimerRunOutput,
+    actor: Uuid,
+    at: DateTime<Utc>,
+    project: bool,
+) -> Result<(bool, Option<Uuid>), sqlx::Error> {
+    let rows=tx.query("SELECT id,started_at FROM task_timer_segments WHERE run_id=?1 AND user_id=?2 AND ended_at IS NULL",&[Cell::uuid(run.id),Cell::uuid(actor)]).await?;
+    let Some(row) = rows.first() else {
+        return Ok((false, None));
+    };
+    let id = row.cell(0)?.id()?;
+    let start = row.cell(1)?.datetime()?;
+    let end = at.max(start);
+    let seconds = (end - start).num_seconds();
+    let entry = if project && seconds > 0 {
+        let entry = Uuid::now_v7();
+        tx.execute("INSERT INTO time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",&[Cell::uuid(entry),Cell::uuid(run.workspace_id),Cell::uuid(run.task_id),Cell::uuid(actor),Cell::instant(start)?,Cell::instant(end)?,Cell::Integer(seconds),Cell::optional_text(run.note.as_deref())]).await?;
+
+        Some(entry)
+    } else {
+        None
+    };
+    tx.execute(
+        "UPDATE task_timer_segments SET ended_at=?3,time_entry_id=?4 WHERE id=?1 AND user_id=?2",
+        &[
+            Cell::uuid(id),
+            Cell::uuid(actor),
+            Cell::instant(end)?,
+            Cell::optional_uuid(entry),
+        ],
+    )
+    .await?;
+    Ok((at < start, Some(id)))
+}
+async fn family_estimate(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+) -> Result<TaskEstimate, sqlx::Error> {
+    let rows=tx.query("SELECT estimate,estimate_unit,updated_at FROM tasks WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+
+    let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+    Ok(TaskEstimate {
+        value: row.cell(0)?.optional(Cell::string)?,
+        unit: row.cell(1)?.optional(Cell::string)?,
+        updated_at: row.cell(2)?.datetime()?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn receipt_digest_is_lowercase_sha256_hex_of_the_semantic_body() {
+        // sha256sum of `["cleanup",null,null,{}]`: the session id is not part of it.
+        let body = serde_json::json!({"expectedSessionId": "s"});
+        assert_eq!(
+            super::hash("cleanup", None, None, &body).unwrap(),
+            "a38b11f5f3307f8aeec1f2deed2c2ecfe21f3190426e63c8138f8ff9982b6cca"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 # collab-engine
 
-Isolated native Yrs child for FVOCI `COLLAB_STATE_ENCODING_V1` / Yjs 13.6.32
+Isolated native Yrs child for FVOCI `COLLAB_STATE_ENCODING_V1` / Yjs 13.6.33
 updateV1. `fvoci-server` links the parent side and its room actor
 (`src/collab/room.rs`) drives one helper per open room; Yrs runs only in the
 helper binary. The crate opens no WebSockets and touches no database. rlimits
@@ -11,7 +11,7 @@ isolate resource/failure, not the filesystem or network.
 | Item | Value |
 | --- | --- |
 | yrs | FVOCI-owned source patch at `../vendor/yrs-0.28.0`, version `=0.28.0`, feature `small-client` |
-| Yjs (fixtures only) | 13.6.32 |
+| Yjs (fixtures only) | 13.6.33 |
 | Doc | `skip_gc=true`, `OffsetKind::Utf16` |
 | fragment | `prosemirror` |
 | Platforms | Linux x86_64 and aarch64. Other OS refuse closed. |

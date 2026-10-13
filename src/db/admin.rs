@@ -7,6 +7,8 @@
 //! until commit (`require_admin_session`). Reads of cross-tenant tables
 //! switch to the system context only after that check.
 
+use super::backend::{Backend, FamilyTx, OperationTx};
+use super::codec::{Cell, FamilyRow};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -262,6 +264,76 @@ pub async fn list_audit(
     Ok(Some(AuditPage { items, next_cursor }))
 }
 
+pub async fn list_audit_backend(
+    backend: &Backend,
+    actor: Uuid,
+    cursor: Option<AuditCursor>,
+    limit: i64,
+) -> Result<Option<AuditPage>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_audit(pool, actor, cursor, limit).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    if !tx.operation().require_live_instance_admin(actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_system_context()?;
+    let rows = family
+        .query(
+            r#"SELECT id,actor_user_id,workspace_id,verb,target_type,target_id,payload,ip,created_at
+        FROM audit_log
+        WHERE ?1 IS NULL
+        OR (created_at,id)<(?1,?2)
+        ORDER BY created_at DESC,id DESC LIMIT ?3"#,
+            &[
+                cursor
+                    .map(|c| Cell::instant(c.created_at))
+                    .transpose()?
+                    .unwrap_or(Cell::Null),
+                Cell::optional_uuid(cursor.map(|c| c.id)),
+                Cell::Integer(limit + 1),
+            ],
+        )
+        .await?;
+    let more = rows.len() as i64 > limit;
+    let items: Vec<AuditRow> = rows
+        .iter()
+        .take(limit as usize)
+        .map(|r| {
+            Ok(AuditRow {
+                id: r.cell(0)?.id()?,
+                actor_user_id: r.cell(1)?.optional(Cell::id)?,
+                workspace_id: r.cell(2)?.optional(Cell::id)?,
+                verb: r.cell(3)?.string()?,
+                target_type: r.cell(4)?.optional(Cell::string)?,
+                target_id: r.cell(5)?.optional(Cell::id)?,
+                payload: r.cell(6)?.value()?,
+                ip: r.cell(7)?.optional(Cell::string)?,
+                created_at: r.cell(8)?.datetime()?,
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()?;
+    let next_cursor = if more {
+        items.last().map(|r| {
+            encode_audit_cursor(AuditCursor {
+                created_at: r.created_at,
+                id: r.id,
+            })
+        })
+    } else {
+        None
+    };
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(AuditPage { items, next_cursor }))
+}
+
 // ---------------------------------------------------------------- directory
 
 #[derive(Debug, Clone)]
@@ -287,6 +359,45 @@ pub async fn list_users(
     let rows = list_users_in(&mut tx).await?;
     tx.commit().await?;
     Ok(Some(rows))
+}
+
+pub async fn list_users_backend(
+    backend: &Backend,
+    actor: Uuid,
+) -> Result<Option<Vec<AdminUserRow>>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_users(pool, actor).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    if !tx.operation().require_live_instance_admin(actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows=family.query(r#"SELECT id,email,given_name,family_name,is_instance_admin,suspended_at,deleted_at,created_at
+        FROM users
+        WHERE anonymized_at IS NULL
+        ORDER BY created_at,id"#,&[]).await?;
+    let users = rows.iter().map(family_user_row).collect::<Result<_, _>>()?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(users))
+}
+
+fn family_user_row(r: &FamilyRow) -> Result<AdminUserRow, sqlx::Error> {
+    Ok(AdminUserRow {
+        id: r.cell(0)?.id()?,
+        email: r.cell(1)?.string()?,
+        given_name: r.cell(2)?.string()?,
+        family_name: r.cell(3)?.optional(Cell::string)?,
+        instance_admin: r.cell(4)?.boolean()?,
+        suspended_at: r.cell(5)?.optional(Cell::datetime)?,
+        deleted_at: r.cell(6)?.optional(Cell::datetime)?,
+        created_at: r.cell(7)?.datetime()?,
+    })
 }
 
 type UserScan = (
@@ -386,6 +497,51 @@ pub async fn list_workspaces(
     Ok(Some(rows))
 }
 
+pub async fn list_workspaces_backend(
+    backend: &Backend,
+    actor: Uuid,
+) -> Result<Option<Vec<AdminWorkspaceRow>>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_workspaces(pool, actor).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    if !tx.operation().require_live_instance_admin(actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows = family_workspaces(family).await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(rows))
+}
+
+async fn family_workspaces(tx: &mut FamilyTx) -> Result<Vec<AdminWorkspaceRow>, sqlx::Error> {
+    tx.require_system_context()?;
+    tx.query(
+        r#"SELECT id,slug,name,created_at
+        FROM workspaces
+        WHERE deleted_at IS NULL
+        ORDER BY created_at,id"#,
+        &[],
+    )
+    .await?
+    .iter()
+    .map(|r| {
+        Ok(AdminWorkspaceRow {
+            id: r.cell(0)?.id()?,
+            slug: r.cell(1)?.string()?,
+            name: r.cell(2)?.string()?,
+            created_at: r.cell(3)?.datetime()?,
+        })
+    })
+    .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstanceDirectory {
     pub users: i64,
@@ -432,6 +588,53 @@ pub async fn instance_directory(
         documents,
         tasks,
     }))
+}
+
+pub async fn instance_directory_backend(
+    backend: &Backend,
+    actor: Uuid,
+) -> Result<Option<InstanceDirectory>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return instance_directory(pool, actor).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    if !tx.operation().require_live_instance_admin(actor).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_system_context()?;
+    let rows = family
+        .query(
+            r#"SELECT (SELECT count(*)
+        FROM users
+        WHERE anonymized_at IS NULL),(SELECT count(*)
+        FROM workspaces
+        WHERE deleted_at IS NULL),(SELECT count(*)
+        FROM documents d
+        JOIN workspaces w ON w.id=d.workspace_id
+        WHERE w.deleted_at IS NULL
+        AND d.deleted_at IS NULL),(SELECT count(*)
+        FROM tasks t
+        JOIN workspaces w ON w.id=t.workspace_id
+        WHERE w.deleted_at IS NULL)"#,
+            &[],
+        )
+        .await?;
+    let r = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+    let result = InstanceDirectory {
+        users: r.cell(0)?.integer()?,
+        workspaces: r.cell(1)?.integer()?,
+        documents: r.cell(2)?.integer()?,
+        tasks: r.cell(3)?.integer()?,
+    };
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(result))
 }
 
 // ---------------------------------------------------------------- user patch
@@ -503,6 +706,123 @@ pub async fn patch_instance_user(
         _ => tx.rollback().await?,
     }
     Ok(Some(outcome))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn patch_instance_user_backend(
+    backend: &Backend,
+    license: &crate::license::Entitlements,
+    actor: Uuid,
+    session: Uuid,
+    target: Uuid,
+    patch: InstanceUserPatch,
+    ip: Option<&str>,
+) -> Result<Option<PatchUserOutcome>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return patch_instance_user(pool, license, actor, session, target, patch, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx.operation().require_admin_session(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows = family
+        .query(
+            "SELECT is_instance_admin,suspended_at FROM users WHERE id=?1 AND deleted_at IS NULL",
+            &[Cell::uuid(target)],
+        )
+        .await?;
+    let Some(r) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Some(PatchUserOutcome::NotFound));
+    };
+    let is_admin = r.cell(0)?.boolean()?;
+    let suspended_at = r.cell(1)?.optional(Cell::datetime)?;
+    let suspends = patch.suspended == Some(true) && suspended_at.is_none();
+    let restores = patch.suspended == Some(false) && suspended_at.is_some();
+    if is_admin && (patch.instance_admin == Some(false) || suspends) {
+        let rows=family.query("SELECT count(*) FROM users WHERE is_instance_admin=1 AND deleted_at IS NULL AND suspended_at IS NULL",&[]).await?;
+        if rows[0].cell(0)?.integer()? <= 1 {
+            tx.rollback().await?;
+            return Ok(Some(PatchUserOutcome::LastInstanceAdmin));
+        }
+    }
+    if suspends && actor == target {
+        tx.rollback().await?;
+        return Ok(Some(PatchUserOutcome::SelfSuspension));
+    }
+    if patch.instance_admin == Some(true)
+        && !is_admin
+        && tx
+            .operation()
+            .require_new_instance_billable_user(Some(target), license)
+            .await?
+            .is_err()
+    {
+        tx.rollback().await?;
+        return Ok(Some(PatchUserOutcome::SeatLimit));
+    }
+    if let Some(value) = patch.instance_admin.filter(|v| *v != is_admin) {
+        let OperationTx::SqliteFamily(family) = tx.operation() else {
+            unreachable!()
+        };
+        family.execute(r#"UPDATE users SET is_instance_admin=?2,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000
+            WHERE id=?1"#,&[Cell::uuid(target),Cell::Integer(i64::from(value))]).await?;
+        tx.operation()
+            .record_instance_change(InstanceChange {
+                actor_user_id: actor,
+                verb: "admin.instance_admin_set",
+                target: Some(("user", target)),
+                payload: json!({"targetId":target.to_string(),"granted":value}),
+                ip,
+            })
+            .await?;
+    }
+    if suspends || restores {
+        let mut op = tx.operation();
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        family.execute(r#"UPDATE users SET suspended_at=CASE WHEN ?2=1 THEN unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 ELSE NULL END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000
+            WHERE id=?1"#,&[Cell::uuid(target),Cell::Integer(i64::from(suspends))]).await?;
+        if suspends {
+            op.revoke_auth_sessions(target, None).await?;
+            let OperationTx::SqliteFamily(family) = &mut op else {
+                unreachable!()
+            };
+            family
+                .execute(
+                    "DELETE FROM api_tokens WHERE user_id=?1",
+                    &[Cell::uuid(target)],
+                )
+                .await?;
+        }
+        op.record_instance_change(InstanceChange {
+            actor_user_id: actor,
+            verb: "admin.user_suspended_set",
+            target: Some(("user", target)),
+            payload: json!({"targetId":target.to_string(),"suspended":suspends}),
+            ip,
+        })
+        .await?;
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    let rows = family
+        .query(
+            "SELECT suspended_at FROM users WHERE id=?1",
+            &[Cell::uuid(target)],
+        )
+        .await?;
+    let suspended_at = rows[0].cell(0)?.optional(Cell::datetime)?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Some(PatchUserOutcome::Ok { suspended_at }))
 }
 
 async fn patch_locked(
@@ -611,5 +931,202 @@ mod tests {
         );
         assert!(decode_audit_cursor(&extra).is_none());
         assert!(decode_audit_cursor("not base64 !").is_none());
+    }
+}
+
+pub async fn is_live_instance_admin_backend(
+    backend: &Backend,
+    user: Uuid,
+) -> Result<bool, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        // Preserve the route's original transaction: the authority check
+        // takes FOR SHARE, which is forbidden in PG's read-only transactions.
+        let mut tx = pool.begin().await?;
+        let allowed = require_live_instance_admin(&mut tx, user).await?;
+        tx.commit().await?;
+        return Ok(allowed);
+    }
+    let mut tx = backend.begin_read().await?;
+    let allowed = tx.operation().require_live_instance_admin(user).await?;
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(allowed)
+}
+
+impl OperationTx<'_, '_> {
+    pub(crate) async fn require_live_instance_admin(
+        &mut self,
+        user: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => require_live_instance_admin(tx, user).await,
+            Self::SqliteFamily(tx) => {
+                let rows = tx
+                    .query(
+                        r#"SELECT EXISTS(SELECT 1
+                    FROM users
+                    WHERE id=?1
+                    AND is_instance_admin=1
+                    AND deleted_at IS NULL
+                    AND suspended_at IS NULL)"#,
+                        &[Cell::uuid(user)],
+                    )
+                    .await?;
+                rows[0].cell(0)?.boolean()
+            }
+        }
+    }
+    pub(crate) async fn require_admin_session(
+        &mut self,
+        user: Uuid,
+        credential: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        match self {
+            Self::Postgres(tx) => require_admin_session(tx, user, credential).await,
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                // Instance administration uses the same credential union as PG;
+                // PAT visibility retains PG's tenant/system RLS policy. A fresh
+                // instance transaction has neither context and refuses PATs.
+                let tenant = Cell::optional_uuid(tx.tenant());
+                let system = Cell::Integer(i64::from(tx.require_system_context().is_ok()));
+                let rows=tx.query(r#"SELECT EXISTS(SELECT 1
+                    FROM users u
+                    WHERE u.id=?1
+                    AND u.is_instance_admin=1
+                    AND u.deleted_at IS NULL
+                    AND u.suspended_at IS NULL
+                    AND (EXISTS(SELECT 1
+                    FROM sessions s
+                    WHERE s.id=?2
+                    AND s.user_id=u.id
+                    AND s.revoked_at IS NULL
+                    AND s.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000))
+                    OR EXISTS(SELECT 1
+                    FROM api_tokens t
+                    WHERE t.id=?2
+                    AND t.user_id=u.id
+                    AND NOT EXISTS(SELECT 1 FROM sessions prior WHERE prior.id=?2 AND prior.user_id=u.id)
+                    AND (t.workspace_id=?3 OR ?4=1)
+                    AND (t.expires_at IS NULL
+                    OR t.expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000)))))"#,&[Cell::uuid(user),Cell::uuid(credential),tenant,system]).await?;
+                rows[0].cell(0)?.boolean()
+            }
+        }
+    }
+    pub(crate) async fn record_instance_change(
+        &mut self,
+        change: InstanceChange<'_>,
+    ) -> Result<(), sqlx::Error> {
+        if let Self::Postgres(tx) = self {
+            return record_instance_change(tx, change).await;
+        }
+        self.set_system().await?;
+        self.append_event(EventAppend {
+            id: Uuid::now_v7(),
+            workspace_id: None,
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.into(),
+            target_type: change.target.map(|(t, _)| t.into()),
+            target_id: change.target.map(|(_, id)| id),
+            payload: change.payload.clone(),
+        })
+        .await?;
+        self.append_audit(AuditAppend {
+            id: Uuid::now_v7(),
+            workspace_id: None,
+            actor_user_id: Some(change.actor_user_id),
+            verb: change.verb.into(),
+            target_type: change.target.map(|(t, _)| t.into()),
+            target_id: change.target.map(|(_, id)| id),
+            payload: change.payload,
+            ip: change.ip.map(str::to_string),
+        })
+        .await
+    }
+}
+
+// Explicit official-sqld witness; excluded from the registered default cohort.
+#[cfg(all(test, feature = "db-tests"))]
+mod selected_admin_family_sdk {
+    use super::*;
+    use crate::db::backend::RemoteDatabase;
+    use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+    use futures_util::FutureExt;
+    use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+
+    #[tokio::test]
+    async fn selected_admin_legal_settings_sdk_commit_and_denial_readback() {
+        let sqld = PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("explicit official sqld required"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-admin-sdk-{}", Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            NonZeroU32::new(1).unwrap(),
+        )));
+        let result=std::panic::AssertUnwindSafe(async{
+            crate::db::migrate::initialize_family_backend_for_test(&backend).await.unwrap();
+            let(actor,session,other)=(Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7());
+            let mut tx=backend.begin_write().await.unwrap();
+            let OperationTx::SqliteFamily(family)=tx.operation() else{unreachable!()};
+            family.execute("INSERT INTO users(id,email,given_name,is_instance_admin) VALUES(?1,'sdk-admin@example.invalid','Admin',1)",&[Cell::uuid(actor)]).await.unwrap();
+            family.execute("INSERT INTO users(id,email,given_name) VALUES(?1,'sdk-member@example.invalid','Member')",&[Cell::uuid(other)]).await.unwrap();
+            family.execute(r#"INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,'synthetic-sdk-admin',unixepoch()*1000000+3600000000)"#,&[Cell::uuid(session),Cell::uuid(actor)]).await.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+            assert!(list_users_backend(&backend,other).await.unwrap().is_none());
+            assert_eq!(list_users_backend(&backend,actor).await.unwrap().unwrap().len(),2);
+            let changed=patch_instance_user_backend(&backend,&crate::license::absent(),actor,session,other,InstanceUserPatch{instance_admin:None,suspended:Some(true)},None).await.unwrap().unwrap();assert!(matches!(changed,PatchUserOutcome::Ok{..}));
+            let fresh=Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(driver.database().await.unwrap(),NonZeroU32::new(1).unwrap())));
+            assert!(list_users_backend(&fresh,actor).await.unwrap().unwrap().iter().find(|u|u.id==other).unwrap().suspended_at.is_some());
+            let input=crate::db::legal::LegalPublishInput{kind:"terms".into(),title:"Terms".into(),body_markdown:"Terms".into(),body_html:"<p>Terms</p>".into(),required:true,effective_at:crate::db::identity::stored_now()};
+            let doc=crate::db::legal::publish_legal_backend(&backend,actor,session,input,None).await.unwrap().unwrap();
+            assert_eq!(crate::db::legal::latest_legal_backend(&fresh,"terms").await.unwrap().unwrap().id,doc.id);
+            assert_eq!(crate::db::legal::pending_consents_backend(&fresh,actor).await.unwrap().len(),1);
+            assert_eq!(crate::db::legal::record_consents_backend(&backend,actor,&[("terms".into(),1)],None).await.unwrap(),crate::db::legal::RecordConsentsOutcome::Recorded);
+            assert!(crate::db::legal::pending_consents_backend(&fresh,actor).await.unwrap().is_empty());
+            let boot=crate::settings::SettingsBoot::default();
+            let changed=crate::settings::apply_change_backend(&backend,actor,session,None,"FVOCI",crate::settings::SettingsChange::Patch(vec![(crate::settings::SettingsKey::Security,Some(json!({"contact":"mailto:security@example.invalid"})))]),&boot).await.unwrap().unwrap();assert_eq!(changed.snapshot.revision,1);
+            assert_eq!(crate::settings::load_backend(&fresh,&boot,"FVOCI").await.unwrap().revision,1);
+
+            let(source,destination)=(Uuid::now_v7(),Uuid::now_v7());
+            let mut tx=backend.begin_write().await.unwrap();let OperationTx::SqliteFamily(family)=tx.operation()else{unreachable!()};
+            for(id,slug,kind)in[(source,"sdk-personal","personal"),(destination,"sdk-team","team")]{family.execute(r#"INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,?2,'SDK transfer',?3)"#,&[Cell::uuid(id),Cell::text(slug),Cell::text(kind)]).await.unwrap();family.execute(r#"INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'owner')"#,&[Cell::uuid(id),Cell::uuid(actor)]).await.unwrap();}
+            family.execute("UPDATE users SET personal_workspace_id=?2 WHERE id=?1",&[Cell::uuid(actor),Cell::uuid(source)]).await.unwrap();tx.commit_with_cleanup().await.unwrap();
+            let pat=Uuid::now_v7();
+            let mut pat_tx=backend.begin_write().await.unwrap();
+            let OperationTx::SqliteFamily(family)=pat_tx.operation()else{unreachable!()};
+            family.execute("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes,expires_at) VALUES(?1,?2,?3,'synthetic-sdk-pat','SDK PAT','[\"workspace.manage\"]',unixepoch()*1000000+3600000000)",&[Cell::uuid(pat),Cell::uuid(destination),Cell::uuid(actor)]).await.unwrap();
+            pat_tx.commit_with_cleanup().await.unwrap();
+            for (tenant,system,allowed) in [(None,false,false),(Some(destination),false,true),(Some(source),false,false),(None,true,true)] {
+                let mut check=backend.begin_write().await.unwrap();
+                if let Some(tenant)=tenant {check.operation().set_tenant(tenant).await.unwrap();}
+                if system {check.operation().set_system().await.unwrap();}
+                assert_eq!(check.operation().require_admin_session(actor,pat).await.unwrap(),allowed);
+                check.rollback().await.unwrap();
+            }
+            let mut expired=backend.begin_write().await.unwrap();expired.operation().set_system().await.unwrap();
+            let OperationTx::SqliteFamily(family)=expired.operation()else{unreachable!()};
+            family.execute("UPDATE api_tokens SET expires_at=0 WHERE id=?1",&[Cell::uuid(pat)]).await.unwrap();
+            assert!(!expired.operation().require_admin_session(actor,pat).await.unwrap());expired.rollback().await.unwrap();
+            let project=crate::db::projects::create_project_backend(&backend,destination,actor,session,crate::db::projects::CreateProjectInput{key:"SDK",name:"SDK",visibility:"workspace",description:None,icon:None,lead_user_id:None},None).await.unwrap().unwrap();
+            let document=crate::db::personal_input::create_personal_input_backend(&backend,source,actor,session,&crate::api::personal_input_dto::PersonalInputBody{request_id:Uuid::now_v7(),intent:crate::api::personal_input_dto::PersonalInputIntent::Note,title:"SDK personal note".into(),project_id:None,source:None},None,"web").await.unwrap().unwrap();
+            let selection=crate::api::personal_transfer::PersonalTransferSelection{action:crate::api::personal_transfer::PersonalTransferAction::Move,document_id:Uuid::parse_str(&document.document_id).unwrap(),task_id:None,expected_document_version:1,expected_task_version:None,destination_workspace_id:destination,destination_project_id:project.id,destination_status_id:None};
+            let preview=crate::db::personal_transfer::preview_personal_transfer_backend(&backend,source,actor,session,&selection,None).await.unwrap().unwrap();
+            let body=crate::api::personal_transfer::PersonalTransferBody{request_id:Uuid::now_v7(),selection,preview_digest:preview.digest,confirmed:true};
+            let moved=crate::db::personal_transfer::transfer_personal_item_backend(&backend,source,actor,session,&body,None,"web",None,None).await.unwrap().unwrap();
+            assert_eq!(moved.document_id,body.selection.document_id);
+            assert!(crate::db::personal_transfer::transfer_personal_item_backend(&fresh,source,actor,session,&body,None,"web",None,None).await.unwrap().unwrap().replayed);
+            let mut tx=backend.begin_write().await.unwrap();let OperationTx::SqliteFamily(family)=tx.operation()else{unreachable!()};family.execute(r#"UPDATE sessions SET revoked_at=unixepoch()*1000000
+                WHERE id=?1"#,&[Cell::uuid(session)]).await.unwrap();tx.commit_with_cleanup().await.unwrap();
+            assert!(patch_instance_user_backend(&backend,&crate::license::absent(),actor,session,other,InstanceUserPatch{instance_admin:Some(true),suspended:None},None).await.unwrap().is_none());
+            assert!(list_audit_backend(&fresh,actor,None,100).await.unwrap().unwrap().items.iter().any(|row|row.verb=="document.deleted"));
+        }).catch_unwind().await;
+        driver.finish().await.unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

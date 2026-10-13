@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Dev-only generator: pinned Yjs 13.6.32 + public Tiptap extensions write
+ * Dev-only generator: pinned Yjs 13.6.33 + public Tiptap extensions write
  * updateV1 / state-vector / snapshot bytes into ../fixtures.
  * Product code must never import this package or spawn Node.
  */
@@ -21,8 +21,8 @@ import * as Y from "yjs";
 
 const require = createRequire(import.meta.url);
 const yjsVersion = require("yjs/package.json").version;
-if (yjsVersion !== "13.6.32") {
-  throw new Error(`expected yjs 13.6.32, got ${yjsVersion}`);
+if (yjsVersion !== "13.6.33") {
+  throw new Error(`expected yjs 13.6.33, got ${yjsVersion}`);
 }
 
 const FRAGMENT = "prosemirror";
@@ -662,7 +662,7 @@ const pendingBothPm = projectJson(
 );
 
 const expectations = {
-  yjs: "13.6.32",
+  yjs: "13.6.33",
   fragment: FRAGMENT,
   encoding: 1,
   gc: false,

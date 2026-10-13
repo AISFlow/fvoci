@@ -43,7 +43,7 @@ function threePageHwp(): Buffer {
 
 /**
  * The review's HWPX counterexample: the Hancom sample plus four unreferenced
- * 32 MiB `Scripts/*` parts (about 140 KB on disk) that rhwp 0.8.6 would
+ * 32 MiB `Scripts/*` parts (about 140 KB on disk) that rhwp 0.8.7 would
  * inflate eagerly. The viewer's package budget refuses it before rhwp runs.
  */
 const scriptsBombHwpx = Buffer.from(
@@ -58,7 +58,7 @@ const scriptsBombHwpx = Buffer.from(
 
 /**
  * A valid HWPX whose parse is slow on its own (about 18 s in Node for rhwp
- * 0.8.6; about 235 KB on disk, well inside the package budget), so the spec
+ * 0.8.7; about 235 KB on disk, well inside the package budget), so the spec
  * can leave the viewer while the worker is still parsing — no test hook.
  */
 const slowHwpx = Buffer.from(

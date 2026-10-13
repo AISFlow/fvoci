@@ -6,6 +6,12 @@
 //! task lock order: membership advisory lock → credential row → workspace →
 //! project row → task row.
 
+use crate::db::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::Cell;
+use crate::db::tasks::{
+    family_record_task_activity, family_task_change, family_task_ref_ids, family_task_row,
+    family_task_write, finish_task_operation,
+};
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -200,6 +206,82 @@ pub async fn list_time_entries(
     Ok(Ok(TimeEntryList { items, can_create }))
 }
 
+pub async fn list_time_entries_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<TimeEntryList, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_time_entries(pool, workspace, task, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let can_create =
+            match family_time_capability(family, workspace, task, actor, credential).await? {
+                Ok(value) => value,
+                Err(e) => return Ok(Err(e)),
+            };
+
+        let mut items=family.query("SELECT id,task_id,user_id,started_at,ended_at,duration_seconds,note FROM time_entries WHERE workspace_id=?1 AND task_id=?2 ORDER BY started_at DESC,id",&[Cell::uuid(workspace),Cell::uuid(task)]).await?.iter().map(|r|Ok(time_entry_row(workspace,(r.cell(0)?.id()?,r.cell(1)?.id()?,r.cell(2)?.id()?,r.cell(3)?.datetime()?,r.cell(4)?.optional(Cell::datetime)?,r.cell(5)?.optional(Cell::int32)?,r.cell(6)?.optional(Cell::string)?)))).collect::<Result<Vec<_>,sqlx::Error>>()?;
+
+        crate::db::task_timer::apply_self_corrections_family(
+            family, workspace, task, actor, &mut items,
+        )
+        .await?;
+        Ok(Ok(TimeEntryList { items, can_create }))
+    }.await;
+    finish_task_operation(tx, result).await
+}
+
+pub(crate) async fn family_time_capability(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<bool, ProjectDbError>, sqlx::Error> {
+    let mut op = OperationTx::SqliteFamily(&mut *tx);
+    op.set_tenant(workspace).await?;
+    if !op.session_is_live(actor, credential).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let Some((row, deleted)) = family_task_row(tx, workspace, task).await? else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    if deleted {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let Some(permission) = OperationTx::SqliteFamily(&mut *tx)
+        .project_permission_by_id(workspace, actor, row.project_id)
+        .await?
+        .filter(|p| p.at_least(ProjectPermission::View))
+    else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let project = tx
+        .query(
+            "SELECT status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",
+            &[Cell::uuid(workspace), Cell::uuid(row.project_id)],
+        )
+        .await?;
+    Ok(Ok(permission.at_least(ProjectPermission::Edit)
+        && row.archived_at.is_none()
+        && project
+            .first()
+            .map(|r| r.cell(0)?.string())
+            .transpose()?
+            .as_deref()
+            != Some("archived")))
+}
+
 fn time_entry_can_create(task: &ViewableTask) -> bool {
     task.permission.at_least(ProjectPermission::Edit)
         && task.project.status != "archived"
@@ -289,6 +371,63 @@ pub async fn create_time_entry(
     };
     tx.commit().await?;
     Ok(Ok(time_entry_row(workspace_id, row)))
+}
+
+pub async fn create_time_entry_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: CreateTimeEntryInput,
+) -> Result<Result<TimeEntryRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_time_entry(pool, workspace, task, actor, credential, input).await;
+    }
+    let duration = match input.ended_at {
+        None => None,
+        Some(end) => match time_entry_duration_seconds(input.started_at, end) {
+            Some(value) => Some(value),
+            None => return Ok(Err(ProjectDbError::InvalidInput)),
+        },
+    };
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, false).await?
+        {
+            return Ok(Err(e));
+        }
+
+        if input.ended_at.is_none()
+            && crate::db::task_timer::family_person_has_unfinished(family, actor).await?
+        {
+            return Ok(Err(ProjectDbError::OpenTimeEntryExists));
+        }
+        let rows=family.query("INSERT INTO time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(workspace_id,user_id) WHERE ended_at IS NULL DO NOTHING RETURNING id,task_id,user_id,started_at,ended_at,duration_seconds,note",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(actor),Cell::instant(input.started_at)?,input.ended_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),duration.map(|v|Cell::Integer(i64::from(v))).unwrap_or(Cell::Null),Cell::optional_text(input.note.as_deref())]).await?;
+
+        let Some(r) = rows.first() else {
+            return Ok(Err(ProjectDbError::OpenTimeEntryExists));
+        };
+        Ok(Ok(time_entry_row(
+            workspace,
+            (
+                r.cell(0)?.id()?,
+                r.cell(1)?.id()?,
+                r.cell(2)?.id()?,
+                r.cell(3)?.datetime()?,
+                r.cell(4)?.optional(Cell::datetime)?,
+                r.cell(5)?.optional(Cell::int32)?,
+                r.cell(6)?.optional(Cell::string)?,
+            ),
+        )))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +526,89 @@ pub async fn clone_task(
         meta: copy,
         display_id,
     }))
+}
+
+pub async fn clone_task_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    ip: Option<&str>,
+    channel: &str,
+) -> Result<Result<ClonedTask, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return clone_task(pool, workspace, task, actor, credential, ip, channel).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let source =
+            match family_task_write(family, workspace, task, actor, credential, false, false).await? {
+                Ok(row) => row,
+                Err(e) => return Ok(Err(e)),
+            };
+
+        let raw = family
+            .query("SELECT value FROM instance_settings WHERE key='i18n'", &[])
+            .await?
+            .first()
+            .map(|r| r.cell(0)?.value())
+            .transpose()?;
+        let messages = Messages::from_row(raw.as_ref());
+        let title = clone_title(&messages, &source.title);
+
+        let input = CreateTaskInput {
+            title: &title,
+            task_type: &source.task_type,
+            priority: &source.priority,
+            status_id: Some(source.status_id),
+            start_date: source.start_date,
+            due_date: source.due_date,
+            parent_id: source.parent_id,
+            milestone_id: source.milestone_id,
+            recurrence: None,
+        };
+        let id = Uuid::now_v7();
+
+        if let Err(e) = OperationTx::SqliteFamily(&mut *family)
+            .create_origin_task_family(crate::db::tasks::OriginTaskCreate {
+                workspace_id: workspace,
+                project_id: source.project_id,
+                actor_user_id: actor,
+                task_id: id,
+                input: &input,
+                client_ip: ip,
+                channel,
+            })
+            .await?
+        {
+            return Ok(Err(e));
+        }
+
+        family.execute("INSERT INTO task_assignees(workspace_id,task_id,user_id) SELECT workspace_id,?3,user_id FROM task_assignees WHERE workspace_id=?1 AND task_id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(id)]).await?;
+
+        family.execute("INSERT INTO task_labels(workspace_id,task_id,label_id) SELECT workspace_id,?3,label_id FROM task_labels WHERE workspace_id=?1 AND task_id=?2",&[Cell::uuid(workspace),Cell::uuid(task),Cell::uuid(id)]).await?;
+
+        let meta = family_task_row(family, workspace, id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?
+            .0;
+        let key = family
+            .query(
+                "SELECT key FROM projects WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(meta.project_id)],
+            )
+            .await?[0]
+            .cell(0)?
+            .string()?;
+
+        let display_id = format_display_id(&key, meta.number);
+        Ok(Ok(ClonedTask { meta, display_id }))
+    }.await;
+    finish_task_operation(tx, result).await
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +763,94 @@ pub async fn list_task_backlinks(
     Ok(Ok(items))
 }
 
+pub async fn list_task_backlinks_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<TaskBacklink>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_task_backlinks(pool, workspace, task, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) = family_time_capability(family, workspace, task, actor, credential).await? {
+            return Ok(Err(e));
+        }
+
+        let rows=family.query("SELECT 'document',d.id,d.title,d.project_id,d.number,p.key,d.content_json FROM documents d LEFT JOIN projects p ON p.workspace_id=d.workspace_id AND p.id=d.project_id AND p.deleted_at IS NULL WHERE d.workspace_id=?1 AND d.deleted_at IS NULL UNION ALL SELECT 'task',t.id,t.title,t.project_id,t.number,p.key,t.content_json FROM tasks t LEFT JOIN projects p ON p.workspace_id=t.workspace_id AND p.id=t.project_id AND p.deleted_at IS NULL WHERE t.workspace_id=?1 AND t.id<>?2 AND t.deleted_at IS NULL",&[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            if !body_references_task(&row.cell(6)?.value()?, task) {
+                continue;
+            }
+            let kind = row.cell(0)?.string()?;
+            let id = row.cell(1)?.id()?;
+            let project = row.cell(3)?.optional(Cell::id)?;
+
+            let mut op = OperationTx::SqliteFamily(&mut *family);
+            let permission = if let Some(project) = project {
+                op.project_permission_by_id(workspace, actor, project)
+                    .await?
+                    .unwrap_or(ProjectPermission::None)
+            } else {
+                op.document_permission(workspace, actor, id, true).await?
+            };
+            if !permission.at_least(ProjectPermission::View) {
+                continue;
+            }
+
+            let key = row.cell(5)?.optional(Cell::string)?;
+            let display_id = if project.is_none() {
+                Some(format_display_id("WIKI", row.cell(4)?.int32()?))
+            } else {
+                {
+                    let number = row.cell(4)?.int32()?;
+                    key.map(|key| format_display_id(&key, number))
+                }
+            };
+
+            items.push(TaskBacklink {
+                kind: if kind == "document" {
+                    BacklinkSource::Document
+                } else {
+                    BacklinkSource::Task
+                },
+                id,
+                title: row.cell(2)?.string()?,
+                display_id,
+            });
+        }
+        items.sort_by_key(|i| i.id);
+        Ok(Ok(items))
+    }.await;
+    finish_task_operation(tx, result).await
+}
+fn body_references_task(value: &Value, task: Uuid) -> bool {
+    let expected = task.to_string();
+    let is_ref = value.get("attrs").is_some_and(|a| {
+        a.get("entity").and_then(Value::as_str) == Some("task")
+            && match value.get("type").and_then(Value::as_str) {
+                Some("mention") => a.get("id"),
+                Some("embed") => a.get("ref"),
+                _ => None,
+            }
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case(&expected))
+    });
+    is_ref
+        || match value {
+            Value::Array(values) => values.iter().any(|v| body_references_task(v, task)),
+            Value::Object(values) => values.values().any(|v| body_references_task(v, task)),
+            _ => false,
+        }
+}
+
 async fn project_visible(
     tx: &mut Transaction<'_, Postgres>,
     cache: &mut HashMap<Uuid, bool>,
@@ -595,6 +905,32 @@ pub async fn locate_task(
     Ok(None)
 }
 
+pub async fn locate_task_backend(
+    backend: &Backend,
+    actor: Uuid,
+    task: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return locate_task(pool, actor, task).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let DbTx::SqliteFamily(family) = &mut tx else {
+        unreachable!()
+    };
+    let previous = family.replace_system_context(true);
+    let result=family.query("SELECT t.workspace_id FROM tasks t JOIN memberships m ON m.workspace_id=t.workspace_id AND m.user_id=?1 JOIN users u ON u.id=m.user_id JOIN workspaces w ON w.id=m.workspace_id WHERE t.id=?2 AND u.deleted_at IS NULL AND u.suspended_at IS NULL AND w.deleted_at IS NULL ORDER BY t.workspace_id LIMIT 1",&[Cell::uuid(actor),Cell::uuid(task)]).await;
+
+    family.replace_system_context(previous);
+    let result = result.and_then(|rows| rows.first().map(|r| r.cell(0)?.id()).transpose());
+    if let Err(cleanup) = tx.rollback().await {
+        return Err(crate::db::backend::rollback_cleanup_unknown(
+            result.err().map(|e| Box::new(e) as _),
+            cleanup,
+        ));
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Purge
 // ---------------------------------------------------------------------------
@@ -635,6 +971,99 @@ pub async fn purge_task(
             Ok(Err(err))
         }
     }
+}
+
+pub async fn purge_task_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    task: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<Uuid, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return purge_task(pool, workspace, task, actor, credential, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        OperationTx::SqliteFamily(&mut *family)
+            .set_tenant(workspace)
+            .await?;
+        if !OperationTx::SqliteFamily(&mut *family).recheck_session(actor, credential).await? { return Ok(Err(ProjectDbError::Forbidden)); }
+        let Some((row, deleted)) = family_task_row(family, workspace, task).await? else {
+            return Ok(Err(ProjectDbError::NotFound));
+        };
+        if let Err(e) =
+            family_task_write(family, workspace, task, actor, credential, false, deleted).await?
+        {
+            return Ok(Err(e));
+        }
+
+        let ids = family_task_ref_ids(family, workspace, task, true).await?;
+        family
+            .execute(
+                "DELETE FROM attachments WHERE workspace_id=?1 AND task_id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(task)],
+            )
+            .await?;
+        let children = family
+            .query(
+                "SELECT id,type FROM tasks WHERE workspace_id=?1 AND parent_id=?2 ORDER BY id",
+                &[Cell::uuid(workspace), Cell::uuid(task)],
+            )
+            .await?;
+        family.execute("UPDATE tasks SET parent_id=NULL,type=CASE WHEN type='subtask' THEN 'task' ELSE type END,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND parent_id=?2",&[Cell::uuid(workspace),Cell::uuid(task)]).await?;
+
+        for child in children {
+            let id = child.cell(0)?.id()?;
+            let kind = child.cell(1)?.string()?;
+            let next = if kind == "subtask" { "task" } else { &kind };
+            let mut before = ActivitySnapshot::new();
+            before.insert("type".into(), json!(kind));
+            before.insert(
+                "parentId".into(),
+                json!({"id":task.to_string(),"label":Value::Null}
+                ),
+            );
+            let mut after = ActivitySnapshot::new();
+            after.insert("type".into(), json!(next));
+            after.insert("parentId".into(), Value::Null);
+            family_record_task_activity(family, workspace, id, actor, "web", Some(&before), &after)
+                .await?;
+
+            family_task_change(
+                family,
+                TaskChangeRecord {
+                    workspace_id: workspace,
+                    actor_user_id: actor,
+                    verb: "task.updated",
+                    target_type: "task",
+                    target_id: id,
+                    payload: json!({"taskId":id.to_string(),"parentId":Value::Null,"type":next}
+                    ),
+                    client_ip: ip,
+                },
+            )
+            .await?;
+        }
+
+        family
+            .execute(
+                "DELETE FROM tasks WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(task)],
+            )
+            .await?;
+        family_task_change(family,TaskChangeRecord{workspace_id:workspace,actor_user_id:actor,verb:"task.deleted",target_type:"task",target_id:task,payload:json!({"taskId":task.to_string(),"projectId":row.project_id.to_string(),"number":row.number,"assigneeIds":uuid_strings(&ids)}
+    ),client_ip:ip}
+    ).await?;
+        Ok(Ok(row.project_id))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
 }
 
 async fn purge_task_in_tx(
@@ -1047,6 +1476,129 @@ pub async fn list_task_parents(
             .collect(),
         next_cursor,
     }))
+}
+
+pub async fn list_task_parents_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    project: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    query: &TaskParentQuery,
+) -> Result<Result<TaskParentPage, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_task_parents(pool, workspace, project, actor, credential, query).await;
+    }
+    let scope = parent_cursor_scope(workspace, project, query);
+    let after = match query.cursor.as_deref() {
+        None => None,
+        Some(raw) => match decode_parent_cursor(raw, &scope) {
+            Ok(a) => Some(a),
+            Err(()) => return Ok(Err(ProjectDbError::InvalidCursor)),
+        },
+    };
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op = tx.operation();
+        if let Err(e) = crate::db::tasks::family_project_access(
+            &mut op,
+            workspace,
+            project,
+            actor,
+            credential,
+            ProjectPermission::View,
+            false,
+        )
+        .await?
+        {
+            return Ok(Err(e));
+        }
+        let OperationTx::SqliteFamily(family) = op else {
+            unreachable!()
+        };
+
+        let rows = family
+            .query(
+                "SELECT key,status FROM projects WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(project)],
+            )
+            .await?;
+        let key = rows[0].cell(0)?.string()?;
+        if rows[0].cell(1)?.string()? == "archived" {
+            return Ok(Err(ProjectDbError::Archived));
+        }
+
+        let types: &[&str] = match query.child_type.as_str() {
+            "subtask" => &["task", "bug", "story"],
+            "epic" => &[],
+            _ => &["epic"],
+        };
+        let display = parse_display_id(&query.q);
+        if types.is_empty()
+            || display
+                .as_ref()
+                .is_some_and(|d| d.prefix != key.to_uppercase())
+        {
+            return Ok(Ok(TaskParentPage {
+                items: vec![],
+                next_cursor: None,
+            }));
+        }
+        let rows=family.query("SELECT id,title,number,type,updated_at FROM tasks WHERE workspace_id=?1 AND project_id=?2 AND deleted_at IS NULL AND archived_at IS NULL ORDER BY updated_at DESC,id DESC",&[Cell::uuid(workspace),Cell::uuid(project)]).await?;
+
+        let mut found = Vec::new();
+        for row in rows {
+            let id = row.cell(0)?.id()?;
+            let title = row.cell(1)?.string()?;
+            let number = row.cell(2)?.int32()?;
+            let kind = row.cell(3)?.string()?;
+            let at = row.cell(4)?.datetime()?;
+            let at = DateTime::from_timestamp_millis(at.timestamp_millis())
+                .ok_or_else(|| sqlx::Error::Protocol("parent date out of range".into()))?;
+
+            if query.exclude_task_id == Some(id) || !types.contains(&kind.as_str()) {
+                continue;
+            }
+            if let Some(display) = &display {
+                if number != display.number {
+                    continue;
+                }
+            } else if !crate::db::tasks::family_title_contains(&title, &query.q)?
+                || after.is_some_and(|anchor| (at, id) >= anchor)
+            {
+                continue;
+            }
+
+            found.push((
+                TaskParentCandidate {
+                    id,
+                    title,
+                    display_id: format_display_id(&key, number),
+                    task_type: kind,
+                },
+                at,
+            ));
+        }
+        found.sort_by_key(|a| std::cmp::Reverse((a.1, a.0.id)));
+        let more = display.is_none() && found.len() as i64 > query.limit;
+        found.truncate(if display.is_some() {
+            1
+        } else {
+            query.limit as usize
+        });
+        let next_cursor = if more {
+            found
+                .last()
+                .map(|(r, at)| encode_parent_cursor(*at, r.id, &scope))
+        } else {
+            None
+        };
+        Ok(Ok(TaskParentPage {
+            items: found.into_iter().map(|v| v.0).collect(),
+            next_cursor,
+        }))
+    }.await;
+    finish_task_operation(tx, result).await
 }
 
 #[cfg(test)]

@@ -669,6 +669,188 @@ pub async fn apply_change(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_change_backend(
+    backend: &Backend,
+    actor: Uuid,
+    session_id: Uuid,
+    ip: Option<&str>,
+    brand_default: &str,
+    change: SettingsChange,
+    boot: &SettingsBoot,
+) -> Result<Result<SettingsWriteOutcome, SettingsWriteError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return apply_change(pool, actor, session_id, ip, brand_default, change, boot).await;
+    }
+    let license = &*boot.license;
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .require_admin_session(actor, session_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(SettingsWriteError::NotAdmin));
+    }
+    let branding_change = match &change {
+        SettingsChange::Patch(items) => items.iter().any(|(key, _)| *key == SettingsKey::Branding),
+        SettingsChange::BrandingAsset { .. } => true,
+    };
+    if branding_change && !license.has_feature("branding") {
+        tx.rollback().await?;
+        return Ok(Err(SettingsWriteError::EnterpriseLicenseRequired));
+    }
+    tx.operation().set_system().await?;
+    let revision = tx.operation().settings_revision().await?;
+    let current = resolve(
+        tx.operation().settings_rows().await?,
+        revision,
+        brand_default,
+        license,
+    );
+    // A write can be this process's first settings call; without this the
+    // next read would record the post-change values and hide the restart.
+    let _ = boot.values.get_or_init(|| current.values.clone());
+
+    let mut previous_asset = None;
+    let mut extra = Map::new();
+    let patch: Vec<(SettingsKey, Option<Value>)> = match change {
+        SettingsChange::Patch(items) => items
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match (key, value) {
+                    (SettingsKey::Branding, Some(mut v)) => {
+                        v["logo"] = serde_json::to_value(&current.values.branding.logo)
+                            .unwrap_or(Value::Null);
+                        v["favicon"] = serde_json::to_value(&current.values.branding.favicon)
+                            .unwrap_or(Value::Null);
+                        Some(v)
+                    }
+                    (_, v) => v,
+                };
+                (key, value)
+            })
+            .collect(),
+        SettingsChange::BrandingAsset { kind, asset } => {
+            let mut branding = current.values.branding.clone();
+            previous_asset = branding.asset(kind).cloned();
+            if asset.is_none() && previous_asset.is_none() {
+                tx.rollback().await?;
+                return Ok(Err(SettingsWriteError::AssetMissing));
+            }
+            let key_for_audit = asset
+                .as_ref()
+                .or(previous_asset.as_ref())
+                .map(|a| a.key.to_string());
+            if let Some(key) = key_for_audit {
+                extra.insert("assetKey".to_string(), Value::String(key));
+            }
+            branding.set_asset(kind, asset);
+            vec![(
+                SettingsKey::Branding,
+                Some(serde_json::to_value(branding).unwrap_or(Value::Null)),
+            )]
+        }
+    };
+
+    let mut changed = Vec::new();
+    let mut fields = Vec::new();
+    let mut writes: Vec<(SettingsKey, Option<Value>)> = Vec::new();
+    for (key, value) in patch {
+        let row = current.stored.get(key.as_str());
+        let default = SettingsValues::defaults(brand_default).get_json(key);
+        let base = row.cloned().unwrap_or_else(|| default.clone());
+        match value {
+            None => {
+                if row.is_none() {
+                    continue;
+                }
+                diff_paths(&base, &default, key.as_str(), &mut fields);
+                changed.push(key);
+                writes.push((key, None));
+            }
+            Some(value) => {
+                let value = without_env_leaves(key, value, &base, &current.env_applied);
+                let mut paths = Vec::new();
+                diff_paths(&base, &value, key.as_str(), &mut paths);
+                // Without a row, write even a default-equal value: the admin
+                // pins today's default.
+                if row.is_some() && paths.is_empty() {
+                    continue;
+                }
+                fields.extend(paths);
+                changed.push(key);
+                writes.push((key, Some(value)));
+            }
+        }
+    }
+    if changed.is_empty() {
+        tx.rollback().await?;
+        return Ok(Ok(SettingsWriteOutcome {
+            changed,
+            previous_asset: None,
+            snapshot: current,
+        }));
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    for (key, value) in &writes {
+        match value {
+            None => {
+                family
+                    .execute(
+                        "DELETE FROM instance_settings WHERE key=?1",
+                        &[crate::db::codec::Cell::text(key.as_str())],
+                    )
+                    .await?;
+            }
+            Some(value) => {
+                family.execute(r#"INSERT INTO instance_settings(key,value,updated_at) VALUES(?1,?2,unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at"#,&[crate::db::codec::Cell::text(key.as_str()),crate::db::codec::Cell::json(value)?]).await?;
+            }
+        }
+    }
+    family
+        .execute(
+            "UPDATE instance_settings_meta SET revision=revision+1 WHERE id=1",
+            &[],
+        )
+        .await?;
+    let revision = tx.operation().settings_revision().await?;
+    let mut payload = Map::new();
+    payload.insert(
+        "keys".to_string(),
+        json!(changed.iter().map(|k| k.as_str()).collect::<Vec<_>>()),
+    );
+    payload.insert("fields".to_string(), json!(fields));
+    payload.extend(extra);
+    tx.operation()
+        .record_instance_change(InstanceChange {
+            actor_user_id: actor,
+            verb: "instance_settings.updated",
+            target: None,
+            payload: Value::Object(payload),
+            ip,
+        })
+        .await?;
+    let snapshot = resolve(
+        tx.operation().settings_rows().await?,
+        revision,
+        brand_default,
+        license,
+    );
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    Ok(Ok(SettingsWriteOutcome {
+        changed,
+        previous_asset,
+        snapshot,
+    }))
+}
+
 impl OperationTx<'_, '_> {
     async fn settings_rows(&mut self) -> Result<Vec<(String, Value)>, sqlx::Error> {
         match self {

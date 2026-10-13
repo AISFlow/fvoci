@@ -8,7 +8,7 @@ use fvoci_server::db::attachment_extract::{
     FinishExtract, EXTRACT_MAX_ATTEMPTS,
 };
 use fvoci_server::db::{migrate, pool};
-use rand::RngCore;
+use rand::Rng;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;

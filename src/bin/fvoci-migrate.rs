@@ -12,7 +12,7 @@ use fvoci_server::identity::encryption_keys_from_env;
 use fvoci_server::search::index::{rebuild_pool, rebuild_search_index};
 use fvoci_server::search::meili::{ensure_meili_key_file, meili_config_from_env};
 use fvoci_server::secret_maintenance::{audit_secrets, rotate_secrets};
-use fvoci_server::secret_verify::verify_sealed_secrets;
+use fvoci_server::secret_verify::verify_sealed_secrets_backend;
 use uuid::Uuid;
 
 fn main() {
@@ -345,12 +345,34 @@ async fn verify_storage() -> Result<(), Box<dyn std::error::Error>> {
 /// reads the ciphertext columns in the system context, like the server.
 /// Prints counts and failing row ids, never secret values.
 async fn verify_secrets() -> Result<(), Box<dyn std::error::Error>> {
-    let url = app_url("--verify-secrets")?;
+    use fvoci_server::config::DatabaseSettings;
+    use fvoci_server::db::backend::{Backend, RemoteDatabase};
+    let settings = DatabaseSettings::from_env()?;
     let keys = encryption_keys_from_env()?;
-    let pool = fvoci_server::db::pool::connect_app(&url).await?;
-    let report = verify_sealed_secrets(&pool, keys.as_deref()).await;
-    pool.close().await;
-    let report = report?;
+    let backend = match settings {
+        DatabaseSettings::Postgres { app_url } => Backend::Postgres(
+            fvoci_server::db::pool::connect_app(&app_url)
+                .await
+                .map_err(|_| "verify-secrets database connection failed")?,
+        ),
+        DatabaseSettings::Sqlite { path } => Backend::Sqlite(
+            fvoci_server::db::pool::connect_sqlite_app(&path, 1)
+                .await
+                .map_err(|_| "verify-secrets database connection failed")?,
+        ),
+        DatabaseSettings::LibsqlRemote {
+            primary_url,
+            auth_token,
+        } => Backend::LibsqlRemote(
+            RemoteDatabase::connect(primary_url, auth_token, 1)
+                .await
+                .map_err(|_| "verify-secrets database connection failed")?,
+        ),
+    };
+    let report = verify_sealed_secrets_backend(&backend, keys.as_deref()).await;
+    let closed = backend.close().await;
+    let report = report.map_err(|_| "verify-secrets database read failed")?;
+    closed.map_err(|_| "verify-secrets database cleanup failed")?;
     println!("{}", serde_json::to_string(&report)?);
     if !report.is_complete() {
         return Err(format!(

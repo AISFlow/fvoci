@@ -12,7 +12,7 @@ use fvoci_server::auth::AuthService;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -141,41 +141,13 @@ async fn app_state(app_url: &str) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
     let storage_root = std::env::temp_dir().join(format!("fvoci-pat-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&storage_root).expect("storage root");
-    AppState {
-        realtime_mode: fvoci_server::config::RealtimeMode::On,
-        native_engine: None,
-        auth: Arc::new(AuthService {
+    token_state(
+        Arc::new(AuthService {
             db: Db::new(pool),
-            password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
+            password_keys: Keyring::parse(PEPPER, "test").unwrap(),
         }),
-        branding_name: "FVOCI".to_string(),
-        public_origin: "http://localhost".to_string(),
-        cookie_secure: false,
-        rate_limiter: RateLimiter::new(),
-        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
-        upload: fvoci_server::attachments::UploadLimits {
-            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
-            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
-            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
-            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
-                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
-            ),
-        },
-        collab: None,
-        meili: None,
-        search_embedder: None,
-        markdown: Some(
-            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
-                "CARGO_BIN_EXE_fvoci-server"
-            )),
-        ),
-        import_wake: None,
-        import_extractor_available: false,
-        preview_extract: None,
-        quota: Default::default(),
-        streams: fvoci_server::http::state::AppState::fresh_streams(),
-        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
-    }
+        storage_root,
+    )
 }
 
 async fn json_request(
@@ -1294,4 +1266,283 @@ async fn api_docs_are_session_only_and_serve_the_live_export() {
 
     admin.close().await;
     harness.cleanup().await;
+}
+
+fn token_state(auth: Arc<AuthService>, storage_root: std::path::PathBuf) -> AppState {
+    AppState {
+        realtime_mode: fvoci_server::config::RealtimeMode::On,
+        native_engine: None,
+        auth,
+        branding_name: "FVOCI".to_string(),
+        public_origin: "http://localhost".to_string(),
+        cookie_secure: false,
+        rate_limiter: RateLimiter::new(),
+        storage: fvoci_server::attachments::LocalStorage::new(storage_root).into(),
+        upload: fvoci_server::attachments::UploadLimits {
+            part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+            max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+            create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+            part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+            ),
+        },
+        collab: None,
+        meili: None,
+        search_embedder: None,
+        markdown: Some(
+            fvoci_server::documents::markdown_helper::MarkdownHelper::new(env!(
+                "CARGO_BIN_EXE_fvoci-server"
+            )),
+        ),
+        import_wake: None,
+        import_extractor_available: false,
+        preview_extract: None,
+        quota: Default::default(),
+        streams: fvoci_server::http::state::AppState::fresh_streams(),
+        mailer: std::sync::Arc::new(fvoci_server::mail::Mailer::disabled()),
+    }
+}
+
+#[tokio::test]
+async fn sqlite_api_tokens_enforce_current_role_tenant_and_revocation() {
+    use fvoci_server::auth::service::SetupInstanceInput;
+    use fvoci_server::db::backend::Backend;
+    let root = std::env::temp_dir().join(format!("fvoci-pat-family-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("tokens.sqlite");
+    migrate::run_sqlite_migrations(&path).await.unwrap();
+    let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+    let auth = Arc::new(AuthService {
+        db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+        password_keys: Keyring::parse(PEPPER, "test").unwrap(),
+    });
+    let (user, workspace, token) = auth
+        .setup_instance(
+            "supersecret1".into(),
+            SetupInstanceInput {
+                email: "pat@example.com".into(),
+                given_name: "PAT".into(),
+                family_name: None,
+                workspace_slug: "pat-family".into(),
+                workspace_name: "PAT".into(),
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let app = router(token_state(auth.clone(), root.join("storage")), None);
+    let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+    let path_tokens = format!("/api/v1/workspaces/{workspace}/api-tokens");
+    let (status, created) = create_token(
+        app.clone(),
+        &token,
+        workspace,
+        "family-token",
+        &["documents.read"],
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created:?}");
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let secret = created["token"].as_str().unwrap();
+    let stored: (String, String) =
+        sqlx::query_as("SELECT token_hash,scopes FROM api_tokens WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(stored.0, hash_token(secret));
+    assert_ne!(stored.0, secret);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored.1).unwrap(),
+        json!(["documents.read"])
+    );
+    for path in [&path_tokens, "/api/v1/me/api-tokens"] {
+        let (status, list, _, _) =
+            json_request(app.clone(), "GET", path, None, Some(&token), &[], None).await;
+        assert_eq!(status, StatusCode::OK, "{list:?}");
+        assert!(!list.to_string().contains(secret));
+        assert!(list.to_string().contains(&id.to_string()));
+    }
+    let foreign = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'foreign-pat','Foreign','team')",
+    )
+    .bind(foreign.as_bytes().as_slice())
+    .execute(&sqlite)
+    .await
+    .unwrap();
+    let (status, _) = create_token(
+        app.clone(),
+        &token,
+        foreign,
+        "foreign-denied",
+        &["documents.read"],
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = bearer_get(
+        app.clone(),
+        &format!("/api/v1/workspaces/{workspace}"),
+        secret,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let (status, service) = create_token(
+        app.clone(),
+        &token,
+        workspace,
+        "service",
+        &["documents.read"],
+        json!({"service":true,"unlimited":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{service:?}");
+    assert!(service["userId"].is_null());
+    assert!(service["expiresAt"].is_null());
+    let service_id = service["id"].as_str().unwrap();
+    for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+        let (status, _, _, _) = json_request(
+            app.clone(),
+            "DELETE",
+            &format!("{path_tokens}/{service_id}"),
+            None,
+            Some(&token),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/workspaces/{foreign}/api-tokens/{id}"),
+        None,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_tokens")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    // Event failure rolls back token insertion and sequence allocation.
+    sqlx::query("CREATE TRIGGER reject_pat BEFORE INSERT ON events WHEN NEW.verb='api_token.created' BEGIN SELECT RAISE(ABORT,'fixture token failure'); END").execute(&sqlite).await.unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT last_seq FROM event_sequence WHERE id=1")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let (status, _) = create_token(
+        app.clone(),
+        &token,
+        workspace,
+        "rolled-back",
+        &["documents.read"],
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT last_seq FROM event_sequence WHERE id=1")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_tokens")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("DROP TRIGGER reject_pat")
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+        .bind(workspace.as_bytes().as_slice())
+        .bind(user.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let (status, _) = create_token(
+        app.clone(),
+        &token,
+        workspace,
+        "denied",
+        &["documents.read"],
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("{path_tokens}/{id}"),
+        None,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Personal-token revocation stays available after loss of workspace admin.
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/me/api-tokens/{id}"),
+        None,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_tokens")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE verb='api_token.revoked'")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        2
+    );
+    let (status, _) = bearer_get(
+        app.clone(),
+        &format!("/api/v1/workspaces/{workspace}"),
+        secret,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    auth.logout(&token, Some(user), None).await.unwrap();
+    let (status, _, _, _) = json_request(
+        app.clone(),
+        "GET",
+        "/api/v1/me/api-tokens",
+        None,
+        Some(&token),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    drop(app);
+    drop(auth);
+    fresh.close().await;
+    sqlite.close().await;
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -20,8 +20,9 @@ function selected(env: Record<string, string> = {}) {
       process.execPath,
       "--eval",
       `const {default:c}=await import(${JSON.stringify(configPath)});
-       const names=["workspace-wiki-selected-backend.spec.ts","workspace-off-selected-backend.spec.ts","wiki-collab.spec.ts"];
-       console.log(JSON.stringify({names:names.filter(n=>c.testMatch.test(n)&&!(c.testIgnore instanceof RegExp&&c.testIgnore.test(n))),metadata:c.metadata,workers:c.workers,retries:c.retries}));`,
+       const names=["workspace-wiki-selected-backend.spec.ts","workspace-off-selected-backend.spec.ts","v060-sqlite-revision-restore.spec.ts","wiki-collab.spec.ts"];
+       const ignore=[c.testIgnore].flat();
+       console.log(JSON.stringify({names:names.filter(n=>c.testMatch.test(n)&&!ignore.some(p=>p.test(n))),metadata:c.metadata,workers:c.workers,retries:c.retries}));`,
     ],
     { env: { ...clean, ...env }, stdout: "pipe", stderr: "pipe" },
   );
@@ -32,7 +33,7 @@ function selected(env: Record<string, string> = {}) {
   };
 }
 
-test("pending discovery keeps pending specs; both allocated normal flows belong to the mandatory companion", () => {
+test("pending discovery keeps pending specs; both allocated normal flows and the dedicated restore spec are excluded", () => {
   const result = selected({ FVOCI_E2E_PENDING: "1" });
   expect(result.code).toBe(0);
   expect(JSON.parse(result.output)).toEqual({

@@ -272,6 +272,77 @@ pub async fn create_api_token(
     }))
 }
 
+pub async fn create_api_token_backend(
+    backend: &super::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    input: CreateApiTokenInput<'_>,
+    ip: Option<&str>,
+) -> Result<Result<ApiTokenCreated, ApiTokenDbError>, sqlx::Error> {
+    use super::backend::{Backend, OperationTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return create_api_token(pool, workspace_id, actor_user_id, credential_id, input, ip).await;
+    }
+    let name = match normalize_name(input.name) {
+        Ok(v) => v,
+        Err(e) => return Ok(Err(e)),
+    };
+    if input.scopes.is_empty() {
+        return Ok(Err(ApiTokenDbError::InvalidInput));
+    }
+    let scopes: Vec<String> = input.scopes.iter().map(|s| s.as_str().into()).collect();
+    let mut tx = backend.begin_write().await?;
+    if !family_token_manage(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        credential_id,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::Forbidden));
+    }
+    let token = new_token();
+    let id = Uuid::now_v7();
+    let expires_at =
+        (!input.unlimited).then(|| crate::db::identity::stored_now() + API_TOKEN_DEFAULT_TTL);
+    let user_id = (!input.service).then_some(actor_user_id);
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family token create")
+    };
+    family.require_writer()?;
+    family.require_tenant(workspace_id)?;
+    family.execute("INSERT INTO api_tokens (id,workspace_id,user_id,token_hash,name,scopes,expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",&[Cell::uuid(id),Cell::uuid(workspace_id),Cell::optional_uuid(user_id),Cell::text(&token.hash),Cell::text(&name),Cell::json(&json!(scopes))?,expires_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null)]).await?;
+    let rows=family.query("SELECT id,workspace_id,user_id,name,scopes,expires_at,created_at FROM api_tokens WHERE workspace_id=?1 AND id=?2",&[Cell::uuid(workspace_id),Cell::uuid(id)]).await?;
+    let record = match family_token_record(rows.first().ok_or(sqlx::Error::RowNotFound)?)? {
+        Ok(r) => r,
+        Err(e) => {
+            tx.rollback().await?;
+            return Ok(Err(e));
+        }
+    };
+    family_token_record_change(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        id,
+        "api_token.created",
+        json!({"name":name,"scopes":scopes,"service":input.service,"unlimited":input.unlimited}),
+        ip,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Ok(ApiTokenCreated {
+        record,
+        token: token.token,
+    }))
+}
+
 pub async fn list_api_tokens(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -308,6 +379,47 @@ pub async fn list_api_tokens(
         }
     }
     Ok(Ok(items))
+}
+
+pub async fn list_api_tokens_backend(
+    backend: &super::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Result<Vec<ApiTokenRecord>, ApiTokenDbError>, sqlx::Error> {
+    use super::backend::{Backend, OperationTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return list_api_tokens(pool, workspace_id, actor_user_id, credential_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    if !family_token_manage(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        credential_id,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::Forbidden));
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family token list")
+    };
+    let rows=family.query("SELECT id,workspace_id,user_id,name,scopes,expires_at,created_at FROM api_tokens WHERE workspace_id=?1 ORDER BY created_at DESC,id DESC",&[Cell::uuid(workspace_id)]).await?;
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        match family_token_record(&row)? {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                tx.rollback().await?;
+                return Ok(Err(e));
+            }
+        }
+    }
+    tx.rollback().await?;
+    Ok(Ok(records))
 }
 
 pub async fn revoke_api_token(
@@ -380,6 +492,62 @@ pub async fn revoke_api_token(
     Ok(Ok(()))
 }
 
+pub async fn revoke_api_token_backend(
+    backend: &super::backend::Backend,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    credential_id: Uuid,
+    id: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), ApiTokenDbError>, sqlx::Error> {
+    use super::backend::{Backend, OperationTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return revoke_api_token(pool, workspace_id, actor_user_id, credential_id, id, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !family_token_manage(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        credential_id,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::Forbidden));
+    }
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family token revoke")
+    };
+    family.require_writer()?;
+    let rows = family
+        .query(
+            "DELETE FROM api_tokens WHERE workspace_id=?1 AND id=?2 RETURNING name",
+            &[Cell::uuid(workspace_id), Cell::uuid(id)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::NotFound));
+    };
+    let name = row.cell(0)?.string()?;
+    family_token_record_change(
+        &mut tx.operation(),
+        workspace_id,
+        actor_user_id,
+        id,
+        "api_token.revoked",
+        json!({"name":name}),
+        ip,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
+    Ok(Ok(()))
+}
+
 pub async fn list_user_api_tokens(
     pool: &PgPool,
     user_id: Uuid,
@@ -411,6 +579,42 @@ pub async fn list_user_api_tokens(
         }
     }
     Ok(Ok(items))
+}
+
+pub async fn list_user_api_tokens_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+    credential_id: Uuid,
+) -> Result<Result<Vec<ApiTokenRecord>, ApiTokenDbError>, sqlx::Error> {
+    use super::backend::{Backend, OperationTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return list_user_api_tokens(pool, user_id, credential_id).await;
+    }
+    // /me uses browser sessions; its token collection spans tenant memberships.
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, credential_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::Forbidden));
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family user token list")
+    };
+    family.require_system_context()?;
+    let rows=family.query("SELECT id,workspace_id,user_id,name,scopes,expires_at,created_at FROM api_tokens WHERE user_id=?1 ORDER BY created_at DESC,id DESC",&[Cell::uuid(user_id)]).await?;
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Ok(record) = family_token_record(&row)? {
+            records.push(record);
+        }
+    }
+    tx.rollback().await?;
+    Ok(Ok(records))
 }
 
 pub async fn revoke_user_api_token(
@@ -477,6 +681,62 @@ pub async fn revoke_user_api_token(
     .await?;
     restore_system(&mut tx, &previous).await?;
     tx.commit().await?;
+    Ok(Ok(()))
+}
+
+pub async fn revoke_user_api_token_backend(
+    backend: &super::backend::Backend,
+    user_id: Uuid,
+    credential_id: Uuid,
+    id: Uuid,
+    ip: Option<&str>,
+) -> Result<Result<(), ApiTokenDbError>, sqlx::Error> {
+    use super::backend::{Backend, OperationTx};
+    use super::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return revoke_user_api_token(pool, user_id, credential_id, id, ip).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    if !tx
+        .operation()
+        .auth_session_live(user_id, credential_id)
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::Forbidden));
+    }
+    tx.operation().set_system().await?;
+    let OperationTx::SqliteFamily(family) = tx.operation() else {
+        unreachable!("family user token revoke")
+    };
+    family.require_writer()?;
+    family.require_system_context()?;
+    let rows = family
+        .query(
+            "DELETE FROM api_tokens WHERE id=?1 AND user_id=?2 RETURNING workspace_id,name",
+            &[Cell::uuid(id), Cell::uuid(user_id)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        tx.rollback().await?;
+        return Ok(Err(ApiTokenDbError::NotFound));
+    };
+    let workspace = row.cell(0)?.id()?;
+    let name = row.cell(1)?.string()?;
+    tx.operation().set_tenant(workspace).await?;
+    family_token_record_change(
+        &mut tx.operation(),
+        workspace,
+        user_id,
+        id,
+        "api_token.revoked",
+        json!({"name":name}),
+        ip,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|unknown| sqlx::Error::AnyDriverError(Box::new(unknown)))?;
     Ok(Ok(()))
 }
 
@@ -605,6 +865,45 @@ async fn resolve_api_token_in(
 }
 
 impl super::backend::OperationTx<'_, '_> {
+    /// Reuses the family credential fence (expiry, deletion and user state),
+    /// then checks the admitted hash and current scopes in that same writer.
+    pub(crate) async fn recheck_api_token_scope(
+        &mut self,
+        workspace: Uuid,
+        actor: Uuid,
+        credential: Uuid,
+        hash: &str,
+        required: ApiTokenScope,
+    ) -> Result<bool, sqlx::Error> {
+        use super::codec::Cell;
+        if !self.recheck_session(actor, credential).await? {
+            return Ok(false);
+        }
+        let Self::SqliteFamily(family) = self else {
+            return Err(sqlx::Error::Protocol(
+                "family API token recheck requires family writer".into(),
+            ));
+        };
+        family.require_writer()?;
+        family.require_tenant(workspace)?;
+        let rows = family.query(
+            "SELECT scopes FROM api_tokens WHERE id=?1 AND user_id=?2 AND workspace_id=?3 AND token_hash=?4",
+            &[Cell::uuid(credential),Cell::uuid(actor),Cell::uuid(workspace),Cell::text(hash)],
+        ).await?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let scopes: Vec<String> = serde_json::from_value(row.cell(0)?.value()?)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let scopes: Vec<_> = scopes
+            .iter()
+            .filter_map(|scope| parse_api_token_scope(scope))
+            .collect();
+        Ok(crate::auth::scopes::grants_api_token_scope(
+            &scopes, required,
+        ))
+    }
+
     async fn api_token_identity(
         &mut self,
         hash: &str,
@@ -655,4 +954,69 @@ impl super::backend::OperationTx<'_, '_> {
         }
         Ok(())
     }
+}
+
+async fn family_token_manage(
+    op: &mut super::backend::OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<bool, sqlx::Error> {
+    op.set_tenant(workspace).await?;
+    if !op.session_is_live(actor, credential).await? || !op.workspace_is_live(workspace).await? {
+        return Ok(false);
+    }
+    Ok(op
+        .membership_role(workspace, actor, false)
+        .await?
+        .is_some_and(|role| role.at_least(WorkspaceRole::Admin)))
+}
+
+fn family_token_record(
+    row: &super::codec::FamilyRow,
+) -> Result<Result<ApiTokenRecord, ApiTokenDbError>, sqlx::Error> {
+    use super::codec::Cell;
+    let scopes = serde_json::from_value(row.cell(4)?.value()?)
+        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    Ok(map_row((
+        row.cell(0)?.id()?,
+        row.cell(1)?.id()?,
+        row.cell(2)?.optional(Cell::id)?,
+        row.cell(3)?.string()?,
+        scopes,
+        row.cell(5)?.optional(Cell::datetime)?,
+        row.cell(6)?.datetime()?,
+    )))
+}
+
+async fn family_token_record_change(
+    op: &mut super::backend::OperationTx<'_, '_>,
+    workspace: Uuid,
+    actor: Uuid,
+    id: Uuid,
+    verb: &str,
+    payload: serde_json::Value,
+    ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    op.append_event(EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some("api_token".into()),
+        target_id: Some(id),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some("api_token".into()),
+        target_id: Some(id),
+        payload,
+        ip: ip.map(str::to_owned),
+    })
+    .await
 }

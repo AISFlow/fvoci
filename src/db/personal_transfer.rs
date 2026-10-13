@@ -1,5 +1,7 @@
 //! One scoped transaction transfers ordinary identities; unsupported graph
 //! models fail before effects until the owned native/file adapter is connected.
+use super::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use super::codec::Cell;
 use crate::api::personal_transfer::{
     PersonalTransferAction, PersonalTransferBlocker as Blocker, PersonalTransferBody,
     PersonalTransferConflict, PersonalTransferDisposition, PersonalTransferItem,
@@ -1573,39 +1575,8 @@ async fn move_native_history(
             Ok(Some(inventory)) => {
                 // The kind of the reference the closure actually rejects, so an
                 // outside retained file refuses as a file, not a reference.
-                let rejected = std::cell::Cell::new(None);
-                let closed = |kind, id| {
-                    let present = match kind {
-                        collab_engine::archive_history::ReferenceKind::Document => {
-                            id == selection.document_id
-                        }
-                        collab_engine::archive_history::ReferenceKind::Task => {
-                            Some(id) == selection.task_id
-                        }
-                        // Only the exact locked files that move with the pair.
-                        collab_engine::archive_history::ReferenceKind::Attachment => {
-                            moved_files.contains(&id)
-                        }
-                        _ => false,
-                    };
-                    if !present {
-                        rejected.set(Some(kind));
-                    }
-                    present
-                };
-                if let Some(blocker) = inventory.closure_blocker(closed) {
-                    let file = blocker == RetainedHistoryBlocker::OutsideClosure
-                        && rejected.get()
-                            == Some(collab_engine::archive_history::ReferenceKind::Attachment);
-                    let (typed, reason) = match blocker {
-                        RetainedHistoryBlocker::Incomplete
-                        | RetainedHistoryBlocker::Unavailable => {
-                            (Blocker::NativeHistory, blocker.reason())
-                        }
-                        _ if file => (Blocker::File, "retained file outside the moved pair"),
-                        _ => (Blocker::OutgoingReference, blocker.reason()),
-                    };
-                    return Ok(Err(PersonalTransferDbError::Incomplete(typed, reason)));
+                if let Some(error) = inventory_closure_refusal(&inventory, selection, moved_files) {
+                    return Ok(Err(error));
                 }
                 found.push(inventory);
             }
@@ -1927,6 +1898,54 @@ pub async fn preview_personal_transfer(
     Ok(Ok(preview))
 }
 
+pub async fn preview_personal_transfer_backend(
+    backend: &Backend,
+    source: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    selection: &PersonalTransferSelection,
+    engine: Option<&TransferBodyEngine>,
+) -> TransferResult<PersonalTransferPreview> {
+    if let Backend::Postgres(pool) = backend {
+        return preview_personal_transfer(pool, source, actor, session, selection, engine).await;
+    }
+    if !valid_selection(source, selection) {
+        return Ok(Err(PersonalTransferDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let family = family_transfer_tx(&mut tx)?;
+        if let Err(error) = family_transfer_writer(family, source, actor, session).await? {
+            return Ok(Err(error));
+        }
+        family.scope_transfer_pair(source, selection.destination_workspace_id)?;
+        let graph = match family_source_graph(family, source, actor, selection, engine).await? {
+            Ok(graph) => graph,
+            Err(error) => return Ok(Err(error)),
+        };
+        let target = match family_destination(family, actor, selection).await? {
+            Ok(target) => target,
+            Err(error) => return Ok(Err(error)),
+        };
+        let dispositions = family_dispositions(family, source, actor, selection, &graph).await?;
+        Ok(Ok(PersonalTransferPreview {
+            digest: preview_digest(source, actor, session, selection, &graph, &target),
+            document_title: graph.document.title,
+            task_title: graph.task.as_ref().map(|t| t.record.title.clone()),
+            workspace_name: target.workspace_name,
+            project_name: target.project_name,
+            project_visibility: target.visibility,
+            source_retained: selection.action == PersonalTransferAction::Copy,
+            attachment_count: u32::try_from(graph.files.len()).unwrap_or(u32::MAX),
+            activity_count: graph.activities.len() as u32,
+            dispositions,
+        }))
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
 async fn replay(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
@@ -2047,6 +2066,177 @@ pub async fn transfer_personal_item(
     .await?;
     tx.commit().await?;
     Ok(Ok(output))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_personal_item_backend(
+    backend: &Backend,
+    source: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &PersonalTransferBody,
+    ip: Option<&str>,
+    channel: &str,
+    engine: Option<&TransferBodyEngine>,
+    files: Option<TransferFiles<'_>>,
+) -> TransferResult<PersonalTransferOutput> {
+    if let Backend::Postgres(pool) = backend {
+        return transfer_personal_item(
+            pool, source, actor, session, body, ip, channel, engine, files,
+        )
+        .await;
+    }
+    if !valid_command(source, body) {
+        return Ok(Err(PersonalTransferDbError::InvalidInput));
+    }
+    let mut tx = backend.begin_write().await?;
+    let admission = family_admit_command(
+        family_transfer_tx(&mut tx)?,
+        source,
+        actor,
+        session,
+        body,
+        engine,
+    )
+    .await;
+    tx.rollback().await?;
+    let graph = match admission? {
+        Err(error) => return Ok(Err(error)),
+        Ok(Admission::Replayed(output)) => return Ok(Ok(output)),
+        Ok(Admission::Ready(graph)) => graph.0,
+    };
+    let mut staged = Vec::new();
+    if !graph.files.is_empty() {
+        let Some(files) = files else {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::File,
+                "file storage unavailable",
+            )));
+        };
+        for file in &graph.files {
+            let destination = if body.selection.action == PersonalTransferAction::Move {
+                file.id
+            } else {
+                Uuid::now_v7()
+            };
+            match super::attachments::stage_attachment_for_transfer_backend(
+                backend,
+                files.storage,
+                source,
+                body.selection.destination_workspace_id,
+                actor,
+                session,
+                file.id,
+                destination,
+            )
+            .await?
+            {
+                Ok(staged_file) => staged.push(StagedFile {
+                    staged: staged_file,
+                    destination,
+                }),
+                Err(super::attachments::StageAttachmentError::Storage) => {
+                    return Err(sqlx::Error::Protocol(
+                        "personal transfer file storage unavailable".into(),
+                    ))
+                }
+                Err(_) => {
+                    return Ok(Err(PersonalTransferDbError::Incomplete(
+                        Blocker::File,
+                        "attachment not ready",
+                    )))
+                }
+            }
+        }
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let family = family_transfer_tx(&mut tx)?;
+        let (graph, target) =
+            match family_admit_command(family, source, actor, session, body, engine).await? {
+                Err(error) => return Ok(Err(error)),
+                Ok(Admission::Replayed(output)) => return Ok(Ok(output)),
+                Ok(Admission::Ready(ready)) => *ready,
+            };
+        let current: Vec<_> = staged
+            .iter()
+            .map(|s| FileIdentity::of(&s.staged.source))
+            .collect();
+        if current != graph.files {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::File,
+                "attachment changed while staging",
+            )));
+        }
+        if !staged.is_empty() {
+            let files =
+                files.ok_or_else(|| sqlx::Error::Protocol("transfer storage missing".into()))?;
+            family.switch_transfer_tenant(body.selection.destination_workspace_id)?;
+            let sizes: Vec<_> = staged
+                .iter()
+                .map(|s| s.staged.original.size_bytes)
+                .collect();
+            if super::attachments::admit_transfer_storage_operation(
+                &mut OperationTx::SqliteFamily(&mut *family),
+                files.quota,
+                body.selection.destination_workspace_id,
+                &sizes,
+            )
+            .await?
+            .is_err()
+            {
+                return Ok(Err(PersonalTransferDbError::Incomplete(
+                    Blocker::File,
+                    "destination storage limit",
+                )));
+            }
+            for id in staged_journal(&staged) {
+                if family
+                    .query(
+                        "SELECT id FROM attachment_object_cleanups WHERE workspace_id=?1 AND id=?2",
+                        &[
+                            Cell::uuid(body.selection.destination_workspace_id),
+                            Cell::uuid(id),
+                        ],
+                    )
+                    .await?
+                    .is_empty()
+                {
+                    return Ok(Err(PersonalTransferDbError::Incomplete(
+                        Blocker::File,
+                        "staged file reclaimed",
+                    )));
+                }
+            }
+        }
+        family_commit_graph(
+            family, source, actor, session, body, &graph, &target, ip, channel, engine, &staged,
+        )
+        .await
+        .map(Ok)
+    }
+    .await;
+    match result {
+        Ok(Ok(output)) => {
+            tx.commit_with_cleanup()
+                .await
+                .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+            Ok(Ok(output))
+        }
+        Ok(Err(error)) => {
+            tx.rollback().await?;
+            Ok(Err(error))
+        }
+        Err(error) => {
+            if let Err(cleanup) = tx.rollback().await {
+                return Err(super::backend::rollback_cleanup_unknown(
+                    Some(Box::new(error)),
+                    cleanup,
+                ));
+            }
+            Err(error)
+        }
+    }
 }
 
 enum Admission {
@@ -2656,6 +2846,2153 @@ async fn commit_graph(
         task_number,
         replayed: false,
     })
+}
+
+// Family operations hold one reserved writer from authorization through the
+// source graph, destination admission and publication. No PG SQL is rewritten.
+
+fn family_transfer_tx(tx: &mut DbTx) -> Result<&mut FamilyTx, sqlx::Error> {
+    match tx {
+        DbTx::SqliteFamily(family) => Ok(family),
+        _ => Err(sqlx::Error::Protocol(
+            "expected family transfer writer".into(),
+        )),
+    }
+}
+
+async fn family_transfer_writer(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    session: Uuid,
+) -> TransferResult<()> {
+    tx.require_writer()?;
+    tx.set_tenant(source)?;
+    tx.require_tenant(source)?;
+    if !OperationTx::SqliteFamily(&mut *tx)
+        .recheck_session(actor, session)
+        .await?
+    {
+        return Ok(Err(PersonalTransferDbError::Forbidden));
+    }
+    let rows = tx
+        .query(
+            r#"SELECT EXISTS(SELECT 1
+        FROM workspaces w
+        JOIN users u ON u.personal_workspace_id=w.id
+        JOIN memberships m ON m.workspace_id=w.id
+        AND m.user_id=u.id
+        WHERE w.id=?1
+        AND w.kind='personal'
+        AND w.deleted_at IS NULL
+        AND u.id=?2
+        AND u.deleted_at IS NULL
+        AND m.role='owner')"#,
+            &[Cell::uuid(source), Cell::uuid(actor)],
+        )
+        .await?;
+    if !rows[0].cell(0)?.boolean()? {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    }
+    Ok(Ok(()))
+}
+
+async fn family_admit_command(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &PersonalTransferBody,
+    engine: Option<&TransferBodyEngine>,
+) -> TransferResult<Admission> {
+    if let Err(error) = family_transfer_writer(tx, source, actor, session).await? {
+        return Ok(Err(error));
+    }
+    tx.scope_transfer_pair(source, body.selection.destination_workspace_id)?;
+    let rows=tx.query(r#"SELECT request_hash,destination_workspace_id,destination_project_id,document_id,document_number,task_id,task_number
+        FROM personal_transfer_commands
+        WHERE workspace_id=?1
+        AND actor_user_id=?2
+        AND request_id=?3"#,&[Cell::uuid(source),Cell::uuid(actor),Cell::uuid(body.request_id)]).await?;
+    if let Some(r) = rows.first() {
+        if r.cell(0)?.string()? != request_hash(source, actor, session, body) {
+            return Ok(Err(PersonalTransferDbError::Conflict(
+                PersonalTransferConflict::CommandChanged,
+            )));
+        }
+        if let Err(error) = family_destination(tx, actor, &body.selection).await? {
+            return Ok(Err(error));
+        }
+        let doc = r.cell(3)?.id()?;
+        let task = r.cell(5)?.optional(Cell::id)?;
+        let exists = tx
+            .query(
+                r#"SELECT EXISTS(SELECT 1
+            FROM documents
+            WHERE workspace_id=?1
+            AND project_id=?2
+            AND id=?3
+            AND deleted_at IS NULL)
+            AND (?4 IS NULL
+            OR EXISTS(SELECT 1
+            FROM tasks
+            WHERE workspace_id=?1
+            AND project_id=?2
+            AND id=?4
+            AND deleted_at IS NULL))"#,
+                &[
+                    Cell::uuid(body.selection.destination_workspace_id),
+                    Cell::uuid(body.selection.destination_project_id),
+                    Cell::uuid(doc),
+                    Cell::optional_uuid(task),
+                ],
+            )
+            .await?;
+        if !exists[0].cell(0)?.boolean()? {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        }
+        return Ok(Ok(Admission::Replayed(PersonalTransferOutput {
+            workspace_id: r.cell(1)?.id()?,
+            project_id: r.cell(2)?.id()?,
+            document_id: doc,
+            document_number: r.cell(4)?.int32()?,
+            task_id: task,
+            task_number: r.cell(6)?.optional(Cell::int32)?,
+            replayed: true,
+        })));
+    }
+    let graph = match family_source_graph(tx, source, actor, &body.selection, engine).await? {
+        Ok(graph) => graph,
+        Err(error) => return Ok(Err(error)),
+    };
+    let target = match family_destination(tx, actor, &body.selection).await? {
+        Ok(target) => target,
+        Err(error) => return Ok(Err(error)),
+    };
+    if preview_digest(source, actor, session, &body.selection, &graph, &target)
+        != body.preview_digest
+    {
+        return Ok(Err(PersonalTransferDbError::Conflict(
+            PersonalTransferConflict::PreviewStale,
+        )));
+    }
+    Ok(Ok(Admission::Ready(Box::new((graph, target)))))
+}
+
+async fn family_destination(
+    tx: &mut FamilyTx,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+) -> TransferResult<Destination> {
+    let ws = selection.destination_workspace_id;
+    let project = selection.destination_project_id;
+    tx.switch_transfer_tenant(ws)?;
+    tx.require_tenant(ws)?;
+    let mut op = OperationTx::SqliteFamily(&mut *tx);
+    if !op.workspace_is_live(ws).await? || op.membership_role(ws, actor, true).await?.is_none() {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    }
+    let kind = tx
+        .query("SELECT kind FROM workspaces WHERE id=?1", &[Cell::uuid(ws)])
+        .await?;
+    if kind[0].cell(0)?.string()? != "team" {
+        return Ok(Err(PersonalTransferDbError::InvalidInput));
+    }
+    if !OperationTx::SqliteFamily(&mut *tx)
+        .project_permission_by_id(ws, actor, project)
+        .await?
+        .is_some_and(|p| p.at_least(ProjectPermission::Edit))
+    {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    }
+    let rows = tx
+        .query(
+            r#"SELECT w.name,w.kind,p.name,p.visibility,p.root_document_id,d.path,d.status,p.status
+        FROM workspaces w
+        JOIN projects p ON p.workspace_id=w.id
+        AND p.id=?2
+        AND p.deleted_at IS NULL
+        JOIN documents d ON d.workspace_id=w.id
+        AND d.project_id=p.id
+        AND d.id=p.root_document_id
+        AND d.deleted_at IS NULL
+        WHERE w.id=?1
+        AND w.deleted_at IS NULL"#,
+            &[Cell::uuid(ws), Cell::uuid(project)],
+        )
+        .await?;
+    let Some(r) = rows.first() else {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    };
+    if r.cell(1)?.string()? != "team" {
+        return Ok(Err(PersonalTransferDbError::InvalidInput));
+    }
+    let root_path = r.cell(5)?.string()?;
+    if r.cell(6)?.string()? == "archived"
+        || r.cell(7)?.string()? == "archived"
+        || depth_of(&root_path) >= MAX_TREE_DEPTH
+    {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    }
+    let mut collection_id = None;
+    if let Some(status) = selection.destination_status_id {
+        let rows = tx
+            .query(
+                "SELECT wip_limit FROM statuses WHERE workspace_id=?1 AND project_id=?2 AND id=?3",
+                &[Cell::uuid(ws), Cell::uuid(project), Cell::uuid(status)],
+            )
+            .await?;
+        let Some(status) = rows.first() else {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        };
+        if status.cell(0)?.optional(Cell::int32)?.is_some() {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::WipReservation,
+                "destination WIP reservation",
+            )));
+        }
+        collection_id = tx
+            .query(
+                r#"SELECT id
+            FROM collections
+            WHERE workspace_id=?1
+            AND project_id=?2
+            AND kind='task'
+            AND deleted_at IS NULL"#,
+                &[Cell::uuid(ws), Cell::uuid(project)],
+            )
+            .await?
+            .first()
+            .map(|r| r.cell(0)?.id())
+            .transpose()?;
+        if collection_id.is_none() {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        }
+    }
+    Ok(Ok(Destination {
+        workspace_name: r.cell(0)?.string()?,
+        project_name: r.cell(2)?.string()?,
+        visibility: r.cell(3)?.string()?,
+        root_id: r.cell(4)?.id()?,
+        root_path,
+        collection_id,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_current_body(
+    tx: &mut FamilyTx,
+    ws: Uuid,
+    kind: CollabKind,
+    id: Uuid,
+    fallback: &Value,
+    engine: Option<&TransferBodyEngine>,
+    budget: Option<&mut ScanBudget>,
+) -> TransferResult<CurrentBody> {
+    tx.switch_transfer_tenant(ws)?;
+    tx.require_tenant(ws)?;
+    tx.require_writer()?;
+    let args = [Cell::uuid(ws), Cell::uuid(id)];
+    let rows = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq
+        FROM document_states
+        WHERE workspace_id=?1
+        AND document_id=?2"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq
+        FROM task_states
+        WHERE workspace_id=?1
+        AND task_id=?2"#
+                }
+            },
+            &args,
+        )
+        .await?;
+    let Some(r) = rows.first() else {
+        let orphan = tx
+            .query(
+                match kind {
+                    CollabKind::Document => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM document_collab_updates
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM document_collab_op_receipts
+            WHERE workspace_id=?1
+            AND document_id=?2)"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM task_collab_updates
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM task_collab_op_receipts
+            WHERE workspace_id=?1
+            AND task_id=?2)"#
+                    }
+                },
+                &args,
+            )
+            .await?[0]
+            .cell(0)?
+            .boolean()?;
+        return if orphan {
+            Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::NativeStateMissing,
+                "native body state missing",
+            )))
+        } else {
+            Ok(Ok(CurrentBody {
+                json: fallback.clone(),
+                cut: json!({"native":false}),
+            }))
+        };
+    };
+    let snapshot = r.cell(0)?.bytes()?;
+    if r.cell(1)?.integer()? != 1 {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::BodyEncoding,
+            "native body encoding",
+        )));
+    }
+    let generation = r.cell(2)?.integer()?;
+    let cutoff = r.cell(3)?.integer()?;
+    let tail_seq = r.cell(4)?.integer()?;
+    let bytes = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT COALESCE(sum(length(payload)),0)
+        FROM document_collab_updates
+        WHERE workspace_id=?1
+        AND document_id=?2
+        AND seq>?3"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT COALESCE(sum(length(payload)),0)
+        FROM task_collab_updates
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND seq>?3"#
+                }
+            },
+            &[args[0].clone(), args[1].clone(), Cell::Integer(cutoff)],
+        )
+        .await?[0]
+        .cell(0)?
+        .integer()?
+        .saturating_add(snapshot.len() as i64);
+    if bytes > MAX_COLLAB_LOAD_BYTES || budget.is_some_and(|b| !b.admit(bytes)) {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::InventoryBudget,
+            "native body budget",
+        )));
+    }
+    let tail = tx
+        .query(
+            match kind {
+                CollabKind::Document => {
+                    r#"SELECT seq,op_id,payload
+        FROM document_collab_updates
+        WHERE workspace_id=?1
+        AND document_id=?2
+        AND seq>?3
+        ORDER BY seq"#
+                }
+                CollabKind::Task => {
+                    r#"SELECT seq,op_id,payload
+        FROM task_collab_updates
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND seq>?3
+        ORDER BY seq"#
+                }
+            },
+            &[args[0].clone(), args[1].clone(), Cell::Integer(cutoff)],
+        )
+        .await?;
+    let updates = tail
+        .iter()
+        .map(|r| Ok((r.cell(0)?.integer()?, r.cell(1)?.id()?, r.cell(2)?.bytes()?)))
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    if updates.last().map_or(cutoff, |u| u.0) != tail_seq
+        || updates
+            .iter()
+            .enumerate()
+            .any(|(i, u)| u.0 != cutoff + i as i64 + 1)
+    {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::NativeStateMissing,
+            "native body cut",
+        )));
+    }
+    let cut = json!({"native":true,"generation":generation,"cutoff":cutoff,"tail":tail_seq,"snapshot":hex_digest(&snapshot),"updates":updates.iter().map(|u|json!({"seq":u.0,"opId":u.1,"payload":hex_digest(&u.2)})).collect::<Vec<_>>()});
+    let engine = engine
+        .ok_or_else(|| sqlx::Error::Protocol("personal transfer body engine unavailable".into()))?
+        .clone();
+    let json = tokio::task::spawn_blocking(move || {
+        crate::collab::revision::project_persisted_offline(
+            engine.engine_bin,
+            engine.limits,
+            snapshot,
+            updates.into_iter().map(|u| u.2).collect(),
+        )
+    })
+    .await
+    .map_err(|_| sqlx::Error::Protocol("personal transfer body projection unavailable".into()))?
+    .map_err(|_| sqlx::Error::Protocol("personal transfer body projection unavailable".into()))?;
+    Ok(Ok(CurrentBody { json, cut }))
+}
+
+async fn family_source_graph(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+    engine: Option<&TransferBodyEngine>,
+) -> TransferResult<SourceGraph> {
+    tx.switch_transfer_tenant(source)?;
+    tx.require_tenant(source)?;
+    tx.require_writer()?;
+    let args = [
+        Cell::uuid(source),
+        Cell::uuid(selection.document_id),
+        Cell::optional_uuid(selection.task_id),
+    ];
+    let docs=tx.query(r#"SELECT title,icon,status,kind,schema_version,version,content_json,text,chosung,created_by,created_at,updated_at,project_id,parent_id
+        FROM documents
+        WHERE workspace_id=?1
+        AND id=?2
+        AND deleted_at IS NULL"#,&args[..2]).await?;
+    let Some(r) = docs.first() else {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    };
+    if r.cell(12)?.optional(Cell::id)?.is_some() || r.cell(13)?.optional(Cell::id)?.is_some() {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::Hierarchy,
+            "source hierarchy adapter",
+        )));
+    }
+    let mut document = DocumentRow {
+        title: r.cell(0)?.string()?,
+        icon: r.cell(1)?.optional(Cell::string)?,
+        status: r.cell(2)?.string()?,
+        kind: r.cell(3)?.string()?,
+        schema_version: r.cell(4)?.int32()?,
+        version: r.cell(5)?.int32()?,
+        content_json: r.cell(6)?.value()?,
+        text: r.cell(7)?.string()?,
+        chosung: r.cell(8)?.string()?,
+        created_by: r.cell(9)?.id()?,
+        created_at: r.cell(10)?.datetime()?,
+        updated_at: r.cell(11)?.datetime()?,
+    };
+    if document.status == "archived" {
+        return Ok(Err(PersonalTransferDbError::NotFound));
+    }
+    if document.version != selection.expected_document_version {
+        return Ok(Err(PersonalTransferDbError::Conflict(
+            PersonalTransferConflict::PreviewStale,
+        )));
+    }
+    let (mut task, mut origin, mut collection_item) = (None, None, None);
+    let mut assignees = Vec::new();
+    let mut activities = Vec::new();
+    if let Some(id) = selection.task_id {
+        let Some((meta, deleted)) = super::tasks::family_task_row(tx, source, id).await? else {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        };
+        if deleted || meta.archived_at.is_some() {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        }
+        let project=tx.query("SELECT status FROM projects WHERE workspace_id=?1 AND id=?2 AND deleted_at IS NULL",&[Cell::uuid(source),Cell::uuid(meta.project_id)]).await?;
+        if project
+            .first()
+            .map(|r| r.cell(0)?.string())
+            .transpose()?
+            .is_none_or(|s| s == "archived")
+            || !OperationTx::SqliteFamily(&mut *tx)
+                .project_permission_by_id(source, actor, meta.project_id)
+                .await?
+                .is_some_and(|p| p.at_least(ProjectPermission::Edit))
+        {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        }
+        if Some(meta.version) != selection.expected_task_version {
+            return Ok(Err(PersonalTransferDbError::Conflict(
+                PersonalTransferConflict::PreviewStale,
+            )));
+        }
+        if meta.parent_id.is_some() || meta.milestone_id.is_some() || meta.task_type == "subtask" {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::Hierarchy,
+                "task hierarchy mapping",
+            )));
+        }
+        let taskargs = [Cell::uuid(source), Cell::uuid(id)];
+        assignees = tx
+            .query(
+                r#"SELECT user_id
+            FROM task_assignees
+            WHERE workspace_id=?1
+            AND task_id=?2
+            ORDER BY user_id"#,
+                &taskargs,
+            )
+            .await?
+            .iter()
+            .map(|r| r.cell(0)?.id())
+            .collect::<Result<_, _>>()?;
+        if assignees.iter().any(|id| *id != actor) {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::Assignee,
+                "assignee mapping",
+            )));
+        }
+        let extra=tx.query("SELECT estimate_unit,content_json,text,chosung FROM tasks WHERE workspace_id=?1 AND id=?2",&taskargs).await?;
+        let e = &extra[0];
+        let record = TaskRowRecord {
+            id: meta.id,
+            project_id: meta.project_id,
+            number: meta.number,
+            title: meta.title,
+            task_type: meta.task_type,
+            priority: meta.priority,
+            status_id: meta.status_id,
+            start_date: meta.start_date,
+            due_date: meta.due_date,
+            due_at: meta.due_at,
+            estimate: meta.estimate,
+            parent_id: meta.parent_id,
+            milestone_id: meta.milestone_id,
+            sort_key: meta.sort_key,
+            schema_version: meta.schema_version,
+            version: meta.version,
+            archived_at: meta.archived_at,
+            created_by: meta.created_by,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+        };
+        task = Some(TaskSource {
+            record,
+            estimate_unit: e.cell(0)?.optional(Cell::string)?,
+            content_json: e.cell(1)?.value()?,
+            text: e.cell(2)?.string()?,
+            chosung: e.cell(3)?.string()?,
+            recurrence: meta.recurrence,
+        });
+        activities = tx
+            .query(
+                r#"SELECT id,actor_user_id,channel,kind,changes,created_at
+            FROM task_activity
+            WHERE workspace_id=?1
+            AND task_id=?2
+            ORDER BY created_at,id LIMIT 1001"#,
+                &taskargs,
+            )
+            .await?
+            .iter()
+            .map(|r| {
+                Ok(Activity {
+                    id: r.cell(0)?.id()?,
+                    actor: r.cell(1)?.optional(Cell::id)?,
+                    channel: r.cell(2)?.string()?,
+                    kind: r.cell(3)?.string()?,
+                    changes: r.cell(4)?.value()?,
+                    created_at: r.cell(5)?.datetime()?,
+                })
+            })
+            .collect::<Result<_, sqlx::Error>>()?;
+        if activities.len() > 1000 {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::InventoryBudget,
+                "activity budget",
+            )));
+        }
+        let rows = tx
+            .query(
+                r#"SELECT i.id,i.version,i.created_at,i.updated_at
+            FROM collection_items i
+            JOIN collections c ON c.workspace_id=i.workspace_id
+            AND c.id=i.collection_id
+            WHERE i.workspace_id=?1
+            AND i.task_id=?2
+            AND c.project_id=?3
+            AND c.kind='task'
+            AND c.deleted_at IS NULL"#,
+                &[
+                    taskargs[0].clone(),
+                    taskargs[1].clone(),
+                    Cell::uuid(meta.project_id),
+                ],
+            )
+            .await?;
+        let Some(r) = rows.first() else {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::DependentGraph,
+                "task collection mapping",
+            )));
+        };
+        collection_item = Some(CollectionItem {
+            id: r.cell(0)?.id()?,
+            version: r.cell(1)?.int32()?,
+            created_at: r.cell(2)?.datetime()?,
+            updated_at: r.cell(3)?.datetime()?,
+        });
+        let rows = tx
+            .query(
+                r#"SELECT request_id,request_hash,anchor,created_at,updated_at
+            FROM task_origins
+            WHERE workspace_id=?1
+            AND task_id=?2
+            AND document_id=?3"#,
+                &[taskargs[0].clone(), taskargs[1].clone(), args[1].clone()],
+            )
+            .await?;
+        let Some(r) = rows.first() else {
+            return Ok(Err(PersonalTransferDbError::NotFound));
+        };
+        origin = Some(Origin {
+            request_id: r.cell(0)?.id()?,
+            request_hash: r.cell(1)?.string()?,
+            anchor: r.cell(2)?.optional(Cell::string)?,
+            created_at: r.cell(3)?.datetime()?,
+            updated_at: r.cell(4)?.datetime()?,
+        });
+    }
+    let checks=tx.query("SELECT
+      EXISTS(SELECT 1 FROM documents WHERE workspace_id=?1 AND parent_id=?2) OR EXISTS(SELECT 1 FROM tasks WHERE workspace_id=?1 AND parent_id=?3),
+      EXISTS(SELECT 1 FROM attachments WHERE workspace_id=?1 AND (document_id=?2 OR task_id=?3)),
+      EXISTS(SELECT 1 FROM comments WHERE workspace_id=?1 AND (document_id=?2 OR task_id=?3))
+      OR EXISTS(SELECT 1 FROM document_tag_assignments WHERE workspace_id=?1 AND document_id=?2)
+      OR EXISTS(SELECT 1 FROM document_members WHERE workspace_id=?1 AND document_id=?2)
+      OR EXISTS(SELECT 1 FROM stars WHERE workspace_id=?1 AND (document_id=?2 OR task_id=?3))
+      OR EXISTS(SELECT 1 FROM share_links WHERE workspace_id=?1 AND document_id=?2)
+      OR EXISTS(SELECT 1 FROM task_labels WHERE workspace_id=?1 AND task_id=?3)
+      OR EXISTS(SELECT 1 FROM github_issue_links WHERE workspace_id=?1 AND task_id=?3)
+      OR EXISTS(SELECT 1 FROM task_dependencies WHERE workspace_id=?1 AND (blocker_id=?3 OR blocked_id=?3))
+      OR EXISTS(SELECT 1 FROM collection_items WHERE workspace_id=?1 AND document_id=?2)
+      OR EXISTS(SELECT 1 FROM collection_values WHERE workspace_id=?1 AND item_id=?4)
+      OR EXISTS(SELECT 1 FROM collection_choices WHERE workspace_id=?1 AND item_id=?4)
+      OR EXISTS(SELECT 1 FROM collection_people WHERE workspace_id=?1 AND item_id=?4)
+      OR EXISTS(SELECT 1 FROM task_origins WHERE workspace_id=?1 AND document_id=?2 AND task_id IS NOT ?3)",
+      &[args[0].clone(),args[1].clone(),args[2].clone(),Cell::optional_uuid(collection_item.as_ref().map(|i|i.id))]).await?;
+    if checks[0].cell(0)?.boolean()? {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::Hierarchy,
+            "native/reference/file/dependent graph adapter",
+        )));
+    }
+    let moving = selection.action == PersonalTransferAction::Move;
+    let zotero = moving
+        && tx
+            .query(
+                r#"SELECT EXISTS(SELECT 1
+        FROM zotero_references
+        WHERE workspace_id=?1
+        AND document_id=?2
+        AND owner_user_id=?4)
+        OR EXISTS(SELECT 1
+        FROM zotero_links
+        WHERE workspace_id=?1
+        AND (document_id=?2
+        OR task_id=?3)
+        AND owner_user_id=?4)"#,
+                &[
+                    args[0].clone(),
+                    args[1].clone(),
+                    args[2].clone(),
+                    Cell::uuid(actor),
+                ],
+            )
+            .await?[0]
+            .cell(0)?
+            .boolean()?;
+    if checks[0].cell(2)?.boolean()? || zotero {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::DependentGraph,
+            "native/reference/file/dependent graph adapter",
+        )));
+    }
+    let files = if checks[0].cell(1)?.boolean()? {
+        match family_movable_files(tx, source, selection).await? {
+            Ok(files) => files,
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        Vec::new()
+    };
+    let native = if moving {
+        let ids: Vec<_> = files.iter().map(|f| f.id).collect();
+        match family_move_native(tx, source, actor, selection, engine, &ids).await? {
+            Ok(native) => native,
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        Vec::new()
+    };
+    let body = match family_current_body(
+        tx,
+        source,
+        CollabKind::Document,
+        selection.document_id,
+        &document.content_json,
+        engine,
+        None,
+    )
+    .await?
+    {
+        Ok(body) => body,
+        Err(error) => return Ok(Err(error)),
+    };
+    let mut task_cut = None;
+    if let (Some(id), Some(task)) = (selection.task_id, task.as_mut()) {
+        let body = match family_current_body(
+            tx,
+            source,
+            CollabKind::Task,
+            id,
+            &task.content_json,
+            engine,
+            None,
+        )
+        .await?
+        {
+            Ok(body) => body,
+            Err(error) => return Ok(Err(error)),
+        };
+        if outside_reference(&body.json, selection) {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::OutgoingReference,
+                "current reference disclosure mapping",
+            )));
+        }
+        let prepared = prepare_derived_body(body.json)
+            .map_err(|_| sqlx::Error::Protocol("personal transfer task body invalid".into()))?;
+        (task.content_json, task.text, task.chosung) = prepared.into_parts();
+        task_cut = Some(body.cut);
+    }
+    if outside_reference(&body.json, selection) {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::OutgoingReference,
+            "current reference disclosure mapping",
+        )));
+    }
+    let prepared = prepare_derived_body(body.json)
+        .map_err(|_| sqlx::Error::Protocol("personal transfer document body invalid".into()))?;
+    (document.content_json, document.text, document.chosung) = prepared.into_parts();
+    if moving {
+        let mut shown = Vec::new();
+        body_files(&document.content_json, &mut shown);
+        if let Some(task) = &task {
+            body_files(&task.content_json, &mut shown);
+        }
+        if shown
+            .iter()
+            .any(|id| !id.is_some_and(|id| files.iter().any(|f| f.id == id)))
+        {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::File,
+                "body file outside the moved pair",
+            )));
+        }
+        if let Err(error) = family_incoming_reference(tx, source, selection, engine).await? {
+            return Ok(Err(error));
+        }
+    } else {
+        let pair_files = files.iter().map(|f| (f.id, f.id)).collect();
+        let pair = PairRefs {
+            document: (selection.document_id, selection.document_id),
+            task: selection.task_id.map(|id| (id, id)),
+        };
+        let (_, blocks) = match copy_body(&document.content_json, &pair_files, &pair) {
+            Ok(body) => body,
+            Err(error) => return Ok(Err(error)),
+        };
+        if let Some(anchor) = origin.as_ref().and_then(|o| o.anchor.as_ref()) {
+            if !block_key(&Value::String(anchor.clone()))
+                .is_some_and(|key| blocks.contains_key(&key))
+            {
+                return Ok(Err(PersonalTransferDbError::Incomplete(
+                    Blocker::BlockIdentity,
+                    "copy origin block mapping",
+                )));
+            }
+        }
+        if let Some(task) = &task {
+            if let Err(error) = copy_body(&task.content_json, &pair_files, &pair) {
+                return Ok(Err(error));
+            }
+        }
+    }
+    let timer = if moving {
+        match family_timer_snapshot(tx, source, actor, selection).await? {
+            Ok(timer) => timer,
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        TimerGraph::default()
+    };
+    Ok(Ok(SourceGraph {
+        document,
+        task,
+        origin,
+        collection_item,
+        files,
+        native,
+        assignees,
+        activities,
+        body_cuts: json!({"document":body.cut,"task":task_cut}),
+        timer,
+    }))
+}
+
+async fn family_movable_files(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    selection: &PersonalTransferSelection,
+) -> TransferResult<Vec<FileIdentity>> {
+    tx.require_tenant(source)?;
+    let rows=tx.query(r#"SELECT id,document_id,task_id,uploader_id,name,mime,declared_mime,storage_key,size_bytes,image,scan_status,json_extract(variants,'$.preview'),created_at,completed_at,status,COALESCE(extract_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        OR COALESCE(preview_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        FROM attachments
+        WHERE workspace_id=?1
+        AND (document_id=?2
+        OR task_id=?3)
+        ORDER BY id"#,&[Cell::uuid(source),Cell::uuid(selection.document_id),Cell::optional_uuid(selection.task_id)]).await?;
+    let mut files = Vec::new();
+    for r in rows {
+        let file = FileIdentity {
+            id: r.cell(0)?.id()?,
+            document_id: r.cell(1)?.optional(Cell::id)?,
+            task_id: r.cell(2)?.optional(Cell::id)?,
+            uploader_id: r.cell(3)?.id()?,
+            name: r.cell(4)?.string()?,
+            mime: r.cell(5)?.string()?,
+            declared_mime: r.cell(6)?.optional(Cell::string)?,
+            storage_key: r.cell(7)?.string()?,
+            size_bytes: r.cell(8)?.optional(Cell::integer)?,
+            image: r.cell(9)?.boolean()?,
+            scan_status: r.cell(10)?.string()?,
+            preview: r.cell(11)?.optional(Cell::value)?,
+            created_at: r.cell(12)?.datetime()?,
+            completed_at: r.cell(13)?.optional(Cell::datetime)?,
+        };
+        if r.cell(14)?.string()? != "stored"
+            || r.cell(15)?.boolean()?
+            || file.scan_status == "infected"
+            || file.size_bytes.is_none()
+        {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::File,
+                "attachment not ready",
+            )));
+        }
+        files.push(file);
+    }
+    Ok(Ok(files))
+}
+
+async fn family_incoming_reference(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    selection: &PersonalTransferSelection,
+    engine: Option<&TransferBodyEngine>,
+) -> TransferResult<()> {
+    tx.require_tenant(source)?;
+    let rows = tx
+        .query(
+            r#"SELECT 'document',id,content_json
+        FROM documents
+        WHERE workspace_id=?1
+        AND deleted_at IS NULL
+        AND id<>?2 UNION ALL SELECT 'task',id,content_json
+        FROM tasks
+        WHERE workspace_id=?1
+        AND deleted_at IS NULL
+        AND id IS NOT ?3
+        ORDER BY 1,2 LIMIT 1001"#,
+            &[
+                Cell::uuid(source),
+                Cell::uuid(selection.document_id),
+                Cell::optional_uuid(selection.task_id),
+            ],
+        )
+        .await?;
+    if rows.len() > 1000 {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::InventoryBudget,
+            "incoming reference inventory budget",
+        )));
+    }
+    let mut budget = ScanBudget::default();
+    for r in rows {
+        let kind = if r.cell(0)?.string()? == "document" {
+            CollabKind::Document
+        } else {
+            CollabKind::Task
+        };
+        let body = match family_current_body(
+            tx,
+            source,
+            kind,
+            r.cell(1)?.id()?,
+            &r.cell(2)?.value()?,
+            engine,
+            Some(&mut budget),
+        )
+        .await?
+        {
+            Ok(body) => body,
+            Err(error) => return Ok(Err(error)),
+        };
+        if extract_internal_refs(&body.json).iter().any(|reference| {
+            let Ok(id) = Uuid::parse_str(&reference.id) else {
+                return false;
+            };
+            match reference.kind {
+                InternalRefKind::Document => id == selection.document_id,
+                InternalRefKind::Task => Some(id) == selection.task_id,
+            }
+        }) {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::IncomingReference,
+                "incoming private reference mapping",
+            )));
+        }
+    }
+    Ok(Ok(()))
+}
+
+async fn family_move_native(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+    engine: Option<&TransferBodyEngine>,
+    moved_files: &[Uuid],
+) -> TransferResult<Vec<NativeHistoryInventory>> {
+    tx.require_tenant(source)?;
+    let mut native_rows = false;
+    for (kind, id) in std::iter::once((CollabKind::Document, selection.document_id))
+        .chain(selection.task_id.map(|id| (CollabKind::Task, id)))
+    {
+        native_rows |= tx
+            .query(
+                match kind {
+                    CollabKind::Document => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM document_states
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM document_collab_updates
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM document_collab_op_receipts
+            WHERE workspace_id=?1
+            AND document_id=?2)
+            OR EXISTS(SELECT 1
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_id=?2
+            AND target_kind=?3)"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT EXISTS(SELECT 1
+            FROM task_states
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM task_collab_updates
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM task_collab_op_receipts
+            WHERE workspace_id=?1
+            AND task_id=?2)
+            OR EXISTS(SELECT 1
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_id=?2
+            AND target_kind=?3)"#
+                    }
+                },
+                &[
+                    Cell::uuid(source),
+                    Cell::uuid(id),
+                    Cell::text(collab_kind_name(kind)),
+                ],
+            )
+            .await?[0]
+            .cell(0)?
+            .boolean()?;
+    }
+    let Some(engine) = engine else {
+        return Ok(if native_rows {
+            Err(PersonalTransferDbError::Incomplete(
+                Blocker::NativeHistory,
+                "native history engine unavailable",
+            ))
+        } else {
+            Ok(Vec::new())
+        });
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut targets = vec![(CollabKind::Document, selection.document_id)];
+    targets.extend(selection.task_id.map(|id| (CollabKind::Task, id)));
+    let mut found = Vec::new();
+    for (kind, id) in targets {
+        tx.switch_transfer_tenant(source)?;
+        tx.require_tenant(source)?;
+        match super::native_history::native_history_inventory_family(
+            tx,
+            source,
+            actor,
+            kind,
+            id,
+            &engine.engine_bin,
+            engine.limits,
+            &cancel,
+        )
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(inventory)) => {
+                // The kind of the reference the closure actually rejects, so an
+                // outside retained file refuses as a file, not a reference.
+                if let Some(error) = inventory_closure_refusal(&inventory, selection, moved_files) {
+                    return Ok(Err(error));
+                }
+                found.push(inventory);
+            }
+            Err(error) => return native_refusal(error).map(Err),
+        }
+    }
+    if let Err(error) = family_admit_native_copy(tx, source, &found).await? {
+        return Ok(Err(error));
+    }
+    Ok(Ok(found))
+}
+
+async fn family_dispositions(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+    graph: &SourceGraph,
+) -> Result<Vec<PersonalTransferDisposition>, sqlx::Error> {
+    use PersonalTransferItem as Item;
+    use PersonalTransferOutcome as Outcome;
+    tx.switch_transfer_tenant(source)?;
+    tx.require_tenant(source)?;
+    let moving = selection.action == PersonalTransferAction::Move;
+    let carried = if moving {
+        Outcome::Moved
+    } else {
+        Outcome::CopiedNewId
+    };
+    let mut out = vec![PersonalTransferDisposition {
+        item: Item::Document,
+        outcome: carried,
+        count: 1,
+    }];
+    if graph.task.is_some() {
+        out.push(PersonalTransferDisposition {
+            item: Item::Task,
+            outcome: carried,
+            count: 1,
+        });
+    }
+    if !graph.activities.is_empty() {
+        out.push(PersonalTransferDisposition {
+            item: Item::Activity,
+            // A copy starts its own activity; the original's stays private.
+            outcome: if moving {
+                Outcome::Moved
+            } else {
+                Outcome::NotIncluded
+            },
+            count: graph.activities.len() as u32,
+        });
+    }
+    if !graph.files.is_empty() {
+        out.push(PersonalTransferDisposition {
+            item: Item::Attachment,
+            outcome: carried,
+            count: u32::try_from(graph.files.len()).unwrap_or(u32::MAX),
+        });
+    }
+    let moved_revisions: usize = graph.native.iter().map(|n| n.revisions.len()).sum();
+    if moving && moved_revisions > 0 {
+        out.push(PersonalTransferDisposition {
+            item: Item::History,
+            outcome: Outcome::Moved,
+            count: u32::try_from(moved_revisions).unwrap_or(u32::MAX),
+        });
+    }
+    // Time: a MOVE carries the task's entries (tenant-shared) and the actor's
+    // own runs; a COPY's task has none and the original keeps them privately.
+    let (entries, runs) = if moving {
+        (
+            graph.timer.entries.len() as i64,
+            graph.timer.runs.len() as i64,
+        )
+    } else if let Some(task) = selection.task_id {
+        tx.switch_transfer_tenant(source)?;
+        tx.require_tenant(source)?;
+        let entries = tx
+            .query(
+                "SELECT count(*) FROM time_entries WHERE workspace_id=?1 AND task_id=?2",
+                &[Cell::uuid(source), Cell::uuid(task)],
+            )
+            .await?[0]
+            .cell(0)?
+            .integer()?;
+        let runs = tx
+            .query(
+                r#"SELECT count(*)
+            FROM task_timer_runs
+            WHERE workspace_id=?1
+            AND task_id=?2
+            AND user_id=?3"#,
+                &[Cell::uuid(source), Cell::uuid(task), Cell::uuid(actor)],
+            )
+            .await?[0]
+            .cell(0)?
+            .integer()?;
+        (entries, runs)
+    } else {
+        (0, 0)
+    };
+    let kept = if moving {
+        Outcome::Moved
+    } else {
+        Outcome::RetainedPrivate
+    };
+    for (item, count) in [(Item::TimeEntry, entries), (Item::Timer, runs)] {
+        if count > 0 {
+            out.push(PersonalTransferDisposition {
+                item,
+                outcome: kept,
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    if !moving {
+        tx.switch_transfer_tenant(source)?;
+        tx.require_tenant(source)?;
+        let revisions = tx
+            .query(
+                r#"SELECT count(*)
+            FROM revisions
+            WHERE workspace_id=?1
+            AND ((target_kind='document'
+            AND target_id=?2)
+            OR (target_kind='task'
+            AND target_id=?3))"#,
+                &[
+                    Cell::uuid(source),
+                    Cell::uuid(selection.document_id),
+                    Cell::optional_uuid(selection.task_id),
+                ],
+            )
+            .await?[0]
+            .cell(0)?
+            .integer()?;
+        if revisions > 0 {
+            out.push(PersonalTransferDisposition {
+                item: Item::History,
+                outcome: Outcome::RetainedPrivate,
+                count: u32::try_from(revisions).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    Ok(out)
+}
+
+async fn family_admit_native_copy(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    native: &[NativeHistoryInventory],
+) -> TransferResult<()> {
+    if native.is_empty() {
+        return Ok(Ok(()));
+    }
+    tx.switch_transfer_tenant(source)?;
+    tx.require_tenant(source)?;
+    let (mut native_bytes, mut graph_bytes, mut rows) = (0i64, 0i64, 0i64);
+    for inventory in native {
+        let r=tx.query(match inventory.kind {CollabKind::Document=>r#"SELECT COALESCE((SELECT length(state)
+            FROM document_states
+            WHERE workspace_id=?1
+            AND document_id=?2),0)+COALESCE((SELECT sum(length(payload))
+            FROM document_collab_updates
+            WHERE workspace_id=?1
+            AND document_id=?2),0)+COALESCE((SELECT sum(length(y_snapshot))
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2),0),COALESCE((SELECT sum(length(CAST(content_json AS BLOB))+length(CAST(text AS BLOB)))
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2),0),(SELECT count(*)
+            FROM document_states
+            WHERE workspace_id=?1
+            AND document_id=?2)+(SELECT count(*)
+            FROM document_collab_updates
+            WHERE workspace_id=?1
+            AND document_id=?2)+(SELECT count(*)
+            FROM document_collab_op_receipts
+            WHERE workspace_id=?1
+            AND document_id=?2)+(SELECT count(*)
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2)"#,CollabKind::Task=>r#"SELECT COALESCE((SELECT length(state)
+            FROM task_states
+            WHERE workspace_id=?1
+            AND task_id=?2),0)+COALESCE((SELECT sum(length(payload))
+            FROM task_collab_updates
+            WHERE workspace_id=?1
+            AND task_id=?2),0)+COALESCE((SELECT sum(length(y_snapshot))
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2),0),COALESCE((SELECT sum(length(CAST(content_json AS BLOB))+length(CAST(text AS BLOB)))
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2),0),(SELECT count(*)
+            FROM task_states
+            WHERE workspace_id=?1
+            AND task_id=?2)+(SELECT count(*)
+            FROM task_collab_updates
+            WHERE workspace_id=?1
+            AND task_id=?2)+(SELECT count(*)
+            FROM task_collab_op_receipts
+            WHERE workspace_id=?1
+            AND task_id=?2)+(SELECT count(*)
+            FROM revisions
+            WHERE workspace_id=?1
+            AND target_kind=?3
+            AND target_id=?2)"#,},&[Cell::uuid(source),Cell::uuid(inventory.target_id),Cell::text(collab_kind_name(inventory.kind))]).await?;
+        let (bytes, graph, count) = (
+            r[0].cell(0)?.integer()?,
+            r[0].cell(1)?.integer()?,
+            r[0].cell(2)?.integer()?,
+        );
+        native_bytes = native_bytes.saturating_add(bytes);
+        graph_bytes = graph_bytes.saturating_add(graph);
+        rows = rows.saturating_add(count);
+    }
+    if !within_native_copy_budget(native_bytes, graph_bytes, rows) {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::InventoryBudget,
+            "native history copy budget",
+        )));
+    }
+    Ok(Ok(()))
+}
+
+async fn family_timer_snapshot(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    selection: &PersonalTransferSelection,
+) -> TransferResult<TimerGraph> {
+    tx.require_tenant(source)?;
+    let Some(task) = selection.task_id else {
+        return Ok(Ok(TimerGraph::default()));
+    };
+    let args = [
+        Cell::uuid(source),
+        Cell::uuid(task),
+        Cell::uuid(actor),
+        Cell::Integer(TIMER_ROW_BUDGET + 1),
+    ];
+    let rows = tx
+        .query(
+            r#"SELECT id,user_id,started_at,ended_at,duration_seconds,note
+        FROM time_entries
+        WHERE workspace_id=?1
+        AND task_id=?2
+        ORDER BY started_at,id LIMIT ?4"#,
+            &args,
+        )
+        .await?;
+    for r in &rows {
+        if r.cell(1)?.id()? != actor {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::DependentGraph,
+                "time entry by another author",
+            )));
+        }
+    }
+    let entries = rows
+        .iter()
+        .map(|r| {
+            Ok(TimeEntryRow {
+                id: r.cell(0)?.id()?,
+                started_at: r.cell(2)?.datetime()?,
+                ended_at: r.cell(3)?.optional(Cell::datetime)?,
+                duration_seconds: r.cell(4)?.optional(Cell::int32)?,
+                note: r.cell(5)?.optional(Cell::string)?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let runs = tx
+        .query(
+            r#"SELECT id,status,version,started_at,stopped_at,note
+        FROM task_timer_runs
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND user_id=?3
+        ORDER BY started_at,id LIMIT ?4"#,
+            &args,
+        )
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(TimerRunRow {
+                id: r.cell(0)?.id()?,
+                status: r.cell(1)?.string()?,
+                version: r.cell(2)?.int32()?,
+                started_at: r.cell(3)?.datetime()?,
+                stopped_at: r.cell(4)?.optional(Cell::datetime)?,
+                note: r.cell(5)?.optional(Cell::string)?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let segments = tx
+        .query(
+            r#"SELECT id,run_id,started_at,ended_at,time_entry_id
+        FROM task_timer_segments
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND user_id=?3
+        ORDER BY started_at,id LIMIT ?4"#,
+            &args,
+        )
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(TimerSegmentRow {
+                id: r.cell(0)?.id()?,
+                run_id: r.cell(1)?.id()?,
+                started_at: r.cell(2)?.datetime()?,
+                ended_at: r.cell(3)?.optional(Cell::datetime)?,
+                time_entry_id: r.cell(4)?.optional(Cell::id)?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let reserved = tx
+        .query(
+            r#"SELECT time_entry_id
+        FROM task_timer_legacy_open
+        WHERE workspace_id=?1
+        AND task_id=?2
+        AND user_id=?3
+        ORDER BY time_entry_id"#,
+            &args[..3],
+        )
+        .await?
+        .iter()
+        .map(|r| r.cell(0)?.id())
+        .collect::<Result<_, _>>()?;
+    if entries.len() as i64 > TIMER_ROW_BUDGET
+        || runs.len() as i64 > TIMER_ROW_BUDGET
+        || segments.len() as i64 > TIMER_ROW_BUDGET
+    {
+        return Ok(Err(PersonalTransferDbError::Incomplete(
+            Blocker::InventoryBudget,
+            "timer inventory budget",
+        )));
+    }
+    if entries.iter().any(|e| e.ended_at.is_none()) {
+        let rows = tx
+            .query(
+                r#"SELECT EXISTS(SELECT 1
+            FROM task_timer_runs
+            WHERE user_id=?3
+            AND status<>'stopped'
+            AND NOT(workspace_id=?1
+            AND task_id=?2))
+            OR EXISTS(SELECT 1
+            FROM task_timer_legacy_open
+            WHERE user_id=?3
+            AND NOT(workspace_id=?1
+            AND task_id=?2))
+            OR EXISTS(SELECT 1
+            FROM time_entries
+            WHERE workspace_id=?4
+            AND user_id=?3
+            AND ended_at IS NULL)"#,
+                &[
+                    args[0].clone(),
+                    args[1].clone(),
+                    args[2].clone(),
+                    Cell::uuid(selection.destination_workspace_id),
+                ],
+            )
+            .await?;
+        if rows[0].cell(0)?.boolean()? {
+            return Ok(Err(PersonalTransferDbError::Incomplete(
+                Blocker::TimerBusy,
+                "another unfinished timer or open time entry",
+            )));
+        }
+    }
+    Ok(Ok(TimerGraph {
+        entries,
+        runs,
+        segments,
+        reserved,
+    }))
+}
+
+async fn family_relocate_timer(
+    tx: &mut FamilyTx,
+    destination: Uuid,
+    actor: Uuid,
+    task: Uuid,
+    timer: &TimerGraph,
+) -> Result<(), sqlx::Error> {
+    tx.require_writer()?;
+    tx.require_tenant(destination)?;
+    let mut entries: Vec<_> = timer.entries.iter().collect();
+    entries.sort_by_key(|e| e.ended_at.is_none());
+    for e in entries {
+        tx.execute(r#"INSERT INTO time_entries(id,workspace_id,task_id,user_id,started_at,ended_at,duration_seconds,note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"#,&[Cell::uuid(e.id),Cell::uuid(destination),Cell::uuid(task),Cell::uuid(actor),Cell::instant(e.started_at)?,e.ended_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),e.duration_seconds.map(|v|Cell::Integer(i64::from(v))).unwrap_or(Cell::Null),Cell::optional_text(e.note.as_deref())]).await?;
+        if e.ended_at.is_none() && !timer.reserved.contains(&e.id) {
+            tx.execute(
+                "DELETE FROM task_timer_legacy_open WHERE time_entry_id=?1 AND user_id=?2",
+                &[Cell::uuid(e.id), Cell::uuid(actor)],
+            )
+            .await?;
+        }
+    }
+    let mut runs: Vec<_> = timer.runs.iter().collect();
+    runs.sort_by_key(|r| r.status != "stopped");
+    for r in runs {
+        tx.execute(r#"INSERT INTO task_timer_runs(id,user_id,workspace_id,task_id,status,version,started_at,stopped_at,note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)"#,&[Cell::uuid(r.id),Cell::uuid(actor),Cell::uuid(destination),Cell::uuid(task),Cell::text(&r.status),Cell::Integer(i64::from(r.version)),Cell::instant(r.started_at)?,r.stopped_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_text(r.note.as_deref())]).await?;
+    }
+    for s in &timer.segments {
+        tx.execute(r#"INSERT INTO task_timer_segments(id,run_id,user_id,workspace_id,task_id,started_at,ended_at,time_entry_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"#,&[Cell::uuid(s.id),Cell::uuid(s.run_id),Cell::uuid(actor),Cell::uuid(destination),Cell::uuid(task),Cell::instant(s.started_at)?,s.ended_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_uuid(s.time_entry_id)]).await?;
+    }
+    Ok(())
+}
+
+async fn family_take_native(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    native: &[NativeHistoryInventory],
+) -> Result<Vec<&'static str>, sqlx::Error> {
+    tx.require_writer()?;
+    tx.require_tenant(source)?;
+    let mut tables = Vec::new();
+    for inventory in native {
+        let (group, _) = native_tables(inventory.kind);
+        for table in [group.states, group.updates, group.receipts, "revisions"] {
+            if !tables.contains(&table) {
+                tables.push(table);
+            }
+        }
+    }
+    for table in &tables {
+        tx.execute(
+            match *table {
+                "document_states" => {
+                    r#"CREATE TEMP TABLE w2_move_document_states AS SELECT *
+                FROM document_states
+                WHERE 0"#
+                }
+                "document_collab_updates" => {
+                    r#"CREATE TEMP TABLE w2_move_document_collab_updates AS SELECT *
+                FROM document_collab_updates
+                WHERE 0"#
+                }
+                "document_collab_op_receipts" => {
+                    r#"CREATE TEMP TABLE w2_move_document_collab_op_receipts AS SELECT *
+                FROM document_collab_op_receipts
+                WHERE 0"#
+                }
+                "task_states" => {
+                    r#"CREATE TEMP TABLE w2_move_task_states AS SELECT *
+                FROM task_states
+                WHERE 0"#
+                }
+                "task_collab_updates" => {
+                    r#"CREATE TEMP TABLE w2_move_task_collab_updates AS SELECT *
+                FROM task_collab_updates
+                WHERE 0"#
+                }
+                "task_collab_op_receipts" => {
+                    r#"CREATE TEMP TABLE w2_move_task_collab_op_receipts AS SELECT *
+                FROM task_collab_op_receipts
+                WHERE 0"#
+                }
+                "revisions" => {
+                    r#"CREATE TEMP TABLE w2_move_revisions AS SELECT *
+                FROM revisions
+                WHERE 0"#
+                }
+                _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+            },
+            &[],
+        )
+        .await?;
+    }
+    for i in native {
+        let (group, _) = native_tables(i.kind);
+        let args = [Cell::uuid(source), Cell::uuid(i.target_id)];
+        for table in [group.states, group.updates, group.receipts] {
+            tx.execute(
+                match table {
+                    "document_states" => {
+                        r#"INSERT INTO temp.w2_move_document_states SELECT *
+                FROM document_states
+                WHERE workspace_id=?1
+                AND document_id=?2"#
+                    }
+                    "document_collab_updates" => {
+                        r#"INSERT INTO temp.w2_move_document_collab_updates SELECT *
+                FROM document_collab_updates
+                WHERE workspace_id=?1
+                AND document_id=?2"#
+                    }
+                    "document_collab_op_receipts" => {
+                        r#"INSERT INTO temp.w2_move_document_collab_op_receipts SELECT *
+                FROM document_collab_op_receipts
+                WHERE workspace_id=?1
+                AND document_id=?2"#
+                    }
+                    "task_states" => {
+                        r#"INSERT INTO temp.w2_move_task_states SELECT *
+                FROM task_states
+                WHERE workspace_id=?1
+                AND task_id=?2"#
+                    }
+                    "task_collab_updates" => {
+                        r#"INSERT INTO temp.w2_move_task_collab_updates SELECT *
+                FROM task_collab_updates
+                WHERE workspace_id=?1
+                AND task_id=?2"#
+                    }
+                    "task_collab_op_receipts" => {
+                        r#"INSERT INTO temp.w2_move_task_collab_op_receipts SELECT *
+                FROM task_collab_op_receipts
+                WHERE workspace_id=?1
+                AND task_id=?2"#
+                    }
+                    _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+                },
+                &args,
+            )
+            .await?;
+        }
+        let revargs = [
+            args[0].clone(),
+            args[1].clone(),
+            Cell::text(collab_kind_name(i.kind)),
+        ];
+        tx.execute("INSERT INTO temp.w2_move_revisions SELECT * FROM revisions WHERE workspace_id=?1 AND target_id=?2 AND target_kind=?3",&revargs).await?;
+        let cuts = tx
+            .query(
+                match i.kind {
+                    CollabKind::Document => {
+                        r#"SELECT snapshot_cutoff_seq,tail_seq
+                    FROM temp.w2_move_document_states
+                    WHERE document_id=?1"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT snapshot_cutoff_seq,tail_seq
+                    FROM temp.w2_move_task_states
+                    WHERE task_id=?1"#
+                    }
+                },
+                &args[1..],
+            )
+            .await?;
+        let tail = tx
+            .query(
+                match i.kind {
+                    CollabKind::Document => {
+                        r#"SELECT seq,op_id
+                    FROM temp.w2_move_document_collab_updates
+                    WHERE document_id=?1
+                    ORDER BY seq"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT seq,op_id
+                    FROM temp.w2_move_task_collab_updates
+                    WHERE task_id=?1
+                    ORDER BY seq"#
+                    }
+                },
+                &args[1..],
+            )
+            .await?
+            .iter()
+            .map(|r| Ok((r.cell(0)?.integer()?, r.cell(1)?.id()?)))
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        let mut receipts = tx
+            .query(
+                match i.kind {
+                    CollabKind::Document => {
+                        r#"SELECT op_id,seq,actor_user_id
+                    FROM temp.w2_move_document_collab_op_receipts
+                    WHERE document_id=?1"#
+                    }
+                    CollabKind::Task => {
+                        r#"SELECT op_id,seq,actor_user_id
+                    FROM temp.w2_move_task_collab_op_receipts
+                    WHERE task_id=?1"#
+                    }
+                },
+                &args[1..],
+            )
+            .await?
+            .iter()
+            .map(|r| Ok((r.cell(0)?.id()?, r.cell(1)?.integer()?, r.cell(2)?.id()?)))
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        let revisions = tx
+            .query(
+                r#"SELECT id
+            FROM temp.w2_move_revisions
+            WHERE target_id=?1
+            AND target_kind=?2
+            ORDER BY created_at,id"#,
+                &[args[1].clone(), revargs[2].clone()],
+            )
+            .await?
+            .iter()
+            .map(|r| r.cell(0)?.id())
+            .collect::<Result<Vec<_>, _>>()?;
+        receipts.sort();
+        let mut expected = i.receipts.clone();
+        expected.sort();
+        if cuts.len() != 1
+            || cuts[0].cell(0)?.integer()? != i.snapshot_cutoff_seq
+            || cuts[0].cell(1)?.integer()? != i.tail_seq
+            || tail != i.tail
+            || receipts != expected
+            || revisions != i.revisions
+        {
+            return Err(sqlx::Error::Protocol(
+                "personal transfer native history changed".into(),
+            ));
+        }
+        let deleted = tx
+            .execute(
+                "DELETE FROM revisions WHERE workspace_id=?1 AND target_id=?2 AND target_kind=?3",
+                &revargs,
+            )
+            .await?;
+        if deleted != revisions.len() as u64 {
+            return Err(sqlx::Error::Protocol(
+                "personal transfer native history changed".into(),
+            ));
+        }
+    }
+    Ok(tables)
+}
+
+async fn family_restore_native(
+    tx: &mut FamilyTx,
+    destination: Uuid,
+    tables: &[&str],
+) -> Result<(), sqlx::Error> {
+    tx.require_writer()?;
+    tx.require_tenant(destination)?;
+    for table in tables {
+        tx.execute(
+            match *table {
+                "document_states" => "UPDATE temp.w2_move_document_states SET workspace_id=?1",
+                "document_collab_updates" => {
+                    "UPDATE temp.w2_move_document_collab_updates SET workspace_id=?1"
+                }
+                "document_collab_op_receipts" => {
+                    "UPDATE temp.w2_move_document_collab_op_receipts SET workspace_id=?1"
+                }
+                "task_states" => "UPDATE temp.w2_move_task_states SET workspace_id=?1",
+                "task_collab_updates" => {
+                    "UPDATE temp.w2_move_task_collab_updates SET workspace_id=?1"
+                }
+                "task_collab_op_receipts" => {
+                    "UPDATE temp.w2_move_task_collab_op_receipts SET workspace_id=?1"
+                }
+                "revisions" => "UPDATE temp.w2_move_revisions SET workspace_id=?1",
+                _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+            },
+            &[Cell::uuid(destination)],
+        )
+        .await?;
+        let count = tx
+            .query(
+                match *table {
+                    "document_states" => "SELECT count(*) FROM temp.w2_move_document_states",
+                    "document_collab_updates" => {
+                        "SELECT count(*) FROM temp.w2_move_document_collab_updates"
+                    }
+                    "document_collab_op_receipts" => {
+                        "SELECT count(*) FROM temp.w2_move_document_collab_op_receipts"
+                    }
+                    "task_states" => "SELECT count(*) FROM temp.w2_move_task_states",
+                    "task_collab_updates" => {
+                        "SELECT count(*) FROM temp.w2_move_task_collab_updates"
+                    }
+                    "task_collab_op_receipts" => {
+                        "SELECT count(*) FROM temp.w2_move_task_collab_op_receipts"
+                    }
+                    "revisions" => "SELECT count(*) FROM temp.w2_move_revisions",
+                    _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+                },
+                &[],
+            )
+            .await?[0]
+            .cell(0)?
+            .integer()?;
+        if tx
+            .execute(
+                match *table {
+                    "document_states" => {
+                        r#"INSERT INTO document_states SELECT *
+                    FROM temp.w2_move_document_states"#
+                    }
+                    "document_collab_updates" => {
+                        r#"INSERT INTO document_collab_updates SELECT *
+                    FROM temp.w2_move_document_collab_updates"#
+                    }
+                    "document_collab_op_receipts" => {
+                        r#"INSERT INTO document_collab_op_receipts SELECT *
+                    FROM temp.w2_move_document_collab_op_receipts"#
+                    }
+                    "task_states" => {
+                        r#"INSERT INTO task_states SELECT *
+                    FROM temp.w2_move_task_states"#
+                    }
+                    "task_collab_updates" => {
+                        r#"INSERT INTO task_collab_updates SELECT *
+                    FROM temp.w2_move_task_collab_updates"#
+                    }
+                    "task_collab_op_receipts" => {
+                        r#"INSERT INTO task_collab_op_receipts SELECT *
+                    FROM temp.w2_move_task_collab_op_receipts"#
+                    }
+                    "revisions" => {
+                        r#"INSERT INTO revisions SELECT *
+                    FROM temp.w2_move_revisions"#
+                    }
+                    _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+                },
+                &[],
+            )
+            .await?
+            != count as u64
+        {
+            return Err(sqlx::Error::Protocol(
+                "personal transfer native history restore incomplete".into(),
+            ));
+        }
+        tx.execute(
+            match *table {
+                "document_states" => "DROP TABLE temp.w2_move_document_states",
+                "document_collab_updates" => "DROP TABLE temp.w2_move_document_collab_updates",
+                "document_collab_op_receipts" => {
+                    "DROP TABLE temp.w2_move_document_collab_op_receipts"
+                }
+                "task_states" => "DROP TABLE temp.w2_move_task_states",
+                "task_collab_updates" => "DROP TABLE temp.w2_move_task_collab_updates",
+                "task_collab_op_receipts" => "DROP TABLE temp.w2_move_task_collab_op_receipts",
+                "revisions" => "DROP TABLE temp.w2_move_revisions",
+                _ => return Err(sqlx::Error::Protocol("unknown native staging table".into())),
+            },
+            &[],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_transfer_change(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    actor: Uuid,
+    verb: &str,
+    kind: &str,
+    id: Uuid,
+    payload: Value,
+    ip: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    tx.require_writer()?;
+    tx.require_tenant(workspace)?;
+    let mut op = OperationTx::SqliteFamily(tx);
+    op.set_tenant(workspace).await?;
+    op.append_event(super::identity::EventAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some(kind.into()),
+        target_id: Some(id),
+        payload: payload.clone(),
+    })
+    .await?;
+    op.append_audit(super::identity::AuditAppend {
+        id: Uuid::now_v7(),
+        workspace_id: Some(workspace),
+        actor_user_id: Some(actor),
+        verb: verb.into(),
+        target_type: Some(kind.into()),
+        target_id: Some(id),
+        payload,
+        ip: ip.map(str::to_string),
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_commit_graph(
+    tx: &mut FamilyTx,
+    source: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    body: &PersonalTransferBody,
+    graph: &SourceGraph,
+    target: &Destination,
+    ip: Option<&str>,
+    channel: &str,
+    engine: Option<&TransferBodyEngine>,
+    staged: &[StagedFile],
+) -> Result<PersonalTransferOutput, sqlx::Error> {
+    tx.require_writer()?;
+    tx.require_tenant(body.selection.destination_workspace_id)?;
+    let selection = &body.selection;
+    let dst = selection.destination_workspace_id;
+    let project = selection.destination_project_id;
+    let moving = selection.action == PersonalTransferAction::Move;
+    let document_id = if moving {
+        selection.document_id
+    } else {
+        Uuid::now_v7()
+    };
+    let task_id = selection
+        .task_id
+        .map(|id| if moving { id } else { Uuid::now_v7() });
+    let copied_files = staged
+        .iter()
+        .map(|f| (f.staged.source.id, f.destination))
+        .collect();
+    let pair = PairRefs {
+        document: (selection.document_id, document_id),
+        task: selection.task_id.zip(task_id),
+    };
+    let (document_json, block_ids) = if moving {
+        (
+            graph.document.content_json.clone(),
+            std::collections::HashMap::new(),
+        )
+    } else {
+        copy_body(&graph.document.content_json, &copied_files, &pair)
+            .map_err(|_| sqlx::Error::Protocol("personal transfer copy body changed".into()))?
+    };
+    let task_json = match &graph.task {
+        Some(task) if !moving => Some(
+            copy_body(&task.content_json, &copied_files, &pair)
+                .map_err(|_| sqlx::Error::Protocol("personal transfer copy body changed".into()))?
+                .0,
+        ),
+        Some(task) => Some(task.content_json.clone()),
+        None => None,
+    };
+    let (document_seed, task_seed) = if moving {
+        (None, None)
+    } else {
+        let engine = engine.ok_or_else(|| {
+            sqlx::Error::Protocol("personal transfer seed engine unavailable".into())
+        })?;
+        let seed = SeedEngine::new(engine.engine_bin.clone(), engine.limits);
+        let document = seed
+            .tiptap_to_yjs_update(&document_json)
+            .await
+            .map_err(|_| {
+                sqlx::Error::Protocol("personal transfer document seed unavailable".into())
+            })?;
+        let task = match &task_json {
+            Some(json) => Some(seed.tiptap_to_yjs_update(json).await.map_err(|_| {
+                sqlx::Error::Protocol("personal transfer task seed unavailable".into())
+            })?),
+            None => None,
+        };
+        (Some(document), task)
+    };
+    tx.switch_transfer_tenant(source)?;
+    tx.require_tenant(source)?;
+    let native = if moving {
+        family_take_native(tx, source, &graph.native).await?
+    } else {
+        Vec::new()
+    };
+    if moving {
+        for f in staged {
+            tx.execute(
+                "DELETE FROM attachments WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(source), Cell::uuid(f.staged.source.id)],
+            )
+            .await?;
+        }
+        if let Some(id) = selection.task_id {
+            tx.execute(
+                "DELETE FROM tasks WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(source), Cell::uuid(id)],
+            )
+            .await?;
+        }
+        tx.execute(
+            "DELETE FROM documents WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(source), Cell::uuid(selection.document_id)],
+        )
+        .await?;
+        family_transfer_change(
+            tx,
+            source,
+            actor,
+            "document.deleted",
+            "document",
+            selection.document_id,
+            json!({}),
+            ip,
+        )
+        .await?;
+        if let Some(task) = &graph.task {
+            family_transfer_change(
+                tx,
+                source,
+                actor,
+                "task.deleted",
+                "task",
+                task.record.id,
+                json!({"taskId":task.record.id,"projectId":task.record.project_id}),
+                ip,
+            )
+            .await?;
+        }
+    }
+    tx.switch_transfer_tenant(dst)?;
+    tx.require_tenant(dst)?;
+    let count = if task_id.is_some() { 2 } else { 1 };
+    let allocated=tx.query(r#"UPDATE projects SET next_number=next_number+?3,updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000
+        WHERE workspace_id=?1
+        AND id=?2
+        RETURNING next_number-?3"#,&[Cell::uuid(dst),Cell::uuid(project),Cell::Integer(count)]).await?;
+    let doc_number = allocated[0].cell(0)?.int32()?;
+    let task_number = task_id.map(|_| doc_number + 1);
+    let last = tx
+        .query(
+            r#"SELECT sort_key
+        FROM documents
+        WHERE workspace_id=?1
+        AND parent_id=?2
+        AND deleted_at IS NULL
+        ORDER BY sort_key COLLATE BINARY DESC LIMIT 1"#,
+            &[Cell::uuid(dst), Cell::uuid(target.root_id)],
+        )
+        .await?
+        .first()
+        .map(|r| r.cell(0)?.string())
+        .transpose()?;
+    let sort = between(last.as_deref(), None).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let now = tx
+        .query(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+            &[],
+        )
+        .await?[0]
+        .cell(0)?
+        .datetime()?;
+    let d = &graph.document;
+    let path = format!("{}.{}", target.root_path, to_path_label(document_id));
+    tx.execute(r#"INSERT INTO documents(id,workspace_id,title,icon,path,parent_id,sort_key,project_id,number,status,schema_version,text,chosung,version,created_by,created_at,updated_at,content_json,kind) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)"#,&[Cell::uuid(document_id),Cell::uuid(dst),Cell::text(&d.title),Cell::optional_text(d.icon.as_deref()),Cell::text(path),Cell::uuid(target.root_id),Cell::text(sort),Cell::uuid(project),Cell::Integer(i64::from(doc_number)),Cell::text(&d.status),Cell::Integer(i64::from(d.schema_version)),Cell::text(&d.text),Cell::text(&d.chosung),Cell::Integer(i64::from(if moving{d.version}else{1})),Cell::uuid(if moving{d.created_by}else{actor}),Cell::instant(if moving{d.created_at}else{now})?,Cell::instant(if moving{d.updated_at}else{now})?,Cell::json(&document_json)?,Cell::text(&d.kind)]).await?;
+    if let Some(seed) = document_seed {
+        tx.execute("INSERT INTO document_states(workspace_id,document_id,state,encoding) VALUES(?1,?2,?3,1)",&[Cell::uuid(dst),Cell::uuid(document_id),Cell::Blob(seed)]).await?;
+    }
+    if let (Some(task), Some(id), Some(number)) = (&graph.task, task_id, task_number) {
+        let r = &task.record;
+        let status = selection.destination_status_id;
+        let last = tx
+            .query(
+                r#"SELECT sort_key
+            FROM tasks
+            WHERE workspace_id=?1
+            AND project_id=?2
+            AND status_id=?3
+            AND deleted_at IS NULL
+            ORDER BY sort_key COLLATE BINARY DESC LIMIT 1"#,
+                &[
+                    Cell::uuid(dst),
+                    Cell::uuid(project),
+                    Cell::optional_uuid(status),
+                ],
+            )
+            .await?
+            .first()
+            .map(|r| r.cell(0)?.string())
+            .transpose()?;
+        let sort =
+            between(last.as_deref(), None).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        tx.execute(r#"INSERT INTO tasks(id,workspace_id,project_id,number,title,type,priority,status_id,start_date,due_date,due_at,estimate,recurrence,sort_key,schema_version,content_json,version,created_by,created_at,updated_at,text,chosung,estimate_unit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"#,&[Cell::uuid(id),Cell::uuid(dst),Cell::uuid(project),Cell::Integer(i64::from(number)),Cell::text(&r.title),Cell::text(&r.task_type),Cell::text(&r.priority),Cell::optional_uuid(status),Cell::optional_text(r.start_date.map(|v|v.to_string()).as_deref()),Cell::optional_text(r.due_date.map(|v|v.to_string()).as_deref()),r.due_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null),Cell::optional_text(r.estimate.as_deref()),task.recurrence.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::text(sort),Cell::Integer(i64::from(r.schema_version)),task_json.as_ref().map(Cell::json).transpose()?.unwrap_or(Cell::Null),Cell::Integer(i64::from(if moving{r.version}else{1})),Cell::uuid(if moving{r.created_by}else{actor}),Cell::instant(if moving{r.created_at}else{now})?,Cell::instant(if moving{r.updated_at}else{now})?,Cell::text(&task.text),Cell::text(&task.chosung),Cell::optional_text(task.estimate_unit.as_deref())]).await?;
+        if let Some(seed) = task_seed {
+            tx.execute(
+                "INSERT INTO task_states(workspace_id,task_id,state,encoding) VALUES(?1,?2,?3,1)",
+                &[Cell::uuid(dst), Cell::uuid(id), Cell::Blob(seed)],
+            )
+            .await?;
+        }
+        for assignee in &graph.assignees {
+            tx.execute(
+                "INSERT INTO task_assignees(workspace_id,task_id,user_id) VALUES(?1,?2,?3)",
+                &[Cell::uuid(dst), Cell::uuid(id), Cell::uuid(*assignee)],
+            )
+            .await?;
+        }
+        let collection = target
+            .collection_id
+            .ok_or_else(|| sqlx::Error::Protocol("transfer task collection missing".into()))?;
+        if let Some(item) = graph.collection_item.as_ref().filter(|_| moving) {
+            tx.execute(r#"INSERT INTO collection_items(id,workspace_id,collection_id,task_id,version,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7)"#,&[Cell::uuid(item.id),Cell::uuid(dst),Cell::uuid(collection),Cell::uuid(id),Cell::Integer(i64::from(item.version)),Cell::instant(item.created_at)?,Cell::instant(item.updated_at)?]).await?;
+        } else {
+            tx.execute(r#"INSERT INTO collection_items(id,workspace_id,collection_id,task_id) VALUES(?1,?2,?3,?4)"#,&[Cell::uuid(Uuid::now_v7()),Cell::uuid(dst),Cell::uuid(collection),Cell::uuid(id)]).await?;
+        }
+        if moving {
+            for a in &graph.activities {
+                tx.execute(r#"INSERT INTO task_activity(id,workspace_id,task_id,actor_user_id,channel,kind,changes,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"#,&[Cell::uuid(a.id),Cell::uuid(dst),Cell::uuid(id),Cell::optional_uuid(a.actor),Cell::text(&a.channel),Cell::text(&a.kind),Cell::json(&a.changes)?,Cell::instant(a.created_at)?]).await?;
+            }
+            family_relocate_timer(tx, dst, actor, id, &graph.timer).await?;
+        } else {
+            super::tasks::family_record_task_activity(
+                tx,
+                dst,
+                id,
+                actor,
+                channel,
+                None,
+                &crate::tasks::activity::ActivitySnapshot::new(),
+            )
+            .await?;
+        }
+        if let Some(origin) = &graph.origin {
+            let anchor = if moving {
+                origin.anchor.clone()
+            } else {
+                origin.anchor.as_ref().and_then(|id| {
+                    block_key(&Value::String(id.clone()))
+                        .and_then(|key| block_ids.get(&key).cloned())
+                })
+            };
+            tx.execute(r#"INSERT INTO task_origins(workspace_id,task_id,document_id,request_id,request_hash,anchor,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"#,&[Cell::uuid(dst),Cell::uuid(id),Cell::uuid(document_id),Cell::uuid(if moving{origin.request_id}else{body.request_id}),Cell::text(&origin.request_hash),Cell::optional_text(anchor.as_deref()),Cell::instant(if moving{origin.created_at}else{now})?,Cell::instant(if moving{origin.updated_at}else{now})?]).await?;
+        }
+        family_transfer_change(
+            tx,
+            dst,
+            actor,
+            "task.created",
+            "task",
+            id,
+            json!({"taskId":id,"projectId":project}),
+            ip,
+        )
+        .await?;
+    }
+    for file in staged {
+        let one = &file.staged;
+        let att = &one.source;
+        let (variants, preview_status) = match &one.preview {
+            Some((_, preview)) => (json!({"preview":preview}), "ok"),
+            None if is_image_mime(&att.mime)
+                && crate::attachments::preview::preview_mime_supported(&att.mime) =>
+            {
+                (json!({}), "pending")
+            }
+            None => (json!({}), "skipped"),
+        };
+        tx.execute(r#"INSERT INTO attachments(id,workspace_id,document_id,task_id,uploader_id,status,name,mime,declared_mime,size_bytes,reserved_size_bytes,storage_key,image,variants,extract_status,scan_status,preview_status,created_at,completed_at) VALUES(?1,?2,?3,?4,?5,'stored',?6,?7,?8,?9,?9,?10,?11,?12,?13,?14,?15,?16,?17)"#,&[Cell::uuid(file.destination),Cell::uuid(dst),Cell::optional_uuid(att.document_id.map(|_|document_id)),Cell::optional_uuid(att.task_id.and(task_id)),Cell::uuid(att.uploader_id),Cell::text(&att.name),Cell::text(&att.mime),Cell::optional_text(att.declared_mime.as_deref()),Cell::Integer(one.original.size_bytes),Cell::text(&one.original.key),Cell::Integer(i64::from(att.image)),Cell::json(&variants)?,Cell::text(initial_extract_status(&att.name,&att.mime)),Cell::text(&att.scan_status),Cell::text(preview_status),Cell::instant(att.created_at)?,att.completed_at.map(Cell::instant).transpose()?.unwrap_or(Cell::Null)]).await?;
+    }
+    for id in staged_journal(staged) {
+        tx.execute(
+            "DELETE FROM attachment_object_cleanups WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(dst), Cell::uuid(id)],
+        )
+        .await?;
+    }
+    family_restore_native(tx, dst, &native).await?;
+    family_transfer_change(
+        tx,
+        dst,
+        actor,
+        "document.created",
+        "document",
+        document_id,
+        json!({"projectId":project}),
+        ip,
+    )
+    .await?;
+    tx.switch_transfer_tenant(source)?;
+    tx.require_tenant(source)?;
+    tx.execute(r#"INSERT INTO personal_transfer_commands(workspace_id,actor_user_id,request_id,session_id,request_hash,action,destination_workspace_id,destination_project_id,document_id,document_number,task_id,task_number) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"#,&[Cell::uuid(source),Cell::uuid(actor),Cell::uuid(body.request_id),Cell::uuid(session),Cell::text(request_hash(source,actor,session,body)),Cell::text(selection.action.as_str()),Cell::uuid(dst),Cell::uuid(project),Cell::uuid(document_id),Cell::Integer(i64::from(doc_number)),Cell::optional_uuid(task_id),task_number.map(|v|Cell::Integer(i64::from(v))).unwrap_or(Cell::Null)]).await?;
+    Ok(PersonalTransferOutput {
+        workspace_id: dst,
+        project_id: project,
+        document_id,
+        document_number: doc_number,
+        task_id,
+        task_number,
+        replayed: false,
+    })
+}
+
+fn inventory_closure_refusal(
+    inventory: &NativeHistoryInventory,
+    selection: &PersonalTransferSelection,
+    moved_files: &[Uuid],
+) -> Option<PersonalTransferDbError> {
+    let rejected = std::cell::Cell::new(None);
+    let closed = |kind, id| {
+        let present = match kind {
+            collab_engine::archive_history::ReferenceKind::Document => id == selection.document_id,
+            collab_engine::archive_history::ReferenceKind::Task => Some(id) == selection.task_id,
+            // Only the exact locked files that move with the pair.
+            collab_engine::archive_history::ReferenceKind::Attachment => moved_files.contains(&id),
+            _ => false,
+        };
+        if !present {
+            rejected.set(Some(kind));
+        }
+        present
+    };
+    if let Some(blocker) = inventory.closure_blocker(closed) {
+        let file = blocker == RetainedHistoryBlocker::OutsideClosure
+            && rejected.get() == Some(collab_engine::archive_history::ReferenceKind::Attachment);
+        let (typed, reason) = match blocker {
+            RetainedHistoryBlocker::Incomplete | RetainedHistoryBlocker::Unavailable => {
+                (Blocker::NativeHistory, blocker.reason())
+            }
+            _ if file => (Blocker::File, "retained file outside the moved pair"),
+            _ => (Blocker::OutgoingReference, blocker.reason()),
+        };
+        return Some(PersonalTransferDbError::Incomplete(typed, reason));
+    }
+
+    None
 }
 
 #[cfg(test)]

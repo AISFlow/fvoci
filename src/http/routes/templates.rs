@@ -19,8 +19,9 @@ use crate::auth::scopes::{grants_api_token_scope, ApiTokenScope};
 use crate::collections::iso_millis;
 use crate::db::collections::Actor;
 use crate::db::templates::{
-    apply_template, create_template, list_templates, ApplyTemplateInput, TemplateDbError,
-    TemplateKind, TemplateRow,
+    apply_template_backend as apply_template, create_template_backend as create_template,
+    list_templates_backend as list_templates, ApplyTemplateInput, TemplateDbError, TemplateKind,
+    TemplateRow,
 };
 use crate::error::{AppError, ProblemCode};
 use crate::http::authz::{require_request_auth, Access, RequestAuth};
@@ -130,20 +131,10 @@ async fn list_route(
 ) -> Result<Json<TemplateListResponse>, ApiError> {
     let (auth, actor) = auth_actor(&state, &headers, &jar, workspace_id, None).await?;
     let kinds = allowed_kinds(auth.token_scopes.as_deref(), false);
-    let rows = list_templates(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/templates.rs")
-            .map_err(internal)?,
-        workspace_id,
-        &actor,
-        &kinds,
-    )
-    .await
-    .map_err(internal)?
-    .map_err(map_error)?;
+    let rows = list_templates(&state.auth.db.pool, workspace_id, &actor, &kinds)
+        .await
+        .map_err(internal)?
+        .map_err(map_error)?;
     Ok(Json(TemplateListResponse {
         items: rows.into_iter().map(to_output).collect(),
     }))
@@ -163,12 +154,7 @@ async fn create_route(
     let kind = TemplateKind::parse(&body.kind).ok_or_else(invalid)?;
     require_kind_scope(&auth, kind, true)?;
     let row = create_template(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/templates.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         kind,
@@ -200,12 +186,7 @@ async fn apply_route(
     };
     let ip = peer_ip(peer.ip());
     let applied = apply_template(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/templates.rs")
-            .map_err(internal)?,
+        &state.auth.db.pool,
         workspace_id,
         &actor,
         auth.credential_id,

@@ -339,6 +339,7 @@ fn contract(root: &Path) -> Check {
             "rust",
             &[
                 "fast",
+                "fast-sqlite",
                 "native-arm64",
                 "postgres-build",
                 "postgres",
@@ -352,6 +353,8 @@ fn contract(root: &Path) -> Check {
                 "web-native-checks",
                 "workspace-browser-build",
                 "workspace-browser-shard",
+                "collaboration-main-build",
+                "collaboration-test-build",
                 "collaboration-build",
                 "collaboration-install-on",
                 "collaboration-postgres-on",
@@ -498,6 +501,37 @@ fn contract(root: &Path) -> Check {
                 if step.lines().any(is_target_path_line) {
                     less_equal(ready.1, block.0, what)?;
                     if step.contains("actions/cache/save@") {
+                        let phase = match (workflow, *name) {
+                            ("web", "collaboration-main-build") => Some("main"),
+                            ("web", "collaboration-test-build") => Some("tests"),
+                            _ => None,
+                        };
+                        if let Some(phase) = phase.filter(|_| {
+                            has_line(step, "      - name: Save current native preparation")
+                        }) {
+                            // New run-scoped, unqualified preparation output;
+                            // it advances the phase instead of replacing a seed.
+                            contains(step, &format!("key: v2-web-selected-{phase}-ubuntu-26.04-${{{{ runner.arch }}}}-1.98.1-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-${{{{ github.sha }}}}-{IDENTITY}"), what)?;
+                            ensure(!masked(step), || {
+                                format!("{what}: current preparation save must be unmasked")
+                            })?;
+                            let compile = *steps
+                                .iter()
+                                .find(|b| {
+                                    has_line(
+                                        text_of(**b),
+                                        "      - name: Compile native preparation",
+                                    )
+                                })
+                                .ok_or("missing native preparation compilation")?;
+                            ensure(!masked(text_of(compile)), || {
+                                format!("{what}: current preparation compile must be unmasked")
+                            })?;
+                            less_equal(compile.1, block.0, what)?;
+                            contains(step, "          path: target\n", what)?;
+                            excludes(step, "restore-keys:", what)?;
+                            continue;
+                        }
                         let primary = step.split("key: ${{ steps.").nth(1).and_then(|rest| {
                             rest.split_once(".outputs.cache-primary-key }}")
                                 .map(|(id, _)| id)
@@ -814,6 +848,12 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     let original = fs::read_to_string(&path).unwrap();
     contract(&root).unwrap();
     for (name, old, new) in [
+        ("collaboration-main-build", "id: sqlite", "id: missing-sqlite"),
+        ("collaboration-test-build", "id: sqlite", "id: missing-sqlite"),
+        ("collaboration-main-build", "v2-web-selected-main-", "v2-web-selected-foreign-"),
+        ("collaboration-test-build", "v2-web-selected-tests-", "v2-web-selected-foreign-"),
+        ("collaboration-main-build", "name: Save current native preparation\n", "name: Save current native preparation\n        if: false\n"),
+        ("collaboration-test-build", "name: Compile native preparation\n", "name: Compile native preparation\n        continue-on-error: true\n"),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         ("collaboration-install-on", "id: sqlite", "id: missing-sqlite"),
         (

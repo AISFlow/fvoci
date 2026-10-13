@@ -1692,3 +1692,144 @@ async fn search_api_token_scopes_narrow_content_kinds() {
     admin.close().await;
     harness.cleanup().await;
 }
+
+mod sqlite_data_port {
+    use super::*;
+    use fvoci_server::auth::{password::Keyring, service::SetupInstanceInput, AuthService};
+    use fvoci_server::db::{backend::Backend, migrate, pool, Db};
+    use fvoci_server::http::{rate_limit::RateLimiter, state::AppState};
+    use std::sync::Arc;
+    async fn fixture(
+        meili: MeiliConfig,
+    ) -> (
+        std::path::PathBuf,
+        sqlx::SqlitePool,
+        axum::Router,
+        String,
+        Uuid,
+        Uuid,
+    ) {
+        let root = std::env::temp_dir().join(format!("fvoci-data-{}", Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.as_path().join("data.sqlite");
+        migrate::run_sqlite_migrations(&path).await.unwrap();
+        let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(Backend::Sqlite(sqlite.clone())),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        let (user, ws, token) = auth
+            .setup_instance(
+                "Data-Oracle-2026!".into(),
+                SetupInstanceInput {
+                    email: "data@example.invalid".into(),
+                    given_name: "Data".into(),
+                    family_name: None,
+                    workspace_slug: "data-oracle".into(),
+                    workspace_name: "Data oracle".into(),
+                    client_ip: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let state = AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::On,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.as_path().join("storage"))
+                .into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: Some(meili),
+            search_embedder: None,
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+            quota: Default::default(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            streams: AppState::fresh_streams(),
+        };
+        (
+            root,
+            sqlite,
+            fvoci_server::http::router(state, None),
+            token,
+            user,
+            ws,
+        )
+    }
+
+    #[tokio::test]
+    async fn sqlite_search_current_hydration_and_revocation() {
+        let meili = test_meili_config();
+        ensure_meili_index(&meili).await.unwrap();
+        let (root, db, app, cookie, actor, ws) = fixture(meili.clone()).await;
+        let doc = Uuid::now_v7();
+        let stale = Uuid::now_v7();
+        for (index, (id, deleted)) in [(doc, None), (stale, Some(1i64))].into_iter().enumerate() {
+            sqlx::query("INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json,text,deleted_at) VALUES(?1,?2,'current searchable',?3,'a',?6,'published',2,?4,'{}','current content',?5)").bind(id.as_bytes().as_slice()).bind(ws.as_bytes().as_slice()).bind(id.simple().to_string()).bind(actor.as_bytes().as_slice()).bind(deleted).bind(index as i32 + 1).execute(&db).await.unwrap();
+        }
+        let marker = format!("needle{}", Uuid::now_v7().simple());
+        upsert_meili_sources(
+            &meili,
+            &[
+                document_source(ws, None, doc, &marker, &marker),
+                document_source(ws, None, stale, &marker, &marker),
+                document_source(Uuid::now_v7(), None, Uuid::now_v7(), &marker, &marker),
+            ],
+        )
+        .await
+        .unwrap();
+        let (status, body) = search(app.clone(), &cookie, ws, &marker, "").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["items"][0]["id"], doc.to_string());
+        assert_eq!(body["items"][0]["title"], "current searchable");
+        let (status, global) = global_search(app.clone(), &cookie, &marker, "").await;
+        assert_eq!(status, StatusCode::OK, "{global}");
+        assert_eq!(global["items"].as_array().unwrap().len(), 1);
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+            .bind(ws.as_bytes().as_slice())
+            .bind(actor.as_bytes().as_slice())
+            .execute(&db)
+            .await
+            .unwrap();
+        let (status, denied) = search(app.clone(), &cookie, ws, &marker, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        let fresh = pool::connect_sqlite_app(&root.join("data.sqlite"), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+                .fetch_one(&fresh)
+                .await
+                .unwrap(),
+            before
+        );
+        fresh.close().await;
+        db.close().await;
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

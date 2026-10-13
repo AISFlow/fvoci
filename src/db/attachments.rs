@@ -1586,6 +1586,26 @@ pub async fn attachment_extract_text(
     Ok(text)
 }
 
+pub async fn attachment_extract_text_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_extract_text(pool, workspace_id, attachment_id).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        let OperationTx::SqliteFamily(family) = op else { unreachable!() };
+        family.query("SELECT extract_text FROM attachments WHERE workspace_id=?1 AND id=?2 AND status='stored'", &[Cell::uuid(workspace_id), Cell::uuid(attachment_id)]).await?.first().map(|row| row.cell(0)?.string()).transpose()
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
 /// Parent kind of an attachment, for API-token scope checks before an
 /// operation runs (source `authorizeTarget`). The parent never changes after
 /// insert, so reading it ahead of the operation's own transaction is sound.
@@ -1788,6 +1808,67 @@ pub async fn attachment_edit_context(
         mime: att.mime,
         editable,
     }))
+}
+
+pub async fn attachment_edit_context_backend(
+    backend: &Backend,
+    workspace_id: Uuid,
+    attachment_id: Uuid,
+    actor_user_id: Uuid,
+    session_id: Uuid,
+) -> Result<Result<AttachmentEditContext, AttachmentDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return attachment_edit_context(
+            pool,
+            workspace_id,
+            attachment_id,
+            actor_user_id,
+            session_id,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace_id).await?;
+        if !op.session_is_live(actor_user_id, session_id).await? {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace_id).await? {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        let Some(att) = op.upload_row(workspace_id, attachment_id).await? else {
+            return Ok(Err(AttachmentDbError::NotFound));
+        };
+        let access = match op
+            .upload_parent_access(workspace_id, actor_user_id, att.parent(), false)
+            .await?
+        {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        };
+        if !access.permission.at_least(ProjectPermission::View) {
+            return Ok(Err(AttachmentDbError::Forbidden));
+        }
+        if att.status != "stored" {
+            return Ok(Err(AttachmentDbError::NotFound));
+        }
+        if att.scan_status == "infected" {
+            return Ok(Err(AttachmentDbError::Infected));
+        }
+        let editable = is_hwp_attachment(&att.name, &att.mime)
+            && access.permission.at_least(ProjectPermission::Edit)
+            && access.writable.is_ok();
+        Ok(Ok(AttachmentEditContext {
+            source_attachment_id: att.id,
+            name: att.name,
+            mime: att.mime,
+            editable,
+        }))
+    }
+    .await;
+    tx.rollback().await?;
+    result
 }
 
 /// Retry delay for a journal row whose object is busy or failed to delete
@@ -3309,6 +3390,189 @@ pub async fn admit_transfer_storage(
     Ok(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn stage_attachment_for_transfer_backend(
+    backend: &crate::db::backend::Backend,
+    storage: &ObjectStorage,
+    source: Uuid,
+    destination: Uuid,
+    actor: Uuid,
+    session: Uuid,
+    attachment: Uuid,
+    destination_attachment: Uuid,
+) -> Result<Result<StagedAttachment, StageAttachmentError>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    if let Backend::Postgres(pool) = backend {
+        return stage_attachment_for_transfer(
+            pool,
+            storage,
+            source,
+            destination,
+            actor,
+            session,
+            attachment,
+            destination_attachment,
+        )
+        .await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let mut op = tx.operation();
+    op.set_tenant(source).await?;
+    if !op.session_is_live(actor, session).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::Forbidden));
+    }
+    if !op.workspace_is_live(source).await? {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    let Some(att) = op.upload_row(source, attachment).await? else {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    };
+    let parent = match (att.document_id, att.task_id) {
+        (Some(id), None) => AttachmentParent::Document(id),
+        (None, Some(id)) => AttachmentParent::Task(id),
+        _ => {
+            tx.rollback().await?;
+            return Ok(Err(StageAttachmentError::NotFound));
+        }
+    };
+    if op
+        .upload_parent_access(source, actor, parent, false)
+        .await?
+        .is_err()
+    {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    if att.status != "stored" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotFound));
+    }
+    let OperationTx::SqliteFamily(family) = &mut op else {
+        unreachable!()
+    };
+    let leased=family.query(r#"SELECT COALESCE(extract_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        OR COALESCE(preview_lease_expires_at>(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),0)
+        FROM attachments
+        WHERE workspace_id=?1
+        AND id=?2"#,&[Cell::uuid(source),Cell::uuid(attachment)]).await?[0].cell(0)?.boolean()?;
+    if leased || att.scan_status == "infected" {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::NotReady));
+    }
+    let Some(size) = att.size_bytes.filter(|s| *s >= 0) else {
+        tx.rollback().await?;
+        return Ok(Err(StageAttachmentError::Changed));
+    };
+    let preview = preview_variant_of(&att.variants);
+    let original_key = Uuid::now_v7().to_string();
+    let preview_key = preview.as_ref().map(|_| Uuid::now_v7().to_string());
+    let mut journal = vec![(Uuid::now_v7(), original_key.clone())];
+    if let Some(key) = &preview_key {
+        journal.push((Uuid::now_v7(), key.clone()));
+    }
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!()
+    };
+    family.scope_transfer_pair(source, destination)?;
+    family.switch_transfer_tenant(destination)?;
+    family.require_writer()?;
+    family.require_tenant(destination)?;
+    for (id, key) in &journal {
+        family.execute(r#"INSERT INTO attachment_object_cleanups(id,workspace_id,attachment_id,storage_key,due_at) VALUES(?1,?2,?3,?4,unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000+?5*1000000)"#,&[Cell::uuid(*id),Cell::uuid(destination),Cell::uuid(destination_attachment),Cell::text(key),Cell::Integer(i64::from(TRANSFER_STAGE_GRACE_SECS))]).await?;
+    }
+    tx.commit_with_cleanup()
+        .await
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(error)))?;
+    #[cfg(feature = "db-tests")]
+    test_barrier::wait_transfer_stage_copy_barrier(destination_attachment).await;
+    // Journal first, then exclude reclamation for the copy and readback. A
+    // reclaimer that won the gap is detected before any object is written.
+    let mut copying = backend.begin_write().await?;
+    let mut op = copying.operation();
+    op.set_tenant(destination).await?;
+    let OperationTx::SqliteFamily(family) = op else {
+        unreachable!()
+    };
+    family.require_writer()?;
+    family.require_tenant(destination)?;
+    for (id, _) in &journal {
+        if family
+            .query(
+                "SELECT id FROM attachment_object_cleanups WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(destination), Cell::uuid(*id)],
+            )
+            .await?
+            .is_empty()
+        {
+            copying.rollback().await?;
+            return Ok(Err(StageAttachmentError::Changed));
+        }
+    }
+    let result = async {
+        let original = StagedObject {
+            journal_id: journal[0].0,
+            key: original_key.clone(),
+            size_bytes: size,
+            sha256: copy_verified(storage, &att.storage_key, &original_key, size).await?,
+        };
+        let preview = match (preview, preview_key) {
+            (Some(variant), Some(key)) => {
+                let sha256 = copy_verified(storage, &variant.key, &key, variant.bytes).await?;
+                let mut value = att.variants.get("preview").cloned().unwrap_or(Value::Null);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("key".into(), Value::String(key.clone()));
+                }
+                Some((
+                    StagedObject {
+                        journal_id: journal[1].0,
+                        key,
+                        size_bytes: variant.bytes,
+                        sha256,
+                    },
+                    value,
+                ))
+            }
+            _ => None,
+        };
+        Ok(StagedAttachment {
+            source: att,
+            original,
+            preview,
+        })
+    }
+    .await;
+    copying.rollback().await?;
+    Ok(result)
+}
+
+pub(crate) async fn admit_transfer_storage_operation(
+    op: &mut crate::db::backend::OperationTx<'_, '_>,
+    quota: &StorageQuota,
+    workspace: Uuid,
+    sizes: &[i64],
+) -> Result<Result<(), AttachmentDbError>, sqlx::Error> {
+    if let crate::db::backend::OperationTx::Postgres(tx) = op {
+        return admit_transfer_storage(tx, quota, workspace, sizes).await;
+    }
+    // The reserved family writer excludes upload/admission writers until the
+    // transfer publishes, exactly as the PG workspace storage lock does.
+    let mut reserved = op.import_attachment_reserved_bytes(workspace).await?;
+    for size in sizes {
+        if let Err(error) = quota.check(reserved, *size) {
+            return Ok(Err(match error {
+                StorageQuotaError::Upload => AttachmentDbError::UploadLimit,
+                StorageQuotaError::Storage => AttachmentDbError::StorageLimit,
+            }));
+        }
+        reserved = reserved.saturating_add(*size);
+    }
+    Ok(Ok(()))
+}
+
 /// Streams `from` to the fresh key `to`, counting length and SHA-256, then
 /// checks the stored size and that the copy reads back with the same hash.
 async fn copy_verified(
@@ -3593,9 +3857,9 @@ pub(crate) mod cleanup_tests {
         assert_eq!(read, BYTES);
         use sha2::Digest;
         println!(
-            "S17 actual object bytes={} sha256={:x}",
+            "S17 actual object bytes={} sha256={}",
             read.len(),
-            sha2::Sha256::digest(&read)
+            hex::encode(sha2::Sha256::digest(&read))
         );
     }
     async fn drain(f: &Fixture, storage: &ObjectStorage) -> ObjectCleanupStats {
@@ -4024,9 +4288,9 @@ pub(crate) mod cleanup_tests {
         if let Ok(value) = &restored {
             use sha2::Digest;
             println!(
-                "S17 unknown-commit sentinel bytes={} sha256={:x}",
+                "S17 unknown-commit sentinel bytes={} sha256={}",
                 value.len(),
-                sha2::Sha256::digest(value)
+                hex::encode(sha2::Sha256::digest(value))
             );
         }
         let document: Vec<u8> =
@@ -5377,9 +5641,9 @@ mod upload_session_tests {
         assert_eq!(actual, BYTES);
         use sha2::Digest;
         println!(
-            "S18 actual stored bytes={} sha256={:x}",
+            "S18 actual stored bytes={} sha256={}",
             actual.len(),
-            sha2::Sha256::digest(actual)
+            hex::encode(sha2::Sha256::digest(actual))
         );
     }
     fn published_part_files(f: &Fixture, key: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -8073,9 +8337,9 @@ mod upload_owned_adapter_tests {
         assert_eq!(bytes, BYTES);
         use sha2::Digest;
         println!(
-            "S18 owned current bytes={} sha256={:x}",
+            "S18 owned current bytes={} sha256={}",
             bytes.len(),
-            sha2::Sha256::digest(&bytes)
+            hex::encode(sha2::Sha256::digest(&bytes))
         );
     }
     fn restore(f: &Fixture, key: &str, bytes: &[u8]) {
@@ -9773,7 +10037,11 @@ mod stored_reference_tests {
             .unwrap();
         }
         sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,status,created_by) VALUES($1,$2,'REF','Reference','private','archived',$3)").bind(project).bind(workspace).bind(owner).execute(&admin).await.unwrap();
-        sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,'viewer')").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(viewer).execute(&admin).await.unwrap();
+        // A private project keeps a lead (deferred trigger), so removing the
+        // viewer's membership below commits.
+        for (user, role) in [(owner, "lead"), (viewer, "viewer")] {
+            sqlx::query("INSERT INTO fvoci.project_members(id,workspace_id,project_id,user_id,role) VALUES($1,$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(workspace).bind(project).bind(user).bind(role).execute(&admin).await.unwrap();
+        }
         sqlx::query("INSERT INTO fvoci.documents(id,workspace_id,project_id,title,path,sort_key,number,status,schema_version,created_by,content_json) VALUES($1,$2,$3,'Reference',$4,'V',1,'published',2,$5,'{\"type\":\"doc\",\"content\":[]}')").bind(document).bind(workspace).bind(project).bind(document.simple().to_string()).bind(owner).execute(&admin).await.unwrap();
         sqlx::query("INSERT INTO fvoci.attachments(id,workspace_id,document_id,uploader_id,status,name,size_bytes,reserved_size_bytes,storage_key,completed_at) VALUES($1,$2,$3,$4,'stored','reference.bin',10,10,$5,now())").bind(id).bind(workspace).bind(document).bind(owner).bind(&key).execute(&admin).await.unwrap();
         sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '30 days')").bind(credential).bind(viewer).bind(&session.hash).execute(&admin).await.unwrap();

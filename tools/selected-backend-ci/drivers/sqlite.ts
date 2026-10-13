@@ -32,10 +32,17 @@ import {
 } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
-import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
+import {
+  loadCurrent,
+  restoreSpec,
+  validateOffReport,
+  validateRestoreReport,
+  type Current,
+} from "./binding.ts";
 import {
   actor,
   assertNoEnvFile,
+  browserPacketKeys,
   checkInterrupt,
   cleanupAttempt,
   cleanupScope,
@@ -46,6 +53,7 @@ import {
   identityGone,
   inodeOf,
   inputCheck,
+  knownBrowserCheckpoint,
   now,
   ownedRows,
   portClosed,
@@ -77,7 +85,11 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
-const checkpointKeys = ["known_driver_checkpoint", "preparation_command_exit"] as const;
+const checkpointKeys = [
+  "known_driver_checkpoint",
+  "preparation_command_exit",
+  ...browserPacketKeys,
+] as const;
 
 // The I/O this driver owns, replaceable as one boundary in tests.
 export interface Seam extends RestartSeam {
@@ -257,6 +269,9 @@ const summaryKeys = [
   "final_exit_code",
   "actual_browser_tests",
   "browser_exit",
+  "restore_browser_exit",
+  "restore_failure_code",
+  ...browserPacketKeys,
   "owned_container_absent",
   "owned_loopback_port_closed",
   "recorded_process_identities_retired",
@@ -300,6 +315,43 @@ export function recordFailure(
     bodyLog,
     extraKeys: checkpointKeys,
   });
+}
+
+// Report only fixed codes and the allowlisted reporter location. Bootstrap
+// failures can precede JSON reporting; never publish their raw log or path.
+export function recordRestoreFailure(
+  state: State,
+  code: number,
+  log: string,
+  report: string,
+): void {
+  const receipt = state.receipt;
+  Object.assign(receipt, {
+    restore_browser_exit: code,
+    restore_failure_code: "SELECTED_RESTORE_BROWSER_FAILED",
+    known_browser_test: null,
+    known_browser_status: null,
+    known_browser_checkpoint: null,
+    browser_report_state: "report-missing",
+  });
+  try {
+    chmodSync(log, 0o600);
+    if (/\bEACCES: permission denied, mkdir\b/.test(readText(log)))
+      receipt.restore_failure_code = "PLAYWRIGHT_OUTPUT_EACCES";
+  } catch (error) {
+    secondary(receipt, "restore-log-diagnostic-failed", error);
+  }
+  if (existsSync(report)) {
+    try {
+      chmodSync(report, 0o600);
+      receipt.sqlite_restore_report_sha256 = sha(report);
+      Object.assign(receipt, knownBrowserCheckpoint(read(report), "sqlite-restore"));
+    } catch (error) {
+      receipt.browser_report_state = "report-unreadable";
+      secondary(receipt, "restore-report-diagnostic-failed", error);
+    }
+  }
+  recordFailure(state, code, undefined, log);
 }
 
 export async function prepareContainer(state: State, seam: Seam): Promise<void> {
@@ -545,6 +597,31 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
         : "actual currentVue setup/login/stable wiki create/nonempty nativeON/matching durableACK/manualrevision/fresh cookie actor body-native-ID-permission-history readback",
   });
   if (flow === "on") {
+    // Retain the original one-test invocation and receipt. Restore is a
+    // separately counted, mandatory invocation on this same SQLite server.
+    const restoreArgs = browserArgs(
+      state.bun,
+      join(root, "node_modules/playwright/cli.js"),
+      restoreSpec,
+    );
+    restoreArgs[restoreArgs.indexOf("--config") + 1] =
+      "e2e-pending/revision-restore-playwright.config.ts";
+    const restoreReport = join(run, "restore-playwright-result.private.json");
+    const restoreResult = await seam.command(restoreArgs, {
+      log: join(run, "restore-browser.log"),
+      required: false,
+      env: { ...state.browserEnv, PLAYWRIGHT_JSON_OUTPUT_FILE: restoreReport },
+      cwd: web,
+    });
+    state.code = restoreResult.returncode;
+    if (state.code !== 0) {
+      recordRestoreFailure(state, state.code, join(run, "restore-browser.log"), restoreReport);
+      return;
+    }
+    chmodSync(restoreReport, 0o600);
+    validateRestoreReport(read(restoreReport));
+    receipt.sqlite_restore_browser = { exit: 0, actual_tests: 1, skipped: 0, retries: 0 };
+    receipt.sqlite_restore_report_sha256 = sha(restoreReport);
     receipt.phase = "restart";
     receipt.current_schema_server_restart = await seam.restart(
       restartContext(state, browserInputs, seam),

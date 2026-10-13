@@ -24,6 +24,7 @@ const LIBCLANG_ENV = { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" };
 // The producer saves; every other consumer only restores and verifies.
 export const SQLITE_PREFIX_JOBS = [
   "fast",
+  "fast-sqlite",
   "native-arm64",
   "postgres-build",
   "postgres",

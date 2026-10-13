@@ -10,6 +10,7 @@ import {
   verifyWebBrowserBudgetJobs,
   verifyWebBuildHandoff,
   verifyWebBuildHandoffJobs,
+  verifyCollaborationPreparationJobs,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 
@@ -25,6 +26,63 @@ const byId = (id: string) => (step: Mapping) => step["id"] === id;
 const isDownload = (step: Mapping) => usesOf(step).startsWith("actions/download-artifact@");
 const unitStep = (jobs: Mapping) =>
   stepWith(jobs, "web-checks", (step) => step["name"] === "Web and editor unit regressions");
+
+test("collaboration preparation requires ordered exact current-run caches and complete compiles", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyCollaborationPreparationJobs(jobs)).toEqual([]);
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    const bad = clone(jobs);
+    Reflect.deleteProperty(bad, name);
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain("must exist");
+  }
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    for (const [key, value] of [
+      ["key", "foreign-run"],
+      ["restore-keys", "prefix-"],
+      ["fail-on-cache-miss", false],
+    ] as const) {
+      const bad = clone(jobs);
+      const restore = stepWith(
+        bad,
+        name,
+        (step) => step["name"] === "Restore current native preparation",
+      );
+      (restore["with"] as Mapping)[key] = value;
+      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+        "exact source/run/attempt/SQLite",
+      );
+    }
+  }
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    const bad = clone(jobs);
+    stepWith(bad, name, (step) => step["name"] === "Compile native preparation")["run"] = "true\n";
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "complete unmasked compiler",
+    );
+  }
+});
+
+test("current preparation cache hit check accepts true and refuses misses or prefix hits", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    const check = stepWith(
+      jobs,
+      name,
+      (step) => step["name"] === "Require exact current native preparation",
+    );
+    const run = check["run"];
+    expect(typeof run).toBe("string");
+    if (typeof run !== "string") throw new Error("missing cache hit check");
+    for (const value of ["true", "false", ""]) {
+      const result = Bun.spawnSync(["bash", "-euo", "pipefail", "-c", run], {
+        env: { PATH: "/usr/bin:/bin", CACHE_HIT: value },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(value === "true" ? 0 : 1);
+    }
+  }
+});
 
 test("real web.yml passes through the context entry points", () => {
   const ctx = loadContext(ROOT);
@@ -358,4 +416,97 @@ test("the budget scalar comes from the context text, not the file on disk", () =
     BUDGET_ERROR,
   ]);
   expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": source }))).toEqual([]);
+});
+
+test("collaboration normalizes source times only after an exact current-run cache hit", () => {
+  const jobs = realJobs("web.yml");
+  const normalizerName = "Normalize tracked source mtimes for native cache reuse";
+  expect(
+    steps(jobs, "collaboration-main-build").some((step) => step["name"] === normalizerName),
+  ).toBe(false);
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    const list = steps(jobs, name);
+    const at = list.findIndex((step) => step["name"] === normalizerName);
+    expect(at, name).toBeGreaterThan(-1);
+    const checkAt = list.findIndex(
+      (step) => step["name"] === "Require exact current native preparation",
+    );
+    expect(at, name).toBeGreaterThan(checkAt);
+    expect(at, name).toBeLessThan(
+      list.findIndex(
+        (step) => step["name"] === "Compile native preparation" || step["id"] === "prepare",
+      ),
+    );
+    for (const edit of ["true\n", "git ls-files -z | xargs -0 touch --\n"]) {
+      const bad = clone(jobs);
+      const normalizer = steps(bad, name)[at];
+      if (!normalizer) throw new Error("missing source mtime normalizer");
+      normalizer["run"] = edit;
+      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+        "deterministic tracked source mtimes",
+      );
+    }
+    for (const before of [0, checkAt]) {
+      const bad = clone(jobs);
+      const reordered = steps(bad, name);
+      const [normalizer] = reordered.splice(at, 1);
+      if (!normalizer) throw new Error("missing source mtime normalizer");
+      reordered.splice(before, 0, normalizer);
+      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+        "after exact current-run cache hit",
+      );
+    }
+  }
+  const bad = clone(jobs);
+  const normalizer = stepWith(
+    jobs,
+    "collaboration-test-build",
+    (step) => step["name"] === normalizerName,
+  );
+  steps(bad, "collaboration-main-build").splice(1, 0, clone(normalizer));
+  expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+    "long-term seed must retain checkout source times",
+  );
+});
+
+test("normalized collaboration jobs reject long-term native and helper fallback caches", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of ["collaboration-test-build", "collaboration-build"]) {
+    expect(
+      steps(jobs, name).some(
+        (step) => (step["with"] as Mapping | undefined)?.["path"] === "crates/collab-engine/target",
+      ),
+    ).toBe(false);
+    for (const path of ["crates/collab-engine/target", "target\ncrates/collab-engine/target\n"]) {
+      for (const fallback of [false, true]) {
+        for (const before of [true, false]) {
+          const bad = clone(jobs);
+          const restore = clone(
+            stepWith(bad, name, (step) => step["id"] === "current_native_cache"),
+          );
+          restore["name"] = "Restore old helper";
+          restore["id"] = "old_helper";
+          restore["with"] = {
+            path,
+            key: "old-source",
+            ...(fallback ? { "restore-keys": "old-" } : {}),
+          };
+          const list = steps(bad, name);
+          list.splice(
+            before
+              ? 1
+              : list.findIndex(
+                  (step) =>
+                    step["id"] === "prepare" || step["name"] === "Compile native preparation",
+                ),
+            0,
+            restore,
+          );
+          expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+            "no long-term native cache in normalized jobs",
+          );
+        }
+      }
+    }
+  }
 });

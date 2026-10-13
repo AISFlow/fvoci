@@ -153,7 +153,7 @@ fn uuid_str(value: &Value) -> Parsed<Uuid> {
 pub fn parse_name(value: &Value) -> Parsed<String> {
     let trimmed = value.as_str().ok_or(InvalidInput)?.trim();
     let len = trimmed.encode_utf16().count();
-    if len == 0 || len > NAME_MAX {
+    if len == 0 || len > NAME_MAX || trimmed.contains('\0') {
         return Err(InvalidInput);
     }
     Ok(trimmed.to_string())
@@ -169,7 +169,7 @@ pub fn positive_int(value: &Value) -> Parsed<i32> {
 
 fn limited_string(value: &Value, max: usize) -> Parsed<String> {
     let raw = value.as_str().ok_or(InvalidInput)?;
-    if raw.encode_utf16().count() > max {
+    if raw.encode_utf16().count() > max || raw.contains('\0') {
         return Err(InvalidInput);
     }
     Ok(raw.to_string())
@@ -503,6 +503,7 @@ pub fn parse_query_config(value: &Value) -> Parsed<QueryConfig> {
         None => ViewQuery::default(),
         Some(value) => parse_view_query_value(value).map_err(|_| InvalidInput)?,
     };
+    if query.filters.title.as_ref().is_some_and(|v|v.contains('\0')) || query.filters.custom.iter().any(|f|matches!(&f.operator, crate::tasks::list_query::CustomOperator::Equals(crate::tasks::list_query::CustomValue::Text(v)) if v.contains('\0'))) { return Err(InvalidInput); }
     let group_by = match o.get("groupBy") {
         None | Some(Value::Null) => None,
         Some(Value::String(raw)) if raw == "status" => Some(GroupBy::Status),

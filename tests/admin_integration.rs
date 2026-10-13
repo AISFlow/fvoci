@@ -14,7 +14,7 @@ use fvoci_server::auth::AuthService;
 use fvoci_server::db::{migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::{router, state::AppState};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -147,11 +147,15 @@ async fn app_state(
     license: Arc<fvoci_server::license::Entitlements>,
 ) -> AppState {
     let pool = pool::connect_app(app_url).await.expect("app pool");
+    backend_app_state(Db::with_license(pool, license), storage_root)
+}
+
+fn backend_app_state(db: Db, storage_root: &std::path::Path) -> AppState {
     AppState {
         realtime_mode: fvoci_server::config::RealtimeMode::On,
         native_engine: None,
         auth: Arc::new(AuthService {
-            db: Db::with_license(pool, license),
+            db,
             password_keys: Keyring::parse(PEPPER, "test").expect("pepper"),
         }),
         branding_name: "FVOCI".to_string(),
@@ -3249,4 +3253,550 @@ async fn settings_writes_refuse_a_session_revoked_while_waiting() {
     assert_eq!(audit_count(&admin, "instance_settings.updated").await, 1);
     admin.close().await;
     h.finish().await;
+}
+
+#[tokio::test]
+async fn sqlite_admin_directory_uses_the_real_http_route() {
+    use fvoci_server::auth::service::SetupInstanceInput;
+    use fvoci_server::db::backend::Backend;
+    let root = std::env::temp_dir().join(format!("fvoci-port-admin-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("admin.sqlite");
+    migrate::run_sqlite_migrations(&path).await.unwrap();
+    let sqlite = pool::connect_sqlite_app(&path, 2).await.unwrap();
+    let state = backend_app_state(
+        Db::with_backend_license(
+            Backend::Sqlite(sqlite.clone()),
+            license_fixture::signed_license(),
+        ),
+        &root,
+    );
+    let (actor, workspace, token) = state
+        .auth
+        .setup_instance(
+            "Synthetic-Admin-2026!".into(),
+            SetupInstanceInput {
+                email: "admin@example.invalid".into(),
+                given_name: "Admin".into(),
+                family_name: None,
+                workspace_slug: "admin-fixture".into(),
+                workspace_name: "Admin fixture".into(),
+                client_ip: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let auth = state.auth.clone();
+    let app = router(state, None);
+    let response = get(&app, "/api/v1/admin/users", Some(&token)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(response.json["items"].as_array().unwrap().len(), 1);
+
+    for path in [
+        "/api/v1/admin/system",
+        "/api/v1/admin/workspaces",
+        "/api/v1/admin/audit",
+        "/api/v1/admin/instance-settings",
+    ] {
+        let reply = get(&app, path, Some(&token)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.json);
+    }
+    let member = Uuid::now_v7();
+    let member_session = Uuid::now_v7();
+    let member_token = fvoci_server::auth::token::new_token();
+    sqlx::query(
+        "INSERT INTO users(id,email,given_name) VALUES(?1,'member@example.invalid','Member')",
+    )
+    .bind(member.as_bytes().as_slice())
+    .execute(&sqlite)
+    .await
+    .unwrap();
+    sqlx::query(r#"INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,unixepoch()*1000000+3600000000)"#).bind(member_session.as_bytes().as_slice()).bind(member.as_bytes().as_slice()).bind(&member_token.hash).execute(&sqlite).await.unwrap();
+    sqlx::query("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?1,?2,'member')")
+        .bind(workspace.as_bytes().as_slice())
+        .bind(member.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&sqlite)
+        .await
+        .unwrap();
+    for path in [
+        "/api/v1/admin/users",
+        "/api/v1/admin/system",
+        "/api/v1/admin/workspaces",
+        "/api/v1/admin/audit",
+        "/api/v1/admin/instance-settings",
+    ] {
+        assert_eq!(
+            get(&app, path, Some(&member_token.token)).await.status,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let denied = with_json(
+        &app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId":actor,"instanceAdmin":false}),
+        Some(&member_token.token),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::NOT_FOUND, "{}", denied.json);
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/v1/admin/users/erase",
+            json!({"userId":member}),
+        ),
+        (
+            "POST",
+            "/api/v1/admin/users/cancel-erase",
+            json!({"userId":member}),
+        ),
+        (
+            "PATCH",
+            "/api/v1/admin/instance-settings",
+            json!({"security":{"contact":"mailto:denied@example.invalid"}}),
+        ),
+        (
+            "POST",
+            "/api/v1/admin/legal",
+            json!({"kind":"terms","title":"Denied","bodyMarkdown":"Denied","required":false,"effectiveAt":"2026-10-01T00:00:00Z"}),
+        ),
+    ] {
+        let denied = with_json(&app, method, path, body, Some(&member_token.token)).await;
+        assert_eq!(
+            denied.status,
+            StatusCode::NOT_FOUND,
+            "{path}: {}",
+            denied.json
+        );
+    }
+    let last = with_json(
+        &app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId":actor,"instanceAdmin":false}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(last.status, StatusCode::CONFLICT, "{}", last.json);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+            .fetch_one(&sqlite)
+            .await
+            .unwrap(),
+        before
+    );
+    let suspended = with_json(
+        &app,
+        "PATCH",
+        "/api/v1/admin/users",
+        json!({"userId":member,"suspended":true}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::OK, "{}", suspended.json);
+    let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, Option<i64>>("SELECT suspended_at FROM users WHERE id=?1")
+            .bind(member.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sqlx::query_scalar::<_, Option<i64>>("SELECT revoked_at FROM sessions WHERE id=?1")
+            .bind(member_session.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        with_json(
+            &app,
+            "PATCH",
+            "/api/v1/admin/users",
+            json!({"userId":member,"suspended":false}),
+            Some(&token)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let erase = with_json(
+        &app,
+        "POST",
+        "/api/v1/admin/users/erase",
+        json!({"userId":member}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(erase.status, StatusCode::OK, "{}", erase.json);
+    let replay = with_json(
+        &app,
+        "POST",
+        "/api/v1/admin/users/erase",
+        json!({"userId":member}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK, "{}", replay.json);
+    let cancel = with_json(
+        &app,
+        "POST",
+        "/api/v1/admin/users/cancel-erase",
+        json!({"userId":member}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.json);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events WHERE verb='user.withdrawn'")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM events WHERE verb='user.withdraw_cancelled'"
+        )
+        .fetch_one(&fresh)
+        .await
+        .unwrap(),
+        1
+    );
+    let invalid_settings = with_json(
+        &app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        json!({"security":{"contact":"mailto:bad\0contact@example.invalid"}}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(invalid_settings.status, StatusCode::BAD_REQUEST);
+    let patch = with_json(
+        &app,
+        "PATCH",
+        "/api/v1/admin/instance-settings",
+        json!({"security":{"contact":"mailto:security@example.invalid"}}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(patch.status, StatusCode::OK, "{}", patch.json);
+    assert_eq!(
+        get(&app, "/.well-known/security.txt", None).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM instance_settings_meta WHERE id=1")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    let legal = |title: &str, body: &str, required: bool| json!({"kind":"terms","title":title,"bodyMarkdown":body,"required":required,"effectiveAt":"2026-10-01T00:00:00Z"});
+
+    for invalid in [
+        legal("bad\0title", "body", false),
+        legal("title", "body\0bad", false),
+    ] {
+        assert_eq!(
+            with_json(&app, "POST", "/api/v1/admin/legal", invalid, Some(&token))
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let published = with_json(
+        &app,
+        "POST",
+        "/api/v1/admin/legal",
+        legal("Terms", "# Terms", true),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(published.status, StatusCode::CREATED, "{}", published.json);
+    assert_eq!(
+        get(&app, "/api/v1/legal/terms", None).await.json["version"],
+        1
+    );
+    assert_eq!(
+        get(&app, "/api/v1/legal/terms?version=1", None).await.json,
+        published.json
+    );
+    assert_eq!(
+        get(&app, "/api/v1/legal/terms/versions", None).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&app, "/api/v1/admin/users", Some(&token)).await.status,
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    let pending = get(&app, "/api/v1/auth/consents/pending", Some(&token)).await;
+    assert_eq!(pending.status, StatusCode::OK, "{}", pending.json);
+    let consents = json!({"items":[{"kind":"terms","version":1}]});
+    let recorded = with_json(
+        &app,
+        "POST",
+        "/api/v1/auth/consents",
+        consents.clone(),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(recorded.status, StatusCode::OK, "{}", recorded.json);
+    assert_eq!(
+        with_json(
+            &app,
+            "POST",
+            "/api/v1/auth/consents",
+            consents,
+            Some(&token)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_consents")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/v1/workspaces/{workspace}/consents"),
+            Some(&token)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let alien = Uuid::now_v7();
+    sqlx::query("INSERT INTO workspaces(id,slug,name,kind) VALUES(?1,'unrelated-admin-tenant','Unrelated tenant','team')")
+        .bind(alien.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+    assert_eq!(
+        get(
+            &app,
+            &format!("/api/v1/workspaces/{alien}/consents"),
+            Some(&token)
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    let pat = Uuid::now_v7();
+    sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes,expires_at) VALUES(?1,?2,?3,'synthetic-port-admin-pat','Admin PAT','[\"workspace.manage\"]',unixepoch()*1000000+3600000000)")
+        .bind(pat.as_bytes().as_slice()).bind(workspace.as_bytes().as_slice()).bind(actor.as_bytes().as_slice()).execute(&sqlite).await.unwrap();
+    let pat_change = fvoci_server::db::admin::InstanceUserPatch {
+        instance_admin: Some(false),
+        suspended: None,
+    };
+    assert!(fvoci_server::db::admin::patch_instance_user_backend(
+        &auth.db.pool,
+        &auth.db.license,
+        actor,
+        pat,
+        member,
+        pat_change,
+        None
+    )
+    .await
+    .unwrap()
+    .is_none());
+    sqlx::query("UPDATE api_tokens SET expires_at=0 WHERE id=?1")
+        .bind(pat.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    assert!(fvoci_server::db::admin::patch_instance_user_backend(
+        &auth.db.pool,
+        &auth.db.license,
+        actor,
+        pat,
+        member,
+        fvoci_server::db::admin::InstanceUserPatch {
+            instance_admin: Some(true),
+            suspended: None
+        },
+        None
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let live = auth.session_user(&token).await.unwrap().unwrap();
+    let credential = Uuid::parse_str(&live.session_id).unwrap();
+    sqlx::query("UPDATE sessions SET revoked_at=unixepoch()*1000000 WHERE id=?1")
+        .bind(credential.as_bytes().as_slice())
+        .execute(&sqlite)
+        .await
+        .unwrap();
+    assert!(fvoci_server::db::admin::patch_instance_user_backend(
+        &auth.db.pool,
+        &auth.db.license,
+        actor,
+        credential,
+        member,
+        fvoci_server::db::admin::InstanceUserPatch {
+            instance_admin: Some(true),
+            suspended: None
+        },
+        None
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT is_instance_admin FROM users WHERE id=?1")
+            .bind(member.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        0
+    );
+    fresh.close().await;
+    drop(app);
+    sqlite.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_concurrent_self_demotions_preserve_last_admin_and_refusals_are_effect_free() {
+    use fvoci_server::db::admin::{
+        patch_instance_user_backend, InstanceUserPatch, PatchUserOutcome,
+    };
+    use fvoci_server::db::backend::Backend;
+    let root = std::env::temp_dir().join(format!("fvoci-admin-race-{}", Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("race.sqlite");
+    migrate::run_sqlite_migrations(&path).await.unwrap();
+    let sqlite = pool::connect_sqlite_app(&path, 3).await.unwrap();
+    let backend = Backend::Sqlite(sqlite.clone());
+    let (a, b, sa, sb) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    for (id, email, session, hash) in [
+        (a, "a@example.invalid", sa, "synthetic-race-a"),
+        (b, "b@example.invalid", sb, "synthetic-race-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO users(id,email,given_name,is_instance_admin) VALUES(?1,?2,'Admin',1)",
+        )
+        .bind(id.as_bytes().as_slice())
+        .bind(email)
+        .execute(&sqlite)
+        .await
+        .unwrap();
+        sqlx::query(r#"INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?1,?2,?3,unixepoch()*1000000+3600000000)"#).bind(session.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(hash).execute(&sqlite).await.unwrap();
+    }
+    let patch = InstanceUserPatch {
+        instance_admin: Some(false),
+        suspended: None,
+    };
+    let license = fvoci_server::license::absent();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let left = async {
+        barrier.wait().await;
+        patch_instance_user_backend(&backend, &license, a, sa, a, patch, None)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let right = async {
+        barrier.wait().await;
+        patch_instance_user_backend(&backend, &license, b, sb, b, patch, None)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let (left, right) = tokio::join!(left, right);
+    assert!(
+        matches!(
+            (&left, &right),
+            (
+                PatchUserOutcome::Ok { .. },
+                PatchUserOutcome::LastInstanceAdmin
+            ) | (
+                PatchUserOutcome::LastInstanceAdmin,
+                PatchUserOutcome::Ok { .. }
+            )
+        ),
+        "{left:?} {right:?}"
+    );
+    let fresh = pool::connect_sqlite_app(&path, 1).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users WHERE is_instance_admin=1")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    let (actor, session, target) = if matches!(left, PatchUserOutcome::LastInstanceAdmin) {
+        (a, sa, b)
+    } else {
+        (b, sb, a)
+    };
+    sqlx::query("CREATE TRIGGER reject_admin_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END").execute(&sqlite).await.unwrap();
+    let error = patch_instance_user_backend(
+        &backend,
+        &license,
+        actor,
+        session,
+        target,
+        InstanceUserPatch {
+            instance_admin: Some(true),
+            suspended: None,
+        },
+        None,
+    )
+    .await;
+    assert!(error.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users WHERE is_instance_admin=1")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM events")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap(),
+        1
+    );
+    fresh.close().await;
+    sqlite.close().await;
+    std::fs::remove_dir_all(root).unwrap();
 }

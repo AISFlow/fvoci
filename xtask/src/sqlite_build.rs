@@ -602,3 +602,21 @@ fn build_or_verify(
     )
     .map_err(io)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha3_256_matches_fips_202_vectors() {
+        assert_eq!(
+            sha3_hex(b"abc"),
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532"
+        );
+        // Longer than the 136-byte rate, so it absorbs more than one block.
+        assert_eq!(
+            sha3_hex(&[0xa3; 200]),
+            "79f38adec5c20307a98ef76e8324afbfd46cfd81b22e3973c65fa1bd9de31787"
+        );
+    }
+}

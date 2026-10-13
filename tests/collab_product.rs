@@ -60,7 +60,7 @@ use fvoci_server::db::workspace;
 use fvoci_server::db::{documents, migrate, pool, Db};
 use fvoci_server::http::rate_limit::RateLimiter;
 use fvoci_server::http::state::AppState;
-use rand::RngCore;
+use rand::Rng;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;

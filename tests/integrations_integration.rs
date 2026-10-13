@@ -8,6 +8,9 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -33,7 +36,7 @@ use fvoci_server::integrations::{ai::AiConfig, Integrations};
 use fvoci_server::outbox::{
     spawn_outbox_dispatcher, OutboxConsumer, OutboxDispatcherHandle, OutboxDispatcherSettings,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use project_harness::{
     add_workspace_user, admin_pool, app_state, create_project, setup_session, test_peer, TestDb,
 };
@@ -48,8 +51,801 @@ const ENC_KEYS: &str =
 const GITHUB_KEY: &str = include_str!("fixtures/github-app-test-key.pem");
 const GITHUB_SECRET: &str = "gh-webhook-secret";
 
+mod sqlite_port {
+    use super::*;
+    #[tokio::test]
+    async fn sqlite_webhook_routes_commit_readback_and_reject_foreign_tenant() {
+        let f = integrations_family::Fixture::new().await;
+        let app = f.app(integrations(Outbound::system(Default::default())));
+        let workspace = f.workspace;
+        let token = &f.token;
+        let path = format!("/api/v1/workspaces/{workspace}/webhooks");
+        let (status, created, _) = call(
+            &app,
+            "POST",
+            &path,
+            Some(json!({"url":"https://example.com/hook","events":["task.created"]})),
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let fresh = f.fresh().await;
+        let secret: String = sqlx::query_scalar("SELECT secret FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert!(secret.starts_with("enc:v2:"));
+        assert_ne!(secret, created["secret"].as_str().unwrap());
+        let (status, listed, _) = call(&app, "GET", &path, None, Some(token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["items"][0]["id"], created["id"]);
+        let (status, _, _) = call(
+            &app,
+            "DELETE",
+            &format!(
+                "/api/v1/workspaces/{}/webhooks/{}",
+                Uuid::now_v7(),
+                created["id"].as_str().unwrap()
+            ),
+            None,
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET role='member' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                &path,
+                Some(json!({"url":"https://example.com/denied","events":["task.created"]})),
+                Some(token)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("{path}/{}", created["id"].as_str().unwrap()),
+                None,
+                Some(token)
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        sqlx::query("UPDATE memberships SET role='owner' WHERE workspace_id=?1 AND user_id=?2")
+            .bind(workspace.as_bytes().as_slice())
+            .bind(f.user.as_bytes().as_slice())
+            .execute(&fresh)
+            .await
+            .unwrap();
+        let (status, _, _) = call(
+            &app,
+            "DELETE",
+            &format!("{path}/{}", created["id"].as_str().unwrap()),
+            None,
+            Some(token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM webhooks")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        fresh.close().await;
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_github_install_nonce_issue_link_and_signed_delivery_atomicity() {
+    use fvoci_server::integrations::github::{self, InboundError, InboundOutcome};
+    let f = integrations_family::Fixture::new().await;
+    let (_, addr) = start_fake_github().await;
+    let app = f.app(github_integrations(addr));
+    let state = start_install(&app, &f.token, f.workspace).await;
+    let callback = format!("/api/v1/github/callback?installation_id=42&state={state}");
+    assert_eq!(
+        call(&app, "GET", &callback, None, Some(&f.token)).await.0,
+        StatusCode::FOUND
+    );
+    assert_eq!(
+        call(&app, "GET", &callback, None, Some(&f.token)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let fresh = f.fresh().await;
+    let installed: String = sqlx::query_scalar("SELECT installation_id FROM github_installations")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(installed, "42");
+    let base = format!("/api/v1/workspaces/{}/github", f.workspace);
+    let (status, read, _) = call(&app, "GET", &base, None, Some(&f.token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["installationId"], "42");
+    let (project, backlog, done) = f.seed_project().await;
+    let config = github_config(addr);
+    let delivery = Uuid::now_v7();
+    let payload = json!({"installation":{"id":42},"action":"opened","repository":{"full_name":"fixture/repo"},"issue":{"number":1,"title":"GitHub task","state":"open"}});
+    let body = serde_json::to_vec(&payload).unwrap();
+    let signature = sign_github(&body);
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery.to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Applied
+    ));
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery.to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Duplicate
+    ));
+    let task: Vec<u8> = sqlx::query_scalar("SELECT id FROM tasks WHERE project_id=?1")
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let task = Uuid::from_slice(&task).unwrap();
+    // PG tasks_collection_item: the webhook task is one item of its project's
+    // task collection, written by the same writer.
+    let collection: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM collections WHERE project_id=?1 AND kind='task'")
+            .bind(project.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    let items: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT collection_id FROM collection_items WHERE task_id=?1")
+            .bind(task.as_bytes().as_slice())
+            .fetch_all(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(items, std::slice::from_ref(&collection));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM task_activity")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE channel='webhook'")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let mut closed = payload.clone();
+    closed["action"] = json!("closed");
+    closed["issue"]["state"] = json!("closed");
+    let bytes = serde_json::to_vec(&closed).unwrap();
+    assert!(matches!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &bytes,
+            Some(&sign_github(&bytes)),
+            Some("issues"),
+            Some(&Uuid::now_v7().to_string())
+        )
+        .await
+        .unwrap(),
+        InboundOutcome::Applied
+    ));
+    let status: Vec<u8> = sqlx::query_scalar("SELECT status_id FROM tasks WHERE id=?1")
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(Uuid::from_slice(&status).unwrap(), done);
+    let path = format!("{base}/issue-links");
+    let manual = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,2,'Manual link',?4,'a1',1,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(manual.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&fresh).await.unwrap();
+    // The raw task holds number 2; advance the counter as task creation does
+    // so later webhook tasks do not collide on tasks.number.
+    sqlx::query("UPDATE projects SET next_number=next_number+1 WHERE id=?1")
+        .bind(project.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &path,
+            Some(json!({"taskId":manual,"repo":"fixture/manual","issueNumber":2})),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER integration_activity_abort BEFORE INSERT ON task_activity BEGIN SELECT RAISE(ABORT,'synthetic activity failure'); END").execute(&fresh).await.unwrap();
+    let mut edited = payload.clone();
+    edited["action"] = json!("edited");
+    edited["issue"]["title"] = json!("Rolled back title");
+    let bytes = serde_json::to_vec(&edited).unwrap();
+    let rejected = Uuid::now_v7();
+    assert!(github::handle_webhook_backend(
+        &f.auth.db.pool,
+        &config,
+        &bytes,
+        Some(&sign_github(&bytes)),
+        Some("issues"),
+        Some(&rejected.to_string())
+    )
+    .await
+    .is_err());
+    let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id=?1")
+        .bind(task.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(title, "GitHub task");
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM github_deliveries WHERE delivery_id=?1")
+            .bind(rejected.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("DROP TRIGGER integration_activity_abort")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &path,
+        Some(json!({"taskId":task,"repo":"fixture/repo","issueNumber":1})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/api/v1/workspaces/{}/github/issue-links", Uuid::now_v7()),
+        Some(json!({"taskId":task,"repo":"fixture/other","issueNumber":2})),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Like the PG trigger, a project without its task collection aborts the
+    // delivery: the leaf refuses with "task collection missing" and leaves no
+    // task, item, link, event, activity, number or marker.
+    sqlx::query("DELETE FROM collections WHERE id=?1")
+        .bind(&collection)
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let counts = "SELECT (SELECT count(*) FROM tasks),(SELECT count(*) FROM collection_items),(SELECT count(*) FROM github_issue_links),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_activity),(SELECT count(*) FROM github_deliveries),next_number FROM projects WHERE id=?1";
+    let before: (i64, i64, i64, i64, i64, i64, i64, i32) = sqlx::query_as(counts)
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let mut orphan = payload.clone();
+    orphan["issue"]["number"] = json!(3);
+    orphan["issue"]["title"] = json!("No task collection");
+    let bytes = serde_json::to_vec(&orphan).unwrap();
+    let refused = github::handle_webhook_backend(
+        &f.auth.db.pool,
+        &config,
+        &bytes,
+        Some(&sign_github(&bytes)),
+        Some("issues"),
+        Some(&Uuid::now_v7().to_string()),
+    )
+    .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(InboundError::Db(sqlx::Error::Protocol(message)))
+                if message == "task collection missing"
+        ),
+        "{refused:?}"
+    );
+    let after: (i64, i64, i64, i64, i64, i64, i64, i32) = sqlx::query_as(counts)
+        .bind(project.as_bytes().as_slice())
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        call(&app, "DELETE", &base, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM github_installations")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+fn sign_github(body: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(GITHUB_SECRET.as_bytes()).unwrap();
+    mac.update(body);
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Same-workspace refusal: a project viewer can read the task's project but
+/// lacks the Edit grant an issue link requires (PG `link_issue`).
+#[tokio::test]
+async fn sqlite_github_issue_link_refuses_same_workspace_viewer() {
+    let f = integrations_family::Fixture::new().await;
+    let (_, addr) = start_fake_github().await;
+    let app = f.app(github_integrations(addr));
+    let (project, backlog, _) = f.seed_project().await;
+    let task = Uuid::now_v7();
+    sqlx::query("INSERT INTO tasks(id,workspace_id,project_id,number,title,status_id,sort_key,schema_version,content_json,created_by) VALUES(?1,?2,?3,1,'Viewer link',?4,'a0',1,'{\"type\":\"doc\",\"content\":[]}',?5)").bind(task.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(backlog.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).execute(&f.sqlite).await.unwrap();
+    let (viewer, viewer_token) = f.member("guest").await;
+    sqlx::query("INSERT INTO project_members(id,workspace_id,project_id,user_id,role) VALUES(?1,?2,?3,?4,'viewer')").bind(Uuid::now_v7().as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(project.as_bytes().as_slice()).bind(viewer.as_bytes().as_slice()).execute(&f.sqlite).await.unwrap();
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{base}/projects/{project}"),
+        None,
+        Some(&viewer_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "viewer reads the project: {body}");
+    let fresh = f.fresh().await;
+    let counts = "SELECT (SELECT count(*) FROM github_issue_links),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)";
+    let before: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    let path = format!("{base}/github/issue-links");
+    let link = json!({"taskId":task,"repo":"fixture/viewer","issueNumber":1});
+    let (status, body, _) =
+        call(&app, "POST", &path, Some(link.clone()), Some(&viewer_token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&fresh).await.unwrap();
+    assert_eq!(before, after);
+    assert_eq!(before.0, 0);
+    // The same request from an editor links, so only the grant was refused.
+    let (status, body, _) = call(&app, "POST", &path, Some(link), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_zotero_http_sync_links_retirement_and_current_owner() {
+    use fvoci_server::db::zotero::{self, Actor};
+    use fvoci_server::integrations::zotero::fixtures::{Upstream, KEY};
+    use std::sync::atomic::Ordering;
+    let f = integrations_family::Fixture::new().await;
+    let upstream = Upstream::start().await;
+    let mut config = (*integrations(Outbound::system(Default::default()))).clone();
+    config.zotero = upstream.reader();
+    let app = f.app(Arc::new(config));
+    let base = format!("/api/v1/workspaces/{}/zotero", f.personal);
+    let input = json!({"libraryType":"user","remoteLibraryId":"42","libraryUrl":"https://www.zotero.org/users/42","apiKey":KEY});
+    let (status, connected, _) =
+        call(&app, "POST", &base, Some(input.clone()), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = Uuid::parse_str(connected["id"].as_str().unwrap()).unwrap();
+    let fresh = f.fresh().await;
+    let sealed: String = sqlx::query_scalar("SELECT sealed_key FROM zotero_credentials")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert!(sealed.starts_with("enc:v2:"));
+    assert_ne!(sealed, KEY);
+    let (status, listed, _) = call(&app, "GET", &base, None, Some(&f.token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["connectors"][0]["id"], connected["id"]);
+    let library = format!("{base}/libraries/{id}");
+    let (status, first, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(!first["references"].as_array().unwrap().is_empty());
+    assert_eq!(first["connector"]["completedVersion"], "12");
+    let reference = first["references"][0]["id"].as_str().unwrap();
+    let initial_version = first["references"][0]["localVersion"].clone();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_references")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, first["references"].as_array().unwrap().len() as i64);
+    let (status, repeated, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated["references"][0]["localVersion"], initial_version);
+    let link = format!("{base}/references/{reference}/links");
+    let body =
+        json!({"documentId":reference,"expectedVersion":initial_version,"anchor":"citation"});
+    for _ in 0..2 {
+        assert_eq!(
+            call(&app, "POST", &link, Some(body.clone()), Some(&f.token))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_links")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    upstream.model.mode.store(14, Ordering::SeqCst);
+    sqlx::query("CREATE TRIGGER integration_zotero_abort BEFORE INSERT ON events WHEN NEW.verb='document.updated' BEGIN SELECT RAISE(ABORT,'synthetic mirror failure'); END").execute(&fresh).await.unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("{library}/sync"),
+            None,
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let complete: i64 =
+        sqlx::query_scalar("SELECT completed_version FROM zotero_connectors WHERE id=?1")
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(complete, 12);
+    let version: i64 =
+        sqlx::query_scalar("SELECT local_version FROM zotero_references WHERE id=?1")
+            .bind(Uuid::parse_str(reference).unwrap().as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+    assert_eq!(version, 1);
+    sqlx::query("DROP TRIGGER integration_zotero_abort")
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, updated, _) = call(
+        &app,
+        "POST",
+        &format!("{library}/sync"),
+        None,
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["connector"]["completedVersion"], "14");
+    assert_eq!(
+        call(&app, "POST", &link, Some(body), Some(&f.token))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{}/zotero", f.workspace),
+            Some(input.clone()),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let actor = Actor {
+        workspace: f.personal,
+        user: f.user,
+        session: f.session,
+    };
+    let cycle = zotero::start_backend(&f.auth.db.pool, actor, id, &keys())
+        .await
+        .unwrap();
+    assert!(zotero::start_backend(&f.auth.db.pool, actor, id, &keys())
+        .await
+        .is_err());
+    let (status, reconnected, _) = call(&app, "POST", &base, Some(input), Some(&f.token)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(reconnected["generation"], "2");
+    assert!(zotero::current_backend(&f.auth.db.pool, &cycle)
+        .await
+        .is_err());
+    assert!(
+        zotero::finish_failed_backend(&f.auth.db.pool, &cycle, 30, true)
+            .await
+            .is_err()
+    );
+    zotero::release_read_backend(&f.auth.db.pool, &cycle)
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        call(&app, "DELETE", &library, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM zotero_credentials")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        call(&app, "GET", &library, None, Some(&f.token)).await.0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE users SET suspended_at=unixepoch()*1000000 WHERE id=?1")
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(matches!(
+        zotero::library_backend(&f.auth.db.pool, actor, id).await,
+        Err(zotero::DbError::NotFound)
+    ));
+    fresh.close().await;
+    upstream.shutdown().await;
+    f.cleanup().await;
+}
+
 fn keys() -> Arc<Keyring> {
     Arc::new(Keyring::parse(ENC_KEYS, "k1").expect("keys"))
+}
+
+#[tokio::test]
+async fn sqlite_integration_writer_races_admit_one_sync_and_one_delivery() {
+    use fvoci_server::api::zotero_dto::{ConnectBody, LibraryType};
+    use fvoci_server::db::zotero::{self, Actor, DbError};
+    use fvoci_server::integrations::github::{self, InboundOutcome};
+    let f = integrations_family::Fixture::new().await;
+    let actor = Actor {
+        workspace: f.personal,
+        user: f.user,
+        session: f.session,
+    };
+    let keys = keys();
+    let input = ConnectBody {
+        library_type: LibraryType::User,
+        remote_library_id: "42".into(),
+        library_url: "https://www.zotero.org/users/42".into(),
+        api_key: "SYNTHETIC_ONLY".into(),
+    };
+    let connected = zotero::connect_backend(&f.auth.db.pool, actor, &input, &keys)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        zotero::start_backend(&f.auth.db.pool, actor, connected.id, &keys),
+        zotero::start_backend(&f.auth.db.pool, actor, connected.id, &keys)
+    );
+    let cycle = match (a, b) {
+        (Ok(cycle), Err(DbError::Conflict)) | (Err(DbError::Conflict), Ok(cycle)) => cycle,
+        _ => panic!("one sync must own the writer-fenced lease"),
+    };
+    zotero::release_read_backend(&f.auth.db.pool, &cycle)
+        .await
+        .unwrap();
+    f.seed_project().await;
+    github::begin_install_backend(
+        &f.auth.db.pool,
+        f.workspace,
+        f.user,
+        f.session,
+        "synthetic-race-nonce",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    github::complete_install_backend(
+        &f.auth.db.pool,
+        f.workspace,
+        f.user,
+        f.session,
+        "synthetic-race-nonce",
+        "42",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let config = github_config(([127, 0, 0, 1], 1).into());
+    let body=serde_json::to_vec(&json!({"installation":{"id":42},"action":"opened","repository":{"full_name":"fixture/race"},"issue":{"number":1,"title":"Race task","state":"open"}})).unwrap();
+    let signature = sign_github(&body);
+    let delivery = Uuid::now_v7().to_string();
+    let (a, b) = tokio::join!(
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery)
+        ),
+        github::handle_webhook_backend(
+            &f.auth.db.pool,
+            &config,
+            &body,
+            Some(&signature),
+            Some("issues"),
+            Some(&delivery)
+        )
+    );
+    assert!(matches!(
+        (a.unwrap(), b.unwrap()),
+        (InboundOutcome::Applied, InboundOutcome::Duplicate)
+            | (InboundOutcome::Duplicate, InboundOutcome::Applied)
+    ));
+    let fresh = f.fresh().await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM github_deliveries")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_ai_http_document_permissions_and_api_token_actor() {
+    use fvoci_server::integrations::ai;
+    let f = integrations_family::Fixture::new().await;
+    let mut config = (*integrations(Outbound::system(Default::default()))).clone();
+    config.ai = Some(AiConfig::new("synthetic-ai-fixture"));
+    let app = f.app(Arc::new(config));
+    let base = format!("/api/v1/workspaces/{}", f.workspace);
+    let mut documents = Vec::new();
+    for title in ["First", "Second"] {
+        let (status, doc, _) = call(
+            &app,
+            "POST",
+            &format!("{base}/documents"),
+            Some(json!({"commandId":Uuid::now_v7(),"parentId":null,"title":title})),
+            Some(&f.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{doc}");
+        documents.push(Uuid::parse_str(doc["id"].as_str().unwrap()).unwrap());
+    }
+    let fresh = f.fresh().await;
+    sqlx::query("UPDATE documents SET content_json=?2 WHERE id=?1").bind(documents[0].as_bytes().as_slice()).bind(json!({"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Heading"}]},{"type":"paragraph","content":[{"type":"text","text":"Hello"}]}]}).to_string()).execute(&fresh).await.unwrap();
+    let body = json!({"documentId":documents[0]});
+    let (status, summary, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/summarize"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert!(summary["summary"].as_str().unwrap().contains("Heading"));
+    let (status, titles, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/generate-tasks"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(titles["titles"], json!(["Heading"]));
+    let (status, links, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/ai/suggest-links"),
+        Some(body.clone()),
+        Some(&f.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(links["documentIds"], json!([documents[1]]));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workspaces/{}/ai/summarize", Uuid::now_v7()),
+            Some(body),
+            Some(&f.token)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let pat = Uuid::now_v7();
+    let issued = fvoci_server::auth::token::new_token();
+    sqlx::query("INSERT INTO api_tokens(id,workspace_id,user_id,token_hash,name,scopes) VALUES(?1,?2,?3,?4,'Fixture','[\"documents.read\"]')").bind(pat.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice()).bind(&issued.hash).execute(&fresh).await.unwrap();
+    assert!(
+        ai::is_member_backend(&f.auth.db.pool, f.workspace, f.user, pat)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ai::viewable_document_backend(&f.auth.db.pool, f.workspace, f.user, pat, documents[0])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("UPDATE api_tokens SET expires_at=unixepoch()*1000000-1 WHERE id=?1")
+        .bind(pat.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    assert!(
+        !ai::is_member_backend(&f.auth.db.pool, f.workspace, f.user, pat)
+            .await
+            .unwrap()
+    );
+    assert!(
+        ai::viewable_document_backend(&f.auth.db.pool, f.workspace, f.user, pat, documents[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fresh.close().await;
+    f.cleanup().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +856,8 @@ enum Reply {
     Status(u16),
     Redirect(String),
     Slow(Duration),
+    /// Answers 200 only after the test calls `notify_one` on the gate.
+    Hold(Arc<tokio::sync::Notify>),
     Endless,
 }
 
@@ -118,6 +916,10 @@ async fn receive(AxState(receiver): AxState<Receiver>, request: Request<Body>) -
         Reply::Redirect(location) => (StatusCode::FOUND, [("location", location)]).into_response(),
         Reply::Slow(delay) => {
             tokio::time::sleep(delay).await;
+            StatusCode::OK.into_response()
+        }
+        Reply::Hold(release) => {
+            release.notified().await;
             StatusCode::OK.into_response()
         }
         Reply::Endless => {
@@ -252,12 +1054,15 @@ async fn raw_post(
     (status, serde_json::from_slice(&bytes).unwrap_or(json!({})))
 }
 
+/// How long `wait_until` observes before it fails.
+const OBSERVATION_BOUND: Duration = Duration::from_secs(15);
+
 async fn wait_until<F, Fut>(what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + OBSERVATION_BOUND;
     while Instant::now() < deadline {
         if check().await {
             return;
@@ -861,7 +1666,6 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
     let pool = project_harness::app_pool(&harness).await;
     let dispatcher = Delivery::start(&pool, outbound, Duration::from_secs(5), Vec::new());
     receiver.script("/endless", &[Reply::Endless]);
-    let started = Instant::now();
     insert_event(&admin, workspace_id, "task.deleted", None, json!({})).await;
     wait_until("every hook settled", || {
         let admin = admin.clone();
@@ -908,9 +1712,18 @@ async fn webhook_refuses_redirects_private_answers_and_reads_bounded_responses()
         );
     }
     // Endless body: the read stops at the cap and the delivery completes
-    // well inside the 5 s request budget.
-    assert_eq!(row("endless").await.status, "delivered");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // inside the 5 s request budget. The budget also bounds the body read, so
+    // a read that did not stop at the cap would end as a timeout and be
+    // recorded as a retryable failure, not as this delivered attempt.
+    assert_eq!(
+        deliveries(&admin, hooks["endless"]).await,
+        vec![DeliveryRow {
+            status: "delivered".into(),
+            attempt: 1,
+            http_status: Some(200),
+            next_in_secs: None,
+        }]
+    );
 
     // Redirect: refused (not followed) and terminal; the Location target is
     // never requested.
@@ -1699,6 +2512,20 @@ async fn github_webhook_verifies_signature_dedupes_and_syncs_issue_tasks() {
     .unwrap();
     assert_eq!(task.1, "버그 🐛 수정");
     assert_eq!(task.2.to_string(), backlog);
+    let collection: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fvoci.collections WHERE project_id = $1 AND kind = 'task'",
+    )
+    .bind(Uuid::parse_str(&project_id).unwrap())
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let items: Vec<Uuid> =
+        sqlx::query_scalar("SELECT collection_id FROM fvoci.collection_items WHERE task_id = $1")
+            .bind(task.0)
+            .fetch_all(&admin)
+            .await
+            .unwrap();
+    assert_eq!(items, [collection]);
     let channel: String = sqlx::query_scalar(
         "SELECT channel FROM fvoci.events WHERE verb = 'task.created' AND target_id = $1",
     )
@@ -1959,6 +2786,67 @@ async fn github_issue_links_and_status_sync_use_the_fake_api() {
     dispatcher.request_shutdown();
     dispatcher.join().await.unwrap();
     pool.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// PG twin of `sqlite_github_issue_link_refuses_same_workspace_viewer`.
+#[tokio::test]
+async fn github_issue_link_refuses_same_workspace_viewer() {
+    let harness = TestDb::bootstrap().await;
+    let (_, cookie, _, workspace_id) = setup_session(&harness).await;
+    let admin = admin_pool(&harness).await;
+    let (_fake, fake_addr) = start_fake_github().await;
+    let app = app(&harness, github_integrations(fake_addr)).await;
+    let project = create_project(app.clone(), &cookie, workspace_id, "VIEW", "workspace").await;
+    let project_id = project["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v1/workspaces/{workspace_id}");
+    let (status, task, _) = call(
+        &app,
+        "POST",
+        &format!("{base}/projects/{project_id}/tasks"),
+        Some(json!({ "title": "Viewer link" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{task}");
+    let viewer = add_workspace_user(&admin, workspace_id, "guest", "viewer").await;
+    sqlx::query("INSERT INTO fvoci.project_members (id, workspace_id, project_id, user_id, role) VALUES ($1, $2, $3, $4, 'viewer')")
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(Uuid::parse_str(&project_id).unwrap())
+        .bind(viewer.user_id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (status, body, _) = call(
+        &app,
+        "GET",
+        &format!("{base}/projects/{project_id}"),
+        None,
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "viewer reads the project: {body}");
+    let counts = "SELECT (SELECT count(*) FROM fvoci.github_issue_links), (SELECT count(*) FROM fvoci.events), (SELECT count(*) FROM fvoci.audit_log)";
+    let before: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    let path = format!("{base}/github/issue-links");
+    let link = json!({"taskId": task["id"], "repo": "octo/viewer", "issueNumber": 1});
+    let (status, body, _) = call(
+        &app,
+        "POST",
+        &path,
+        Some(link.clone()),
+        Some(&viewer.cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+    let after: (i64, i64, i64) = sqlx::query_as(counts).fetch_one(&admin).await.unwrap();
+    assert_eq!(before, after);
+    assert_eq!(before.0, 0);
+    let (status, body, _) = call(&app, "POST", &path, Some(link), Some(&cookie)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     admin.close().await;
     harness.cleanup().await;
 }
@@ -2240,14 +3128,14 @@ async fn github_token_client_errors_are_final_and_do_not_hold_other_workspaces()
     let (task_a, statuses_a) = linked_task(&app, &cookie, ws_a, "GHA", "octo/a", 1).await;
     let (task_b, statuses_b) = linked_task(&app, &cookie, ws_b, "GHB", "octo/b", 2).await;
 
-    // A retried event would wait 30 s before its next attempt and hold the
-    // shared cursor that long; B must be PATCHed well before that.
+    // A retried event would wait out the failure backoff before its next
+    // attempt and hold the shared cursor that long. The backoff outlasts the
+    // observation bound, so B is PATCHed inside `wait_until` only if A's
+    // client error never entered the retry path; the state checks after the
+    // wait confirm that directly.
+    const RETRY_BACKOFF: Duration = Duration::from_secs(OBSERVATION_BOUND.as_secs() * 2);
     let pool = project_harness::app_pool(&harness).await;
-    let dispatcher = github_dispatcher(
-        &pool,
-        Some(github_config(fake_addr)),
-        Duration::from_secs(30),
-    );
+    let dispatcher = github_dispatcher(&pool, Some(github_config(fake_addr)), RETRY_BACKOFF);
     move_task(
         &app,
         &cookie,
@@ -2264,17 +3152,11 @@ async fn github_token_client_errors_are_final_and_do_not_hold_other_workspaces()
         &status_of(&statuses_b, "done"),
     )
     .await;
-    let started = Instant::now();
     wait_until("B PATCHed", || {
         let fake = fake.clone();
         async move { fake.count("PATCH", "/repos/octo/b/issues/2") == 1 }
     })
     .await;
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "B waited {:?} behind A",
-        started.elapsed()
-    );
     assert_eq!(
         fake.count("POST", "/app/installations/404001/access_tokens"),
         1,
@@ -2570,15 +3452,22 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
         &["project.created"],
     )
     .await;
-    // The tarpit answers after 60 s; the request budget is 10 s (source).
-    receiver.script("/tarpit", &[Reply::Slow(Duration::from_secs(60))]);
+    // The tarpit holds the request until the explicit release below, so events,
+    // not elapsed time, decide the result. The request budget exceeds the
+    // observation bound: a budget that ended first would record the held
+    // attempt as a timeout and leave the ordering undecided. The budget's own
+    // timeout is covered by
+    // `webhook_retries_with_source_backoff_and_stops_on_client_errors`.
+    const HELD_REQUEST_BUDGET: Duration = Duration::from_secs(OBSERVATION_BOUND.as_secs() * 4);
+    let release = Arc::new(tokio::sync::Notify::new());
+    receiver.script("/tarpit", &[Reply::Hold(release.clone())]);
     let member = add_workspace_user(&admin, workspace_id, "member", "n").await;
 
     let pool = project_harness::app_pool(&harness).await;
     let delivery = Delivery::start(
         &pool,
         outbound,
-        Duration::from_secs(10),
+        HELD_REQUEST_BUDGET,
         vec![fvoci_server::notifications::notifications_consumer()],
     );
     let project = create_project(app.clone(), &cookie, workspace_id, "SLOW", "workspace").await;
@@ -2588,7 +3477,7 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
     })
     .await;
 
-    // While that request is held, a notification is produced promptly.
+    // While that request is held, a notification is produced.
     let project_id = project["id"].as_str().unwrap();
     let (status, task, _) = call(
         &app,
@@ -2609,7 +3498,6 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let started = Instant::now();
     wait_until("member notification", || {
         let admin = admin.clone();
         let user = member.user_id;
@@ -2625,15 +3513,27 @@ async fn slow_webhook_receiver_does_not_hold_the_notification_consumer() {
         }
     })
     .await;
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "notification waited {:?} behind the webhook send",
-        started.elapsed()
-    );
     // The webhook attempt is still in flight (claimed, not yet recorded).
     let rows = deliveries(&admin, hook_id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].status.as_str(), rows[0].attempt), ("pending", 0));
+
+    // Releasing the receiver completes that same held attempt.
+    release.notify_one();
+    wait_until("held delivery recorded", || {
+        let admin = admin.clone();
+        async move {
+            deliveries(&admin, hook_id).await
+                == vec![DeliveryRow {
+                    status: "delivered".into(),
+                    attempt: 1,
+                    http_status: Some(200),
+                    next_in_secs: None,
+                }]
+        }
+    })
+    .await;
+    assert_eq!(receiver.count(), 1);
 
     delivery.stop().await;
     pool.close().await;

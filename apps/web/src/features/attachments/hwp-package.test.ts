@@ -26,7 +26,7 @@ function names(bytes: Uint8Array): string[] {
 
 await test("the review's small Scripts bomb is rejected before rhwp runs", async () => {
   // Four unreferenced 32 MiB scripts: about 140 KB on disk, about 324 MiB of
-  // wasm heap when rhwp 0.8.6 opens it directly (review B1 table).
+  // wasm heap when rhwp 0.8.7 opens it directly (review B1 table).
   const bomb = withExtra(
     [0, 1, 2, 3].map((n) => ({ name: `Scripts/s${String(n)}.js`, data: new Uint8Array(32 * MiB) })),
   );

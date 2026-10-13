@@ -1,13 +1,13 @@
 /**
- * Bounded Hocuspocus 4.6.0 frame reader for product /collab Playwright
+ * Bounded Hocuspocus 4.7.0 frame reader for product /collab Playwright
  * observation. Persist strings and auth token shape match
- * packages/editor/src/collab/constants.ts and the public provider 4.6.0
+ * packages/editor/src/collab/constants.ts and the public provider 4.7.0
  * goldens in compat/fixtures/hocus-wire.json. This is not a second codec.
  */
 export const COLLAB_PERSIST_REQUEST = "persist";
 export const COLLAB_PERSIST_DONE = "persisted";
 export const COLLAB_PERSIST_FAILED = "persist-failed";
-export const PROVIDER_VERSION = "4.6.0";
+export const PROVIDER_VERSION = "4.7.0";
 export const SESSION_COOKIE = "fvoci_session";
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const PERSIST_ID_RE = new RegExp(

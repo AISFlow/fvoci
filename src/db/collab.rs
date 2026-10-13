@@ -2792,6 +2792,39 @@ pub async fn append_collab_restore_kind(
     })
 }
 
+/// Family restore retains the room's current lease for the complete native,
+/// revision and body commit, just like an ordinary room append.
+pub(crate) async fn append_family_room_restore(
+    backend: &Backend,
+    fence: FamilyNativeRoomFence,
+    kind: CollabKind,
+    input: AppendCollabInput<'_>,
+    restore: &crate::db::revisions::RestoreRevisionAppend,
+) -> Result<Result<(AppendCollabResult, Uuid), CollabDbError>, sqlx::Error> {
+    if matches!(backend, Backend::Postgres(_))
+        || !fence.matches(kind, input.workspace_id, input.document_id)
+    {
+        return Ok(Err(CollabDbError::StaleWriter));
+    }
+    let tx = backend.begin_write().await?;
+    append_collab_update_in_tx(
+        tx,
+        kind,
+        input,
+        CollabDbStageTimings::default(),
+        Some(restore),
+        Some(fence),
+    )
+    .await
+    .map(|(result, _)| {
+        result.and_then(|(append, revision)| {
+            revision
+                .map(|id| (append, id))
+                .ok_or(CollabDbError::OpIdConflict)
+        })
+    })
+}
+
 /// Append on a room's dedicated session connection (no pool acquire).
 pub async fn append_collab_update_on_conn_timed(
     conn: &mut PgConnection,
@@ -2854,18 +2887,10 @@ impl OperationTx<'_, '_> {
         restore: &crate::db::revisions::RestoreRevisionAppend,
     ) -> Result<Result<Option<crate::db::revisions::RestoredRevision>, CollabDbError>, sqlx::Error>
     {
-        use crate::db::revisions::{
-            authorize_restore_in_tx, lookup_restored_revision_in_tx, RevisionDbError,
-        };
-        let Self::Postgres(tx) = self else {
-            // The first slice adds ordinary ON appends; family revision restore
-            // remains required and refuses before any native mutation.
-            return Err(sqlx::Error::Protocol(
-                "native revision restore is pending SQLite-family port".into(),
-            ));
-        };
-        if let Err(error) =
-            authorize_restore_in_tx(tx, workspace, actor, credential, restore.intent).await?
+        use crate::db::revisions::RevisionDbError;
+        if let Err(error) = self
+            .authorize_revision_scope(workspace, actor, credential, restore.intent.scope, true)
+            .await?
         {
             return Ok(Err(if error == RevisionDbError::RestoreConflict {
                 CollabDbError::OpIdConflict
@@ -2873,23 +2898,40 @@ impl OperationTx<'_, '_> {
                 CollabDbError::Forbidden
             }));
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "revision-restore:{workspace}:{}",
-                restore.intent.correlation_id
-            ))
-            .execute(&mut ***tx)
-            .await?;
-        match lookup_restored_revision_in_tx(tx, workspace, actor, restore.intent).await? {
+        // Family begin_write owns the SQLite write lock (including remote
+        // primary transactions); PG keeps its correlation advisory lock.
+        if let Self::Postgres(tx) = self {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "revision-restore:{workspace}:{}",
+                    restore.intent.correlation_id
+                ))
+                .execute(&mut ***tx)
+                .await?;
+        }
+        match self
+            .lookup_restored_revision(workspace, actor, restore.intent)
+            .await?
+        {
             Ok(Some(record)) => return Ok(Ok(Some(record))),
             Ok(None) => {}
             Err(_) => return Ok(Err(CollabDbError::OpIdConflict)),
         }
-        let source: Option<Uuid> = sqlx::query_scalar(
+        let source_exists = match self {
+            Self::Postgres(tx) => {
+                let source: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM fvoci.revisions WHERE workspace_id=$1 AND id=$2 AND target_kind=$3 AND target_id=$4 FOR SHARE",
         ).bind(workspace).bind(restore.intent.source_revision_id).bind(t.target_type).bind(resource)
             .fetch_optional(&mut ***tx).await?;
-        Ok(if source.is_some() {
+                source.is_some()
+            }
+            Self::SqliteFamily(tx) => {
+                tx.require_writer()?;
+                tx.require_tenant(workspace)?;
+                !tx.query("SELECT id FROM revisions WHERE workspace_id=?1 AND id=?2 AND target_kind=?3 AND target_id=?4", &[Cell::uuid(workspace), Cell::uuid(restore.intent.source_revision_id), Cell::text(t.target_type), Cell::uuid(resource)]).await?.is_empty()
+            }
+        };
+        Ok(if source_exists {
             Ok(None)
         } else {
             Err(CollabDbError::NotFound)
@@ -2905,10 +2947,39 @@ impl OperationTx<'_, '_> {
         seq: i64,
         restore: &crate::db::revisions::RestoreRevisionAppend,
     ) -> Result<(), sqlx::Error> {
+        if let Self::SqliteFamily(tx) = self {
+            tx.require_writer()?;
+            tx.require_tenant(workspace_id)?;
+            tx.execute("INSERT INTO revisions(id,workspace_id,target_kind,target_id,y_snapshot,encoding,content_json,text,reason,created_by,restored_from_id,restore_correlation_id,restore_base_tail_seq,restore_committed_tail_seq) VALUES(?1,?2,?3,?4,?5,1,?6,?7,'restore',?8,?9,?10,?11,?12)",
+                &[Cell::uuid(restore.revision_id),Cell::uuid(workspace_id),Cell::text(t.target_type),Cell::uuid(document_id),Cell::Blob(restore.y_snapshot.clone()),Cell::json(restore.prepared_body.content_json())?,Cell::text(restore.prepared_body.text()),Cell::uuid(actor_user_id),Cell::uuid(restore.intent.source_revision_id),Cell::uuid(restore.intent.correlation_id),Cell::Integer(restore.intent.expected_tail_seq),Cell::Integer(seq)]).await?;
+            let mut payload = serde_json::json!({
+                "restoreRequested": restore.intent.source_revision_id,
+                "restoredFromRevisionId": restore.intent.source_revision_id,
+                "restoredRevisionId": restore.revision_id,
+                "correlationId": restore.intent.correlation_id,
+            });
+            payload[t.payload_key] = serde_json::json!(document_id);
+            self.append_event(EventAppend {
+                id: Uuid::now_v7(),
+                workspace_id: Some(workspace_id),
+                actor_user_id: Some(actor_user_id),
+                verb: t.verb("updated"),
+                target_type: Some(t.target_type.into()),
+                target_id: Some(document_id),
+                payload,
+            })
+            .await?;
+            if self
+                .write_native_body_projection(t, workspace_id, document_id, &restore.prepared_body)
+                .await?
+            {
+                self.append_native_body_updated(t, workspace_id, document_id)
+                    .await?;
+            }
+            return Ok(());
+        }
         let Self::Postgres(tx) = self else {
-            return Err(sqlx::Error::Protocol(
-                "native revision restore is pending SQLite-family port".into(),
-            ));
+            unreachable!()
         };
         let tx = &mut **tx;
         sqlx::query(
@@ -3377,6 +3448,22 @@ struct NativeRollbackUnconfirmed {
     rollback: sqlx::Error,
 }
 
+/// A transaction that committed and explicitly finished, whose caller lost
+/// only the append reply. This differs from an unconfirmed remote COMMIT.
+#[cfg(feature = "db-tests")]
+#[derive(Debug, thiserror::Error)]
+#[error("fixture restore committed and finished; reply lost")]
+struct RestoreReplyLost;
+
+pub(crate) fn restore_reply_lost_after_finish(error: &sqlx::Error) -> bool {
+    #[cfg(feature = "db-tests")]
+    if let sqlx::Error::AnyDriverError(source) = error {
+        return source.downcast_ref::<RestoreReplyLost>().is_some();
+    }
+    let _ = error;
+    false
+}
+
 async fn append_collab_update_in_tx(
     mut tx: DbTransaction<'_>,
     kind: CollabKind,
@@ -3447,10 +3534,7 @@ async fn append_collab_update_in_tx(
         if let Some((reached, proceed)) = barrier {
             let _ = reached.send(());
             let _ = proceed.await;
-            return Err(sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "fixture restore committed; reply lost",
-            )));
+            return Err(sqlx::Error::AnyDriverError(Box::new(RestoreReplyLost)));
         }
     }
     let (prepared, revision) = prepared_result;

@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use fvoci_server::db::migrate;
-use rand::RngCore;
+use rand::Rng;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;

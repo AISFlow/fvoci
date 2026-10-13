@@ -7,6 +7,9 @@
 //! take it before touching a status, so a status cannot be deleted while a
 //! concurrent create or move puts a task into it.
 
+use crate::db::backend::{Backend, DbTx, FamilyTx, OperationTx};
+use crate::db::codec::{Cell, FamilyRow};
+use crate::db::tasks::{family_project_access, finish_task_operation};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -103,6 +106,115 @@ pub async fn list_workspace_statuses(
         .await?;
     tx.commit().await?;
     Ok(Ok(rows.into_iter().map(status_row).collect()))
+}
+
+pub async fn list_workspace_statuses_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Vec<StatusRow>, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return list_workspace_statuses(pool, workspace, actor, credential).await;
+    }
+    let mut tx = backend.begin_read().await?;
+    let result=async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        if !op.session_is_live(actor, credential).await? {
+            return Ok(Err(ProjectDbError::Forbidden));
+        }
+        if !op.workspace_is_live(workspace).await?
+            || op.membership_role(workspace, actor, false).await?.is_none()
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+
+        let OperationTx::SqliteFamily(family) = &mut op else {
+            unreachable!()
+        };
+        let rows=family.query("SELECT id,workflow_id,project_id,name,category,sort_key,wip_limit FROM statuses WHERE workspace_id=?1 ORDER BY sort_key COLLATE BINARY,id",&[Cell::uuid(workspace)]).await?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            let status = family_status_row(&row)?;
+            if op
+                .project_permission_by_id(workspace, actor, status.project_id)
+                .await?
+                .is_some_and(|p| p.at_least(ProjectPermission::View))
+            {
+                items.push(status);
+            }
+        }
+        Ok(Ok(items))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
+}
+fn family_status_row(r: &FamilyRow) -> Result<StatusRow, sqlx::Error> {
+    Ok(status_row((
+        r.cell(0)?.id()?,
+        r.cell(1)?.id()?,
+        r.cell(2)?.id()?,
+        r.cell(3)?.string()?,
+        r.cell(4)?.string()?,
+        r.cell(5)?.string()?,
+        r.cell(6)?.optional(Cell::int32)?,
+    )))
+}
+async fn family_workflow_manage(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    workflow: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<Uuid, ProjectDbError>, sqlx::Error> {
+    let mut op = OperationTx::SqliteFamily(&mut *tx);
+    op.set_tenant(workspace).await?;
+    if !op.recheck_session(actor, credential).await? {
+        return Ok(Err(ProjectDbError::Forbidden));
+    }
+    if !op.workspace_is_live(workspace).await? {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    let rows = tx
+        .query(
+            "SELECT project_id FROM workflows WHERE workspace_id=?1 AND id=?2",
+            &[Cell::uuid(workspace), Cell::uuid(workflow)],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(Err(ProjectDbError::NotFound));
+    };
+    let project = row.cell(0)?.id()?;
+    // Manage is checked before archive, matching the PostgreSQL error precedence.
+    let mut op = OperationTx::SqliteFamily(&mut *tx);
+    if !op
+        .project_permission_by_id(workspace, actor, project)
+        .await?
+        .is_some_and(|p| p.at_least(ProjectPermission::Manage))
+    {
+        return Ok(Err(ProjectDbError::NotFound));
+    }
+    Ok(family_project_access(
+        &mut op,
+        workspace,
+        project,
+        actor,
+        credential,
+        ProjectPermission::Manage,
+        true,
+    )
+    .await?
+    .map(|()| project))
+}
+async fn family_statuses(
+    tx: &mut FamilyTx,
+    workspace: Uuid,
+    workflow: Uuid,
+) -> Result<Vec<StatusRow>, sqlx::Error> {
+    tx.query("SELECT id,workflow_id,project_id,name,category,sort_key,wip_limit FROM statuses WHERE workspace_id=?1 AND workflow_id=?2 ORDER BY sort_key COLLATE BINARY,id",&[Cell::uuid(workspace),Cell::uuid(workflow)]).await?.iter().map(family_status_row).collect()
 }
 
 /// Source `requireWorkflowManage`: returns the workflow's project after
@@ -258,6 +370,46 @@ pub async fn create_status(
     Ok(Ok(status_row(row)))
 }
 
+pub async fn create_status_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    workflow: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: CreateStatusInput,
+) -> Result<Result<StatusRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return create_status(pool, workspace, workflow, actor, credential, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        let project =
+            match family_workflow_manage(family, workspace, workflow, actor, credential).await? {
+                Ok(p) => p,
+                Err(e) => return Ok(Err(e)),
+            };
+        let siblings = family_statuses(family, workspace, workflow).await?;
+
+        if siblings.len() as i64 >= MAX_WORKFLOW_STATUSES {
+            return Ok(Err(ProjectDbError::WorkflowStatusLimit));
+        }
+        let Ok(key) = between(siblings.last().map(|s| s.sort_key.as_str()), None) else {
+            return Ok(Err(ProjectDbError::Conflict));
+        };
+
+        let rows=family.query("INSERT INTO statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key,wip_limit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) RETURNING id,workflow_id,project_id,name,category,sort_key,wip_limit",&[Cell::uuid(Uuid::now_v7()),Cell::uuid(workspace),Cell::uuid(project),Cell::uuid(workflow),Cell::text(input.name),Cell::text(input.category),Cell::text(key),input.wip_limit.map(|v|Cell::Integer(i64::from(v))).unwrap_or(Cell::Null)]).await?;
+        Ok(Ok(family_status_row(
+            rows.first().ok_or(sqlx::Error::RowNotFound)?,
+        )?))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusAnchor {
     Before(Uuid),
@@ -375,6 +527,56 @@ pub async fn update_status(
     Ok(Ok(status_row(row)))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn update_status_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    workflow: Uuid,
+    status: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+    input: UpdateStatusInput,
+) -> Result<Result<StatusRow, ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return update_status(pool, workspace, workflow, status, actor, credential, input).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result=async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) = family_workflow_manage(family, workspace, workflow, actor, credential).await? {
+            return Ok(Err(e));
+        }
+        let siblings = family_statuses(family, workspace, workflow).await?;
+        if !siblings.iter().any(|s| s.id == status) {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+
+        let key = if let Some(anchor) = input.anchor {
+            let others = siblings
+                .into_iter()
+                .filter(|s| s.id != status)
+                .collect::<Vec<_>>();
+            match anchor_sort_key(&others, anchor) {
+                Ok(Ok(key)) => Some(key),
+                Ok(Err(e)) => return Ok(Err(e)),
+                Err(_) => return Ok(Err(ProjectDbError::Conflict)),
+            }
+        } else {
+            None
+        };
+
+        let rows=family.query("UPDATE statuses SET name=COALESCE(?3,name),category=COALESCE(?4,category),wip_limit=CASE WHEN ?5 THEN ?6 ELSE wip_limit END,sort_key=COALESCE(?7,sort_key),updated_at=unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000 WHERE workspace_id=?1 AND id=?2 RETURNING id,workflow_id,project_id,name,category,sort_key,wip_limit",&[Cell::uuid(workspace),Cell::uuid(status),Cell::optional_text(input.name.as_deref()),Cell::optional_text(input.category.as_deref()),Cell::Integer(i64::from(input.wip_limit.is_some())),input.wip_limit.flatten().map(|v|Cell::Integer(i64::from(v))).unwrap_or(Cell::Null),Cell::optional_text(key.as_deref())]).await?;
+        Ok(Ok(family_status_row(
+            rows.first().ok_or(sqlx::Error::RowNotFound)?,
+        )?))
+    }
+.await;
+
+    finish_task_operation(tx, result).await
+}
+
 /// Source `purgeStatus`: refused with `status_has_tasks` while any task row
 /// (trashed included) still uses the status.
 pub async fn delete_status(
@@ -425,6 +627,56 @@ pub async fn delete_status(
         .await?;
     tx.commit().await?;
     Ok(Ok(()))
+}
+
+pub async fn delete_status_backend(
+    backend: &Backend,
+    workspace: Uuid,
+    workflow: Uuid,
+    status: Uuid,
+    actor: Uuid,
+    credential: Uuid,
+) -> Result<Result<(), ProjectDbError>, sqlx::Error> {
+    if let Backend::Postgres(pool) = backend {
+        return delete_status(pool, workspace, workflow, status, actor, credential).await;
+    }
+    let mut tx = backend.begin_write().await?;
+    let result = async {
+        let DbTx::SqliteFamily(family) = &mut tx else {
+            unreachable!()
+        };
+        if let Err(e) =
+            family_workflow_manage(family, workspace, workflow, actor, credential).await?
+        {
+            return Ok(Err(e));
+        }
+        if !family_statuses(family, workspace, workflow)
+            .await?
+            .iter()
+            .any(|s| s.id == status)
+        {
+            return Ok(Err(ProjectDbError::NotFound));
+        }
+        if !family
+            .query(
+                "SELECT id FROM tasks WHERE workspace_id=?1 AND status_id=?2 LIMIT 1",
+                &[Cell::uuid(workspace), Cell::uuid(status)],
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(Err(ProjectDbError::StatusHasTasks));
+        }
+        family
+            .execute(
+                "DELETE FROM statuses WHERE workspace_id=?1 AND id=?2",
+                &[Cell::uuid(workspace), Cell::uuid(status)],
+            )
+            .await?;
+        Ok(Ok(()))
+    }
+    .await;
+    finish_task_operation(tx, result).await
 }
 
 #[cfg(test)]

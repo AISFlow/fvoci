@@ -34,6 +34,7 @@ jobs:
       plan_ok: ${{ steps.plan.outputs.plan_ok }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
       select_fast: ${{ steps.plan.outputs.select_fast }}
+      select_fast_sqlite: ${{ steps.plan.outputs.select_fast_sqlite }}
       select_postgres: ${{ steps.plan.outputs.select_postgres }}
       select_native_arm64: ${{ steps.plan.outputs.select_native_arm64 }}
       select_collaboration: ${{ steps.plan.outputs.select_collaboration }}
@@ -62,9 +63,9 @@ jobs:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_fast == 'true'
     runs-on: ubuntu-26.04
-    # Cold target miss 113019589871 filled 911s through the 54 SQLite filters.
-    # Seven later cargo test commands were not started. 19m is that wall,
-    # plus one measured 165s profile compile for the unrun tail, plus 60s.
+    # Measured cold steps: clippy 204s + default lib/bin 431s + process/vendor
+    # tail 35s. Moving SQLite controls (345s) to fast-sqlite leaves about
+    # 810s including setup, saves and post steps inside the unchanged 19m.
     timeout-minutes: 19
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -140,12 +141,6 @@ jobs:
         with:
           path: target/clippy
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-clippy-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
-      - name: Restore SQLite library build outputs
-        id: db_lib_cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: target/db-lib
-          key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-lib-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
       - run: cargo fmt --check
       - name: Pinned SQLite build wiring (xtask, no native compilation)
@@ -158,9 +153,6 @@ jobs:
       - run: cargo test --locked --offline --lib --bin fvoci-server
         env:
           CARGO_TARGET_DIR: target/default
-      - name: Selected SQLite library controls (54 exact tests)
-        run: |
-          xtask/target/debug/xtask selected-library --target-dir target/db-lib
       - run: cargo test --locked --offline --test collab_wire
         env:
           CARGO_TARGET_DIR: target/default
@@ -192,6 +184,74 @@ jobs:
         with:
           path: target/clippy
           key: ${{ steps.clippy_cache.outputs.cache-primary-key }}
+
+  fast-sqlite:
+    needs: ci-plan
+    if: needs.ci-plan.outputs.select_fast_sqlite == 'true'
+    runs-on: ubuntu-26.04
+    # Measured cold SQLite controls: 345s, including the db-tests build.
+    # Separate prefix/fetch/xtask setup and cache save allow about 450s total;
+    # keep the same 19m budget independently of clippy and default tests.
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Restore Cargo downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Prepare pinned SQLite root build inputs
+        id: sqlite
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          set -euo pipefail
+          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+          . /etc/os-release
+          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+          case "$(dpkg --print-architecture)" in
+            amd64)
+              test -f /etc/apt/apt-mirrors.txt
+              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+              ;;
+            arm64) ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          mkdir "$RUNNER_TEMP/fvoci-sqlite"
+          dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --identity-only --github-output "$GITHUB_OUTPUT"
+      - name: Restore prepared SQLite prefix
+        id: sqlite_prefix_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}
+          key: v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}
+      - name: Verify cached SQLite prefix or build
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: |
+          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+            --cache-fallback --expected-cache-identity "${{ steps.sqlite.outputs.cache_identity }}" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - name: Restore SQLite library build outputs
+        id: db_lib_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: target/db-lib
+          key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-fast-db-tests-lib-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+      - run: cargo fetch --locked
+      - name: Selected SQLite library controls (54 exact tests)
+        run: |
+          xtask/target/debug/xtask selected-library --target-dir target/db-lib
       - name: Save SQLite library build outputs after validation
         if: steps.db_lib_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -257,6 +317,15 @@ jobs:
           path: target
           key: v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-native-default-dev-test-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - run: cargo fetch --locked
+      - name: Measure native ARM64 Task scalar runtime
+        run: xtask/target/debug/xtask task-scalar-qualification measure > "$RUNNER_TEMP/task-scalar-runtime.json"
+      - name: Retain native ARM64 Task scalar runtime measurement
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: task-scalar-host-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/task-scalar-runtime.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Native server build and policy tests (ARM64)
         run: |
           cargo build --locked --offline --bins
@@ -470,7 +539,7 @@ jobs:
             "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
             "check": "postgres-b",
             "shard": "b",
-            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+            "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
           },
           {
             "runner": "ubuntu-26.04-arm",
@@ -494,7 +563,7 @@ jobs:
             "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
             "check": "postgres-arm64-b",
             "shard": "b",
-            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+            "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
           },
           {
             "runner": "ubuntu-26.04",
@@ -518,7 +587,7 @@ jobs:
             "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
             "check": "postgres-pg16-b",
             "shard": "b",
-            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+            "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
           },
           {
             "runner": "ubuntu-26.04",
@@ -542,7 +611,7 @@ jobs:
             "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
             "check": "postgres-pg17-b",
             "shard": "b",
-            "tests": "--test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
+            "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
           }
         ]
     strategy:
@@ -794,7 +863,7 @@ jobs:
 
   rust-ci-gate:
     name: rust-ci-gate
-    needs: [ci-plan, fast, native-arm64, postgres-build, postgres, collaboration]
+    needs: [ci-plan, fast, fast-sqlite, native-arm64, postgres-build, postgres, collaboration]
     if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 5

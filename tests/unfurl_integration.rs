@@ -8,6 +8,41 @@
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
+#[path = "support/integrations_family.rs"]
+mod integrations_family;
+
+#[tokio::test]
+async fn sqlite_unfurl_live_settings_membership_and_foreign_tenant() {
+    let f = integrations_family::Fixture::new().await;
+    let client = Arc::new(Scripted::new(&[]));
+    let app = f.app(integrations_with(client.clone()));
+    let path = unfurl_path(f.workspace, "https://www.youtube.com/watch?v=fixture");
+    let (status, _) = call(&app, "GET", &path, Some(&f.token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = f.fresh().await;
+    let (status, _) = call(
+        &app,
+        "GET",
+        &unfurl_path(Uuid::now_v7(), "https://example.com"),
+        Some(&f.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(*client.fetched.lock().unwrap(), 1);
+    sqlx::query("DELETE FROM memberships WHERE workspace_id=?1 AND user_id=?2")
+        .bind(f.workspace.as_bytes().as_slice())
+        .bind(f.user.as_bytes().as_slice())
+        .execute(&fresh)
+        .await
+        .unwrap();
+    let (status, _) = call(&app, "GET", &path, Some(&f.token), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(*client.fetched.lock().unwrap(), 1);
+    fresh.close().await;
+    f.cleanup().await;
+}
+
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

@@ -17,7 +17,9 @@ use crate::http::authz::{require_request_auth, Access};
 use crate::http::guard::check_origin;
 use crate::http::state::AppState;
 use crate::integrations::outbound::{parse_target_url, OutboundPolicy};
-use crate::push::db::{normalize_subscription_key, register_subscription, PushSubscriptionRow};
+use crate::push::db::{
+    normalize_subscription_key, register_subscription_backend, PushSubscriptionRow,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new().route(
@@ -55,13 +57,8 @@ async fn put_push_subscription(
         require_request_auth(&state, &headers, &jar, Access::Session, Some(workspace_id)).await?;
     let Json(body) = body.map_err(AppError::from)?;
     let subscription = validate_body(body)?;
-    let stored = register_subscription(
-        state
-            .auth
-            .db
-            .pool
-            .postgres("src/http/routes/push.rs")
-            .map_err(crate::http::routes::tasks::internal)?,
+    let stored = register_subscription_backend(
+        &state.auth.db.pool,
         workspace_id,
         auth.user_id,
         auth.credential_id,
