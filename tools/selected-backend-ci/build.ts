@@ -123,7 +123,8 @@ export function inputs(): Inputs {
     join(root, "node_modules"),
     call(["rustc", "--print", "sysroot"]),
     env("LIBCLANG_PATH"),
-    "/usr/include",
+    // Lanes leave it unset; only the fixture probe swaps in a small directory.
+    process.env.FVOCI_SELECTED_CI_SYSTEM_INCLUDE ?? "/usr/include",
     dirname(env("SQLITE3_LIB_DIR")),
   ])
     add(directory);
