@@ -19,6 +19,7 @@ import {
   serverContainsLive,
   type OffWikiOwner,
 } from "../../features/documents/off-wiki-draft";
+import { retainedScope } from "../../features/documents/off-wiki-draft-slot";
 import { formatDisplayId } from "../../lib/href";
 import type {
   BodySaveCommand,
@@ -38,10 +39,14 @@ class ProblemError extends Error {
     super(String(status));
   }
 }
-const text = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
+// The composable runs with the editor-free slot module it imports.
+const text = ["./useOffWikiBodySlots.ts", "./useOffWikiBody.ts"]
+  .map((file) => readFileSync(new URL(file, import.meta.url), "utf8"))
+  .join("\n")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replaceAll("export function", "function");
-const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = `${ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None })}
+({ useOffWikiBody, listRetainedOffDrafts, holdsRetainedDrafts })`;
 const original = {
   actorId: "A",
   credentialId: "session-A",
@@ -117,7 +122,7 @@ function harness(owner?: () => OffWikiOwner | null) {
     pending: ReturnType<typeof deferred<OffDraftCreateResponse>>;
   }[] = [];
   let effects = Vue.effectScope();
-  const composable = runInNewContext(`${script}\n({ useOffWikiBody, listRetainedOffDrafts })`, {
+  const composable = runInNewContext(script, {
     ...Vue,
     Y,
     OffWikiDraft,
@@ -128,6 +133,7 @@ function harness(owner?: () => OffWikiOwner | null) {
     loadBody,
     ownerKey,
     readRetainedDraft,
+    retainedScope,
     serverContainsLive,
     ProblemError,
     sourceDraftAuthRetiredKey: Symbol(),
@@ -180,7 +186,8 @@ function harness(owner?: () => OffWikiOwner | null) {
       creates.push({ body, projectId, pending });
       return pending.promise;
     },
-  }) as Pick<typeof import("./useOffWikiBody"), "useOffWikiBody" | "listRetainedOffDrafts">;
+  }) as Pick<typeof import("./useOffWikiBody"), "useOffWikiBody" | "listRetainedOffDrafts"> &
+    Pick<typeof import("./useOffWikiBodySlots"), "holdsRetainedDrafts">;
   const mount = () =>
     required(
       effects.run(() =>
@@ -201,6 +208,7 @@ function harness(owner?: () => OffWikiOwner | null) {
     effects,
     slots,
     listRetainedOffDrafts: composable.listRetainedOffDrafts,
+    holdsRetainedDrafts: composable.holdsRetainedDrafts,
     /** The host unmounts and mounts again in this page: one module, a new composable. */
     remount() {
       h.effects.stop();
@@ -1255,6 +1263,9 @@ describe("a draft the tab storage refused (memory only)", () => {
     expect(h.listRetainedOffDrafts("A", "session-A")).toMatchObject([
       { owner: original, unstored: true },
     ]);
+    // The check a screen without the editor runs before loading it counts it too.
+    expect(h.slots.size).toBe(0);
+    expect(h.holdsRetainedDrafts("A", "session-A")).toBe(true);
     // Another actor in this page, even remounted, never sees or lists it.
     const other = { ...original, actorId: "B", credentialId: "session-B" };
     h.scope.value = other;
@@ -1266,6 +1277,8 @@ describe("a draft the tab storage refused (memory only)", () => {
     expect(h.body.retainedFor(other)).toBeNull();
     expect(h.listRetainedOffDrafts("B", "session-B")).toEqual([]);
     expect(h.listRetainedOffDrafts("A", "session-B")).toEqual([]);
+    expect(h.holdsRetainedDrafts("B", "session-B")).toBe(false);
+    expect(h.holdsRetainedDrafts("A", "session-B")).toBe(false);
     expect(h.writes).toHaveLength(0);
     h.effects.stop();
   });

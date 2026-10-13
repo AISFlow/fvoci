@@ -17,7 +17,10 @@ import {
 } from "../../features/documents/off-wiki-draft";
 import type { OffWikiOwner } from "../../features/documents/off-wiki-draft";
 import type { BodySaveResult, VersionedBody } from "../../features/documents/versioned-body-api";
-const raw = readFileSync(new URL("./useOffWikiBody.ts", import.meta.url), "utf8")
+// The composable runs with the editor-free slot module it imports.
+const raw = ["./useOffWikiBodySlots.ts", "./useOffWikiBody.ts"]
+  .map((file) => readFileSync(new URL(file, import.meta.url), "utf8"))
+  .join("\n")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replaceAll("export function", "function");
 const script = ts.transpile(raw, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });

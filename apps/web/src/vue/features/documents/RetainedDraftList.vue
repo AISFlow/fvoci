@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
-import { ownerKey, type RetainedOffDraft } from "@/features/documents/off-wiki-draft";
-import { useRetainedDraftExport } from "../../composables/useOffWikiBody";
+import { ownerKey, type RetainedOffDraft } from "@/features/documents/off-wiki-draft-slot";
+import { useRetainedDraftExport } from "../../composables/useOffWikiBodySlots";
 
 // Retained OFF drafts of targets the page can no longer reach. Local copy and
 // download only: nothing here can send a draft to the server.

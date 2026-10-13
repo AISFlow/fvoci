@@ -7,19 +7,16 @@ import { isTiptapDoc } from "@fvoci/editor/json";
 import { z } from "zod";
 import type { BodySaveCommand, BodySaveResult, VersionedBody } from "./versioned-body-api";
 import type { OffDraftCreateBody, OffDraftCreateResponse } from "./document-api";
+import {
+  STORAGE_PREFIX,
+  ownerKey,
+  retainedScope,
+  type OffWikiOwner,
+  type RetainedOffDraft,
+} from "./off-wiki-draft-slot";
 
-export type OffWikiOwner = {
-  actorId: string;
-  credentialId: string;
-  workspaceId: string;
-  targetId: string;
-  projectId?: string | null;
-  kind?: "document" | "task";
-  /** The address the target was opened at (WIKI-12, KEY-3). Stored in the slot
-   * outside its key, so a page that no longer finds the target can still name
-   * this draft locally. It is never sent to the server. */
-  displayId?: string;
-};
+export { ownerKey, type OffWikiOwner, type RetainedOffDraft } from "./off-wiki-draft-slot";
+
 type FrozenSave = { command: BodySaveCommand; snapshot: string };
 export type DraftDestination = {
   projectId: string | null;
@@ -41,24 +38,6 @@ type StoredDraft = {
   conflictBackup?: StoredDraft | null;
   comparison?: { start: unknown; mine: unknown; current: unknown } | null;
   sourceBuffer?: { text: string; baseV1: string } | null;
-};
-const STORAGE_PREFIX = "fvoci:off-wiki:1:";
-export function ownerKey(owner: OffWikiOwner): string {
-  // sessionStorage is a tab-owned storage area. Neither another credential nor
-  // another target can read this slot, including after A -> B -> A navigation.
-  const identity = [owner.actorId, owner.credentialId, owner.workspaceId, owner.targetId];
-  if (owner.kind === "task") identity.push("task");
-  if (owner.projectId) identity.push(owner.projectId);
-  return `${STORAGE_PREFIX}${JSON.stringify(identity)}`;
-}
-/** A retired private draft read back for local copy/download only. It is
- * never a live draft or a save base, and nothing here can send it. `unstored`:
- * the tab storage refused it, so only this page's memory holds it. */
-export type RetainedOffDraft = {
-  owner: OffWikiOwner;
-  markdown: string;
-  excerpt: string;
-  unstored?: true;
 };
 const markdownOf = (body: unknown) => (isTiptapDoc(body) ? tiptapDocToMd(body) : "");
 /** The native body a stored draft, or the draft "edit current" set aside, holds. */
@@ -173,7 +152,7 @@ export function listRetainedDrafts(
 ): RetainedOffDraft[] {
   const drafts: RetainedOffDraft[] = [];
   // The key spells the actor and credential first: other slots stay unparsed.
-  const scope = `${STORAGE_PREFIX}${JSON.stringify([actorId, credentialId]).slice(0, -1)},`;
+  const scope = retainedScope(actorId, credentialId);
   try {
     for (let index = 0; storage && index < storage.length; index++) {
       const key = storage.key(index);

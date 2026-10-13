@@ -1,4 +1,3 @@
-import { t } from "@fvoci/i18n";
 import { computed, inject, markRaw, onScopeDispose, ref, shallowRef, watch } from "vue";
 import * as Y from "yjs";
 import {
@@ -17,58 +16,9 @@ import {
 import { createDocumentFromDraft } from "@/features/documents/document-api";
 import { readVersionedBody, saveVersionedBody } from "@/features/documents/versioned-body-api";
 import { ProblemError } from "@/lib/api";
-import { shareDownloadName, triggerDownload } from "@/lib/share";
-import { copyText } from "../features/settings/clipboard";
+import { held, tabStorage, unstored } from "./useOffWikiBodySlots";
 import { sourceDraftAuthRetiredKey } from "./useSourceDraftGuard";
 
-// Slots the tab storage refused (quota, blocked), kept in this page's memory
-// under the same key: a denial, a retry, regained access or a remount in this
-// page still restores them. Leaving, closing or reloading the page loses them.
-const unstoredSlots = new Map<string, string>();
-type TabSlots = Pick<Storage, "length" | "key" | "getItem" | "setItem" | "removeItem">;
-/** This tab's draft slots: sessionStorage, then this page's memory for writes it refused. */
-function tabStorage(): TabSlots {
-  let storage: Storage | null;
-  try {
-    storage = window.sessionStorage;
-  } catch {
-    storage = null;
-  }
-  const keys = () => {
-    const all = new Set(unstoredSlots.keys());
-    for (let index = 0; storage && index < storage.length; index++) {
-      const key = storage.key(index);
-      if (key !== null) all.add(key);
-    }
-    return [...all];
-  };
-  return {
-    get length() {
-      return keys().length;
-    },
-    key: (index) => keys()[index] ?? null,
-    // Memory is written only by a refused write, so it is never the older copy.
-    getItem: (key) => unstoredSlots.get(key) ?? storage?.getItem(key) ?? null,
-    setItem(key, value) {
-      try {
-        if (!storage) throw new Error("Tab storage unavailable");
-        storage.setItem(key, value);
-        unstoredSlots.delete(key);
-      } catch (error) {
-        // The draft still reports the failure, so its warning stays.
-        unstoredSlots.set(key, value);
-        throw error;
-      }
-    },
-    removeItem(key) {
-      unstoredSlots.delete(key);
-      storage?.removeItem(key);
-    },
-  };
-}
-/** The draft as this page holds it, marked when only its memory does. */
-const held = (draft: RetainedOffDraft | null): RetainedOffDraft | null =>
-  draft && unstoredSlots.has(ownerKey(draft.owner)) ? { ...draft, unstored: true } : draft;
 const denied = (failure: unknown) =>
   failure instanceof ProblemError && [401, 403, 404].includes(failure.status);
 
@@ -77,28 +27,6 @@ export function listRetainedOffDrafts(actorId: string, credentialId: string): Re
   return listRetainedDrafts(tabStorage(), actorId, credentialId).map(
     (draft) => held(draft) ?? draft,
   );
-}
-
-/** Local copy/download of a retained draft; neither path reaches the server. */
-export function useRetainedDraftExport() {
-  const note = ref<string | null>(null);
-  async function run(draft: RetainedOffDraft | null, how: "copy" | "download", title?: string) {
-    note.value = null;
-    if (!draft) return;
-    try {
-      if (how === "copy") {
-        await copyText(draft.markdown);
-        note.value = t("doc.off.copyDraftDone");
-      } else
-        triggerDownload(
-          shareDownloadName(title?.trim() || draft.excerpt || t("doc.off.mine"), "md"),
-          new Blob([draft.markdown], { type: "text/markdown;charset=utf-8" }),
-        );
-    } catch {
-      note.value = t("doc.off.copyDraftFailed");
-    }
-  }
-  return { note, run };
 }
 
 /** An authorized wiki page owns one local native history document. Identity
@@ -205,7 +133,7 @@ export function useOffWikiBody(owner: () => OffWikiOwner | null, enabled: () => 
         const next = new OffWikiDraft(scope, current, storage, changed);
         // A slot only memory holds is offered back like any other. Writing it
         // again lets the storage take it now, or keeps its warning.
-        if (unstoredSlots.has(ownerKey(scope))) next.persist();
+        if (unstored(ownerKey(scope))) next.persist();
         draft.value = markRaw(next);
         generation.value++;
       }

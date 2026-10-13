@@ -3,13 +3,14 @@ import { useNavigationError } from "../features/workspace/useNavigationError";
 import { t } from "@fvoci/i18n";
 import UButton from "@nuxt/ui/components/Button.vue";
 import { useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref, watchEffect } from "vue";
+import { computed, ref, shallowRef, watch, watchEffect } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import type { RetainedOffDraft } from "@/features/documents/off-wiki-draft-slot";
 import { logout as logoutRequest } from "@/features/notifications/push-logout";
 import { api, ensureOk, ProblemError, problemMessage } from "@/lib/api";
 import { wikiPath } from "@/lib/href";
 import { meQuery, setupStatusQuery, workspacesQuery } from "@/lib/queries";
-import { listRetainedOffDrafts } from "../composables/useOffWikiBody";
+import { holdsRetainedDrafts } from "../composables/useOffWikiBodySlots";
 import RetainedDraftList from "../features/documents/RetainedDraftList.vue";
 import AuthenticatedLegalNav from "../features/legal/AuthenticatedLegalNav.vue";
 import EmptyWorkspace from "../features/workspace/EmptyWorkspace.vue";
@@ -36,14 +37,29 @@ const denied = computed(() => route.query.denied === "workspace");
 const items = computed(() => workspaces.data.value?.items ?? []);
 // This tab's OFF drafts of the current actor and credential whose workspace
 // the fresh list no longer grants. Local reads only: export, never send.
-const retainedDrafts = computed(() => {
-  const actor = me.data.value;
-  if (!denied.value || !actor?.userId || !actor.sessionId || !workspaces.isSuccess.value) return [];
-  const granted = new Set(items.value.map((item) => item.id));
-  return listRetainedOffDrafts(actor.userId, actor.sessionId).filter(
-    (draft) => !granted.has(draft.owner.workspaceId),
-  );
-});
+// Reading a slot needs the editor, loaded only when this tab holds one.
+const retainedDrafts = shallowRef<RetainedOffDraft[]>([]);
+let listing = 0;
+watch(
+  () => {
+    const actor = me.data.value;
+    if (!denied.value || !actor?.userId || !actor.sessionId || !workspaces.isSuccess.value)
+      return null;
+    const granted = new Set(items.value.map((item) => item.id));
+    return { actorId: actor.userId, credentialId: actor.sessionId, granted };
+  },
+  async (scope) => {
+    const started = ++listing;
+    retainedDrafts.value = [];
+    if (!scope || !holdsRetainedDrafts(scope.actorId, scope.credentialId)) return;
+    const { listRetainedOffDrafts } = await import("../composables/useOffWikiBody");
+    if (started !== listing) return;
+    retainedDrafts.value = listRetainedOffDrafts(scope.actorId, scope.credentialId).filter(
+      (draft) => !scope.granted.has(draft.owner.workspaceId),
+    );
+  },
+  { immediate: true },
+);
 const leaving = computed(
   () => setup.data.value?.needed === true || (ready.value && me.isError.value),
 );
