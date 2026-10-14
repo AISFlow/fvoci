@@ -344,6 +344,7 @@ export function containerArgv(
   const argv = [
     "docker",
     "create",
+    ...(binary === BINARY_DST + "/fvoci-e2e-fixture" ? ["--interactive"] : []),
     ...(executionMode() === "orca-local" ? ["--pull", "never"] : []),
     "--name",
     name,
