@@ -13,6 +13,8 @@ Load `skills get orca-cli` and `skills get orchestration` through the locator's 
 
 Read the target checkout's AGENTS.md and selected FVOCI skills for product, verification, submission and approval rules. Do not copy those policies into this package. Read [operations.md](references/operations.md) when launching or handling mail; it describes the helper's request and decision inputs. Read [migration.md](references/migration.md) before replacing an existing launcher.
 
+For a fresh copy or package review, follow [validation.md](references/validation.md). It separates formatting, host metadata, local references, strict TypeScript and isolated operation tests using explicitly selected local tools. Neither a predecessor checkout nor its reports are validation inputs.
+
 Use the external profile for controller and worker model/effort/tier, concurrency guidance, common prompts and heavy-command entrypoint. Verify actual TUI model, effort and Fast state; a successful launch flag alone is not proof. Preserve agents from other sessions, their worktrees, dirty files, processes and DBs. Narrow an operation to its explicit task and ownership; never restart or stop another chain to satisfy this one.
 
 For review and acceptance, keep fixed source identity, author/reviewer independence, exact checks and their counts/exit codes, and PASS/FAIL/NOTRUN/MISSING separate. Read the complete report before accepting its summary. A heartbeat is liveness evidence, not completion; CLI transport keepalive, PTY activity, fleet agent liveness and Task settlement are distinct. Use Orca's current receipts and guides for settlement, retention, release and recovery. This package never performs release, stop, retry, cleanup, Git push or CI mutation.

@@ -11,6 +11,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   Coordinator,
   loadProfile,
@@ -153,6 +154,55 @@ test("inspect paginates read-only projections", async () => {
       ),
   ).toBe(true);
 });
+
+// Exercise the installed command, profile loading and cwd independence together.
+// This fixture is a local CLI double, never a connection to a live Orca Run.
+for (const scenario of ["good", "stalerun"])
+  test(`installed inspect CLI from foreign cwd: ${scenario}`, async () => {
+    const f = fixture(scenario);
+    for (const tool of [f.p.cli, join(f.root, "git")]) {
+      writeFileSync(
+        tool,
+        `#!${process.execPath}\nprocess.argv.splice(2, 0, ${JSON.stringify(f.root)}, ${JSON.stringify(scenario)}, ${JSON.stringify(tool === f.p.cli ? f.p.cli : "git")});\nawait import(${JSON.stringify(join(f.root, "stub.ts"))});\n`,
+      );
+      chmodSync(tool, 0o700);
+    }
+    const profile = join(f.root, "local-profile.json");
+    writeFileSync(profile, JSON.stringify(f.p), { mode: 0o600 });
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        fileURLToPath(new URL("./coordinator.ts", import.meta.url)),
+        "inspect",
+        "--profile",
+        profile,
+      ],
+      {
+        cwd: f.root,
+        // No inherited locator, private scratch, or terminal binding is available.
+        env: { PATH: `${f.root}:${process.env.PATH}`, HOME: f.root, XDG_STATE_HOME: f.root },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (scenario === "good") {
+      expect(exit).toBe(0);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout).workers).toHaveLength(2);
+      expect(JSON.parse(stdout).handoff).toBe(f.p.handoff);
+    } else {
+      expect(exit).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("Run/coordinator mismatch");
+      expect(f.calls()).toHaveLength(2);
+    }
+    expect(f.calls().some((a) => a.includes("worker-start") || a.includes("check"))).toBe(false);
+  });
 test("ready existing author launches once without shell input", async () => {
   const f = fixture();
   expect((await f.c.launch(f.request)).dispatchId).toBe("ctx_fixture");
