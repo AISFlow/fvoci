@@ -88,6 +88,8 @@ const leaseModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/equal-work.ts",
+  "tools/selected-backend-ci/drivers/equal-work-policy.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",
   "tools/selected-backend-ci/drivers/install.ts",
@@ -802,6 +804,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     "missing-lane",
     "live-port",
     "bad-owner",
+    "bad-purpose",
   ] as const)
     test("owner-return refuses " + mutation, async () => {
       await withEnvironment(ci, async () => {
@@ -1022,6 +1025,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
       if (mutation === "bad-owner") grant.owner = "foreign";
+      if (mutation === "bad-purpose") grant.purpose = "skip-normal-server";
       if (mutation === "root-uid") grant.uid = 0;
       if (mutation === "foreign-uid") grant.uid = uid() + 1;
       if (mutation === "foreign-gid") grant.gid = gid() + 1;

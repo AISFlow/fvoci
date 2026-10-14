@@ -42,6 +42,7 @@ export default defineConfig({
       ? [
           /workspace-(wiki|off)-selected-backend\.spec\.ts/,
           /v060-sqlite-revision-restore\.spec\.ts/,
+          /v060-equal-work\.spec\.ts/,
         ]
       : [],
   metadata: {

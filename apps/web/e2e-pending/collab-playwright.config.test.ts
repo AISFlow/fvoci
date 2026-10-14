@@ -20,7 +20,7 @@ function selected(env: Record<string, string> = {}) {
       process.execPath,
       "--eval",
       `const {default:c}=await import(${JSON.stringify(configPath)});
-       const names=["workspace-wiki-selected-backend.spec.ts","workspace-off-selected-backend.spec.ts","v060-sqlite-revision-restore.spec.ts","wiki-collab.spec.ts"];
+       const names=["workspace-wiki-selected-backend.spec.ts","workspace-off-selected-backend.spec.ts","v060-sqlite-revision-restore.spec.ts","v060-equal-work.spec.ts","wiki-collab.spec.ts"];
        const ignore=[c.testIgnore].flat();
        console.log(JSON.stringify({names:names.filter(n=>c.testMatch.test(n)&&!ignore.some(p=>p.test(n))),metadata:c.metadata,workers:c.workers,retries:c.retries}));`,
     ],

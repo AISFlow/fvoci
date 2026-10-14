@@ -75,6 +75,7 @@ import {
   type Row,
 } from "./common.ts";
 import { browserArgs } from "./postgres.ts";
+import { equalSpec, measureBrowser, measurementInputs, validateEqualReport } from "./equal-work.ts";
 import {
   browserPort,
   restartSameApp,
@@ -534,6 +535,9 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     db,
     serverEnv: state.serverEnv,
   });
+  const equal = state.current.manifest.purpose === "equal-work";
+  const measurements = join(run, "equal-work-samples");
+  if (equal) state.browserEnv.FVOCI_E2E_EQUAL_WORK_DIR = measurements;
   const web = join(root, "apps/web");
   // prettier-ignore
   const chromium = (await seam.command([state.bun, "--eval",
@@ -548,6 +552,7 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   state.browserInputs = browserInputs;
   writeJson(join(run, "actual-browser-inputs.json"), browserInputs);
   const args = browserArgs(state.bun, join(root, "node_modules/playwright/cli.js"), state.spec);
+  if (equal) args[args.indexOf("--config") + 1] = "e2e-pending/equal-work-playwright.config.ts";
   receipt.phase = "browser";
   Object.assign(receipt, {
     browser_command: args,
@@ -558,10 +563,17 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   const started = performance.now();
   const log = join(run, "browser.log");
   // prettier-ignore
-  const result = await seam.command(args,
-    { log, required: false, env: state.browserEnv, cwd: web });
+  const invoke = async () => {
+    const result = await seam.command(args, { log, required: false, env: state.browserEnv, cwd: web });
+    state.code = result.returncode;
+    if (state.code !== 0) recordFailure(state, state.code, undefined, log);
+    return result;
+  };
+  const measured = equal
+    ? await measureBrowser(measurements, state.name, state.base as string, invoke, seam.command)
+    : null;
+  const result = measured?.result ?? (await invoke());
   state.code = result.returncode;
-  if (state.code !== 0) recordFailure(state, state.code, undefined, log);
   const report = join(run, "playwright-result.private.json");
   if (existsSync(report)) {
     chmodSync(report, 0o600);
@@ -582,10 +594,31 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   if (state.code !== 0) return;
   assert.ok(actors.length === 1, "exactly one fresh selected actor fixture");
   assertActorReceipt(read(join(dbroot, actors[0] as string)));
+  assert.ok(deepEquals(inodeOf(db), state.databaseInode), "no replacement/reset DB");
+  if (equal) {
+    receipt.purpose = "equal-work";
+    receipt.equal_work = {
+      inputs: measurementInputs(
+        state.before,
+        state.current.build,
+        state.current.assets,
+        browserInputs,
+        image,
+      ),
+      browser: validateEqualReport(read(report), "sqlite", flow),
+      samples: measured?.samples,
+    };
+    Object.assign(receipt, {
+      actual_browser_tests: 1,
+      retries: 0,
+      ignored: 0,
+      actual_fixture_pin_checks_completed: true,
+    });
+    return;
+  }
   if (flow === "on")
     assert.ok(/\b1 passed\b/.test(readText(log)), "exact one selected browser test");
   else receipt.actual_off_titles = seam.validateOffReport(read(report), "sqlite");
-  assert.ok(deepEquals(inodeOf(db), state.databaseInode), "no replacement/reset DB");
   Object.assign(receipt, {
     actual_browser_tests: flow === "off" ? 8 : 1,
     retries: 0,
@@ -824,9 +857,11 @@ export async function main(
     tree = manifest.tree;
   const owner = env("FVOCI_CI_OWNER", source);
   const spec =
-    flow === "off"
-      ? "workspace-off-selected-backend.spec.ts"
-      : "workspace-wiki-selected-backend.spec.ts";
+    current.manifest.purpose === "equal-work"
+      ? equalSpec
+      : flow === "off"
+        ? "workspace-off-selected-backend.spec.ts"
+        : "workspace-wiki-selected-backend.spec.ts";
   const bun = env("FVOCI_CI_BUN", source);
   assert.ok(source.FVOCI_ROOT_RUN_OWNER === owner);
   const before = current.before;
@@ -859,6 +894,7 @@ export async function main(
   assert.ok(!existsSync(db));
   const name = "fvoci-v060-vue-sqlite-current-" + randomBytes(6).toString("hex");
   const serverEnv = serverEnvironment(flow, () => randomBytes(32).toString("hex"));
+  if (current.manifest.purpose === "equal-work") serverEnv.METRICS_ALLOW_IPS = "127.0.0.1";
   privateText(join(run, "environment.private.json"), JSON.stringify(serverEnv));
   privateText(join(run, "environment.private.sh"), shellExports(serverEnv));
   const state: State = {

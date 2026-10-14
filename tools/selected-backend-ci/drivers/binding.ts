@@ -42,6 +42,7 @@ const restoreSpecSha256 = "5e0e539eefc477f03665f6324ec6b853e3a6d645b3b891e41fa16
 
 export type Lane = "install" | "postgres" | "sqlite";
 export interface Manifest {
+  purpose?: unknown;
   schema: unknown;
   ready: unknown;
   flow?: unknown;
@@ -237,6 +238,10 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   const execution = process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci";
   assert.ok(execution === "github-ci" || execution === "orca-local");
   const local: LocalGrant | null = execution === "orca-local" ? localAllocation("run") : null;
+  assert.ok(
+    m.purpose === undefined || (m.purpose === "equal-work" && local?.purpose === "equal-work"),
+  );
+  assert.equal(m.purpose, lane === "install" ? undefined : local?.purpose);
   if (local !== null) assert.ok(m.source === local.source && m.tree === local.tree);
   else {
     assert.ok(env("GITHUB_ACTIONS") === "true" && env("CI") === "true");
