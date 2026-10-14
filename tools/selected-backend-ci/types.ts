@@ -166,6 +166,12 @@ export interface LocalConsumerGrant extends LocalGrant {
     heavy: string;
     chromiumTmp?: string;
     sso?: Reference;
+    processObserver?: {
+      directory: string;
+      bun: Reference;
+      module: Reference;
+      config: Reference;
+    };
   };
 }
 export interface AccessReceipt {
