@@ -1,10 +1,11 @@
 // Local evidence only. The hosted guard and target allowlist remain separate.
-import { closeSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { localTursoUiAllocation } from "../selected-backend-ci/admission.ts";
 import { digest, sha, write } from "../selected-backend-ci/io.ts";
 import { ownedListener, startLocalLibsql } from "../keycloak/local-libsql.ts";
 import {
+  cleanEnv,
   diagnosticJson,
   failureCode,
   get,
@@ -15,10 +16,10 @@ import {
   valueDigest,
 } from "./ui-common.ts";
 import { lease } from "./ui-container.ts";
-import { fixture, start, stop } from "./ui-native.ts";
-import { identity, withProcesses } from "./ui-processes.ts";
+import { fixture } from "./ui-native.ts";
+import { identity, wait, withProcesses } from "./ui-processes.ts";
 import { currentBuild } from "./ui-record.ts";
-import { executeRestore, sourceEnvironment } from "./ui-restore.ts";
+import { executeRestore } from "./ui-restore.ts";
 
 export async function localRestore(): Promise<void> {
   const grant = localTursoUiAllocation("server");
@@ -91,17 +92,24 @@ export async function localRestore(): Promise<void> {
       mkdirSync(bootstrap, 0o700);
       const storage = join(bootstrap, "storage");
       mkdirSync(storage, 0o700);
-      const started = await start(
-        scope,
-        manifest,
-        sourceEnvironment(manifest, environment, storage, "tui-" + token(10)),
-        bootstrap,
-        true,
-      );
+      // Migration only, as the hosted migration phase leaves the primary: a
+      // server start would register the relay consumers before the baseline.
+      const log = openSync(join(bootstrap, "migrate.private.log"), "wx", 0o600);
       try {
-        await stop(scope, started.server, started.base, bootstrap);
+        const migrate = scope.spawn(
+          [get(manifest, "binaries", "fvoci-migrate", "path") as string],
+          "local-migrate",
+          {
+            env: { ...cleanEnv(), ...local.environment, FVOCI_DATABASE_BACKEND: "libsql-remote" },
+            stdin: "ignore",
+            stdout: log,
+            stderr: log,
+          },
+        );
+        require((await wait(migrate, 120)) === 0, "RESTORE_LOCAL_MIGRATION_FAILED");
+        await scope.finish(migrate);
       } finally {
-        closeSync(started.log);
+        closeSync(log);
       }
       // The local fixture runs in the same container shape and needs a storage mount.
       const baseline = await fixture(scope, manifest, "baseline", {
