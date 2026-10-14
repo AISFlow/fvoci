@@ -29,7 +29,7 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 const sha = "a".repeat(40);
-function fixture(scenario = "good") {
+function fixture(scenario = "good", shellTail?: string[]) {
   const root = mkdtempSync(join(fixtureRoot!, "case-"));
   roots.push(root);
   for (const d of ["repo", "parent", "unit", "checkout"]) mkdirSync(join(root, d));
@@ -86,8 +86,9 @@ function fixture(scenario = "good") {
   // Real Bun child CLI boundary; every invocation records argv, not a shell command.
   writeFileSync(
     stub,
-    `import {appendFileSync,existsSync,mkdirSync} from 'node:fs';
+    `import {appendFileSync,existsSync,mkdirSync,readFileSync} from 'node:fs';
 const [root,scenario,...argv]=process.argv.slice(2);
+const shellTail=${JSON.stringify(shellTail ?? null)};
 appendFileSync(root+'/calls.jsonl',JSON.stringify(argv)+'\\n');
 const flag=k=>argv[argv.indexOf(k)+1];
 let r;
@@ -99,16 +100,16 @@ else if(verb==='orchestration run-show') r={run:{id:'run_fixture',coordinator_ha
 else if(verb==='repo show') { r={repo:{id:scenario==='wrongrepo'?'other':'repo-fixture',path:root+'/repo'}}; }
 else if(verb==='worktree show') {
  const path=flag('--worktree').slice(5),parent=path===root+'/parent';
- r={worktree:{id:'repo-fixture::'+path,repoId:scenario==='wrongsource'&&path===root+'/repo'?'other':'repo-fixture',path,instanceId:parent?(scenario==='shell-stale-parent'&&existsSync(root+'/created')?'other':'parent-instance'):'child-instance',childWorktreeIds:scenario==='reverseparent'?[]:['repo-fixture::'+root+'/checkout','repo-fixture::'+root+'/new-checkout','repo-fixture::'+root+'/fixture','repo-fixture::'+root+'/v6-unit','repo-fixture::'+root+'/rv-grok-unit'],parentWorktreeId:scenario==='wrongparent'||(scenario==='shell-wrong-parent'&&!parent)?'other':scenario==='missingparent'?null:'repo-fixture::'+root+'/parent',lineage:{parentWorktreeInstanceId:scenario==='wronginstance'?'other':'parent-instance'}}};
+ r={worktree:{id:'repo-fixture::'+path,repoId:scenario==='wrongsource'&&path===root+'/repo'?'other':'repo-fixture',path,instanceId:parent?(scenario==='shell-stale-parent'&&existsSync(root+'/created')?'other':'parent-instance'):'child-instance',childWorktreeIds:scenario==='reverseparent'?[]:['repo-fixture::'+root+'/checkout','repo-fixture::'+root+'/new-checkout','repo-fixture::'+root+'/fixture','repo-fixture::'+root+'/v6-unit','repo-fixture::'+root+'/rv-grok-unit',...(existsSync(root+'/created')?['repo-fixture::'+readFileSync(root+'/created','utf8')]:[])],parentWorktreeId:scenario==='wrongparent'||(scenario==='shell-wrong-parent'&&!parent)?'other':scenario==='missingparent'?null:'repo-fixture::'+root+'/parent',lineage:{parentWorktreeInstanceId:scenario==='wronginstance'?'other':'parent-instance'}}};
 }
-else if(verb==='worktree create') { if(flag('--repo')!=='id:repo-fixture') {console.log(JSON.stringify({ok:false,error:{code:'repo_not_found'}}));process.exit(1);} const path=root+'/'+flag('--name');mkdirSync(path);appendFileSync(root+'/created','created'); r={worktree:{path},startupTerminal:null,warnings:[]}; }
-else if(verb==='terminal list') { const parent=flag('--worktree')==='path:'+root+'/parent'; const t={handle:'term_agent',connected:scenario!=='shell-disconnected',worktreePath:['shell-foreign','foreignterminal'].includes(scenario)?root+'/foreign':flag('--worktree').slice(5),agentIdentity:shell?null:'codex'}; r={terminals:parent?[{handle:'term_fixture',worktreePath:root+'/parent',connected:true}]:scenario==='shell-missing'?[]:scenario==='shell-multiple'?[t,{...t,handle:'term_other'}]:[t]}; }
+else if(verb==='worktree create') { if(flag('--repo')!=='id:repo-fixture') {console.log(JSON.stringify({ok:false,error:{code:'repo_not_found'}}));process.exit(1);} const path=root+'/'+flag('--name');mkdirSync(path);appendFileSync(root+'/created',path); r={worktree:{path},startupTerminal:null,warnings:[]}; }
+else if(verb==='terminal list') { const parent=flag('--worktree')==='path:'+root+'/parent'; const t={handle:'term_agent',connected:scenario!=='shell-disconnected',worktreePath:['shell-foreign','foreignterminal'].includes(scenario)?root+'/foreign':flag('--worktree').slice(5),agentIdentity:scenario==='shell-unknown-agent'?'unknown':shell?null:'codex'}; r={terminals:parent?[{handle:'term_fixture',worktreePath:root+'/parent',connected:true}]:scenario==='shell-missing'?[]:scenario==='shell-multiple'?[t,{...t,handle:'term_other'}]:[t]}; }
 else if(verb==='terminal send') r=scenario==='shell-send-flat'?{accepted:true}:scenario==='shell-send-missing'?{}:{send:{handle:scenario==='shell-send-wrong'?'term_other':flag('--terminal'),accepted:scenario!=='shell-send-false',bytesWritten:42,prompt:null}};
 else if(verb==='terminal wait') {
  if(shell&&!existsSync(root+'/sent')) {console.log(JSON.stringify({ok:false,error:{code:'timeout'}}));process.exit(1);}
  r=scenario==='wait-flat'?{satisfied:true}:scenario==='wait-missing'?{}:{wait:{handle:scenario==='wait-wrong'?'term_other':flag('--terminal'),condition:scenario==='wait-condition'?'exit':'tui-idle',satisfied:scenario!=='wait-false',status:scenario==='wait-stopped'?'exited':'running',exitCode:null}};
 }
-else if(verb==='terminal read') { const parent=flag('--terminal')==='term_fixture',before=shell&&!existsSync(root+'/sent'); r={terminal:{handle:!parent&&scenario==='shell-read-wrong'?'term_other':flag('--terminal'),status:!parent&&scenario==='shell-stopped'?'exited':'running',tail:parent?['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']:before?[scenario==='shell-no-prompt'?'starting':scenario==='shell-agent-screen'?'Codex fixture$':'fixture$']:['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}}; }
+else if(verb==='terminal read') { const parent=flag('--terminal')==='term_fixture',before=shell&&!existsSync(root+'/sent'); r={terminal:{handle:!parent&&scenario==='shell-read-wrong'?'term_other':flag('--terminal'),status:!parent&&scenario==='shell-stopped'?'exited':'running',tail:parent?['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']:before?(shellTail??(scenario==='shell-no-prompt'?['starting']:scenario==='shell-agent-screen'?['GPT-6.1-Sol high','fixture$']:['fixture@fixture:'+readFileSync(root+'/created','utf8')+'$ '])):['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}}; }
 else if(verb==='orchestration worker-start') { if(scenario==='failedstage') {console.log(JSON.stringify({ok:false,result:{failedStage:'inject',residualResources:['term_agent']}}));process.exit(1);} r=scenario==='partial'?{state:'ready',taskId:'task_fixture'}:{runId:'run_fixture',state:'ready',stage:'input_accepted',taskId:'task_fixture',dispatchId:'ctx_fixture',effects:[{kind:'terminal',role:'agent',id:'term_agent'},{kind:'dispatch_input',id:'term_agent',state:'accepted'}]}; }
 else if(verb==='orchestration worker-list') { const second=a.includes('--cursor'); r={scope:{run:'run_fixture'},workers:[{dispatchId:second?'ctx_2':'ctx_1',agentTerminalHandle:scenario==='unknownagent'?null:'term_agent',dispatchStatus:scenario==='liveagent'?'dispatched':'completed',terminalState:'retained',projection:{outcome:scenario==='liveagent'?'in_progress':'succeeded',liveness:{verdict:'live'}}}],page:{hasMore:!second,nextCursor:second?null:'page2'}}; }
 else if(verb==='orchestration reply') r={replied:true};
@@ -389,6 +390,7 @@ for (const scenario of [
   "shell-read-wrong",
   "shell-stopped",
   "shell-agent-screen",
+  "shell-unknown-agent",
   "shell-wrong-parent",
   "shell-stale-parent",
   "shell-send-flat",
@@ -411,6 +413,44 @@ for (const scenario of [
     expect(
       f.calls().some((a) => a[1] === "terminal" && ["create", "close", "stop"].includes(a[2])),
     ).toBe(false);
+  });
+
+for (const name of [
+  "v6-unit",
+  "rv-grok-unit",
+  "v6-codex-claude-grok-unit",
+  "rv-grok-4-claude-code-unit",
+])
+  test(`owned PS1 cwd permits one exec: ${name}`, async () => {
+    const f = fixture("new");
+    expect(
+      (await f.c.launch({ ...f.request, name, worktree: join(f.root, name), terminal: null }))
+        .dispatchId,
+    ).toBe("ctx_fixture");
+    expect(f.calls().filter((a) => a.includes("send"))).toHaveLength(1);
+    expect(f.calls().filter((a) => a.includes("wait"))).toHaveLength(1);
+    expect(f.calls().filter((a) => a.includes("worker-start"))).toHaveLength(1);
+    await expect(
+      f.c.launch({ ...f.request, name, worktree: join(f.root, name), terminal: null }),
+    ).rejects.toThrow();
+    expect(f.calls().filter((a) => a.includes("send"))).toHaveLength(1);
+  });
+
+for (const marker of [
+  "╭─ OpenAI Codex (v0.162.1)",
+  "GPT-6.1-Sol high · default",
+  "› Ask Codex to do anything",
+  "Claude Code v2.1.299",
+  "grok-4",
+])
+  test(`agent TUI marker refuses exec despite a prompt: ${marker}`, async () => {
+    const f = fixture("new", [marker, "fixture@fixture:/work/rv-grok-unit$ "]);
+    await expect(
+      f.c.launch({ ...f.request, worktree: join(f.root, "fixture"), terminal: null }),
+    ).rejects.toThrow("shell readiness unproven");
+    expect(f.calls().some((a) => a.includes("send") || a.includes("worker-start"))).toBe(false);
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(true);
+    expect(existsSync(join(f.root, "fixture"))).toBe(true);
   });
 
 for (const scenario of ["wronginstance", "reverseparent"])

@@ -576,7 +576,11 @@ export class Coordinator {
           shell.status === "running" &&
           Array.isArray(shell.tail) &&
           /[$#>]\s*$/.test(shell.tail.at(-1) || "") &&
-          !/Codex|Claude|grok/i.test(shell.tail.join("\n")),
+          // Provider names alone occur in PS1 cwd paths and ordinary shell output.
+          // Identity is checked above; reject actual TUI banners/input hints here.
+          !/^\s*(?:[│╭╰─>_›❯]\s*)*(?:OpenAI Codex(?:\s|\()|Ask Codex to do anything(?:\s|$)|GPT-\d[\w.-]*(?:\s|$)|Claude Code(?:\s|$)|grok-\d[\w.-]*(?:\s|$))/im.test(
+            shell.tail.join("\n"),
+          ),
         "shell readiness unproven",
       );
       const sent = (
