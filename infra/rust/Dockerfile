@@ -29,6 +29,9 @@ COPY infra/rust/.env.example ./infra/rust/.env.example
 COPY apps/web/openapi.json ./apps/web/openapi.json
 COPY scripts ./scripts
 COPY xtask ./xtask
+# xtask compiles the official sqld pin (`#[path]`, native_library_sqld.rs) and
+# registers its bytes in the SQLite input identity (xtask/src/sqlite.rs SOURCES).
+COPY tests/support/official_sqld.rs ./tests/support/official_sqld.rs
 COPY crates/collab-engine ./crates/collab-engine
 # FVOCI-owned same-version read-only Yrs accessor patch (direct path dependency).
 COPY crates/vendor/yrs-0.28.0 ./crates/vendor/yrs-0.28.0
