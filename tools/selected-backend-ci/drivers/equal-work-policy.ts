@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
 
+export interface ConnectionFacts {
+  opened: number;
+  collabOpened: number;
+  closeEvents: number;
+  active: number;
+  collabActive: number;
+  contextClosed: boolean;
+}
+
 // Shared literal policy, imported by the browser and its allocated collector.
 export const equalSpec = "e2e-pending/v060-equal-work.spec.ts";
 export const equalTitle = "equal work: UI edit, matching durable ACK and fresh readback";

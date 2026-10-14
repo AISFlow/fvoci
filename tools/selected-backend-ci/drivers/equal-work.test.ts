@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { DriverReceipt } from "../types.ts";
+import type { ConnectionFacts } from "./equal-work-policy.ts";
 import {
   cgroupCounters,
   comparePair,
@@ -33,6 +34,14 @@ const samples = (): Sample[] =>
     metrics: metrics(rawMetrics),
   }));
 function receipt(flow: "on" | "off"): DriverReceipt {
+  const connections = (closed: boolean): ConnectionFacts => ({
+    opened: flow === "on" ? 2 : 1,
+    collabOpened: flow === "on" ? 1 : 0,
+    closeEvents: closed ? (flow === "on" ? 2 : 1) : 0,
+    active: closed ? 0 : flow === "on" ? 2 : 1,
+    collabActive: closed || flow === "off" ? 0 : 1,
+    contextClosed: closed,
+  });
   return {
     source: "a".repeat(40),
     tree: "b".repeat(40),
@@ -74,8 +83,15 @@ function receipt(flow: "on" | "off"): DriverReceipt {
         contextsClosed: true,
         resources: [0, 1, 2].map((i) => ({
           phase: `ack-${String(i)}`,
-          ownerSockets: flow === "on" ? 1 : 0,
+          ownerConnections: connections(false),
           observedRoomKeys: flow === "on" ? 1 : 0,
+        })),
+        ownerAtStart: connections(false),
+        ownerAfterClose: connections(true),
+        freshConnections: [workload.warm, ...workload.edits].map((text) => ({
+          text,
+          beforeClose: connections(false),
+          afterClose: connections(true),
         })),
         texts: workload.edits,
         ackLatencyMs: [3, 2, 4],
@@ -142,6 +158,37 @@ test("equal costs are observations, independent of which mode is faster", () => 
     on: { cpuDeltaUsec: 600 },
     off: { cpuDeltaUsec: 600 },
   });
+});
+test("total sockets are measured separately; collab ON1/OFF0 and each context retirement remain mandatory", () => {
+  expect(() => {
+    comparePair(receipt("on"), receipt("off"));
+  }).not.toThrow();
+  type BrowserFacts = {
+    resources: { ownerConnections: ConnectionFacts }[];
+    ownerAfterClose: ConnectionFacts;
+    freshConnections: { beforeClose: ConnectionFacts; afterClose: ConnectionFacts }[];
+  };
+  const faults: ((facts: BrowserFacts) => void)[] = [
+    (f) => {
+      (f.resources[0] as BrowserFacts["resources"][number]).ownerConnections.collabActive = 1;
+    },
+    (f) => {
+      f.ownerAfterClose.contextClosed = false;
+    },
+    (f) => {
+      f.freshConnections.pop();
+    },
+    (f) => {
+      (f.freshConnections[0] as BrowserFacts["freshConnections"][number]).afterClose.active = 1;
+    },
+  ];
+  for (const fault of faults) {
+    const off = receipt("off");
+    fault((off.equal_work as { browser: BrowserFacts }).browser);
+    expect(() => {
+      comparePair(receipt("on"), off);
+    }).toThrow();
+  }
 });
 test("different inputs/workload, zero tests, missing ACK/readback, failed/cancelled body and failed cleanup block the pair", () => {
   type Measurement = {

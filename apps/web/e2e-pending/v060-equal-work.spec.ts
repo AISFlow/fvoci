@@ -1,6 +1,6 @@
 import { existsSync, linkSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type WebSocket as BrowserSocket } from "@playwright/test";
 import * as Y from "yjs";
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
@@ -12,6 +12,7 @@ import {
   phases,
   workload,
   workloadHash,
+  type ConnectionFacts,
 } from "../../../tools/selected-backend-ci/drivers/equal-work-policy";
 import type { components } from "../src/generated/api";
 import {
@@ -36,6 +37,35 @@ import {
 } from "./selected-backend-fixture";
 
 type Schema = components["schemas"];
+// Reuse the wire helper's endpoint classification. Keep total observations
+// separate from collaboration connections, and use the SDK's live state.
+function observeConnections(page: Page): () => ConnectionFacts {
+  const sockets = new Map<BrowserSocket, boolean>();
+  let closeEvents = 0,
+    contextClosed = false;
+  page.context().on("close", () => {
+    contextClosed = true;
+  });
+  page.on("websocket", (socket) => {
+    sockets.set(socket, socket.url().includes("/collab"));
+    socket.on("close", () => {
+      closeEvents++;
+    });
+  });
+  return () => {
+    // The positive context close event retires every connection it owned,
+    // including objects whose individual close event was not dispatched.
+    const active = contextClosed ? [] : [...sockets.keys()].filter((s) => !s.isClosed());
+    return {
+      opened: sockets.size,
+      collabOpened: [...sockets.values()].filter(Boolean).length,
+      closeEvents,
+      active: active.length,
+      collabActive: active.filter((s) => sockets.get(s)).length,
+      contextClosed,
+    };
+  };
+}
 test(equalTitle, async ({ browser, baseURL }, info) => {
   const backend = requiredFixtureInput("FVOCI_E2E_SELECTED_BACKEND");
   const flow = requiredFixtureInput("FVOCI_E2E_SELECTED_FLOW");
@@ -70,17 +100,21 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
   const wire = attachCollabWire(page);
   const ackIds: string[] = [],
     ackLatencyMs: number[] = [];
-  const resources: { phase: string; ownerSockets: number; observedRoomKeys: number }[] = [];
-  let sockets = 0;
-  page.on("websocket", (socket) => {
-    sockets++;
-    socket.on("close", () => {
-      sockets--;
-    });
-  });
+  const ownerConnections = observeConnections(page);
+  const resources: {
+    phase: string;
+    ownerConnections: ConnectionFacts;
+    observedRoomKeys: number;
+  }[] = [];
+  const freshConnections: {
+    text: string;
+    beforeClose: ConnectionFacts;
+    afterClose: ConnectionFacts;
+  }[] = [];
   let ownerClosed = false;
-  const mount = async (p: Page, url: string) => {
-    expect((await p.goto(url))?.status()).toBe(200);
+  const mount = async (p: Page, url: string, navigate = true) => {
+    if (navigate) expect((await p.goto(url))?.status()).toBe(200);
+    else await expect(p).toHaveURL(url);
     if (flow === "on") await waitConnected(p);
     else {
       await expect(p.locator('[data-body-mode="off"]')).toBeVisible();
@@ -119,12 +153,17 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
     if (typeof document.displayId !== "string") throw new Error("created wiki display ID missing");
     const url = `/w/${admin.workspaceSlug}/${document.displayId}`;
     installSelectedMember(backend);
-    await mount(page, url);
+    // The real Create command already routes to this document. A second full
+    // navigation creates a second transport before the first observer retires.
+    await mount(page, url, false);
     expect((await editorShape(page)).text).toBe("");
     const readback = async (text: string) => {
       const fresh = await newCollabContext(browser, baseURL);
+      let observed: (() => ConnectionFacts) | undefined;
+      let beforeClose: ConnectionFacts | undefined;
       try {
         const reader = await fresh.newPage();
+        observed = observeConnections(reader);
         const receivedNative: Uint8Array[] = [];
         reader.on("websocket", (socket) =>
           socket.on("framereceived", ({ payload }) => {
@@ -141,7 +180,7 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         expect(user.userId).not.toBe(owner.userId);
         expect(user.sessionId).not.toBe(owner.sessionId);
         await mount(reader, url);
-        expect((await editorShape(reader)).text).toBe(text);
+        await expect.poll(async () => (await editorShape(reader)).text).toBe(text);
         const meta = await reader.request.get(path);
         expect(meta.status()).toBe(200);
         expect(await meta.json()).toMatchObject({ id: document.id, workspaceId: workspace.id });
@@ -181,9 +220,20 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         } finally {
           native.destroy();
         }
+        beforeClose = observed();
+        await info.attach(`fresh-connections-${String(freshConnections.length)}.json`, {
+          contentType: "application/json",
+          body: JSON.stringify(beforeClose),
+        });
+        expect(beforeClose.collabActive).toBe(flow === "on" ? 1 : 0);
       } finally {
         await fresh.close();
       }
+      if (!observed || !beforeClose) throw new Error("fresh connection observation missing");
+      const afterClose = observed();
+      expect(afterClose.contextClosed).toBe(true);
+      expect(afterClose.active).toBe(0);
+      freshConnections.push({ text, beforeClose, afterClose });
     };
     const editSave = async (text: string, observed: CollabWireLog) => {
       const editor = page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]');
@@ -228,6 +278,7 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
     await readback(workload.warm);
     await marker("warm");
     await marker("start");
+    const ownerAtStart = ownerConnections();
     for (const [i, text] of workload.edits.entries()) {
       const saved = await editSave(text, wire);
       ackIds.push(saved.id);
@@ -235,12 +286,17 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
       const roomKeys = new Set(
         [...wire.sent, ...wire.received].flatMap((f) => ("routingKey" in f ? [f.routingKey] : [])),
       );
+      const observedOwner = ownerConnections();
       resources.push({
         phase: `ack-${String(i)}`,
-        ownerSockets: sockets,
+        ownerConnections: observedOwner,
         observedRoomKeys: roomKeys.size,
       });
-      expect(sockets).toBe(flow === "on" ? 1 : 0);
+      await info.attach(`owner-connections-${String(i)}.json`, {
+        contentType: "application/json",
+        body: JSON.stringify(observedOwner),
+      });
+      expect(observedOwner.collabActive).toBe(flow === "on" ? 1 : 0);
       expect(roomKeys.size).toBe(flow === "on" ? 1 : 0);
       await marker(`ack-${String(i)}`);
       await readback(text);
@@ -248,6 +304,9 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
     }
     await context.close();
     ownerClosed = true;
+    const ownerAfterClose = ownerConnections();
+    expect(ownerAfterClose.contextClosed).toBe(true);
+    expect(ownerAfterClose.active).toBe(0);
     await marker("closed");
     expect(phase).toBe(phases.length);
     await info.attach("equal-work.json", {
@@ -265,9 +324,12 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         ackIds,
         ackLatencyMs,
         resources,
+        ownerAtStart,
+        ownerAfterClose,
+        freshConnections,
         contextsClosed: true,
         roomDefinition:
-          "unique routing keys observed on owner wire; not a server room registry gauge",
+          "unique owner wire routing keys; collaboration sockets use the existing /collab classification and WebSocket.isClosed; totals are separate; context close is positive retirement evidence; not a server room registry gauge",
         latencyDefinition:
           "Playwright runner monotonic clock: before Save click through matching ACK and persisted UI confirmation",
       }),

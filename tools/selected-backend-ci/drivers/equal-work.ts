@@ -10,7 +10,13 @@ import { digest, sha } from "../io.ts";
 import type { Browser, Bundle, DriverReceipt, Inputs, Web } from "../types.ts";
 import { command, privateWrite, readText, type Command, type Completed } from "./common.ts";
 
-import { equalTitle, phases, workload, workloadHash } from "./equal-work-policy.ts";
+import {
+  equalTitle,
+  phases,
+  workload,
+  workloadHash,
+  type ConnectionFacts,
+} from "./equal-work-policy.ts";
 export { equalSpec, equalTitle, phases, workload, workloadHash } from "./equal-work-policy.ts";
 const integer = (text: string) => {
   assert.ok(/^[0-9]+$/.test(text));
@@ -315,6 +321,23 @@ export function validateEqualReport(
 }
 
 export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
+  const connections = (value: ConnectionFacts, flow: string, closed: boolean) => {
+    assert.ok(
+      [value.opened, value.collabOpened, value.closeEvents, value.active, value.collabActive].every(
+        (v) => Number.isSafeInteger(v) && v >= 0,
+      ),
+    );
+    assert.ok(
+      value.closeEvents <= value.opened &&
+        value.active <= value.opened &&
+        value.collabOpened <= value.opened &&
+        value.collabActive <= value.active,
+    );
+    assert.ok(value.contextClosed === closed);
+    assert.ok(value.collabActive === (closed || flow === "off" ? 0 : 1));
+    assert.ok(flow === "on" ? value.collabOpened >= 1 : value.collabOpened === 0);
+    if (closed) assert.ok(value.active === 0);
+  };
   const qualify = (receipt: DriverReceipt, flow: string) => {
     assert.ok(
       receipt.final_exit_code === 0 &&
@@ -383,18 +406,39 @@ export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
     validateSamples(measurement.samples);
     const resources = b.resources as {
       phase: string;
-      ownerSockets: number;
+      ownerConnections: ConnectionFacts;
       observedRoomKeys: number;
     }[];
+    connections(b.ownerAtStart as ConnectionFacts, flow, false);
+    connections(b.ownerAfterClose as ConnectionFacts, flow, true);
     assert.ok(
       resources.length === 3 &&
         resources.every(
           (r, i) =>
-            r.phase === `ack-${String(i)}` &&
-            r.ownerSockets === (flow === "on" ? 1 : 0) &&
-            r.observedRoomKeys === (flow === "on" ? 1 : 0),
+            r.phase === `ack-${String(i)}` && r.observedRoomKeys === (flow === "on" ? 1 : 0),
         ),
     );
+    for (const resource of resources) connections(resource.ownerConnections, flow, false);
+    const fresh = b.freshConnections as {
+      text: string;
+      beforeClose: ConnectionFacts;
+      afterClose: ConnectionFacts;
+    }[];
+    assert.ok(
+      deepEquals(
+        fresh.map((f) => f.text),
+        [workload.warm, ...workload.edits],
+      ),
+    );
+    for (const client of fresh) {
+      connections(client.beforeClose, flow, false);
+      connections(client.afterClose, flow, true);
+      assert.ok(
+        client.afterClose.opened >= client.beforeClose.opened &&
+          client.afterClose.collabOpened >= client.beforeClose.collabOpened &&
+          client.afterClose.closeEvents >= client.beforeClose.closeEvents,
+      );
+    }
     return measurement;
   };
   const a = qualify(on, "on"),
@@ -430,7 +474,7 @@ export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
       memory:
         "memory.current is whole cgroup charge; memory.stat anon is an RSS proxy, distinct from /metrics server VmRSS; sampled maxima are not continuous peaks",
       peak: "memory.peak is container lifetime charge peak including startup/warm, not a reset measurement-window RSS peak",
-      room: "browser attachment records actual owner sockets and unique observed wire routing keys, not internal server room registry count",
+      room: "total observed/open sockets are separate from /collab active sockets (ON1/OFF0); owner and four fresh contexts retain positive close events; routing keys are observed owner rooms, not an internal server registry gauge",
       latency:
         "before UI Save click through matching durable ACK and persisted UI; runner monotonic ms; no speed threshold",
     },
