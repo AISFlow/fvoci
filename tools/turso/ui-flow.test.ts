@@ -582,7 +582,16 @@ describe("dedicated auth allocations", () => {
     ],
   });
   type Fault = "browser" | "sink-start" | "sink-stop" | "events" | "background";
-  async function allocate(fault: Fault) {
+  type SourceFault =
+    | "none"
+    | "index"
+    | "label"
+    | "identity"
+    | "other-live"
+    | "unknown-live"
+    | "scope-error"
+    | "hosted-open";
+  async function allocate(fault: Fault, sourceFault?: SourceFault) {
     const root = mkdtempSync(join(directory, "root-"));
     writeFileSync(join(root, "current-build.json"), "pure pinned metadata");
     process.env.RUNNER_TEMP = root;
@@ -591,7 +600,35 @@ describe("dedicated auth allocations", () => {
     const browsers: { environment: Record<string, string>; spec: string; config?: string }[] = [];
     const baselines: Record<string, string>[] = [];
     const output = new Captured();
-    const { scope } = fakeScope();
+    const { scope } = fakeScope({
+      closure: () => sourceFault === undefined,
+      retired: () => false,
+    });
+    const sourceIdentity = { pid: 71, startTicks: "200" };
+    const processErrors: string[] = [];
+    if (sourceFault !== undefined) {
+      scope.allocations.push({
+        process: exitedChild(null, "", sourceIdentity.pid),
+        label: sourceFault === "label" ? "unrelated-child" : "official-sqld",
+        closed: false,
+        forced: false,
+      });
+      must(scope.allocations[0]).key = scope.capture(
+        { ...sourceIdentity, parentPid: 1, state: "S" },
+        "official-sqld",
+        0,
+      );
+      if (sourceFault === "other-live")
+        scope.allocations.push({
+          process: exitedChild(null, "", 72),
+          label: "unrelated-child",
+          closed: false,
+          forced: false,
+        });
+      if (sourceFault === "unknown-live")
+        scope.capture({ pid: 72, startTicks: "201", parentPid: 1, state: "S" }, "unknown");
+      if (sourceFault !== "hosted-open") process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
+    }
     const steps: AuthSteps = {
       smtp: (_scope, _manifest, allocation) => {
         calls.push("smtp");
@@ -640,6 +677,7 @@ describe("dedicated auth allocations", () => {
       browser: (_scope, _manifest, allocation, environment, spec, _grep, _workspace, config) => {
         calls.push("browser");
         browsers.push({ environment, spec, config });
+        if (sourceFault === "scope-error") processErrors.push("UI_PROCESS_OBSERVATION_FAILED");
         if (fault === "browser" || fault === "sink-stop")
           return Promise.reject(new UiError("UI_ACTUAL_BROWSER_FAILED"));
         const namespace = must(environment.FVOCI_E2E_TURSO_NAMESPACE);
@@ -671,6 +709,17 @@ describe("dedicated auth allocations", () => {
           ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
         },
         steps,
+        undefined,
+        sourceFault === undefined || sourceFault === "hosted-open"
+          ? undefined
+          : {
+              sourceAllocation: sourceFault === "index" ? 1 : 0,
+              sourceIdentity:
+                sourceFault === "identity"
+                  ? { ...sourceIdentity, startTicks: "201" }
+                  : sourceIdentity,
+              processErrors,
+            },
       ),
     );
     const receipt = existsSync(join(root, "auth-result.private.json"))
@@ -767,6 +816,33 @@ describe("dedicated auth allocations", () => {
     expect(result.calls).toEqual(["smtp", "fixture:baseline"]);
     expect(result.baselines.at(-1)?.FVOCI_STORAGE_DIR).toBe(join(result.root, "bootstrap-storage"));
   });
+
+  test("only the bound local source remains live for the final preservation read", async () => {
+    const result = await allocate("browser", "none");
+    expect(result.failure).toBe("UI_ACTUAL_BROWSER_FAILED");
+    expect(result.calls.filter((call) => call === "fixture:baseline")).toHaveLength(2);
+    expect(result.receipt?.preservation).toHaveProperty("afterSha256");
+    expect(result.receipt?.originalFailure).toBe("UI_ACTUAL_BROWSER_FAILED");
+  });
+
+  for (const fault of ["index", "label", "identity"] as const)
+    test(`a local source with wrong ${fault} refuses before any auth allocation`, async () => {
+      const result = await allocate("browser", fault);
+      expect(result.failure).toBe("UI_LOCAL_SOURCE_REFUSED");
+      expect(result.calls).toEqual([]);
+    });
+
+  for (const fault of ["other-live", "unknown-live", "scope-error", "hosted-open"] as const)
+    test(`preservation refuses ${fault} and keeps the original browser failure`, async () => {
+      const result = await allocate("browser", fault);
+      expect(result.failure).toBe("UI_ACTUAL_BROWSER_FAILED");
+      expect(result.calls.filter((call) => call === "fixture:baseline")).toHaveLength(1);
+      expect(result.receipt?.preservation).toMatchObject({
+        result: "NOTRUN",
+        failure: "UI_RESOURCE_CLOSURE_FAILED",
+      });
+      expect(result.receipt?.originalFailure).toBe("UI_ACTUAL_BROWSER_FAILED");
+    });
 });
 
 // A real maintained sink child under the owned process scope.

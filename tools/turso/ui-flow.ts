@@ -64,6 +64,7 @@ import {
   now,
   pause,
   poll,
+  wait,
   withProcesses,
   type Child,
   type Scope,
@@ -659,7 +660,32 @@ export async function executeAuth(
   environment: Record<string, string>,
   steps: AuthSteps = defaultAuthSteps,
   heavy?: string,
+  localSource?: {
+    sourceAllocation: number;
+    sourceIdentity: { pid: number; startTicks: string };
+    processErrors: readonly string[];
+  },
 ): Promise<AuthReceipt> {
+  const sourceAllocation = localSource && scope.allocations[localSource.sourceAllocation];
+  const sourceEntry = sourceAllocation?.key ? scope.entries.get(sourceAllocation.key) : undefined;
+  if (localSource)
+    require(executionMode() === "orca-local" &&
+      Number.isSafeInteger(localSource.sourceAllocation) &&
+      localSource.sourceAllocation >= 0 &&
+      localSource.processErrors.length === 0 &&
+      sourceAllocation !== undefined &&
+      sourceAllocation.label === "official-sqld" &&
+      !sourceAllocation.closed &&
+      !sourceAllocation.forced &&
+      poll(sourceAllocation.process) === null &&
+      sourceEntry !== undefined &&
+      sourceEntry.label === "official-sqld" &&
+      !scope.retired(sourceEntry.identity) &&
+      sourceEntry.allocation === localSource.sourceAllocation &&
+      sourceEntry.identity.pid === sourceAllocation.process.pid &&
+      sourceEntry.identity.pid === localSource.sourceIdentity.pid &&
+      sourceEntry.identity.startTicks ===
+        localSource.sourceIdentity.startTicks, "UI_LOCAL_SOURCE_REFUSED");
   const source = manifest.sourceInputs;
   require(startupBlockers(baseline).length === 0, "UI_EXISTING_BACKGROUND_WORK_REFUSED");
   const audit: Audit = {
@@ -844,7 +870,26 @@ export async function executeAuth(
   }
   receipt.auditErrors = auditErrors;
   try {
-    require(scope.closure(), "UI_RESOURCE_CLOSURE_FAILED");
+    // Refresh the process observation before checking the local source's
+    // exact exception. Its primary must still serve the preservation read;
+    // localAuth retires it before withProcesses requires full closure.
+    const closed = scope.closure();
+    require(localSource
+      ? localSource.processErrors.length === 0 &&
+          sourceAllocation !== undefined &&
+          !sourceAllocation.closed &&
+          !sourceAllocation.forced &&
+          poll(sourceAllocation.process) === null &&
+          sourceEntry !== undefined &&
+          !scope.retired(sourceEntry.identity) &&
+          scope.allocations.every(
+            (allocation) =>
+              allocation === sourceAllocation || (allocation.closed && !allocation.forced),
+          ) &&
+          [...scope.entries.values()].every(
+            (entry) => entry === sourceEntry || scope.retired(entry.identity),
+          )
+      : closed, "UI_RESOURCE_CLOSURE_FAILED");
     steps.currentBuild();
     const final = await steps.fixture(scope, manifest, "baseline", lastEnvironment);
     steps.write(join(steps.root(), "auth-preservation.private.json"), {
@@ -1076,15 +1121,17 @@ export async function localAuth(): Promise<AuthReceipt> {
     let original: unknown = null,
       result: AuthReceipt | null = null;
     try {
-      const child = scope.allocations.find(
+      const sourceAllocation = scope.allocations.findIndex(
         (a, index) => index >= before && a.label === "official-sqld",
-      )?.process;
+      );
+      const child = scope.allocations[sourceAllocation]?.process;
       require(child !== undefined &&
         scope.allocations.slice(before).filter((a) => a.label === "official-sqld").length ===
           1, "UI_LOCAL_SOURCE_REFUSED");
       const upstream = await ownedListener(child);
       const url = new URL(local.environment.FVOCI_LIBSQL_URL as string);
       const ca = local.environment.SSL_CERT_FILE as string;
+      const sourceIdentity = identity(child.pid);
       require(url.protocol === "https:" &&
         url.hostname === "127.0.0.1" &&
         url.port !== "" &&
@@ -1106,7 +1153,7 @@ export async function localAuth(): Promise<AuthReceipt> {
         inputSha256: grant.inputSha256,
         manifestSha256: sha(join(root(), "current-build.json")),
         physicalSha256: manifest.physicalInputs.sha256,
-        child: identity(child.pid),
+        child: sourceIdentity,
         targetSha256: digest(url.origin),
         upstreamSha256: digest(upstream),
         certificateSha256: local.certificateSha256,
@@ -1125,23 +1172,28 @@ export async function localAuth(): Promise<AuthReceipt> {
         ENCRYPTION_KEYS: diagnosticJson({ "turso-test": token(32) }),
         ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
       };
-      // The current schema exists on the new primary before its first
-      // observation; this bootstrap start is outside the audited allocations.
+      // Migration only, as the hosted migration phase leaves the primary:
+      // a server start would register relay consumers before the baseline.
       const bootstrap = join(root(), "local-auth-bootstrap");
       mkdirSync(bootstrap, 0o700);
       const storage = join(bootstrap, "storage");
       mkdirSync(storage, 0o700);
-      const started = await start(
-        scope,
-        manifest,
-        allocationEnvironment(manifest, environment, "tui-" + token(10), "on", storage),
-        bootstrap,
-        true,
-      );
+      const log = openSync(join(bootstrap, "migrate.private.log"), "wx", 0o600);
       try {
-        await stop(scope, started.server, started.base, bootstrap);
+        const migrate = scope.spawn(
+          [get(manifest, "binaries", "fvoci-migrate", "path") as string],
+          "local-auth-migrate",
+          {
+            env: { ...cleanEnv(), ...local.environment, FVOCI_DATABASE_BACKEND: "libsql-remote" },
+            stdin: "ignore",
+            stdout: log,
+            stderr: log,
+          },
+        );
+        require((await wait(migrate, 120)) === 0, "UI_LOCAL_MIGRATION_FAILED");
+        await scope.finish(migrate);
       } finally {
-        closeSync(started.log);
+        closeSync(log);
       }
       // The local fixture runs in the same container shape and needs a storage
       // mount; the final preservation observation reuses this environment.
@@ -1161,6 +1213,7 @@ export async function localAuth(): Promise<AuthReceipt> {
         observed,
         defaultAuthSteps,
         grant.heavy.path,
+        { sourceAllocation, sourceIdentity, processErrors: scope.errors },
       );
     } catch (error) {
       original = error;
