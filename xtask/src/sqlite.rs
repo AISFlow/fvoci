@@ -49,7 +49,11 @@ pub fn archive_root() -> String {
 
 /// Every source, manifest and lockfile compiled into this binary. Adding a
 /// module to `src/` requires listing it here (checked by a test).
-const SOURCES: [(&str, &[u8]); 30] = [
+const SOURCES: [(&str, &[u8]); 31] = [
+    (
+        "../tests/support/official_sqld.rs",
+        include_bytes!("../../tests/support/official_sqld.rs"),
+    ),
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     ("Cargo.lock", include_bytes!("../Cargo.lock")),
     ("src/args.rs", include_bytes!("args.rs")),

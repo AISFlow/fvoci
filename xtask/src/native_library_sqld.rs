@@ -1,34 +1,14 @@
 //! Official sqld release inputs. Both tarball and executable digests come
 //! from libsql-server-v0.24.32's published assets; no mutable tag/cache trust.
 
-use super::native_elf;
+#[path = "../../tests/support/official_sqld.rs"]
+mod official;
 use crate::ci_fixture::{capture, Streams};
 use crate::rust_binaries_archive::file_sha256;
+use official::pin;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-pub(super) struct Pin {
-    pub triple: &'static str,
-    pub archive: &'static str,
-    pub binary: &'static str,
-}
-
-pub(super) fn pin(arch: &str) -> Result<Pin, String> {
-    match arch {
-        "x86_64" => Ok(Pin {
-            triple: "x86_64-unknown-linux-gnu",
-            archive: "71720fc8648c19efef416efebd47145ef59b62e198770533530a858e1336879f",
-            binary: "0863c3fbe68ac9714bca2cec1330def7a0ba5e4a29f199bf60ef46fa0c95b895",
-        }),
-        "aarch64" => Ok(Pin {
-            triple: "aarch64-unknown-linux-gnu",
-            archive: "37f9eee45b388a30192907ecf4565b93df945c079331657073b5b3caf8bb1cd0",
-            binary: "54039931c1088483706790e6cf73444ad88b843a9bb0ca8285b82fc309ad4810",
-        }),
-        _ => Err("official sqld is not pinned for this architecture".into()),
-    }
-}
 
 fn command(command: &mut Command, phase: &str) -> Result<Vec<u8>, String> {
     let done = capture(command, None, Streams::Separate, false)
@@ -40,11 +20,8 @@ fn command(command: &mut Command, phase: &str) -> Result<Vec<u8>, String> {
 }
 
 pub(super) fn verify(path: &Path) -> Result<(), String> {
-    let pin = pin(std::env::consts::ARCH)?;
-    if file_sha256(path).ok().as_deref() != Some(pin.binary) {
-        return Err("official sqld executable digest mismatch".into());
-    }
-    native_elf(path)?;
+    let digest = file_sha256(path).map_err(|_| "official sqld executable digest unavailable")?;
+    official::verify(path, &digest, std::env::consts::ARCH)?;
     let version = command(Command::new(path).arg("--version"), "version")?;
     if version != b"sqld sqld 0.24.32 (40c272de 2025-02-14)\n" {
         return Err("official sqld version mismatch".into());
@@ -111,4 +88,59 @@ pub(super) fn prepare(directory: &Path) -> Result<(), String> {
         };
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::official;
+    use std::fs;
+
+    #[test]
+    fn official_pins_require_the_selected_architecture_and_exact_digest() {
+        let root = crate::host::mkdtemp("sqld-identity-", &std::env::temp_dir()).unwrap();
+        let path = root.join("sqld");
+        for (arch, machine, other) in [("x86_64", 62u16, "aarch64"), ("aarch64", 183, "x86_64")] {
+            let pin = official::pin(arch).unwrap();
+            let mut bytes = [0u8; 20];
+            bytes[..6].copy_from_slice(b"\x7fELF\x02\x01");
+            bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+            fs::write(&path, bytes).unwrap();
+            official::verify(&path, pin.binary, arch).unwrap();
+            assert!(official::verify(&path, "wrong", arch)
+                .unwrap_err()
+                .contains("digest"));
+            assert!(official::verify(&path, official::pin(other).unwrap().binary, arch).is_err());
+            assert!(
+                official::verify(&path, official::pin(other).unwrap().binary, other)
+                    .unwrap_err()
+                    .contains("ELF64")
+            );
+            for (offset, value) in [(0, 0), (4, 1), (5, 2), (18, 0)] {
+                let mut bad = bytes;
+                bad[offset] = value;
+                fs::write(&path, bad).unwrap();
+                assert!(official::verify(&path, pin.binary, arch)
+                    .unwrap_err()
+                    .contains("ELF64"));
+            }
+        }
+        assert!(official::pin("riscv64").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn official_identity_refuses_symlink_and_relative_inputs() {
+        let root = crate::host::mkdtemp("sqld-path-", &std::env::temp_dir()).unwrap();
+        let path = root.join("sqld");
+        fs::write(&path, b"unused").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let pin = official::pin(std::env::consts::ARCH).unwrap();
+        for input in [&link, std::path::Path::new("sqld")] {
+            assert!(official::verify(input, pin.binary, std::env::consts::ARCH)
+                .unwrap_err()
+                .contains("physical absolute"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

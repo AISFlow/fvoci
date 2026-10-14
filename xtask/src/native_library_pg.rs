@@ -65,11 +65,29 @@ pub(super) fn run(
     let mut created_database = false;
     let password = ci_fixture::random_hex(32)?;
     let identity = Identity::new(&ci_fixture::random_hex(8)?, password.clone());
+    let create = |text: &str, phase: &str, owned: &mut bool| -> Result<(), String> {
+        if ci_fixture::interrupted() {
+            return Err("native PG app interrupted".into());
+        }
+        // CREATE can commit before the docker/psql ACK reaches this process.
+        // Finish and reap that child, then record ownership before acting on
+        // SIGINT. A failed/unknown ACK never authorizes dropping a collision.
+        sql(text, phase, false).map_err(|error| {
+            format!("{error}; creation outcome unconfirmed, resource not adopted")
+        })?;
+        *owned = true;
+        if ci_fixture::interrupted() {
+            return Err("native PG app interrupted".into());
+        }
+        Ok(())
+    };
     let original = (|| {
-        sql(&identity.create_role(), "create-role", true)?;
-        created_role = true;
-        sql(&identity.create_database(), "create-database", true)?;
-        created_database = true;
+        create(&identity.create_role(), "create-role", &mut created_role)?;
+        create(
+            &identity.create_database(),
+            "create-database",
+            &mut created_database,
+        )?;
         let owner = url.with_database(&identity.database);
         run_command(
             Command::new(migrator)
