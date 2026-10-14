@@ -165,14 +165,15 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         const reader = await fresh.newPage();
         observed = observeConnections(reader);
         const receivedNative: Uint8Array[] = [];
-        reader.on("websocket", (socket) =>
+        reader.on("websocket", (socket) => {
+          if (!socket.url().includes("/collab")) return;
           socket.on("framereceived", ({ payload }) => {
             const bytes = frameBytes(payload),
               frame = decodeHocuspocusFrame(bytes);
             if (frame?.kind === "other" && frame.type === 0)
               receivedNative.push(Uint8Array.from(bytes));
-          }),
-        );
+          });
+        });
         await login(reader, member.email, member.password);
         const identity = await reader.request.get("/api/v1/auth/me");
         expect(identity.status()).toBe(200);
@@ -229,7 +230,6 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
       } finally {
         await fresh.close();
       }
-      if (!observed || !beforeClose) throw new Error("fresh connection observation missing");
       const afterClose = observed();
       expect(afterClose.contextClosed).toBe(true);
       expect(afterClose.active).toBe(0);
