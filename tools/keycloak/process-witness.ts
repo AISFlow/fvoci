@@ -2,8 +2,37 @@
 // to a private directory; stdin is a fixed DTO, stdout contains booleans only.
 // Never accepts a path, command, SQL, environment value or output destination.
 import { createHash } from "node:crypto";
-import { readFileSync, readlinkSync, statSync, writeSync } from "node:fs";
-import { basename } from "node:path";
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+
+/** Fixed system entry only; root-owned alternatives are followed without PATH. */
+export function systemSudo(): string {
+  let path = "/usr/bin/sudo";
+  for (let depth = 0; depth < 8; depth++) {
+    for (let parent = dirname(path); ; parent = dirname(parent)) {
+      const facts = lstatSync(parent);
+      if (
+        !facts.isDirectory() ||
+        realpathSync(parent) !== parent ||
+        facts.uid !== 0 ||
+        facts.gid !== 0 ||
+        (facts.mode & 0o022) !== 0
+      )
+        throw new Error("WITNESS_SYSTEM_LAUNCHER_REFUSED");
+      if (parent === "/") break;
+    }
+    const facts = lstatSync(path);
+    if (facts.uid !== 0 || facts.gid !== 0) throw new Error("WITNESS_SYSTEM_LAUNCHER_REFUSED");
+    if (facts.isSymbolicLink()) {
+      path = resolve(dirname(path), readlinkSync(path));
+      continue;
+    }
+    if (!facts.isFile() || (facts.mode & 0o022) !== 0 || realpathSync(path) !== path)
+      throw new Error("WITNESS_SYSTEM_LAUNCHER_REFUSED");
+    return path;
+  }
+  throw new Error("WITNESS_SYSTEM_LAUNCHER_REFUSED");
+}
 
 const ALLOWED = [
   "DATABASE_APP_URL",
@@ -184,13 +213,21 @@ export function callerFrameMatches(
 export function callerBound(input: WitnessInput): boolean {
   // Only our own bounded ancestor chain (sudo's monitor/exec processes), never
   // a scan of unrelated processes. The observed app must be this caller's child.
+  const sudo = systemSudo(),
+    sudoSha256 = digest(readFileSync(sudo));
   let pid = process.ppid;
   for (let depth = 0; depth < 8 && pid > 1; depth++) {
     const parent = identity(pid);
     const executable = `/proc/${String(pid)}/exe`;
     const path = readlinkSync(executable);
     const file = statSync(executable);
-    if (path === "/usr/bin/sudo" && file.uid === 0 && file.gid === 0 && (file.mode & 0o022) === 0) {
+    if (
+      path === sudo &&
+      file.uid === 0 &&
+      file.gid === 0 &&
+      (file.mode & 0o022) === 0 &&
+      digest(readFileSync(executable)) === sudoSha256
+    ) {
       pid = parent.parentPid;
       continue;
     }

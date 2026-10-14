@@ -69,7 +69,7 @@ import {
   selftestFailures,
 } from "./redact.ts";
 import { startLocalLibsql } from "./local-libsql.ts";
-import { digest, type WitnessInput } from "./process-witness.ts";
+import { digest, systemSudo, type WitnessInput } from "./process-witness.ts";
 
 export const MODES = ["flows", "failures", "wrong-secret"] as const;
 export type Backend = "postgres" | "sqlite" | "libsql-remote";
@@ -250,8 +250,9 @@ export async function assertServerEnvironment(
       }).flatMap(([key, value]) => (value === undefined ? [] : [[key, digest(value)]])),
     ),
   };
+  const sudo = systemSudo();
   const argv = [
-    "sudo",
+    sudo,
     "-n",
     "/usr/bin/env",
     "-i",
