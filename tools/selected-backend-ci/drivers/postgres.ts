@@ -90,7 +90,7 @@ export const postgresDriverCommand = () => bunDriver(postgresDriver);
 const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
 export const pgImage =
-  "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db";
+  "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336";
 export const meiliImage =
   "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c";
 const pgScript = join(root, "scripts/start-test-postgres.sh");
