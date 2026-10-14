@@ -11,6 +11,8 @@ export const LITERALS = {
   number: 0.12345678901234566,
   date: "2026-10-03",
   instant: "2026-10-03T01:02:03.123456Z",
+  instantApi: "2026-10-03T01:02:03.123Z",
+  instantArchive: "2026-10-03T01:02:03.123456+00:00",
 };
 const object = z.record(z.string(), z.unknown());
 export const workspaceSchema = z.object({ id: z.guid(), slug: z.string() });

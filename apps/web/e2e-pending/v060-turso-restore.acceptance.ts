@@ -322,7 +322,9 @@ test("Turso restore export: current native archive carries IDs references attach
       );
       expect(updated.status()).toBe(200);
       const after = await collectionValues(page.request, workspace.id, collection.id);
-      expect(after.items[0]?.values[field.id]).toEqual(value);
+      expect(after.items[0]?.values[field.id]).toEqual(
+        type === "datetime" ? { datetime: LITERALS.instantApi } : value,
+      );
     }
     const body = await jsonObject(page.request.get(base + "/body"));
     const task = await jsonObject(page.request.get(taskPath));
@@ -334,6 +336,17 @@ test("Turso restore export: current native archive carries IDs references attach
     const exported = await archive(page.request, workspace.id, project.id);
     expect(exported.graph.source_actor_id).toBe(state.source.actor);
     expect(exported.graph.source_workspace_id).toBe(workspace.id);
+    const scalars = rows(exported.graph, "collection_values");
+    for (const [type, column, literal] of [
+      ["number", "value_number", String(LITERALS.number)],
+      ["date", "value_date", LITERALS.date],
+      ["datetime", "value_ts", LITERALS.instantArchive],
+    ]) {
+      const selected = scalars.filter((row) => row.field_type === type);
+      expect(selected).toHaveLength(1);
+      if (!column) throw new Error("Fixed native scalar column required");
+      expect(selected[0]?.[column]).toBe(literal);
+    }
     expect(rows(exported.graph, "documents").map((item) => item.id)).toContain(document.id);
     expect(rows(exported.graph, "tasks").map((item) => item.id)).toEqual([taskCreated.taskId]);
     expect(rows(exported.graph, "attachments").map((item) => item.id)).toEqual([file]);
@@ -471,6 +484,16 @@ test("Turso restore destination: malformed input publishes nothing and identical
             .status,
       )
       .toBe("completed");
+    const publishedCounts = observeRestoreCounts();
+    expect(publishedCounts.counts).toMatchObject({
+      projects: beforeCounts.counts.projects + 1,
+      documents: beforeCounts.counts.documents + rows(exported.graph, "documents").length,
+      tasks: beforeCounts.counts.tasks + rows(exported.graph, "tasks").length,
+      attachments: beforeCounts.counts.attachments + rows(exported.graph, "attachments").length,
+      revisions: beforeCounts.counts.revisions + rows(exported.graph, "revisions").length,
+      jobs: beforeCounts.counts.jobs + 1,
+      nativeJobs: 1,
+    });
     const replay = await json(
       page.request.post(base + "/native-archive/restore", { data: intent }),
       jobSchema,
@@ -478,11 +501,13 @@ test("Turso restore destination: malformed input publishes nothing and identical
     );
     expect(replay.id).toBe(queued.id);
     const afterCounts = observeRestoreCounts();
+    expect(afterCounts.counts).toEqual(publishedCounts.counts);
     expect(afterCounts.counts.nativeJobs).toBe(1);
     expect(afterCounts.counts.jobs).toBe(beforeCounts.counts.jobs + 1);
     await info.attach("restore-destination-counts.private.json", {
       body: JSON.stringify({
         before: beforeCounts,
+        published: publishedCounts,
         after: afterCounts,
         request: intent.requestId,
         job: queued.id,
