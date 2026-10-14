@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import {
   Coordinator,
+  checkModel,
+  launchEntry,
   loadProfile,
   exclusive,
   inside,
@@ -23,15 +25,14 @@ export async function legacy(args: string[], p: Profile, c = new Coordinator(p))
   );
   c.controllerOnly();
   if (mode === "wait") return c.wait(values[0], true);
-  requireThat(
-    (process.env.SOL_EFFORT ?? "high") === "high" &&
-      p.worker.model === "gpt-6.1-sol" &&
-      p.worker.effort === "high" &&
-      p.worker.tier === "default" &&
-      p.worker.banner === "GPT-6.1-Sol",
-    "legacy entrypoint requires Sol 6.1 high, Fast off",
-  );
   const reviewer = mode === "review";
+  const entry = launchEntry(p, reviewer ? "reviewer" : "author");
+  // The selected adapter must be supported and satisfy its own constraints before any mutation.
+  checkModel(entry);
+  requireThat(
+    (process.env.SOL_EFFORT ?? entry.effort) === entry.effort,
+    "legacy effort override differs from the profile",
+  );
   const [unit, second, third, fourth] = values;
   const sha = reviewer ? second : third;
   const branch = reviewer ? fourth : second;
@@ -49,7 +50,9 @@ export async function legacy(args: string[], p: Profile, c = new Coordinator(p))
     existsSync(sourcePrompt) && existsSync(reviewer ? p.reviewerCommon : p.authorCommon),
     "missing prompt/common",
   );
-  const name = (reviewer ? "rv-grok-" : "v6-") + unit;
+  // Codex reviewers keep the existing compatibility name. Claude reviewers get their own prefix so a
+  // leftover checkout from the other adapter is never adopted as this attempt's checkout.
+  const name = (reviewer ? (entry.adapter === "claude" ? "rv-claude-" : "rv-grok-") : "v6-") + unit;
   const worktree = join(dirname(p.parent), name);
   const prompt = join(unitDir, "prompt.md");
   const requestPath = join(unitDir, "request.json");

@@ -8,15 +8,23 @@ import {
   unlinkSync,
   realpathSync,
   existsSync,
+  readdirSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
-type Model = { model: string; effort: string; tier: string; banner: string };
+// Execution adapters are selected explicitly per role; names never imply an adapter.
+export type Model = {
+  adapter: "codex" | "claude";
+  model: string;
+  effort: string;
+  tier: string;
+  banner: string;
+};
 export type Profile = {
   version: number;
   cli: string;
-  codex: string;
+  codex?: string;
   repo: string;
   parent: string;
   parentId: string;
@@ -31,7 +39,8 @@ export type Profile = {
   reviewerCommon: string;
   controller: Model;
   worker: Model;
-  concurrency: number;
+  reviewer?: Model;
+  concurrency: number | null;
 };
 export type Request = {
   role: "author" | "reviewer";
@@ -72,9 +81,14 @@ export type Exec = (argv: string[]) => Promise<string>;
 export function requireThat(value: unknown, why: string): asserts value {
   if (!value) throw new Error(why);
 }
-function exactKeys(value: any, keys: string[]) {
+function exactKeys(value: any, keys: string[], optional: string[] = []) {
   requireThat(value && typeof value === "object" && !Array.isArray(value), "expected object");
-  requireThat(Object.keys(value).sort().join() === keys.sort().join(), "unexpected/missing keys");
+  const present = Object.keys(value);
+  requireThat(
+    keys.every((k) => present.includes(k)) &&
+      present.every((k) => keys.includes(k) || optional.includes(k)),
+    "unexpected/missing keys",
+  );
 }
 export function privateJson(path: string): any {
   const st = lstatSync(path);
@@ -94,33 +108,41 @@ export function loadProfile(
   ),
 ): Profile {
   const p = privateJson(path);
-  exactKeys(p, [
-    "version",
-    "cli",
-    "codex",
-    "repo",
-    "parent",
-    "parentId",
-    "parentInstance",
-    "run",
-    "coordinator",
-    "handoff",
-    "state",
-    "scratch",
-    "heavy",
-    "authorCommon",
-    "reviewerCommon",
-    "controller",
-    "worker",
-    "concurrency",
-  ]);
   requireThat(
-    p.version === 1 && Number.isInteger(p.concurrency) && p.concurrency > 0,
-    "invalid profile version/concurrency",
+    p?.version === 2,
+    "profile version must be 2 with an explicit adapter per role; rewrite older locators from verified receipts",
+  );
+  exactKeys(
+    p,
+    [
+      "version",
+      "cli",
+      "repo",
+      "parent",
+      "parentId",
+      "parentInstance",
+      "run",
+      "coordinator",
+      "handoff",
+      "state",
+      "scratch",
+      "heavy",
+      "authorCommon",
+      "reviewerCommon",
+      "controller",
+      "worker",
+      "concurrency",
+    ],
+    ["codex", "reviewer"],
+  );
+  // null records that the user set no fixed worker cap; the heavy-command entrypoint still limits load.
+  requireThat(
+    p.concurrency === null || (Number.isInteger(p.concurrency) && p.concurrency > 0),
+    "invalid profile concurrency",
   );
   for (const key of [
     "cli",
-    "codex",
+    ...("codex" in p ? ["codex"] : []),
     "repo",
     "parent",
     "handoff",
@@ -137,20 +159,39 @@ export function loadProfile(
   }
   for (const key of ["parentId", "parentInstance", "run", "coordinator"])
     requireThat(typeof p[key] === "string" && p[key].length > 0, `missing reference: ${key}`);
-  for (const key of ["controller", "worker"]) {
-    exactKeys(p[key], ["model", "effort", "tier", "banner"]);
-    for (const value of Object.values(p[key]))
-      requireThat(
-        typeof value === "string" && /^[a-zA-Z0-9. -]+$/.test(value),
-        "invalid model profile",
-      );
+  for (const key of ["controller", "worker", ...("reviewer" in p ? ["reviewer"] : [])])
+    checkModel(p[key]);
+  requireThat(
+    ![p.worker, p.reviewer].some((m) => m?.adapter === "codex") || "codex" in p,
+    "codex adapter requires the codex executable path",
+  );
+  return p;
+}
+// Each adapter states its own constraints; unknown adapters are refused, never relabeled.
+export function checkModel(m: any): asserts m is Model {
+  exactKeys(m, ["adapter", "model", "effort", "tier", "banner"]);
+  for (const value of Object.values(m))
     requireThat(
-      p[key].model === p[key].banner.toLowerCase() &&
-        /^(low|medium|high|xhigh|max|ultra)$/.test(p[key].effort),
+      typeof value === "string" && /^[a-zA-Z0-9. -]+$/.test(value),
+      "invalid model profile",
+    );
+  requireThat(m.adapter === "codex" || m.adapter === "claude", "unsupported execution adapter");
+  // Codex default tier is Fast off; Claude has no Fast tier, so only default is valid.
+  requireThat(m.tier === "default", "unsupported tier for adapter");
+  if (m.adapter === "codex")
+    requireThat(
+      m.model === m.banner.toLowerCase() && /^(low|medium|high|xhigh|max|ultra)$/.test(m.effort),
       "model/banner or effort mismatch",
     );
-  }
-  return p;
+  // Claude transcripts record the full model id, so aliases cannot be confirmed.
+  else
+    requireThat(
+      /^claude-[a-z0-9-]+$/.test(m.model) && /^(low|medium|high|xhigh|max)$/.test(m.effort),
+      "claude adapter requires a full model id and supported effort",
+    );
+}
+export function launchEntry(p: Profile, role: Request["role"]): Model {
+  return role === "reviewer" ? (p.reviewer ?? p.worker) : p.worker;
 }
 
 // Do not print argv, command output, or the environment on failure: prompts may contain private data.
@@ -204,6 +245,16 @@ export function assertBanner(text: string, m: Model) {
     "Fast/tier mismatch",
   );
 }
+// A plain shell ends in a prompt and shows none of the TUI glyphs or hints observed on real
+// Codex, Claude Code and grok screens. Provider names alone occur in PS1 cwd paths, so they
+// are not markers; the structured terminal identity is checked separately.
+const tuiGlyph = /[\u2500-\u259F⎿⏵⏺●◆◈✢✳✶✻✽❯›•⚠]/;
+const tuiHint = /Ask Codex to do anything|bypass permissions on|for shortcuts|x:shortcuts/;
+export function plainShell(tail: string[]) {
+  const text = tail.join("\n");
+  return /[$#>]\s*$/.test(tail.at(-1) || "") && !tuiGlyph.test(text) && !tuiHint.test(text);
+}
+type Transcript = { file: string; records: any[]; assistant: any[] };
 export function inside(root: string, path: string) {
   const rel = relative(realpathSync(root), path);
   requireThat(
@@ -233,7 +284,117 @@ export class Coordinator {
   constructor(
     readonly p: Profile,
     readonly exec: Exec = execute,
+    readonly transcripts = join(homedir(), ".claude/projects"),
   ) {}
+  // Installed Claude Code stores a session as <transcripts>/<launch cwd, "/" -> "-">/<session>.jsonl.
+  // Only that observed mapping is used; paths with other characters are refused as unverified.
+  sessions(path: string, only?: string): Transcript[] {
+    requireThat(isAbsolute(path) && /^[A-Za-z0-9/-]+$/.test(path), "unverified transcript mapping");
+    const dir = join(this.transcripts, path.replaceAll("/", "-"));
+    if (!existsSync(dir)) return [];
+    ownedDirectory(dir);
+    const found: Transcript[] = [];
+    // Top-level session files only: subagents/ transcripts may run other models.
+    for (const name of readdirSync(dir).sort()) {
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/.test(name) ||
+        (only !== undefined && name !== only)
+      )
+        continue;
+      const file = join(dir, name);
+      const st = lstatSync(file);
+      requireThat(
+        st.isFile() && st.uid === process.getuid?.() && (st.mode & 0o777) === 0o600,
+        "transcript must be an owned regular mode 0600 file",
+      );
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      // Only a final line still being written may be incomplete.
+      if (!text.endsWith("\n")) lines.pop();
+      const records = lines.filter((l) => l !== "").map((l) => JSON.parse(l));
+      // The first recorded cwd is the launch cwd; later records follow in-session cd.
+      if (records.find((r) => typeof r.cwd === "string")?.cwd !== path) continue;
+      found.push({ file: name, records, assistant: records.filter((r) => r.type === "assistant") });
+    }
+    return found;
+  }
+  // Read-only: no wait or sleep; an attempt without assistant output is PENDING, never PASS.
+  async confirm(dispatchId: string, role: Request["role"] = "author") {
+    requireThat(/^ctx_[a-z0-9]+$/.test(dispatchId), "invalid dispatch id");
+    requireThat(["author", "reviewer"].includes(role), "invalid role");
+    const m = launchEntry(this.p, role);
+    requireThat(m.adapter === "claude", "transcript confirmation applies to the claude adapter");
+    const shown = await this.cli("orchestration", "worker-show", "--dispatch", dispatchId);
+    const repoId = this.p.parentId.split("::")[0];
+    const worktreeId = shown.worker?.worktreeId;
+    requireThat(
+      shown.dispatch?.id === dispatchId &&
+        shown.dispatch.runId === this.p.run &&
+        shown.worker?.dispatchId === dispatchId &&
+        typeof worktreeId === "string" &&
+        worktreeId.startsWith(repoId + "::"),
+      "dispatch outside this Run/repository",
+    );
+    const effective = shown.worker.startOptions?.launch?.effective;
+    requireThat(
+      effective?.agent === "claude" && effective.model === m.model && effective.effort === m.effort,
+      "dispatch launch does not match the profile",
+    );
+    const worktree = worktreeId.slice(repoId.length + 2);
+    // The injected Task prompt is a string user message carrying the Dispatch ID; tool output is not.
+    const own = this.sessions(worktree).filter((s) =>
+      s.records.some(
+        (r) =>
+          r.type === "user" &&
+          typeof r.message?.content === "string" &&
+          r.message.content.includes(dispatchId),
+      ),
+    );
+    const assistant = own.flatMap((s) => s.assistant);
+    const summary = {
+      dispatch: dispatchId,
+      worktree,
+      transcripts: own.length,
+      assistant: assistant.length,
+      model: m.model,
+      effort: m.effort,
+    };
+    if (assistant.length === 0) return { verdict: "PENDING", ...summary };
+    const wrong = assistant.filter(
+      (r) => r.message?.model !== m.model || r.effort !== m.effort,
+    ).length;
+    requireThat(
+      wrong === 0,
+      `actual model/effort mismatch in ${wrong} of ${assistant.length} assistant messages`,
+    );
+    return { verdict: "PASS", ...summary };
+  }
+  // The installed Claude Code screen shows no model or effort, and typed composer text could imitate
+  // one, so a Claude controller is verified from its own session transcript only.
+  controllerEvidence(screen: string, identity: unknown) {
+    const m = this.p.controller;
+    if (m.adapter === "codex") {
+      assertBanner(screen, m);
+      return "screen";
+    }
+    requireThat(identity === "claude", "controller terminal is not a claude agent");
+    const sid = process.env.CLAUDE_CODE_SESSION_ID;
+    const own = this.sessions(
+      this.p.parent,
+      process.env.ORCA_TERMINAL_HANDLE === this.p.coordinator && sid ? sid + ".jsonl" : undefined,
+    ).filter((s) => s.assistant.length > 0);
+    requireThat(
+      own.length === 1,
+      "controller transcript missing or ambiguous; inspect from the controller session",
+    );
+    // The latest assistant turn is the controller's current model and effort.
+    const last = own[0].assistant.at(-1);
+    requireThat(
+      last.message?.model === m.model && last.effort === m.effort,
+      "wrong/missing controller model or effort",
+    );
+    return "transcript";
+  }
   async cli(...args: string[]): Promise<any> {
     let out: string;
     try {
@@ -279,9 +440,10 @@ export class Coordinator {
       "runtime not ready",
     );
     const run = (await this.cli("orchestration", "run-show", "--id", this.p.run)).run;
+    requireThat(run?.id === this.p.run, "Run/coordinator mismatch: locator Run not shown");
     requireThat(
-      run?.id === this.p.run && run.coordinator_handle === this.p.coordinator,
-      "Run/coordinator mismatch",
+      run.coordinator_handle === this.p.coordinator,
+      "Run/coordinator mismatch: the Run is bound to another coordinator; complete the documented takeover and update the locator from its verified receipts",
     );
     const parent = await this.worktree(this.p.parent);
     requireThat(
@@ -325,26 +487,25 @@ export class Coordinator {
     );
     const terminals = (await this.cli("terminal", "list", "--worktree", `path:${this.p.parent}`))
       .terminals;
-    requireThat(
-      Array.isArray(terminals) &&
-        terminals.some(
+    const own = Array.isArray(terminals)
+      ? terminals.find(
           (t) =>
             t.handle === this.p.coordinator &&
             t.worktreePath === this.p.parent &&
             t.connected === true,
-        ),
-      "coordinator terminal missing or misplaced",
-    );
+        )
+      : undefined;
+    requireThat(own, "coordinator terminal missing or misplaced");
     const screen = (await this.cli("terminal", "read", "--terminal", this.p.coordinator)).terminal;
     requireThat(
       screen?.handle === this.p.coordinator && Array.isArray(screen.tail),
       "missing controller screen",
     );
-    assertBanner(screen.tail.join("\n"), this.p.controller);
-    return { run, parent, repo };
+    const evidence = this.controllerEvidence(screen.tail.join("\n"), own.agentIdentity);
+    return { run, parent, repo, evidence };
   }
   async inspect() {
-    const { run, parent } = await this.context();
+    const { run, parent, evidence } = await this.context();
     const workers: any[] = [];
     let cursor: string | undefined;
     const seen = new Set<string>();
@@ -380,7 +541,9 @@ export class Coordinator {
       handoff: this.p.handoff,
       state: this.p.state,
       controller: this.p.controller,
+      controllerEvidence: evidence,
       worker: this.p.worker,
+      reviewer: launchEntry(this.p, "reviewer"),
       concurrency: this.p.concurrency,
       heavy: this.p.heavy,
       workers,
@@ -450,7 +613,12 @@ export class Coordinator {
         (r.terminal === null || /^term_[a-z0-9-]+$/.test(r.terminal)),
       "invalid spec/terminal",
     );
-    requireThat(this.p.worker.tier === "default", "unsupported tier");
+    const entry = launchEntry(this.p, r.role);
+    checkModel(entry);
+    requireThat(
+      entry.adapter === "claude" ? r.terminal === null : typeof this.p.codex === "string",
+      "claude starts a fresh agent (terminal reuse cannot carry model/effort); codex needs its executable",
+    );
     const unitDir = join(this.p.scratch, r.unit);
     ownedDirectory(unitDir);
     inside(unitDir, r.prompt);
@@ -528,6 +696,7 @@ export class Coordinator {
     const terminals = (await this.cli("terminal", "list", "--worktree", `path:${r.worktree}`))
       .terminals;
     requireThat(Array.isArray(terminals), "missing terminal inventory");
+    if (entry.adapter === "claude") return this.startClaude(r, entry, existed, terminals, unitDir);
     if (!existed) {
       requireThat(
         terminals.length === 1,
@@ -537,13 +706,13 @@ export class Coordinator {
     }
     let handle = r.terminal;
     const argv = [
-      this.p.codex,
+      this.p.codex!,
       "-m",
-      this.p.worker.model,
+      entry.model,
       "-c",
-      `model_reasoning_effort=\"${this.p.worker.effort}\"`,
+      `model_reasoning_effort=\"${entry.effort}\"`,
       "-c",
-      `service_tier=\"${this.p.worker.tier}\"`,
+      `service_tier=\"${entry.tier}\"`,
       "--dangerously-bypass-approvals-and-sandbox",
     ];
     const command = "exec " + argv.map(quoteArg).join(" ");
@@ -575,12 +744,7 @@ export class Coordinator {
         shell?.handle === newShell &&
           shell.status === "running" &&
           Array.isArray(shell.tail) &&
-          /[$#>]\s*$/.test(shell.tail.at(-1) || "") &&
-          // Provider names alone occur in PS1 cwd paths and ordinary shell output.
-          // Identity is checked above; reject actual TUI banners/input hints here.
-          !/^\s*(?:[│╭╰─>_›❯]\s*)*(?:OpenAI Codex(?:\s|\()|Ask Codex to do anything(?:\s|$)|GPT-\d[\w.-]*(?:\s|$)|Claude Code(?:\s|$)|grok-\d[\w.-]*(?:\s|$))/im.test(
-            shell.tail.join("\n"),
-          ),
+          plainShell(shell.tail),
         "shell readiness unproven",
       );
       const sent = (
@@ -628,7 +792,7 @@ export class Coordinator {
       !screen.tail.join("\n").includes("Update available"),
       "update menu requires operator action; preserve resources",
     );
-    assertBanner(screen.tail.join("\n"), this.p.worker);
+    assertBanner(screen.tail.join("\n"), entry);
     // Revalidate context and source immediately before the authoritative start.
     await this.context();
     await this.clean(r.worktree, r.sha);
@@ -663,6 +827,72 @@ export class Coordinator {
       "partial/non-ready worker receipt; inspect residuals, never relaunch",
     );
     return started;
+  }
+  // Orca's own claude launcher creates a fresh agent terminal; startup shells stay untouched.
+  async startClaude(r: Request, m: Model, existed: boolean, terminals: any[], unitDir: string) {
+    requireThat(
+      (!existed || terminals.length === 0) &&
+        terminals.every(
+          (t) => typeof t.handle === "string" && t.worktreePath === r.worktree && !t.agentIdentity,
+        ),
+      "checkout has an agent or foreign terminal; preserve and inspect, never start beside it",
+    );
+    const preserved: string[] = terminals.map((t) => t.handle);
+    const residual = `preserved startup terminals: ${preserved.join(",") || "none"}`;
+    exclusive(
+      join(unitDir, "startup-terminals.json"),
+      JSON.stringify({ worktree: r.worktree, preserved }, null, 2) + "\n",
+    );
+    // Revalidate context and source immediately before the authoritative start.
+    await this.context();
+    await this.clean(r.worktree, r.sha);
+    await this.lineage(r.worktree);
+    let started: any;
+    try {
+      started = await this.cli(
+        "orchestration",
+        "worker-start",
+        "--run",
+        this.p.run,
+        "--from",
+        this.p.coordinator,
+        "--worktree",
+        `path:${r.worktree}`,
+        "--agent",
+        "claude",
+        "--model",
+        m.model,
+        "--effort",
+        m.effort,
+        "--task-title",
+        `${r.role} ${r.unit}`,
+        "--spec",
+        r.spec,
+      );
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : "worker-start failed"}; ${residual}`,
+      );
+    }
+    const same = (l: any) => l?.agent === "claude" && l.model === m.model && l.effort === m.effort;
+    const agent = started.effects?.find(
+      (e: Effect) => e.kind === "terminal" && e.role === "agent",
+    )?.id;
+    requireThat(
+      started.runId === this.p.run &&
+        started.state === "ready" &&
+        typeof started.taskId === "string" &&
+        typeof started.dispatchId === "string" &&
+        same(started.launch?.requested) &&
+        same(started.launch?.effective) &&
+        typeof agent === "string" &&
+        !preserved.includes(agent) &&
+        started.effects.some(
+          (e: Effect) => e.kind === "dispatch_input" && e.id === agent && e.state === "accepted",
+        ),
+      `partial/non-ready/mismatched worker receipt; inspect residuals, never relaunch; ${residual}`,
+    );
+    return { ...started, preservedTerminals: preserved };
   }
   async wait(out: string, envelope = false) {
     this.controllerOnly();
@@ -785,7 +1015,9 @@ if (import.meta.main) {
       const key = args.shift()!;
       const value = args.shift();
       requireThat(
-        ["--profile", "--request", "--out", "--decisions"].includes(key) && value && !flags[key],
+        ["--profile", "--request", "--out", "--decisions", "--dispatch", "--role"].includes(key) &&
+          value &&
+          !flags[key],
         "invalid arguments",
       );
       flags[key] = value;
@@ -793,15 +1025,17 @@ if (import.meta.main) {
     const allowed: Record<string, string[]> = {
       inspect: ["--profile"],
       launch: ["--profile", "--request"],
+      confirm: ["--profile", "--dispatch", "--role"],
       wait: ["--profile", "--out"],
       process: ["--profile", "--decisions"],
     };
     requireThat(
       mode && allowed[mode] && Object.keys(flags).every((k) => allowed[mode].includes(k)),
-      "use inspect|launch --request FILE|wait --out FILE|process --decisions FILE [--profile FILE]",
+      "use inspect|launch --request FILE|confirm --dispatch ID [--role author|reviewer]|wait --out FILE|process --decisions FILE [--profile FILE]",
     );
     const required: Record<string, string> = {
       launch: "--request",
+      confirm: "--dispatch",
       wait: "--out",
       process: "--decisions",
     };
@@ -812,9 +1046,11 @@ if (import.meta.main) {
         ? await c.inspect()
         : mode === "launch"
           ? await c.launch(privateJson(flags["--request"]))
-          : mode === "wait"
-            ? await c.wait(flags["--out"])
-            : await c.process(privateJson(flags["--decisions"]));
+          : mode === "confirm"
+            ? await c.confirm(flags["--dispatch"], (flags["--role"] ?? "author") as Request["role"])
+            : mode === "wait"
+              ? await c.wait(flags["--out"])
+              : await c.process(privateJson(flags["--decisions"]));
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : "operation failed");
