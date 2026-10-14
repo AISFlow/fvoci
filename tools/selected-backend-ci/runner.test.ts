@@ -1025,7 +1025,8 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
       if (mutation === "bad-owner") grant.owner = "foreign";
-      if (mutation === "bad-purpose") grant.purpose = "skip-normal-server";
+      if (mutation === "bad-purpose")
+        grant.purpose = "skip-normal-server" as unknown as LocalGrant["purpose"];
       if (mutation === "root-uid") grant.uid = 0;
       if (mutation === "foreign-uid") grant.uid = uid() + 1;
       if (mutation === "foreign-gid") grant.gid = gid() + 1;
