@@ -507,7 +507,7 @@ pub async fn compile_view_query(
 
     if !checks.is_empty() {
         let sql = format!("SELECT {}", checks.join(" AND "));
-        let mut check = sqlx::query_scalar::<_, bool>(&sql);
+        let mut check = sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(sql));
         for value in &check_args.values {
             check = check.bind(value);
         }

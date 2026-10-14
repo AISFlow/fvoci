@@ -68,7 +68,7 @@ where
 }
 
 async fn install_derived_document_updated_fail_trigger(admin: &PgPool, fn_name: &str) {
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -82,17 +82,17 @@ async fn install_derived_document_updated_fail_trigger(admin: &PgPool, fn_name: 
         END;
         $$;
         "#
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE TRIGGER fvoci_{fn_name}
         BEFORE INSERT ON fvoci.events
         FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
         "#
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();

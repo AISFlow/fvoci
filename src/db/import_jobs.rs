@@ -431,9 +431,9 @@ pub async fn load_import_payload(
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
-    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(&format!(
+    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT payload FROM fvoci.import_jobs WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}"
-    ))
+    )))
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)
@@ -447,14 +447,14 @@ pub async fn load_import_payload(
 pub async fn reset_import_refs(pool: &PgPool, claim: &ImportClaim) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET created_refs = '{{"documentIds":[],"taskIds":[],"storedKeys":[]}}'::jsonb,
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)
@@ -518,13 +518,13 @@ async fn publish_deferred_events(
 pub async fn extend_import_lease(pool: &PgPool, claim: &ImportClaim) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET lease_until = now() + make_interval(secs => $4), updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)
@@ -585,7 +585,7 @@ pub async fn append_import_ref(
     value: &str,
 ) -> Result<bool, sqlx::Error> {
     let key = kind.key();
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET created_refs = jsonb_set(
@@ -597,7 +597,7 @@ pub async fn append_import_ref(
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(workspace_id)
     .bind(job_id)
     .bind(lease_token)
@@ -615,13 +615,13 @@ pub async fn hold_import_fence(
     workspace_id: Uuid,
     fence: crate::db::documents::ImportFence,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET lease_until = now() + make_interval(secs => $4), updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(workspace_id)
     .bind(fence.job_id)
     .bind(fence.lease_token)
@@ -655,14 +655,14 @@ pub(crate) async fn finish_import_job_in_tx(
     claim: &ImportClaim,
     status: ImportStatus,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET status = $4, payload = NULL, lease_token = NULL, lease_until = NULL,
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)
@@ -695,7 +695,7 @@ pub async fn release_import_job_for_retry(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_tenant(&mut tx, claim.workspace_id).await?;
-    let result = sqlx::query(&format!(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         UPDATE fvoci.import_jobs
         SET created_refs = CASE WHEN $4 THEN '{{"documentIds":[],"taskIds":[],"storedKeys":[]}}'::jsonb
@@ -705,7 +705,7 @@ pub async fn release_import_job_for_retry(
             updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND {OWNED_BY_RUNNER}
         "#
-    ))
+    )))
     .bind(claim.workspace_id)
     .bind(claim.job_id)
     .bind(claim.lease_token)

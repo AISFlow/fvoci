@@ -1893,7 +1893,10 @@ mod selected_scheduler_tests {
             .bind(connector.as_bytes().as_slice()).bind(f.workspace.as_bytes().as_slice()).bind(f.user.as_bytes().as_slice())
             .execute(&f.pool).await.unwrap();
         let trigger = format!("CREATE TRIGGER maintenance_upload_commit_fault AFTER DELETE ON attachments WHEN OLD.id=X'{}' BEGIN INSERT INTO zotero_collections(workspace_id,owner_user_id,connector_id,collection_key,remote_version,name,parent_key) VALUES(OLD.workspace_id,OLD.uploader_id,X'{}','ABCDEFGH',1,'COMMIT fault','JKLMNPQR'); END",first.simple(),connector.simple());
-        sqlx::query(&trigger).execute(&f.pool).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(trigger))
+            .execute(&f.pool)
+            .await
+            .unwrap();
         let handle = start(&f, storage.clone());
         let requests = handle._family_requests.as_ref().unwrap().clone();
         finished(&handle).await;

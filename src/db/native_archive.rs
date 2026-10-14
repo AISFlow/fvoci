@@ -164,9 +164,9 @@ pub async fn recheck_delivery(
                 .collect::<Vec<_>>(),
         ),
     ] {
-        let count: i64 = sqlx::query_scalar(&format!(
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM fvoci.{table} WHERE (project_id=$1 OR (project_id IS NULL AND id=ANY($4))) AND id=ANY($2) AND (NOT id=ANY($3) OR deleted_at IS NULL)"
-        )).bind(project).bind(&ids).bind(&live_ids).bind(&wiki).fetch_one(&mut *tx).await?;
+        ))).bind(project).bind(&ids).bind(&live_ids).bind(&wiki).fetch_one(&mut *tx).await?;
         if count != ids.len() as i64 {
             return Err(NativeDbError::Forbidden);
         }
@@ -272,19 +272,18 @@ fn admit_history_references(
 
 async fn rows<T: DeserializeOwned>(
     tx: &mut Transaction<'_, Postgres>,
-    sql: &str,
+    sql: &'static str,
     scope: &Scope,
 ) -> Result<Vec<T>, NativeDbError> {
     let sql = sql
         .replace("{COLLECTIONS}", COLLECTIONS)
         .replace("{DOCS}", DOCS);
-    let sql = sql.as_str();
     // Refuse oversized JSON sets in the coherent source transaction before
     // fetching them into the parent. LIMIT in each owned query also bounds
     // counts; a 10001st row is deliberately a failure, not a silent truncation.
-    let (count, bytes): (i64, i64) = sqlx::query_as(&format!(
+    let (count, bytes): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT count(*)::bigint,coalesce(sum(octet_length(v::text)),0)::bigint FROM ({sql}) AS q(v)"
-    ))
+    )))
     .bind(scope.project)
     .bind(&scope.wiki)
     .bind(scope.workspace)
@@ -302,7 +301,7 @@ async fn rows<T: DeserializeOwned>(
     scope
         .graph_bytes
         .store(admitted, std::sync::atomic::Ordering::Relaxed);
-    let values: Vec<Value> = sqlx::query_scalar(sql)
+    let values: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(scope.project)
         .bind(&scope.wiki)
         .bind(scope.workspace)
@@ -425,7 +424,7 @@ pub async fn capture(
         } else {
             "(SELECT id FROM fvoci.tasks WHERE project_id=$1)"
         };
-        let state_rows = scoped(sqlx::query(&format!("SELECT to_jsonb(s)-'workspace_id'-'{table}_id'-'state'-'writer_generation' AS meta,s.{table}_id AS id,s.state FROM fvoci.{table}_states s JOIN fvoci.{parent} p ON p.id=s.{table}_id WHERE p.id IN {selected} ORDER BY p.id LIMIT 10001")), &scope)
+        let state_rows = scoped(sqlx::query(sqlx::AssertSqlSafe(format!("SELECT to_jsonb(s)-'workspace_id'-'{table}_id'-'state'-'writer_generation' AS meta,s.{table}_id AS id,s.state FROM fvoci.{table}_states s JOIN fvoci.{parent} p ON p.id=s.{table}_id WHERE p.id IN {selected} ORDER BY p.id LIMIT 10001"))), &scope)
             .fetch_all(&mut *tx).await?;
         if state_rows.len() > MAX_OBJECTS {
             return Err(ArchiveError::Limit.into());
@@ -445,7 +444,7 @@ pub async fn capture(
             let tail = meta["tail_seq"]
                 .as_i64()
                 .ok_or_else(|| ArchiveError::Invalid("tail".into()))?;
-            let updates = sqlx::query(&format!("SELECT seq,op_id,payload,created_at FROM fvoci.{table}_collab_updates WHERE {table}_id=$1 AND seq>$2 AND seq<=$3 ORDER BY seq LIMIT 10001"))
+            let updates = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT seq,op_id,payload,created_at FROM fvoci.{table}_collab_updates WHERE {table}_id=$1 AND seq>$2 AND seq<=$3 ORDER BY seq LIMIT 10001")))
                 .bind(id).bind(cutoff).bind(tail).fetch_all(&mut *tx).await?;
             if updates.len() > MAX_ENTRIES {
                 return Err(ArchiveError::Limit.into());
@@ -467,7 +466,7 @@ pub async fn capture(
                     }
                 })
                 .collect();
-            let receipt_values: Vec<Value> = sqlx::query_scalar(&format!("SELECT to_jsonb(r)-'workspace_id'-'{table}_id'-'payload_sha256' || jsonb_build_object('payload_sha256',encode(r.payload_sha256,'hex')) FROM fvoci.{table}_collab_op_receipts r WHERE {table}_id=$1 ORDER BY seq,op_id LIMIT 10001"))
+            let receipt_values: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT to_jsonb(r)-'workspace_id'-'{table}_id'-'payload_sha256' || jsonb_build_object('payload_sha256',encode(r.payload_sha256,'hex')) FROM fvoci.{table}_collab_op_receipts r WHERE {table}_id=$1 ORDER BY seq,op_id LIMIT 10001")))
                 .bind(id).fetch_all(&mut *tx).await?;
             if receipt_values.len() > MAX_ENTRIES {
                 return Err(ArchiveError::Limit.into());
@@ -480,7 +479,7 @@ pub async fn capture(
             );
         }
     }
-    let revision_rows = scoped(sqlx::query(&format!("SELECT to_jsonb(r)-'workspace_id'-'y_snapshot' AS meta,r.y_snapshot FROM fvoci.revisions r WHERE (target_kind='document' AND target_id IN {DOCS}) OR (target_kind='task' AND target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)) ORDER BY r.created_at,r.id LIMIT 10001")), &scope)
+    let revision_rows = scoped(sqlx::query(sqlx::AssertSqlSafe(format!("SELECT to_jsonb(r)-'workspace_id'-'y_snapshot' AS meta,r.y_snapshot FROM fvoci.revisions r WHERE (target_kind='document' AND target_id IN {DOCS}) OR (target_kind='task' AND target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)) ORDER BY r.created_at,r.id LIMIT 10001"))), &scope)
         .fetch_all(&mut *tx).await?;
     if revision_rows.len() > MAX_ENTRIES {
         return Err(ArchiveError::Limit.into());
@@ -502,7 +501,7 @@ pub async fn capture(
                 .map_err(|_| ArchiveError::Unsupported("revision schema".into()))?,
         );
     }
-    let file_rows = scoped(sqlx::query(&format!("SELECT id,document_id,task_id,uploader_id,name,mime,declared_mime,size_bytes,image,created_at,completed_at,storage_key,status,scan_status FROM fvoci.attachments WHERE document_id IN {DOCS} OR task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) ORDER BY id LIMIT 10001")), &scope)
+    let file_rows = scoped(sqlx::query(sqlx::AssertSqlSafe(format!("SELECT id,document_id,task_id,uploader_id,name,mime,declared_mime,size_bytes,image,created_at,completed_at,storage_key,status,scan_status FROM fvoci.attachments WHERE document_id IN {DOCS} OR task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1) ORDER BY id LIMIT 10001"))), &scope)
         .fetch_all(&mut *tx).await?;
     if file_rows.len() > MAX_OBJECTS {
         return Err(ArchiveError::Limit.into());
@@ -706,7 +705,7 @@ async fn capture_payload_budget(
 ) -> Result<(), NativeDbError> {
     // Read no bytea until the combined native/history/file payload fits. The
     // database evaluates this against the same REPEATABLE READ snapshot.
-    let bytes: i64 = sqlx::query_scalar(&format!(
+    let bytes: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT coalesce(sum(n),0)::bigint FROM (
             SELECT octet_length(s.state)::bigint AS n FROM fvoci.document_states s WHERE s.document_id IN {DOCS}
             UNION ALL SELECT octet_length(s.state)::bigint FROM fvoci.task_states s JOIN fvoci.tasks t ON t.id=s.task_id WHERE t.project_id=$1
@@ -715,7 +714,7 @@ async fn capture_payload_budget(
             UNION ALL SELECT octet_length(r.y_snapshot)::bigint FROM fvoci.revisions r WHERE (r.target_kind='document' AND r.target_id IN {DOCS}) OR (r.target_kind='task' AND r.target_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1))
             UNION ALL SELECT a.size_bytes FROM fvoci.attachments a WHERE a.document_id IN {DOCS} OR a.task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1)
         ) AS payload"
-    ))
+    )))
     .bind(scope.project)
     .bind(&scope.wiki)
     .fetch_one(&mut **tx)
@@ -770,7 +769,7 @@ async fn reject_unsupported(
         ("external issue links", "SELECT EXISTS(SELECT 1 FROM fvoci.github_issue_links WHERE task_id IN(SELECT id FROM fvoci.tasks WHERE project_id=$1))"),
     ];
     for (kind, sql) in tests {
-        if sqlx::query_scalar::<_, bool>(&sql.replace("{DOCS}", DOCS))
+        if sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(sql.replace("{DOCS}", DOCS)))
             .bind(scope.project)
             .bind(&scope.wiki)
             .bind(scope.workspace)
@@ -782,7 +781,7 @@ async fn reject_unsupported(
             return Err(ArchiveError::Unsupported(kind.into()).into());
         }
     }
-    let unsupported_grant: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fvoci.project_members WHERE project_id=$1 AND (user_id IS DISTINCT FROM $3 OR group_id IS NOT NULL)) OR EXISTS(SELECT 1 FROM fvoci.document_members WHERE document_id IN {DOCS})".replace("{DOCS}", DOCS).as_str())
+    let unsupported_grant: bool = sqlx::query_scalar(sqlx::AssertSqlSafe("SELECT EXISTS(SELECT 1 FROM fvoci.project_members WHERE project_id=$1 AND (user_id IS DISTINCT FROM $3 OR group_id IS NOT NULL)) OR EXISTS(SELECT 1 FROM fvoci.document_members WHERE document_id IN {DOCS})".replace("{DOCS}", DOCS)))
         .bind(scope.project).bind(&scope.wiki).bind(scope.actor).fetch_one(&mut **tx).await?;
     if unsupported_grant {
         return Err(ArchiveError::Unsupported("multiple authors or grants".into()).into());
@@ -1051,7 +1050,7 @@ async fn insert_record(
         .map(|key| format!("\"{key}\""))
         .collect::<Vec<_>>()
         .join(",");
-    sqlx::query(&format!("INSERT INTO fvoci.{table} ({columns}) SELECT {columns} FROM jsonb_populate_record(NULL::fvoci.{table},$1::jsonb)"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO fvoci.{table} ({columns}) SELECT {columns} FROM jsonb_populate_record(NULL::fvoci.{table},$1::jsonb)")))
         .bind(value).execute(&mut **tx).await?;
     Ok(())
 }

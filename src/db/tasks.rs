@@ -1065,7 +1065,7 @@ pub(crate) mod selected_task_detail_tests {
                 _ => task,
             };
             let sql = format!("UPDATE {table} SET {column}=1 WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(id.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -1079,7 +1079,7 @@ pub(crate) mod selected_task_detail_tests {
                 assert!(matches!(denied, Err(ProjectDbError::NotFound)));
             }
             let sql = format!("UPDATE {table} SET {column}=NULL WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(id.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -3804,7 +3804,7 @@ async fn list_tasks_in_scope(
             "#,
             due_sql = due_date_sql("t", "$4"),
         );
-        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(&anchor_sql)
+        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(sqlx::AssertSqlSafe(anchor_sql))
             .bind(workspace_id)
             .bind(scope_bind)
             .bind(cursor.id)
@@ -3889,7 +3889,9 @@ async fn list_tasks_in_scope(
         LIMIT {limit}
         "#
     );
-    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(scope_bind);
+    let mut list_query = sqlx::query(sqlx::AssertSqlSafe(list_sql))
+        .bind(workspace_id)
+        .bind(scope_bind);
     for value in &binds {
         list_query = list_query.bind(value);
     }
@@ -3903,7 +3905,7 @@ async fn list_tasks_in_scope(
         GROUP BY t.status_id
         "#
     );
-    let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(&count_sql)
+    let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(count_sql))
         .bind(workspace_id)
         .bind(scope_bind);
     for value in &base_binds {
@@ -4079,7 +4081,7 @@ async fn workspace_row_exists(
 ) -> Result<bool, sqlx::Error> {
     let sql =
         format!("SELECT EXISTS (SELECT 1 FROM fvoci.{table} WHERE workspace_id = $1 AND id = $2)");
-    sqlx::query_scalar(&sql)
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(id)
         .fetch_one(&mut **tx)
@@ -4107,9 +4109,9 @@ async fn load_custom_sort_tokens(
     let mut out = Vec::with_capacity(fields.len());
     for (field_id, column) in fields {
         let expr = scalar_value_sql(RootKind::Task, "t", "$3", column);
-        let value: Option<Option<String>> = sqlx::query_scalar(&format!(
+        let value: Option<Option<String>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT ({expr})::text FROM fvoci.tasks t WHERE t.workspace_id = $1 AND t.id = $2"
-        ))
+        )))
         .bind(workspace_id)
         .bind(task_id)
         .bind(field_id.to_string())
@@ -5000,7 +5002,9 @@ pub async fn patch_task_meta(
             "#,
             sets.join(", ")
         );
-        let mut query = sqlx::query(&sql).bind(workspace_id).bind(task_id);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(workspace_id)
+            .bind(task_id);
         if let Some(title) = bind_title {
             query = query.bind(title);
         }

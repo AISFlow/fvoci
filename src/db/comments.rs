@@ -627,7 +627,7 @@ async fn list_rows(
         )
     };
     let rows = if let Some(after) = after {
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(target_id)
             .bind(after)
@@ -635,7 +635,7 @@ async fn list_rows(
             .fetch_all(&mut **tx)
             .await?
     } else {
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(target_id)
             .bind(limit)

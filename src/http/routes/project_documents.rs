@@ -655,7 +655,7 @@ mod selected_create_http_tests {
             assert_eq!(body["sortKey"], row.5);
             sort_keys.push(row.5);
             for table in ["events", "audit_log"] {
-                let rows: Vec<(Vec<u8>,String)> = sqlx::query_as(&format!("SELECT actor_user_id,payload FROM {table} WHERE workspace_id=?1 AND verb='document.created' AND target_id=?2"))
+                let rows: Vec<(Vec<u8>,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT actor_user_id,payload FROM {table} WHERE workspace_id=?1 AND verb='document.created' AND target_id=?2")))
                     .bind(f.workspace.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].0, f.user.as_bytes());

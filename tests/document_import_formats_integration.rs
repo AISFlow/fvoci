@@ -102,7 +102,7 @@ async fn body_json(fx: &Fixture, doc_id: &str) -> String {
     body["contentJson"].to_string()
 }
 
-async fn count(admin: &PgPool, sql: &str, id: Uuid) -> i64 {
+async fn count(admin: &PgPool, sql: &'static str, id: Uuid) -> i64 {
     sqlx::query_scalar(sql)
         .bind(id)
         .fetch_one(admin)

@@ -811,7 +811,7 @@ mod sqlite_port {
         }
     }
 
-    pub(super) async fn scalar(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> i64 {
+    pub(super) async fn scalar(pool: &SqlitePool, sql: &'static str, ids: &[Uuid]) -> i64 {
         let mut query = sqlx::query_scalar::<_, i64>(sql);
         for id in ids {
             query = query.bind(blob(*id));
@@ -819,7 +819,7 @@ mod sqlite_port {
         query.fetch_one(pool).await.unwrap()
     }
 
-    pub(super) async fn text(pool: &SqlitePool, sql: &str, ids: &[Uuid]) -> Option<String> {
+    pub(super) async fn text(pool: &SqlitePool, sql: &'static str, ids: &[Uuid]) -> Option<String> {
         let mut query = sqlx::query_scalar::<_, Option<String>>(sql);
         for id in ids {
             query = query.bind(blob(*id));
@@ -878,7 +878,7 @@ async fn sqlite_stamps(pool: &sqlx::SqlitePool, table: &str, ids: &[Uuid]) -> Ve
     let mut out = Vec::new();
     for id in ids {
         out.push(
-            sqlx::query_scalar(&sql)
+            sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(sqlite_port::blob(*id))
                 .fetch_one(pool)
                 .await

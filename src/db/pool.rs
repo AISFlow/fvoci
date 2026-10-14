@@ -181,7 +181,7 @@ async fn assert_sqlite_connection_settings(conn: &mut SqliteConnection) -> Resul
 /// The check runs as `before_acquire` on every idle connection and replaces
 /// sqlx's acquire-time ping (`test_before_acquire(false)`), so a checkout
 /// still costs one round trip there. It is the liveness probe as well: in
-/// sqlx-core 0.8.6 `check_idle_conn` an `Err` closes the connection hard and
+/// sqlx-core 0.9.0 `check_idle_conn` an `Err` closes the connection hard and
 /// the acquire connects a fresh one, as a failed ping did. `Pool::try_acquire`,
 /// `try_begin` and `try_begin_with` pop an idle connection with neither the
 /// ping nor `before_acquire`, so they must not be used on this pool.
@@ -211,15 +211,17 @@ const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 /// `before_acquire` check: hands the idle connection out (`Ok(true)`) only
 /// when the server has no transaction open on it.
 ///
-/// Why: sqlx 0.8.6 `PgTransactionManager::begin` queues `BEGIN`, awaits the
-/// reply, and only then counts the transaction (`transaction_depth += 1`); its
-/// drop guard's `start_rollback` does nothing at depth 0. A begin future
-/// dropped after `BEGIN` reached the server (a client abort) therefore returns
-/// the connection with the transaction open and no `ROLLBACK` queued (fixed
-/// upstream only in 0.9, launchbadge/sqlx#3980). Its next users would run
-/// inside it: uncommitted writes, a frozen REPEATABLE READ snapshot pinning
-/// xmin, or, once a later `begin_read` fails there, `current transaction is
-/// aborted` for everyone on the connection. sqlx's public
+/// Why: sqlx-postgres 0.9.0 `PgTransactionManager::begin`, as 0.8.6 did, queues
+/// `BEGIN`, awaits the reply, and only then counts the transaction
+/// (`transaction_depth += 1`); its drop guard's `start_rollback` does nothing
+/// at depth 0. A begin future dropped after `BEGIN` reached the server (a
+/// client abort) therefore returns the connection with the transaction open
+/// and no `ROLLBACK` queued. launchbadge/sqlx#3980 (0.9.0) only moves the
+/// connection into the `Transaction` before `begin` runs; its drop reaches the
+/// same `start_rollback` at depth 0, so PostgreSQL still leaks. Its next users
+/// would run inside it: uncommitted writes, a frozen REPEATABLE READ snapshot
+/// pinning xmin, or, once a later `begin_read` fails there, `current
+/// transaction is aborted` for everyone on the connection. sqlx's public
 /// `Connection::is_in_transaction` reads that depth counter, not the server
 /// status, so the check asks the server.
 ///
@@ -227,12 +229,14 @@ const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 /// `cancelled_begin_does_not_leak_its_transaction` reproduces the upstream
 /// bug. The `released_*` tests there pin this check's own contract (no
 /// connection is handed out inside a server-side transaction, whatever opened
-/// it), so they fail without the hook on any sqlx version. On sqlx >= 0.9,
-/// once `cancelled_begin_*` passes without the hook, the hook is defense in
-/// depth only; removing it and restoring `test_before_acquire` also drops the
-/// `released_*` guarantees, which is a separate decision.
+/// it), so they fail without the hook on any sqlx version. On sqlx 0.9.0
+/// `cancelled_begin_*` still fails without the hook (the next `begin_read`
+/// gets 25001 inside the leaked transaction). Once a later sqlx passes it
+/// without the hook, the hook is defense in depth only; removing it and
+/// restoring `test_before_acquire` also drops the `released_*` guarantees,
+/// which is a separate decision.
 ///
-/// Ordering: sqlx-core 0.8.6 `Floating::return_to_pool` (pool/connection.rs)
+/// Ordering: sqlx-core 0.9.0 `Floating::return_to_pool` (pool/connection.rs)
 /// always runs `ping` (`write_sync` + `wait_until_ready`) before `release`
 /// puts the connection in the idle queue. That flushes the write buffer (the
 /// `ROLLBACK` a dropped `Transaction` queued, or a cancelled begin's unsent
@@ -248,16 +252,16 @@ const RELEASE_IN_TRANSACTION: &str = "db.pool.release_in_transaction";
 /// outbox dispatcher acquiring every second), so the warning appears on that
 /// later, unrelated checkout, not on the aborted request.
 ///
-/// The check: a `&str` without arguments goes out as one simple-protocol
-/// Query message (`PgConnection::run` takes the extended path only with bound
-/// arguments, which `sqlx::query` always has). Outside a block PostgreSQL
-/// starts an implicit transaction for that message and copies its start
-/// (`now()`) from the message's receipt time (`statement_timestamp()`), so the
-/// two are equal. In an open block `now()` is the receipt time of the earlier
-/// `BEGIN` message, and at least the release ping's round trip separates the
-/// two receipts, so the microsecond timestamps differ. In an aborted block
-/// the statement fails with 25P02. The extended protocol would not work: its
-/// transaction starts at Parse or Bind and Execute moves
+/// The check: a `&'static str` without arguments goes out as one
+/// simple-protocol Query message (`PgConnection::run` takes the extended path
+/// only with bound arguments, which `sqlx::query` always has). Outside a block
+/// PostgreSQL starts an implicit transaction for that message and copies its
+/// start (`now()`) from the message's receipt time (`statement_timestamp()`),
+/// so the two are equal. In an open block `now()` is the receipt time of the
+/// earlier `BEGIN` message, and at least the release ping's round trip
+/// separates the two receipts, so the microsecond timestamps differ. In an
+/// aborted block the statement fails with 25P02. The extended protocol would
+/// not work: its transaction starts at Parse or Bind and Execute moves
 /// `statement_timestamp()`, so the comparison is false outside a block as well.
 ///
 /// Slow-statement logs: sqlx times each statement from before its

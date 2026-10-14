@@ -264,6 +264,9 @@ async fn setup_session_with(
 /// Guarded by `notification_integration.rs`
 /// `close_pool_closes_a_connection_returned_during_close`; go back to a single
 /// `pool.close()` once that test passes with `close_pool` replaced by it.
+/// With sqlx-core 0.9.0 it does: `Pool::close` now takes every permit before
+/// it closes the idle connections (launchbadge/sqlx#3952), so the first close
+/// already empties the pool. Dropping this loop is a separate cleanup.
 pub async fn close_pool(pool: PgPool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
@@ -388,14 +391,14 @@ pub async fn insert_project_document(
 
 pub async fn count_rows(admin: &PgPool, table: &str) -> i64 {
     let sql = format!("SELECT count(*) FROM fvoci.{table}");
-    sqlx::query_scalar::<_, i64>(&sql)
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
         .fetch_one(admin)
         .await
         .unwrap_or(0)
 }
 
 pub async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -404,31 +407,33 @@ pub async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: 
         END;
         $$;
         "#
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE TRIGGER fvoci_{fn_name}
         BEFORE INSERT ON fvoci.{target}
         FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
         "#
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
 }
 
 pub async fn drop_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
-    let _ = sqlx::query(&format!(
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP TRIGGER IF EXISTS fvoci_{fn_name} ON fvoci.{target}"
-    ))
+    )))
     .execute(admin)
     .await;
-    let _ = sqlx::query(&format!("DROP FUNCTION IF EXISTS fvoci.{fn_name}()"))
-        .execute(admin)
-        .await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP FUNCTION IF EXISTS fvoci.{fn_name}()"
+    )))
+    .execute(admin)
+    .await;
 }
 
 pub async fn wait_for_user_for_update_blocked(admin: &PgPool, blocker_pid: i32) {

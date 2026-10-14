@@ -203,7 +203,7 @@ pub async fn list_workspace_events(
         return Ok(Err(WorkspaceDbError::NotFound));
     }
     let after = cursor.unwrap_or(EventCursor { xact: 0, seq: 0 });
-    let rows: Vec<EventScan> = sqlx::query_as(&list_sql())
+    let rows: Vec<EventScan> = sqlx::query_as(sqlx::AssertSqlSafe(list_sql()))
         .bind(workspace_id)
         .bind(actor_user_id)
         .bind(after.xact.to_string())

@@ -1478,9 +1478,9 @@ async fn wiki_document_collection_attach_guest_and_tenant_isolation() {
         fvoci_server::db::context::set_tenant(&mut tx, other_ws)
             .await
             .unwrap();
-        let visible: i64 = sqlx::query_scalar(&format!(
+        let visible: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM fvoci.{table} WHERE workspace_id = $1"
-        ))
+        )))
         .bind(ws)
         .fetch_one(&mut *tx)
         .await

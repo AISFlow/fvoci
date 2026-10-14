@@ -2037,9 +2037,9 @@ async fn resource_in_room_workspace(
     };
     let mut tx = pool.begin().await?;
     crate::db::context::set_tenant(&mut tx, key.0).await?;
-    let exists: bool = sqlx::query_scalar(&format!(
+    let exists: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(SELECT 1 FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2)"
-    ))
+    )))
     .bind(key.0)
     .bind(key.1)
     .fetch_one(&mut *tx)

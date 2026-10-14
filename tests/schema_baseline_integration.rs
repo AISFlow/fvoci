@@ -73,7 +73,7 @@ async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
     for name in ["legacy-sqlite-001_current_schema.sql"] {
         let sql = std::fs::read_to_string(fixture(name)).unwrap();
         for statement in migrate::sdk_rendered_statements(&sql).unwrap() {
-            sqlx::raw_sql(&statement)
+            sqlx::raw_sql(sqlx::AssertSqlSafe(statement.as_str()))
                 .execute(&mut reference)
                 .await
                 .unwrap_or_else(|error| panic!("{name}: {error}\n{statement}"));
@@ -100,10 +100,12 @@ async fn sdk_rendering_reproduces_archived_remote_sqlite_schema_rows() {
     .await
     .unwrap();
     for name in ["legacy-sqlite-001_current_schema.sql"] {
-        sqlx::raw_sql(&std::fs::read_to_string(fixture(name)).unwrap())
-            .execute(&mut raw)
-            .await
-            .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            std::fs::read_to_string(fixture(name)).unwrap(),
+        ))
+        .execute(&mut raw)
+        .await
+        .unwrap();
     }
     let raw_rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type COLLATE BINARY,name COLLATE BINARY",
@@ -167,7 +169,10 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
         .await
         .unwrap();
         for text in sql_texts {
-            sqlx::raw_sql(&text).execute(&mut conn).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(text))
+                .execute(&mut conn)
+                .await
+                .unwrap();
         }
         let tables: Vec<(String,)> = sqlx::query_as(
             "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name COLLATE NOCASE",
@@ -178,28 +183,32 @@ async fn baseline_sqlite_steps_render_to_the_same_structural_catalog() {
         let mut out = serde_json::Map::new();
         let mut default_texts = serde_json::Map::new();
         for (table,) in tables {
-            let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
-                sqlx::query_as(&format!("PRAGMA table_info(\"{table}\")"))
-                    .fetch_all(&mut conn)
-                    .await
-                    .unwrap();
-            let fks: Vec<ForeignKeyRow> =
-                sqlx::query_as(&format!("PRAGMA foreign_key_list(\"{table}\")"))
-                    .fetch_all(&mut conn)
-                    .await
-                    .unwrap();
-            let indexes: Vec<(i64, String, i64, String, i64)> =
-                sqlx::query_as(&format!("PRAGMA index_list(\"{table}\")"))
-                    .fetch_all(&mut conn)
-                    .await
-                    .unwrap();
+            let columns: Vec<(i64, String, String, i64, Option<String>, i64)> = sqlx::query_as(
+                sqlx::AssertSqlSafe(format!("PRAGMA table_info(\"{table}\")")),
+            )
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+            let fks: Vec<ForeignKeyRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "PRAGMA foreign_key_list(\"{table}\")"
+            )))
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+            let indexes: Vec<(i64, String, i64, String, i64)> = sqlx::query_as(
+                sqlx::AssertSqlSafe(format!("PRAGMA index_list(\"{table}\")")),
+            )
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
             let mut index_columns = Vec::new();
             for index in &indexes {
-                let cols: Vec<(i64, i64, Option<String>)> =
-                    sqlx::query_as(&format!("PRAGMA index_info(\"{}\")", index.1))
-                        .fetch_all(&mut conn)
-                        .await
-                        .unwrap();
+                let cols: Vec<(i64, i64, Option<String>)> = sqlx::query_as(sqlx::AssertSqlSafe(
+                    format!("PRAGMA index_info(\"{}\")", index.1),
+                ))
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
                 index_columns.push(json!({"name": index.1.to_lowercase(), "unique": index.2, "origin": index.3, "partial": index.4, "columns": cols.iter().map(|c| json!([c.0, c.1, c.2.as_deref().map(|s| s.to_lowercase())])).collect::<Vec<_>>()}));
             }
             index_columns.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -340,7 +349,7 @@ async fn postgres_catalog_dump() {
                     WHERE n.nspname = 'fvoci' AND c.relkind = 'r' AND c.relname <> 'schema_migrations') counts))"),
     ];
     for (key, sql) in json_queries {
-        let value: Value = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+        let value: Value = sqlx::query_scalar(*sql).fetch_one(&pool).await.unwrap();
         catalog.insert((*key).into(), value);
     }
     if let Some(role) = app_role {
@@ -419,10 +428,12 @@ async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledger
         .connect(&server_url)
         .await
         .expect("connect server");
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&server_pool)
-        .await
-        .expect("create database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{db_name}\""
+    )))
+    .execute(&server_pool)
+    .await
+    .expect("create database");
     let mut owner_url = url::Url::parse(&server_url).expect("server url");
     owner_url.set_path(&format!("/{db_name}"));
     let owner_url = owner_url.to_string();
@@ -431,9 +442,9 @@ async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledger
         .connect(&owner_url)
         .await
         .expect("connect owner");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
-    ))
+    )))
     .execute(&owner)
     .await
     .expect("create role");
@@ -478,10 +489,12 @@ async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledger
     assert!(!error.contains("no applied migrations"), "{error}");
 
     // 3. Schema USAGE without table SELECT: still unreadable, still not empty.
-    sqlx::query(&format!("GRANT USAGE ON SCHEMA fvoci TO \"{role}\""))
-        .execute(&owner)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT USAGE ON SCHEMA fvoci TO \"{role}\""
+    )))
+    .execute(&owner)
+    .await
+    .unwrap();
     let error = migrate::assert_schema_current(&app).await.unwrap_err();
     assert!(
         error.contains("cannot read fvoci.schema_migrations"),
@@ -553,19 +566,23 @@ async fn app_role_gate_tells_unreadable_missing_empty_retired_and_current_ledger
 
     app.close().await;
     owner.close().await;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
-    ))
+    )))
     .execute(&server_pool)
     .await
     .ok();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
-        .execute(&server_pool)
-        .await
-        .expect("drop database");
-    sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
-        .execute(&server_pool)
-        .await
-        .expect("drop role");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS \"{db_name}\""
+    )))
+    .execute(&server_pool)
+    .await
+    .expect("drop database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP ROLE IF EXISTS \"{role}\""
+    )))
+    .execute(&server_pool)
+    .await
+    .expect("drop role");
     server_pool.close().await;
 }

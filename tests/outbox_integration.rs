@@ -54,10 +54,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -68,10 +71,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -100,18 +103,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
     }
@@ -171,10 +180,10 @@ async fn install_delivery_table(admin: &PgPool, app_role: &str) {
     .execute(admin)
     .await
     .expect("delivery table");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT SELECT, INSERT ON fvoci.outbox_test_deliveries TO \"{}\"",
         app_role.replace('"', "\"\"")
-    ))
+    )))
     .execute(admin)
     .await
     .expect("grant delivery table");
@@ -1101,7 +1110,7 @@ async fn read_sees_events_when_function_owner_is_subject_to_rls() {
         ),
         format!("ALTER FUNCTION fvoci.app_outbox_read(text, integer) OWNER TO \"{owner}\""),
     ] {
-        sqlx::query(&q).execute(&admin).await.expect(&q);
+        sqlx::query(sqlx::AssertSqlSafe(q.as_str())).execute(&admin).await.expect(&q);
     }
     let after = read_events(&app, "r4", 100)
         .await
@@ -1119,7 +1128,7 @@ async fn read_sees_events_when_function_owner_is_subject_to_rls() {
         format!("REVOKE ALL ON SCHEMA fvoci FROM \"{owner}\""),
         format!("DROP ROLE \"{owner}\""),
     ] {
-        sqlx::query(&q).execute(&admin).await.expect(&q);
+        sqlx::query(sqlx::AssertSqlSafe(q.as_str())).execute(&admin).await.expect(&q);
     }
     app.close().await;
     admin.close().await;
@@ -1507,10 +1516,10 @@ async fn r8_stale_owner_failure_row_does_not_double_apply_pg_only_effect() {
         .execute(&admin)
         .await
         .expect("effects table");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT SELECT, INSERT ON fvoci.r8_effects TO \"{}\"",
         harness.role_name.replace('"', "\"\"")
-    ))
+    )))
     .execute(&admin)
     .await
     .expect("grant effects");
@@ -1639,10 +1648,10 @@ async fn r10_requeued_retry_is_not_reapplied_across_a_lease_steal() {
         .execute(&admin)
         .await
         .expect("effects table");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT SELECT, INSERT ON fvoci.r10_effects TO \"{}\"",
         harness.role_name.replace('"', "\"\"")
-    ))
+    )))
     .execute(&admin)
     .await
     .expect("grant effects");
@@ -3248,7 +3257,7 @@ async fn renewal_error_after_the_batch_still_marks_every_event() {
              FOR EACH ROW EXECUTE FUNCTION public.outbox_renewal_fault('{consumer_name}')"
         ),
     ] {
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .execute(&admin)
             .await
             .expect("install fault");

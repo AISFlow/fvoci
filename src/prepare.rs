@@ -1476,7 +1476,7 @@ async fn prepare_postgres() -> Result<(), String> {
     .await
     .map_err(db)?;
     if let Some(statement) = create {
-        sqlx::raw_sql(&statement)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
             .execute(&mut conn)
             .await
             .map_err(|e| format!("create app role {}: {e}", names.app_role))?;

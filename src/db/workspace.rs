@@ -2160,13 +2160,13 @@ pub(crate) async fn workspace_card_counts_in_tx(
           AND {visible}
         "#
     );
-    let document_count: i64 = sqlx::query_scalar(&document_sql)
+    let document_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(document_sql))
         .bind(workspace_id)
         .bind(is_guest)
         .bind(user_id)
         .fetch_one(&mut **tx)
         .await?;
-    let assigned_count: i64 = sqlx::query_scalar(&assigned_sql)
+    let assigned_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(assigned_sql))
         .bind(workspace_id)
         .bind(is_guest)
         .bind(user_id)
@@ -2845,7 +2845,7 @@ pub(crate) mod selected_member_removal_tests {
     ) {
         let payload = json!({"userId":target.to_string(),"role":"member","revokedInvitations":revoked,"transferredSharedViews":transferred});
         for table in ["events", "audit_log"] {
-            let rows: Vec<RemovalPublicationRow> = sqlx::query_as(&format!("SELECT workspace_id,actor_user_id,target_type,verb,payload FROM {table} WHERE target_id=?1 AND verb='workspace_member.removed'"))
+            let rows: Vec<RemovalPublicationRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT workspace_id,actor_user_id,target_type,verb,payload FROM {table} WHERE target_id=?1 AND verb='workspace_member.removed'")))
                 .bind(target.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].0, f.workspace.as_bytes());
@@ -3242,7 +3242,7 @@ pub(crate) mod selected_member_removal_tests {
         invitation(&f, f.workspace, target, "member", false).await;
         let before = snapshot(&f).await;
         for table in ["events", "audit_log"] {
-            sqlx::query(&format!("CREATE TRIGGER removal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace_member.removed' BEGIN SELECT RAISE(ABORT,'member publication refused'); END")).execute(&f.pool).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER removal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace_member.removed' BEGIN SELECT RAISE(ABORT,'member publication refused'); END"))).execute(&f.pool).await.unwrap();
             let error = remove(&f, credential, target).await.err().unwrap();
             assert!(
                 matches!(&error,sqlx::Error::Database(e) if e.message().contains("member publication refused"))
@@ -3341,14 +3341,14 @@ pub(crate) mod selected_member_removal_tests {
         assert_eq!(leads, vec![survivor.as_bytes().to_vec()]);
         let expected = json!({"userId":if survivor==f.user{target}else{f.user}.to_string(),"role":"owner","revokedInvitations":0,"transferredSharedViews":0});
         for table in ["events", "audit_log"] {
-            let row:(Vec<u8>,String)=sqlx::query_as(&format!("SELECT actor_user_id,payload FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'"))
+            let row:(Vec<u8>,String)=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT actor_user_id,payload FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'")))
                 .bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
             assert_eq!(row.0, survivor.as_bytes());
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&row.1).unwrap(),
                 expected
             );
-            assert_eq!(sqlx::query_scalar::<_,i64>(&format!("SELECT count(*) FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'")).bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap(),1);
+            assert_eq!(sqlx::query_scalar::<_,i64>(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table} WHERE workspace_id=?1 AND verb='workspace_member.removed'"))).bind(f.workspace.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap(),1);
         }
         super::selected_personal_workspace_tests::foreign_keys(&f).await;
         f.close().await;
@@ -3491,7 +3491,7 @@ pub(crate) mod selected_personal_workspace_tests {
         assert_eq!(owners, vec![(f.user.as_bytes().to_vec(), "owner".into())]);
         let payload = json!({"workspaceId":meta.id.to_string(),"ownerId":f.user.to_string(),"kind":"personal","slug":meta.slug});
         for table in ["events", "audit_log"] {
-            let rows:Vec<PublicationRow> = sqlx::query_as(&format!("SELECT workspace_id,actor_user_id,target_type,payload FROM {table} WHERE verb='workspace.personal_created' AND target_id=?1"))
+            let rows:Vec<PublicationRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT workspace_id,actor_user_id,target_type,payload FROM {table} WHERE verb='workspace.personal_created' AND target_id=?1")))
                 .bind(meta.id.as_bytes().as_slice()).fetch_all(&f.pool).await.unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].0, meta.id.as_bytes());
@@ -3672,7 +3672,7 @@ pub(crate) mod selected_personal_workspace_tests {
         let (f, credential) = fixture().await;
         let before = snapshot(&f).await;
         for table in ["events", "audit_log"] {
-            sqlx::query(&format!("CREATE TRIGGER personal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace.personal_created' BEGIN SELECT RAISE(ABORT,'personal publication refused'); END"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER personal_refuse BEFORE INSERT ON {table} WHEN NEW.verb='workspace.personal_created' BEGIN SELECT RAISE(ABORT,'personal publication refused'); END")))
                 .execute(&f.pool).await.unwrap();
             let error = ensure(&f, credential).await.err().unwrap();
             assert!(

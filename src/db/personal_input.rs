@@ -1308,7 +1308,7 @@ pub(crate) mod selected_personal_input_tests {
             "task_origins",
             "personal_input_commands",
         ] {
-            sqlx::query(&format!("CREATE TRIGGER personal_input_refuse AFTER INSERT ON {table} BEGIN INSERT INTO personal_input_fk_probe(id) VALUES(zeroblob(16)); END")).execute(&f.pool).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER personal_input_refuse AFTER INSERT ON {table} BEGIN INSERT INTO personal_input_fk_probe(id) VALUES(zeroblob(16)); END"))).execute(&f.pool).await.unwrap();
             let error = create(&f, credential, &body).await.unwrap_err();
             assert!(
                 error

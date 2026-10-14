@@ -483,10 +483,10 @@ impl FamilyTx {
     }
 }
 
-fn local_query<'a>(
-    sql: &'a str,
+fn local_query(
+    sql: &'static str,
     args: &[Cell],
-) -> sqlx::query::Query<'a, Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+) -> sqlx::query::Query<'static, Sqlite, sqlx::sqlite::SqliteArguments> {
     let mut query = sqlx::query(sql);
     for value in args {
         query = match value {
@@ -1733,7 +1733,7 @@ pub(crate) mod maintenance_claim_driver_tests {
     )]
     async fn sqlite_statement(stream: &mut Stream, stmt: &Value) -> Result<Value, sqlx::Error> {
         let sql = stmt["sql"].as_str().unwrap();
-        let mut query = sqlx::query(sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for arg in stmt["args"].as_array().unwrap() {
             query = match arg["type"].as_str().unwrap() {
                 "null" => query.bind(Option::<i64>::None),

@@ -599,7 +599,7 @@ pub(crate) async fn load_search_acl(
     role: WorkspaceRole,
     project_filter: Option<Uuid>,
 ) -> Result<SearchAcl, sqlx::Error> {
-    let project_ids: Vec<Uuid> = sqlx::query_scalar(&format!(
+    let project_ids: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT p.id
         FROM fvoci.projects p
@@ -608,20 +608,22 @@ pub(crate) async fn load_search_acl(
         ORDER BY p.key COLLATE "C"
         "#,
         visible = visible_project_sql_for_guest("p", role == WorkspaceRole::Guest, 2),
-    ))
+    )))
     .bind(workspace_id)
     .bind(actor_user_id)
     .fetch_all(&mut **tx)
     .await?;
     let wiki_document_ids = if role == WorkspaceRole::Guest {
-        sqlx::query_as::<_, (Uuid,)>(&guest_wiki_document_ids_select_sql(1, 2))
-            .bind(workspace_id)
-            .bind(actor_user_id)
-            .fetch_all(&mut **tx)
-            .await?
-            .into_iter()
-            .map(|(id,)| id)
-            .collect()
+        sqlx::query_as::<_, (Uuid,)>(sqlx::AssertSqlSafe(guest_wiki_document_ids_select_sql(
+            1, 2,
+        )))
+        .bind(workspace_id)
+        .bind(actor_user_id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(|(id,)| id)
+        .collect()
     } else {
         Vec::new()
     };

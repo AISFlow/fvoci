@@ -324,7 +324,7 @@ impl Harness {
         totp::totp_code(secret, totp::totp_step(self.now_ms()))
     }
 
-    pub async fn count(&self, sql: &str, id: Uuid) -> i64 {
+    pub async fn count(&self, sql: &'static str, id: Uuid) -> i64 {
         sqlx::query_scalar(sql)
             .bind(id)
             .fetch_one(&self.admin)
@@ -1193,7 +1193,7 @@ async fn mfa_rows_are_owner_scoped_for_the_app_role() {
     assert!(forced);
     // Challenges and flow state are not readable at all.
     for table in ["fvoci.mfa_challenges", "fvoci.oidc_states"] {
-        let err = sqlx::query(&format!("SELECT count(*) FROM {table}"))
+        let err = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(&h.app_pool)
             .await
             .expect_err("app role must not read");

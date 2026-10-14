@@ -299,10 +299,10 @@ pub async fn create_tag(
         tx.rollback().await?;
         return Ok(Err(TagDbError::Forbidden));
     }
-    let row: Option<TagTuple> = sqlx::query_as(&format!(
+    let row: Option<TagTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO fvoci.document_tags (id, workspace_id, name, color) VALUES ($1, $2, $3, $4) \
          ON CONFLICT DO NOTHING RETURNING {TAG_COLUMNS}"
-    ))
+    )))
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(name)
@@ -526,10 +526,10 @@ pub async fn update_tag(
             return Ok(Err(TagDbError::Conflict));
         }
     }
-    let updated = sqlx::query_as::<_, TagTuple>(&format!(
+    let updated = sqlx::query_as::<_, TagTuple>(sqlx::AssertSqlSafe(format!(
         "UPDATE fvoci.document_tags SET name = COALESCE($3, name), color = COALESCE($4, color), updated_at = now() \
          WHERE workspace_id = $1 AND id = $2 RETURNING {TAG_COLUMNS}"
-    ))
+    )))
     .bind(workspace_id)
     .bind(tag_id)
     .bind(name)
@@ -866,9 +866,9 @@ pub async fn assign_tag(
         tx.rollback().await?;
         return Ok(Err(err));
     }
-    let tag: Option<TagTuple> = sqlx::query_as(&format!(
+    let tag: Option<TagTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {TAG_COLUMNS} FROM fvoci.document_tags WHERE workspace_id = $1 AND id = $2 FOR SHARE"
-    ))
+    )))
     .bind(workspace_id)
     .bind(tag_id)
     .fetch_optional(&mut *tx)

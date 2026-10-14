@@ -340,9 +340,9 @@ async fn fetch_attachment(
     workspace_id: Uuid,
     attachment_id: Uuid,
 ) -> Result<Option<AttachmentRow>, sqlx::Error> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments WHERE workspace_id = $1 AND id = $2"
-    ))
+    )))
     .bind(workspace_id)
     .bind(attachment_id)
     .fetch_optional(&mut **tx)
@@ -1652,10 +1652,10 @@ pub async fn list_task_attachments(
             return Ok(Err(err));
         }
     }
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments \
          WHERE workspace_id = $1 AND task_id = $2 ORDER BY created_at, id"
-    ))
+    )))
     .bind(workspace_id)
     .bind(task_id)
     .fetch_all(&mut *tx)
@@ -7862,7 +7862,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<Option<AttachmentRow>, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let row = sqlx::query(&format!("SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR UPDATE"))
+                let row = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT {ATTACHMENT_COLUMNS} FROM fvoci.attachments WHERE workspace_id=$1 AND id=$2 FOR UPDATE")))
                     .bind(workspace).bind(attachment).fetch_optional(&mut ***tx).await?;
                 Ok(row.map(|row| row_to_attachment(&row)))
             }
@@ -9960,10 +9960,12 @@ mod stored_reference_tests {
         let database = format!("fvoci_reference_{}", Uuid::now_v7().simple());
         let role = format!("fvoci_app_{}", Uuid::now_v7().simple());
         let password = token::new_token().hash;
-        sqlx::query(&format!("CREATE DATABASE \"{database}\""))
-            .execute(&admin_server)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database}\""
+        )))
+        .execute(&admin_server)
+        .await
+        .unwrap();
         let mut database_url = server.clone();
         database_url.set_path(&format!("/{database}"));
         crate::db::migrate::run_migrations(database_url.as_str())
@@ -9974,9 +9976,9 @@ mod stored_reference_tests {
             .connect(database_url.as_str())
             .await
             .unwrap();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
-        ))
+        )))
         .execute(&admin)
         .await
         .unwrap();
@@ -10226,11 +10228,11 @@ mod stored_reference_tests {
         backend.close().await.unwrap();
         app.close().await;
         admin.close().await;
-        sqlx::query(&format!("DROP DATABASE \"{database}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE \"{database}\"")))
             .execute(&admin_server)
             .await
             .unwrap();
-        sqlx::query(&format!("DROP ROLE \"{role}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE \"{role}\"")))
             .execute(&admin_server)
             .await
             .unwrap();

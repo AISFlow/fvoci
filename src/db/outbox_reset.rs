@@ -775,9 +775,9 @@ async fn collect_skip(
             WHERE p.consumer = $1 AND p.event_id = e.id
         )
     "#;
-    let agg = sqlx::query(&format!(
+    let agg = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) AS n, min(e.created_at) AS oldest FROM fvoci.events AS e WHERE {WHERE}"
-    ))
+    )))
     .bind(consumer)
     .bind(&cursor.last_xact)
     .bind(cursor.last_seq)
@@ -788,7 +788,7 @@ async fn collect_skip(
     if count == 0 {
         return Ok(None);
     }
-    let ends = sqlx::query(&format!(
+    let ends = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT
             (SELECT e.xact::text FROM fvoci.events AS e WHERE {WHERE} ORDER BY e.xact, e.seq LIMIT 1) AS min_xact,
@@ -796,16 +796,16 @@ async fn collect_skip(
             (SELECT e.xact::text FROM fvoci.events AS e WHERE {WHERE} ORDER BY e.xact DESC, e.seq DESC LIMIT 1) AS max_xact,
             (SELECT e.seq FROM fvoci.events AS e WHERE {WHERE} ORDER BY e.xact DESC, e.seq DESC LIMIT 1) AS max_seq
         "#
-    ))
+    )))
     .bind(consumer)
     .bind(&cursor.last_xact)
     .bind(cursor.last_seq)
     .bind(RESET_SCAN_WINDOW_DAYS)
     .fetch_one(&mut **tx)
     .await?;
-    let sample = sqlx::query(&format!(
+    let sample = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT e.id::text AS event_id, e.verb FROM fvoci.events AS e WHERE {WHERE} ORDER BY e.xact, e.seq LIMIT $5"
-    ))
+    )))
     .bind(consumer)
     .bind(&cursor.last_xact)
     .bind(cursor.last_seq)

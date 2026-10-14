@@ -2631,10 +2631,12 @@ mod pg_draft_native_tests {
         let database = format!("fvoci_off_copy_{}", Uuid::now_v7().simple());
         let role = format!("fvoci_off_app_{}", Uuid::now_v7().simple());
         let password = crate::auth::token::new_token().hash;
-        sqlx::query(&format!("CREATE DATABASE \"{database}\""))
-            .execute(&admin_server)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database}\""
+        )))
+        .execute(&admin_server)
+        .await
+        .unwrap();
         let mut database_url = server.clone();
         database_url.set_path(&format!("/{database}"));
         crate::db::migrate::run_migrations(database_url.as_str())
@@ -2645,9 +2647,9 @@ mod pg_draft_native_tests {
             .connect(database_url.as_str())
             .await
             .unwrap();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
-        ))
+        )))
         .execute(&admin)
         .await
         .unwrap();
@@ -2844,11 +2846,11 @@ mod pg_draft_native_tests {
         );
         app.close().await;
         admin.close().await;
-        sqlx::query(&format!("DROP DATABASE \"{database}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE \"{database}\"")))
             .execute(&admin_server)
             .await
             .unwrap();
-        sqlx::query(&format!("DROP ROLE \"{role}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE \"{role}\"")))
             .execute(&admin_server)
             .await
             .unwrap();
