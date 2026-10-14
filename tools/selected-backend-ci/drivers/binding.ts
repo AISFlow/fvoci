@@ -241,7 +241,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(
     m.purpose === undefined || (m.purpose === "equal-work" && local?.purpose === "equal-work"),
   );
-  assert.equal(m.purpose, lane === "install" ? undefined : local?.purpose);
+  assert.ok(m.purpose === (lane === "install" ? undefined : local?.purpose));
   if (local !== null) assert.ok(m.source === local.source && m.tree === local.tree);
   else {
     assert.ok(env("GITHUB_ACTIONS") === "true" && env("CI") === "true");

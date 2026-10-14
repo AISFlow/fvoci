@@ -804,7 +804,6 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     "missing-lane",
     "live-port",
     "bad-owner",
-    "bad-purpose",
   ] as const)
     test("owner-return refuses " + mutation, async () => {
       await withEnvironment(ci, async () => {
@@ -975,6 +974,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     "foreign-source",
     "foreign-tree",
     "bad-registration",
+    "bad-purpose",
     "extra-mode",
     "same-terminal",
     "bad-task",

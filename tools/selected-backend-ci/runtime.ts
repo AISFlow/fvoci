@@ -28,7 +28,6 @@ import {
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
-import { comparePair } from "./drivers/equal-work.ts";
 import {
   accessible,
   ancestors,
@@ -755,6 +754,10 @@ export async function run(
       }
     }
     if (purpose) {
+      // The registered consumer is loaded only after identity/lease validation
+      // and successful driver retirement; CLI discovery loads no driver code.
+      const consumer = join(root, "tools/selected-backend-ci/drivers/equal-work.ts");
+      const { comparePair } = (await import(consumer)) as typeof import("./drivers/equal-work.ts");
       for (const backend of ["postgres", "sqlite"] as const) {
         const receipt = (flow: Flow) => {
           const result = results.find((r) => r.lane === backend && r.flow === flow);

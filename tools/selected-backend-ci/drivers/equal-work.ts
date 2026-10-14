@@ -29,10 +29,10 @@ export function cgroupCounters(raw: string): Counters {
   const scalar = lines.filter((line) => /^[0-9]+$/.test(line));
   const value = (key: string) => {
     const found = lines.filter((line) => line.startsWith(key + " "));
-    assert.equal(found.length, 1, "missing or duplicate cgroup counter");
+    assert.ok(found.length === 1, "missing or duplicate cgroup counter");
     return integer((found[0] as string).slice(key.length + 1));
   };
-  assert.equal(scalar.length, 2, "memory.current and memory.peak required");
+  assert.ok(scalar.length === 2, "memory.current and memory.peak required");
   const counters = {
     cpuUsec: value("usage_usec"),
     memoryCurrentBytes: integer(scalar[0] as string),
@@ -57,7 +57,7 @@ export function metrics(raw: string): Record<string, number> {
   return Object.fromEntries(
     metricNames.map((key) => {
       const lines = raw.split("\n").filter((line) => line.startsWith(key + " "));
-      assert.equal(lines.length, 1, "required live metric missing");
+      assert.ok(lines.length === 1, "required live metric missing");
       const value = Number((lines[0] as string).slice(key.length + 1));
       assert.ok(Number.isFinite(value) && value >= 0, "unobservable metric is not zero");
       if (key === metricNames[0]) assert.ok(value > 0);
@@ -99,7 +99,7 @@ export function validateSamples(samples: Sample[]): void {
     "missing, duplicate or unordered samples",
   );
   for (const [i, sample] of samples.entries()) {
-    assert.equal(sample.workloadHash, workloadHash);
+    assert.ok(sample.workloadHash === workloadHash);
     assert.ok(Number.isFinite(sample.monotonicMs));
     assert.ok(sample.memoryCurrentBytes > 0 && sample.anonRssProxyBytes > 0);
     assert.ok(sample.lifetimePeakBytes >= sample.memoryCurrentBytes);
@@ -130,9 +130,8 @@ export async function measureBrowser(
     "{{.HostConfig.CgroupnsMode}}",
     container,
   ]);
-  assert.equal(
-    namespace.stdout.trim(),
-    "private",
+  assert.ok(
+    namespace.stdout.trim() === "private",
     "observer must read this owned container cgroup",
   );
   mkdirSync(directory, { mode: 0o700 });
@@ -204,7 +203,7 @@ export async function measureBrowser(
     await pending;
     if (failure !== undefined)
       throw failure instanceof Error ? failure : new Error("equal-work collector failed");
-    assert.equal(result.returncode, 0, "browser failure cannot qualify costs");
+    assert.ok(result.returncode === 0, "browser failure cannot qualify costs");
     validateSamples(samples);
     assert.ok(
       deepEquals(
@@ -215,7 +214,7 @@ export async function measureBrowser(
       ),
     );
     for (const [name, hash] of Object.entries(hashes))
-      assert.equal(sha(join(directory, name)), hash);
+      assert.ok(sha(join(directory, name)) === hash);
     return { result, samples };
   } finally {
     watcher.close();
@@ -266,7 +265,7 @@ export function validateEqualReport(
       }[];
     }[];
   };
-  assert.equal(r.config.workers, 1);
+  assert.ok(r.config.workers === 1);
   assert.ok(
     deepEquals(r.config.metadata, {
       selectedBackend: backend,
@@ -276,7 +275,7 @@ export function validateEqualReport(
   );
   assert.ok(deepEquals(r.errors, []) && r.stats.expected === 1);
   assert.ok(["unexpected", "flaky", "skipped"].every((key) => r.stats[key] === 0));
-  assert.equal(r.suites.length, 1);
+  assert.ok(r.suites.length === 1);
   const specs = r.suites[0]?.specs;
   assert.ok(specs?.length === 1);
   const spec = specs[0];
@@ -286,7 +285,7 @@ export function validateEqualReport(
       spec.file.endsWith("v060-equal-work.spec.ts") &&
       spec.ok === true,
   );
-  assert.equal(spec.tests.length, 1);
+  assert.ok(spec.tests.length === 1);
   const test = spec.tests[0];
   assert.ok(test?.expectedStatus === "passed" && test.results.length === 1);
   const actual = test.results[0];
@@ -310,7 +309,7 @@ export function validateEqualReport(
   );
   const latencies = facts.ackLatencyMs as number[];
   assert.ok(latencies.length === 3 && latencies.every((v) => Number.isFinite(v) && v > 0));
-  assert.equal(new Set(facts.ackIds as string[]).size, 3);
+  assert.ok(new Set(facts.ackIds as string[]).size === 3);
   assert.ok(deepEquals(facts.texts, workload.edits));
   return facts;
 }
@@ -401,7 +400,7 @@ export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
   const a = qualify(on, "on"),
     b = qualify(off, "off");
   assert.ok(on.source === off.source && on.tree === off.tree && on.root_owner === off.root_owner);
-  assert.equal(a.browser.backend, b.browser.backend);
+  assert.ok(a.browser.backend === b.browser.backend);
   assert.ok(
     deepEquals(a.inputs, b.inputs),
     "different build/browser/dataset inputs cannot form a pair",
