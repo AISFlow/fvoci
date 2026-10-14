@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { root as checkout, sha } from "../selected-backend-ci/io.ts";
-import { baselineFailureDiagnostic, OFF, ON } from "./ui-audit.ts";
+import { baselineFailureDiagnostic, OFF, ON, RESTORE } from "./ui-audit.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import {
   fixtureInput,
@@ -35,11 +35,12 @@ import {
 import {
   localFixture,
   localServerStart,
+  lease,
   stopAttachedDaemon,
   type ServerHandle,
 } from "./ui-container.ts";
 import { communicate, identity, now, poll, wait, type Scope } from "./ui-processes.ts";
-import type { Manifest } from "./ui-record.ts";
+import { loadLocalLease, type Manifest } from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 
@@ -275,7 +276,12 @@ export async function browser(
   spec: string,
   grep?: string,
   workspace: string = checkout,
+  config = "collab-playwright.config.ts",
+  heavy?: string,
 ): Promise<unknown> {
+  require(config === "collab-playwright.config.ts" ||
+    (spec === RESTORE &&
+      config === "turso-restore-playwright.config.ts"), "UI_BROWSER_CONFIG_REFUSED");
   const report = join(directory, "playwright.private.json");
   const env: Record<string, string> = {
     ...cleanEnv(),
@@ -313,7 +319,7 @@ export async function browser(
     cli,
     "test",
     "--config",
-    "e2e-pending/collab-playwright.config.ts",
+    "e2e-pending/" + config,
     "--reporter=line,json",
   ];
   if (grep) args.push("--grep", grep);
@@ -322,6 +328,12 @@ export async function browser(
   let code = -1;
   try {
     fchmodSync(output, 0o600);
+    if (executionMode() === "orca-local") {
+      const grant = loadLocalLease("current-build", lease.load);
+      require(typeof heavy === "string" &&
+        get(grant, "heavy", "path") === heavy, "UI_LOCAL_ALLOCATION_REFUSED");
+      args.unshift(heavy);
+    }
     const child = scope.spawn(args, "browser", {
       env,
       cwd: join(workspace, "apps/web"),

@@ -91,6 +91,7 @@ export function validateDispatch(
   if ((phase === "inventory" || phase === "ui-baseline") && destructive)
     reject("INVENTORY_MUST_BE_READ_ONLY");
   if (!READ_ONLY.includes(phase) && !destructive) reject("DESTRUCTIVE_CONFIRMATION_REQUIRED");
+  if (phase === "restore" && context.ref !== "refs/heads/main") reject("RESTORE_MAIN_REF_REQUIRED");
   return phase;
 }
 
@@ -175,6 +176,7 @@ const IMPLEMENTED: readonly Phase[] = [
   "reset",
   "ui-baseline",
   "ui-ack",
+  "restore",
 ];
 
 export function requireImplemented(phase: unknown): void {
@@ -313,7 +315,7 @@ export function primaryChildEnv(
 export function validateUiInputs(phase: Phase, inputs: Inputs, checkoutSha: string): void {
   if ((Object.hasOwn(inputs, "ui_source_sha") ? inputs.ui_source_sha : undefined) !== checkoutSha)
     reject("UI_REVIEWED_SOURCE_REQUIRED");
-  if (phase !== "ui-ack") return;
+  if (phase !== "ui-ack" && phase !== "restore") return;
   for (const [key, code] of [
     ["ui_baseline_sha256", "UI_CURRENT_DATASET_BINDING_REQUIRED"],
     ["ui_target_sha256", "UI_CURRENT_TARGET_BINDING_REQUIRED"],

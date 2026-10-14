@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { decodeUtf8, get, require } from "./ui-common.ts";
+import { decodeUtf8, get, require, UiError } from "./ui-common.ts";
 import { now, pause, poll, type Child, type Scope } from "./ui-processes.ts";
 import { serverStartDiagnostic } from "./ui-start-diagnostic.ts";
 
@@ -76,21 +76,31 @@ export function publishStartDiagnostic(
   return result;
 }
 
-export function portClosed(base: string): Promise<boolean> {
-  const port = Number(base.slice(base.lastIndexOf(":") + 1));
-  return new Promise((resolve) => {
+export async function portClosed(base: string): Promise<boolean> {
+  const endpoint = /^https?:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/?$/.exec(base);
+  require(endpoint !== null, "UI_PORT_CLOSURE_ENDPOINT_REFUSED");
+  const port = Number(endpoint[1]);
+  require(port <= 65535, "UI_PORT_CLOSURE_ENDPOINT_REFUSED");
+  return new Promise((resolve, reject) => {
     const socket = net.connect({ host: "127.0.0.1", port });
+    let settled = false;
+    const finish = (closed: boolean | null) => {
+      if (settled) return;
+      settled = true;
+      socket.setTimeout(0);
+      socket.destroy();
+      if (closed === null) reject(new UiError("UI_PORT_CLOSURE_UNCONFIRMED"));
+      else resolve(closed);
+    };
     socket.setTimeout(1000);
     socket.once("connect", () => {
-      socket.destroy();
-      resolve(false);
+      finish(false);
     });
     socket.once("timeout", () => {
-      socket.destroy();
-      resolve(true);
+      finish(null);
     });
-    socket.once("error", () => {
-      resolve(true);
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      finish(error.code === "ECONNREFUSED" ? true : null);
     });
   });
 }

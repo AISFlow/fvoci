@@ -61,8 +61,8 @@ export interface Manifest {
 
 /**
  * Same-user ROOT lease of the orca-local mode. The maintained loader is
- * `localAllocation` in tools/selected-backend-ci/admission.ts, which does not
- * yet accept the turso-ui consumer; until it does, the local mode is refused.
+ * `localTursoUiAllocation` in tools/selected-backend-ci/admission.ts. Without
+ * that controller allocation the local mode is refused.
  */
 export type LocalLease = (mode: string) => LocalGrant & Record<string, unknown>;
 export const refusedLocalLease: LocalLease = () => {

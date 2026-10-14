@@ -1,0 +1,9 @@
+{
+  "extends": "./collab-tsconfig.json",
+  "compilerOptions": { "types": ["bun", "node"], "allowImportingTsExtensions": true },
+  "include": [
+    "./v060-turso-restore.acceptance.ts",
+    "./turso-restore-helpers.ts",
+    "./turso-restore-playwright.config.ts"
+  ]
+}

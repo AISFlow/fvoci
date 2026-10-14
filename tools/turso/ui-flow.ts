@@ -49,6 +49,7 @@ import { lease, shellQuote, type ServerHandle } from "./ui-container.ts";
 import { browser, fixture, registeredTitles, start, stop } from "./ui-native.ts";
 import { identity, withProcesses, type Scope } from "./ui-processes.ts";
 import { currentBuild, loadLocalLease, type Manifest } from "./ui-record.ts";
+import type { executeRestore } from "./ui-restore.ts";
 
 export const ENTRY = join(import.meta.dir, "ui.ts");
 const RESTART_TITLE =
@@ -475,6 +476,7 @@ export interface ConsumeSteps {
   currentBuild: () => Manifest;
   fixture: typeof fixture;
   executeUi: typeof executeUi;
+  executeRestore?: typeof executeRestore;
   write: typeof write;
   root: () => string;
   output: Output;
@@ -483,6 +485,7 @@ const consumeSteps: ConsumeSteps = {
   currentBuild: () => currentBuild(lease.load),
   fixture,
   executeUi,
+  executeRestore: async (...args) => (await import("./ui-restore.ts")).executeRestore(...args),
   write,
   root,
   output: stdio,
@@ -494,10 +497,11 @@ export async function consumeIn(
   inputs: Record<string, unknown>,
   steps: ConsumeSteps = consumeSteps,
 ): Promise<void> {
+  require(["ui-baseline", "ui-ack", "restore"].includes(phase), "UI_PHASE_REFUSED");
   const manifest = steps.currentBuild();
   require(inputs.ui_source_sha === manifest.sourceInputs.source, "UI_REVIEWED_SOURCE_REQUIRED");
   let encryptionKeys: string | undefined;
-  if (phase === "ui-ack") {
+  if (phase === "ui-ack" || phase === "restore") {
     const raw = process.env.FVOCI_TEST_TURSO_ENCRYPTION_KEYS;
     require(typeof raw === "string" && raw.length > 0, "UI_ENCRYPTION_KEYRING_REQUIRED");
     let keys: unknown;
@@ -539,7 +543,7 @@ export async function consumeIn(
     );
     return;
   }
-  require(phase === "ui-ack" &&
+  require((phase === "ui-ack" || phase === "restore") &&
     inputs.ui_baseline_sha256 === baselineSha, "UI_CURRENT_DATASET_BINDING_REQUIRED");
   require(inputs.ui_target_sha256 === targetSha, "UI_CURRENT_TARGET_BINDING_REQUIRED");
   Object.assign(environment, {
@@ -551,6 +555,21 @@ export async function consumeIn(
     ENCRYPTION_KEYS: encryptionKeys,
     ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
   });
+  if (phase === "restore") {
+    require(steps.executeRestore !== undefined, "RESTORE_CONSUMER_REQUIRED");
+    const result = await steps.executeRestore(scope, manifest, baseline, environment);
+    require(result.result === "PASS" &&
+      result.originalFailure === null &&
+      result.cleanupErrors.length === 0 &&
+      result.auditErrors.length === 0 &&
+      deepEquals(result.counts, [1, 1, 1, 1, 1, 1]) &&
+      result.preservation.result === "PASS" &&
+      result.sourceUnchangedDuringDestination === "PASS", "RESTORE_ACCEPTANCE_FAILED");
+    steps.output.out(
+      "TURSO_RESTORE_PASS u6=1 source_restart=1 export=1 destination=1 destination_restart=1 compare=1 retries=0 ignored=0 source=libsql-remote destination=sqlite cost=NOTRUN",
+    );
+    return;
+  }
   const result = await steps.executeUi(scope, manifest, baseline, environment);
   steps.output.out(
     "TURSO_UI_ACK_PASS on=1 restart=1 off=8 retries=0 ignored=0 restore=NOTRUN precision=NOTRUN cost=NOTRUN",

@@ -796,44 +796,49 @@ describe("UI consumer handoff", () => {
     expect(loaded).toBe(0);
   });
 
-  test("ack binds both observed digests; UiError codes pass through, other errors do not", async () => {
-    const env = { ...uiEnv, FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" };
-    const base = { phase: "ui-ack", destructive: true, ui_source_sha: A };
-    const never = () => Promise.reject(new Error("must not load"));
-    expect(
-      await refusal(runUi("ui-ack", A, { ...base, ui_target_sha256: "a".repeat(64) }, env, never)),
-    ).toBe("UI_CURRENT_DATASET_BINDING_REQUIRED");
-    expect(
-      await refusal(
-        runUi("ui-ack", A, { ...base, ui_baseline_sha256: "a".repeat(64) }, env, never),
-      ),
-    ).toBe("UI_CURRENT_TARGET_BINDING_REQUIRED");
-    const bound = { ...base, ui_baseline_sha256: "a".repeat(64), ui_target_sha256: "b".repeat(64) };
-    const seen: unknown[] = [];
-    await runUi("ui-ack", A, bound, env, () =>
-      Promise.resolve((phase: string, inputs: Inputs) => {
-        seen.push(phase, inputs);
-        return Promise.resolve();
-      }),
-    );
-    expect(seen).toEqual(["ui-ack", bound]);
-    class UiError extends Error {
-      override name = "UiError";
-    }
-    const fails = (error: Error) => () => Promise.resolve(() => Promise.reject(error));
-    expect(
-      await refusal(runUi("ui-ack", A, bound, env, fails(new UiError("UI_ACTUAL_BROWSER_FAILED")))),
-    ).toBe("UI_ACTUAL_BROWSER_FAILED");
-    // A non-UiError stays an internal failure: main() reports ADMISSION_FAILED.
-    let caught: unknown;
-    try {
-      await runUi("ui-ack", A, bound, env, fails(new Error("FAKE_PRIVATE_TOKEN")));
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(Error);
-    expect(caught).not.toBeInstanceOf(AdmissionError);
-  });
+  test.each(["ui-ack", "restore"] as const)(
+    "%s binds both observed digests; UiError codes pass through, other errors do not",
+    async (phase) => {
+      const env = { ...uiEnv, FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" };
+      const base = { phase, destructive: true, ui_source_sha: A };
+      const never = () => Promise.reject(new Error("must not load"));
+      expect(
+        await refusal(runUi(phase, A, { ...base, ui_target_sha256: "a".repeat(64) }, env, never)),
+      ).toBe("UI_CURRENT_DATASET_BINDING_REQUIRED");
+      expect(
+        await refusal(runUi(phase, A, { ...base, ui_baseline_sha256: "a".repeat(64) }, env, never)),
+      ).toBe("UI_CURRENT_TARGET_BINDING_REQUIRED");
+      const bound = {
+        ...base,
+        ui_baseline_sha256: "a".repeat(64),
+        ui_target_sha256: "b".repeat(64),
+      };
+      const seen: unknown[] = [];
+      await runUi(phase, A, bound, env, () =>
+        Promise.resolve((phase: string, inputs: Inputs) => {
+          seen.push(phase, inputs);
+          return Promise.resolve();
+        }),
+      );
+      expect(seen).toEqual([phase, bound]);
+      class UiError extends Error {
+        override name = "UiError";
+      }
+      const fails = (error: Error) => () => Promise.resolve(() => Promise.reject(error));
+      expect(
+        await refusal(runUi(phase, A, bound, env, fails(new UiError("UI_ACTUAL_BROWSER_FAILED")))),
+      ).toBe("UI_ACTUAL_BROWSER_FAILED");
+      // A non-UiError stays an internal failure: main() reports ADMISSION_FAILED.
+      let caught: unknown;
+      try {
+        await runUi(phase, A, bound, env, fails(new Error("FAKE_PRIVATE_TOKEN")));
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(AdmissionError);
+    },
+  );
 });
 
 describe("child capture", () => {
