@@ -2536,10 +2536,32 @@ mod sqlite_port {
         .await
     }
 
+    /// Another team workspace of the same owner with a private project led by
+    /// the owner and a group.
+    async fn other_workspace(app: &axum::Router, cookie: &str) -> Uuid {
+        let (status, ws) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/workspaces",
+            Some(json!({"slug": "other-trash", "name": "Other"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{ws}");
+        let ws: Uuid = ws["id"].as_str().unwrap().parse().unwrap();
+        let project = create_project(app.clone(), cookie, ws, "OTHR", "private").await;
+        group_lead(app, cookie, ws, project["id"].as_str().unwrap()).await;
+        ws
+    }
+    /// (live, memberships, project grants, live projects, projects)
+    type Other = (bool, i64, i64, i64, i64);
+
     /// Trash tombstones every live project with the workspace stamp before the
     /// memberships delete cascades every user grant, so PostgreSQL's deferred
     /// project_members_private_lead_check_del passes for a private project led
     /// only by its creator. While the workspace is live that lead stays required.
+    /// The tombstone and the memberships delete stay inside the trashed
+    /// workspace: the owner's other workspace does not change.
     #[tokio::test]
     async fn trash_with_user_led_private_project_matches_postgres() {
         /// (trashed, memberships, project grants, workspace.deleted events,
@@ -2554,6 +2576,20 @@ mod sqlite_port {
         }
         async fn sqlite_stored(pool: &sqlx::SqlitePool, ws: Uuid) -> Stored {
             sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM workspaces WHERE id=?1),(SELECT count(*) FROM memberships WHERE workspace_id=?1),(SELECT count(*) FROM project_members WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects WHERE workspace_id=?1 AND deleted_at IS NULL),(SELECT count(*) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE w.id=?1 AND p.deleted_at=w.deleted_at)")
+                .bind(ws.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        async fn pg_other(admin: &sqlx::PgPool, ws: Uuid) -> Other {
+            sqlx::query_as("SELECT w.deleted_at IS NULL,(SELECT count(*) FROM fvoci.memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM fvoci.project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id) FROM fvoci.workspaces w WHERE w.id=$1")
+                .bind(ws)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_other(pool: &sqlx::SqlitePool, ws: Uuid) -> Other {
+            sqlx::query_as("SELECT w.deleted_at IS NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id) FROM workspaces w WHERE w.id=?1")
                 .bind(ws.as_bytes().as_slice())
                 .fetch_one(pool)
                 .await
@@ -2583,6 +2619,9 @@ mod sqlite_port {
         let grouped = create_project(app.clone(), &cookie, ws, "GRP", "private").await;
         let grouped = grouped["id"].as_str().unwrap().to_string();
         group_lead(&app, &cookie, ws, &grouped).await;
+        let other = other_workspace(&app, &cookie).await;
+        let other_before = pg_other(&admin, other).await;
+        assert_eq!(other_before, (true, 1, 2, 1, 1));
         let mut postgres = vec![pg_stored(&admin, ws).await];
         let kept = drop_lead(&app, &cookie, ws, &led, owner).await;
         postgres.push(pg_stored(&admin, ws).await);
@@ -2598,6 +2637,7 @@ mod sqlite_port {
                 (true, 0, 1, 1, 0, 2)
             ]
         );
+        assert_eq!(pg_other(&admin, other).await, other_before);
         admin.close().await;
         harness.cleanup().await;
 
@@ -2606,6 +2646,8 @@ mod sqlite_port {
         let grouped = create_project(f.app.clone(), &f.cookie, f.ws, "GRP", "private").await;
         let grouped = grouped["id"].as_str().unwrap().to_string();
         group_lead(&f.app, &f.cookie, f.ws, &grouped).await;
+        let other = other_workspace(&f.app, &f.cookie).await;
+        assert_eq!(sqlite_other(&f.pool, other).await, other_before);
         let mut sqlite = vec![sqlite_stored(&f.pool, f.ws).await];
         assert_eq!(
             drop_lead(&f.app, &f.cookie, f.ws, &led, f.actor).await,
@@ -2615,12 +2657,14 @@ mod sqlite_port {
         assert_eq!(trash(&f.app, &f.cookie, f.ws, "groups").await, trashed);
         sqlite.push(sqlite_stored(&f.pool, f.ws).await);
         assert_eq!(sqlite, postgres);
+        assert_eq!(sqlite_other(&f.pool, other).await, other_before);
         f.close().await;
     }
 
     /// The JSON NUL and overlong email refusals through the remote libSQL
     /// driver: the PostgreSQL responses, and nothing stored. Trash with a
-    /// user-led private project succeeds and tombstones it with the workspace.
+    /// user-led private project succeeds and tombstones it with the workspace;
+    /// the owner's other workspace does not change.
     #[tokio::test]
     #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
     async fn remote_json_nul_email_refusals_and_trash_match_postgres() {
@@ -2655,6 +2699,9 @@ mod sqlite_port {
         assert_eq!(ints(r.row(account).await, 3), before);
 
         private_project(&r.app, &r.cookie, r.ws).await;
+        other_workspace(&r.app, &r.cookie).await;
+        let other = "SELECT w.deleted_at IS NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id) FROM workspaces w WHERE w.slug='other-trash'";
+        assert_eq!(ints(r.row(other).await, 5), [1, 1, 2, 1, 1]);
         let workspace = "SELECT w.deleted_at IS NOT NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at=w.deleted_at) FROM workspaces w WHERE w.slug='groups'";
         let before = ints(r.row(workspace).await, 6);
         assert_eq!((before[0], before[5]), (0, 0));
@@ -2666,6 +2713,7 @@ mod sqlite_port {
             ints(r.row(workspace).await, 6),
             [1, 0, 0, before[3] + 1, 0, before[4]]
         );
+        assert_eq!(ints(r.row(other).await, 5), [1, 1, 2, 1, 1]);
         r.finish().await;
     }
 
