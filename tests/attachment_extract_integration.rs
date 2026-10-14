@@ -1,5 +1,8 @@
 #![cfg(feature = "db-tests")]
 
+#[path = "attachment_extract_integration/preview_race.rs"]
+mod preview_race;
+
 #[path = "support/office_fixtures.rs"]
 mod office_fixtures;
 
@@ -925,7 +928,7 @@ async fn off_body_save_and_extract_finish(kind: fvoci_server::db::collab::Collab
         .fetch_one(&mut *barrier)
         .await
         .unwrap();
-    sqlx::query(&format!("SELECT {id_column} FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2 FOR UPDATE"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("SELECT {id_column} FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2 FOR UPDATE")))
         .bind(workspace).bind(resource).fetch_one(&mut *barrier).await.unwrap();
     let operation = Uuid::now_v7();
     let append_pool = append_app.clone();
@@ -973,9 +976,9 @@ async fn off_body_save_and_extract_finish(kind: fvoci_server::db::collab::Collab
         .unwrap();
     // OFF saves compact their update into the snapshot; the immutable native
     // receipt and state head, rather than an uncompacted tail, prove the ACK.
-    let native_count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM fvoci.{receipt_table} WHERE workspace_id=$1 AND {id_column}=$2 AND op_id=$3"))
+    let native_count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM fvoci.{receipt_table} WHERE workspace_id=$1 AND {id_column}=$2 AND op_id=$3")))
         .bind(workspace).bind(resource).bind(operation).fetch_one(&admin).await.unwrap();
-    let native_head: (i64, i64) = sqlx::query_as(&format!("SELECT tail_seq,snapshot_cutoff_seq FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2"))
+    let native_head: (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT tail_seq,snapshot_cutoff_seq FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2")))
         .bind(workspace).bind(resource).fetch_one(&admin).await.unwrap();
     let committed: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.body_save_commands WHERE command_id=$1),(SELECT count(*) FROM fvoci.revisions WHERE target_id=$2),(SELECT count(*) FROM fvoci.attachment_text WHERE attachment_id=$3),(SELECT count(*) FROM fvoci.events WHERE target_id=$3 AND verb='attachment.extracted')")
         .bind(operation).bind(resource).bind(attachment).fetch_one(&admin).await.unwrap();

@@ -280,8 +280,10 @@ impl OperationTx<'_, '_> {
                 let Some(parent) = parent else {
                     return Ok(false);
                 };
+                // Fence deletion without blocking the KEY SHARE needed by a
+                // parent writer's revision workspace foreign key before commit.
                 let workspace: Option<bool> = sqlx::query_scalar(
-                    "SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id=$1 FOR UPDATE",
+                    "SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id=$1 FOR SHARE",
                 )
                 .bind(claim.workspace_id)
                 .fetch_optional(&mut ***tx)
