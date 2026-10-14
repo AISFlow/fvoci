@@ -193,7 +193,7 @@ async fn case(server: &TestServer, readback: &Readback) {
     assert_eq!(initial.status(), StatusCode::OK);
     assert_eq!(
         initial.json::<Value>().await.unwrap(),
-        json!({"needed":true}),
+        json!({"branding":{"name":"FVOCI"},"mailEnabled":false,"needed":true,"realtimeMode":"on"}),
         "requires this unit's fresh migrated allocation"
     );
     let setup = api(
@@ -221,7 +221,10 @@ async fn case(server: &TestServer, readback: &Readback) {
     .await;
     assert_eq!(login.status(), StatusCode::OK);
     let retained = cookie(&login);
-    assert_ne!(ending, retained);
+    assert!(
+        ending != retained,
+        "normal logins must yield distinct cookies"
+    );
     let ending_me = api(server, Method::GET, "/api/v1/auth/me", None, Some(&ending))
         .await
         .json::<Value>()
@@ -383,6 +386,9 @@ async fn run(backend: Backend, readback: Readback, directory: PathBuf) {
     let closed = tokio::net::TcpStream::connect(addr).await.is_err();
     let observer_closed = readback.close().await;
     let app_closed = backend.close().await.is_ok();
+    eprintln!(
+        "AUTH_FAMILY_CLOSURE listener={closed} observer={observer_closed} backend={app_closed}"
+    );
     if let Err(original) = result {
         if !(closed && observer_closed && app_closed) {
             eprintln!("AUTH_FAMILY_CLEANUP_FAILED");

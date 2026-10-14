@@ -71,13 +71,17 @@ test.beforeAll(async ({ browser, baseURL }) => {
   const setup = await setupContext.newPage();
   const initial = await setup.request.get("/api/v1/setup");
   expect(initial.status()).toBe(200);
-  expect(await initial.json()).toEqual({ needed: selectedSetupNeeded() });
+  expect(await initial.json()).toMatchObject({
+    needed: selectedSetupNeeded(),
+    mailEnabled: true,
+    realtimeMode: flow,
+  });
   if (selectedSetupNeeded()) await ensureInstanceSetup(setup);
   owner = await actor(browser, admin);
   ownerWire = attachCollabWire(owner.page);
   expect(
     (await (await owner.page.request.get("/api/v1/setup")).json()) as { needed: boolean },
-  ).toEqual({ needed: false });
+  ).toMatchObject({ needed: false, mailEnabled: true, realtimeMode: flow });
   installSelectedMember(selected);
   a = await actor(browser, member);
   b = await actor(browser, member);
