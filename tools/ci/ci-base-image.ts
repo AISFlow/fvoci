@@ -491,7 +491,7 @@ if (import.meta.main) {
         );
         check(
           at(await json("apps/web/package.json"), "devDependencies", "@playwright/test") ===
-            "1.63.0",
+            "1.64.0",
           "Playwright pin differs from recipe",
         );
         verifyWorkflow(Bun.YAML.parse(await text(".github/workflows/ci-base-image.yml")));

@@ -420,7 +420,7 @@ export function configListInputs(
   for (const name of ["@playwright/test", "playwright", "playwright-core"]) {
     const path = join(checkout, "node_modules", name, "package.json"),
       data = read(path) as { version: string; bin?: { playwright: string } };
-    assert.equal(data.version, "1.63.0");
+    assert.equal(data.version, "1.64.0");
     if (name === "playwright") assert.equal(data.bin?.playwright, "cli.js");
     modules[name] = sha(path);
   }

@@ -96,9 +96,9 @@ USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN mkdir /tmp/ci-web \
  && cd /tmp/ci-web \
- && printf '%s\n' '{"private":true,"dependencies":{"@playwright/test":"1.63.0"}}' > package.json \
+ && printf '%s\n' '{"private":true,"dependencies":{"@playwright/test":"1.64.0"}}' > package.json \
  && bun install --ignore-scripts \
- && test "$(bun --bun x --no-install playwright --version)" = 'Version 1.63.0' \
+ && test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0' \
  && cat /etc/apt/sources.list.d/ubuntu.sources \
  && bun --bun x --no-install playwright install --with-deps chromium \
  && dpkg-query -W > /usr/local/share/ci-web-build-packages.txt \

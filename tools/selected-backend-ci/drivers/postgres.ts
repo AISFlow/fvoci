@@ -118,7 +118,7 @@ export function qualifyPlaywright(workspace: string, before: Inputs, bun: string
     version?: unknown;
     bin?: { playwright?: unknown };
   };
-  assert.ok(manifest.version === "1.63.0" && manifest.bin?.playwright === "cli.js");
+  assert.ok(manifest.version === "1.64.0" && manifest.bin?.playwright === "cli.js");
   assert.ok(
     sha(cli) === before.external[cli],
     "Playwright CLI must be in the admitted input closure",

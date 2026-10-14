@@ -276,7 +276,7 @@ function browserInputs(): BrowserInputs {
   mkdirSync(join(workspace, "node_modules/playwright"), { recursive: true });
   writeFileSync(cli, "/* pure fixture; never executed */");
   const pkg = join(workspace, "node_modules/playwright/package.json");
-  writeFileSync(pkg, JSON.stringify({ version: "1.63.0", bin: { playwright: "cli.js" } }));
+  writeFileSync(pkg, JSON.stringify({ version: "1.64.0", bin: { playwright: "cli.js" } }));
   const physical = join(workspace, "physical.private.json");
   write(physical, { files: { external: { [cli]: sha(cli), [pkg]: sha(pkg) } } });
   const manifest = {
@@ -508,7 +508,7 @@ describe("browser", () => {
         writeFileSync(
           inputs.pkg,
           JSON.stringify({
-            version: fault === "package-version" ? "1.62.0" : "1.63.0",
+            version: fault === "package-version" ? "1.62.0" : "1.64.0",
             bin: { playwright: fault === "package-bin" ? "other.js" : "cli.js" },
           }),
         );

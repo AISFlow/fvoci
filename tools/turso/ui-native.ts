@@ -302,7 +302,7 @@ export async function browser(
   }
   const pkg = JSON.parse(readFileSync(packagePath, "utf8")) as unknown;
   require(isRecord(pkg) &&
-    pkg.version === "1.63.0" &&
+    pkg.version === "1.64.0" &&
     isRecord(pkg.bin) &&
     pkg.bin.playwright === "cli.js", "UI_PLAYWRIGHT_CLI_REFUSED");
   // The checked env is the whole env: no .env or bunfig of apps/web is loaded.

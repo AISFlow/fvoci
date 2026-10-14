@@ -47,7 +47,7 @@ try {
   for (const name of ["@playwright/test", "playwright", "playwright-core"]) {
     const path = join(checkout, "node_modules", name, "package.json");
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ version: "1.63.0", bin: { playwright: "cli.js" } }));
+    writeFileSync(path, JSON.stringify({ version: "1.64.0", bin: { playwright: "cli.js" } }));
     external[path] = sha(path);
   }
   const cli = join(checkout, "node_modules/playwright/cli.js"),
@@ -279,7 +279,7 @@ try {
   attempt(
     "playwright bin is not the official CLI",
     () => {
-      rewrite(pkg, JSON.stringify({ version: "1.63.0", bin: { playwright: "other.js" } }));
+      rewrite(pkg, JSON.stringify({ version: "1.64.0", bin: { playwright: "other.js" } }));
       rebindExternal((record) => {
         record[pkg] = sha(pkg);
       });

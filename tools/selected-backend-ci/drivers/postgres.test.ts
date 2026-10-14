@@ -62,7 +62,7 @@ describe("Playwright direct CLI qualification", () => {
       bun = join(root, "bun");
     mkdirSync(join(root, "node_modules/playwright"), { recursive: true });
     writeFileSync(cli, "synthetic official CLI");
-    writeFileSync(manifest, JSON.stringify({ version: "1.63.0", bin: { playwright: "cli.js" } }));
+    writeFileSync(manifest, JSON.stringify({ version: "1.64.0", bin: { playwright: "cli.js" } }));
     writeFileSync(bun, "synthetic qualified Bun");
     const before = { external: { [cli]: hash(readFileSync(cli)) } } as unknown as Inputs;
     return { cli, manifest, bun, before };
@@ -78,7 +78,7 @@ describe("Playwright direct CLI qualification", () => {
       if (fault === "hash") before.external[cli] = "0".repeat(64);
       if (fault === "missing") before.external = {};
       if (fault === "bin")
-        writeFileSync(manifest, JSON.stringify({ version: "1.63.0", bin: { playwright: "o.js" } }));
+        writeFileSync(manifest, JSON.stringify({ version: "1.64.0", bin: { playwright: "o.js" } }));
       if (fault === "version")
         writeFileSync(
           manifest,
