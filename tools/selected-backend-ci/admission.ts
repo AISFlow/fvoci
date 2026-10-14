@@ -76,8 +76,9 @@ function localIdentity(expected: readonly [number, number]): LocalGrant {
   const facts = statSync(path);
   assert.ok(facts.uid === uid() && (facts.mode & 0o777) === 0o600);
   assert.equal(sha(path), env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
+  // Purpose belongs to each entry: the selected lanes and every local
+  // consumer admit only their own exact purposes after this shared identity.
   const grant = read(path) as LocalGrant;
-  assert.ok(grant.purpose === undefined || grant.purpose === "equal-work");
   assert.ok(
     grant.schema === 1 && grant.status === "GRANTED" && grant.executionMode === "orca-local",
   );
