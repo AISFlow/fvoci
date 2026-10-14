@@ -71,12 +71,12 @@ const realScreens: Record<string, string[]> = {
 const realShells: Record<string, string[]> = {
   "idle shell": ["", "fixture@fixture:~/work/fvoci$"],
   "shell after output": [
-    "fixture@fixture:~/work/polyp$ orca skills update --all",
+    "fixture@fixture:~/work/other$ orca skills update --all",
     "Checking skills from source: stablyai/orca",
     "✓ All global skills are up to date",
     "",
     "",
-    "fixture@fixture:~/work/polyp$",
+    "fixture@fixture:~/work/other$",
   ],
 };
 const claudeOpus = {
