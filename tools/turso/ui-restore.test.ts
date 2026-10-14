@@ -2,13 +2,141 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as Y from "yjs";
+import { digest } from "../selected-backend-ci/io.ts";
 import { write } from "../selected-backend-ci/io.ts";
 import { BACKGROUND_TABLES, OFF, reportCases, RESTORE } from "./ui-audit.ts";
 import { failureCode, privateRead, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, clone, exitedChild, failureOf, fakeScope } from "./ui-fakes.ts";
 import { consumeIn, type FlowSteps } from "./ui-flow.ts";
 import type { Manifest } from "./ui-record.ts";
-import { executeRestore, RESTORE_TITLES, type RestoreReceipt } from "./ui-restore.ts";
+import {
+  executeRestore,
+  RESTORE_TITLES,
+  restoreStateDigest,
+  verifyRestoreStage,
+  type RestoreReceipt,
+} from "./ui-restore.ts";
+
+test("fresh restore witness accepts an acknowledged duplicate delete set at exactly its next tail", () => {
+  const doc = new Y.Doc({ gc: false });
+  try {
+    doc.getText("body").insert(0, "beforeafter");
+    doc.getText("body").delete(6, 5);
+    const update = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc));
+    expect(update.length).toBeGreaterThan(2);
+    expect(Y.decodeUpdate(update).structs).toHaveLength(0);
+    const actor = "00000000-0000-4000-8000-000000000001";
+    const document = "00000000-0000-4000-8000-000000000002";
+    const before = {
+      state: Buffer.from(Y.encodeStateAsUpdate(doc)).toString("hex"),
+      updates: [],
+      tail: 3,
+      content: { text: "before" },
+      receipts: [1, 2, 3].map((seq) => ({
+        seq,
+        op: `00000000-0000-4000-8000-00000000000${String(seq + 2)}`,
+        sha: "a".repeat(64),
+        len: 10,
+        actor,
+      })),
+    };
+    const after = {
+      ...before,
+      tail: 4,
+      updates: [{ seq: 4, hex: Buffer.from(update).toString("hex") }],
+      receipts: [
+        ...before.receipts,
+        {
+          seq: 4,
+          op: "00000000-0000-4000-8000-000000000007",
+          sha: digest(update),
+          len: update.length,
+          actor,
+        },
+      ],
+    };
+    const witness = {
+      document,
+      actor,
+      beforeTail: "3",
+      finalTail: "4",
+      fullStateSha256: restoreStateDigest(before),
+      ack: { requestId: "00000000-0000-4000-8000-000000000008", matched: true },
+      sync: [
+        {
+          sha: digest(update),
+          len: update.length,
+          empty: false,
+          applied: true,
+          fullStateUnchanged: restoreStateDigest(before, [update]) === restoreStateDigest(before),
+        },
+      ],
+    };
+    verifyRestoreStage(before, after, witness, document, actor);
+    for (const fault of [
+      "ack",
+      "capture",
+      "status",
+      "proof",
+      "extra",
+      "native-tail",
+      "witness-tail",
+      "prior",
+      "hash",
+      "actor",
+      "document",
+      "length",
+      "state",
+      "body",
+    ] as const) {
+      const wrong = clone(witness),
+        native = clone(after);
+      if (fault === "ack") wrong.ack.matched = false;
+      if (fault === "capture") wrong.sync = [];
+      const sync = wrong.sync[0];
+      const receipt = native.receipts.at(-1);
+      if (!receipt) throw new Error("receipt missing");
+      if (fault === "status" && sync) sync.applied = false;
+      if (fault === "proof" && sync) sync.fullStateUnchanged = false;
+      if (fault === "extra") native.receipts.push({ ...receipt, seq: 5 });
+      if (fault === "native-tail") native.tail = 5;
+      if (fault === "witness-tail") wrong.finalTail = "5";
+      if (fault === "prior" && native.receipts[0]) native.receipts[0].sha = "b".repeat(64);
+      if (fault === "hash") receipt.sha = "b".repeat(64);
+      if (fault === "actor") receipt.actor = document;
+      if (fault === "document") wrong.document = actor;
+      if (fault === "length") receipt.len += 1;
+      if (fault === "state") {
+        doc.getText("body").insert(0, "changed");
+        native.state = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("hex");
+      }
+      if (fault === "body") native.content.text = "changed";
+      expect(() => {
+        verifyRestoreStage(before, native, wrong, document, actor);
+      }, fault).toThrow();
+    }
+  } finally {
+    doc.destroy();
+  }
+});
+
+test("restore full-state proof detects delete-only state changes with an unchanged vector", () => {
+  const doc = new Y.Doc({ gc: false });
+  try {
+    doc.getText("body").insert(0, "beforeafter");
+    const state = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("hex");
+    const vector = Y.encodeStateVector(doc);
+    doc.getText("body").delete(6, 5);
+    const changed = Y.encodeStateAsUpdate(doc, vector);
+    expect(Y.encodeStateVector(doc)).toEqual(vector);
+    expect(restoreStateDigest({ state, updates: [] }, [changed])).not.toBe(
+      restoreStateDigest({ state, updates: [] }),
+    );
+  } finally {
+    doc.destroy();
+  }
+});
 
 test.each(["sqlite", "libsql-remote"] as const)(
   "restore %s report refuses missing, zero, retry, skip and wrong backend",

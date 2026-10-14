@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { chmodSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { MessageType } from "@hocuspocus/provider";
+import * as decoding from "lib0/decoding";
+import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
 import { z } from "zod";
 import type { Editor } from "@tiptap/core";
 import type { components } from "../src/generated/api";
 import { observeRestoreCounts } from "../../../tools/turso/ui-restore-observe";
+import { restoreStateDigest, verifyRestoreStage } from "../../../tools/turso/ui-restore";
+import { frameBytes, persistParts } from "./collab-wire";
 import {
   admin,
   attachCollabWire,
@@ -15,6 +21,7 @@ import {
   newCollabContext,
   openEditor,
   persistBody,
+  type CollabWireLog,
 } from "./collab-helpers";
 import {
   LITERALS,
@@ -42,6 +49,305 @@ import {
 } from "./turso-restore-helpers";
 
 type Schema = components["schemas"];
+type NativeArchive = Awaited<ReturnType<typeof archive>>;
+
+// This companion is separate from the immutable restore-response checkpoint.
+// Only native content archives and allowlisted save witnesses enter it.
+function stagePath(): string {
+  const path = process.env.FVOCI_E2E_RESTORE_INPUT;
+  if (!path?.startsWith("/")) throw new Error("RESTORE_STAGE_INPUT_MISSING");
+  return path + ".stage.private.json";
+}
+async function previousStage(): Promise<NativeArchive | null> {
+  try {
+    const facts = lstatSync(stagePath());
+    expect(
+      facts.isFile() &&
+        !facts.isSymbolicLink() &&
+        facts.size <= 64 * 1024 * 1024 &&
+        (facts.mode & 0o777) === 0o600,
+    ).toBe(true);
+    const saved = z
+      .object({ base64: z.string() })
+      .strict()
+      .parse(JSON.parse(readFileSync(stagePath(), "utf8")));
+    return await decodeArchive(Buffer.from(z.string().parse(saved.base64), "base64"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("RESTORE_STAGE_INPUT_INVALID", { cause: error });
+  }
+}
+
+async function archiveRow(captured: NativeArchive, document: string) {
+  const native = rows(captured.graph, "states").filter(
+    (row) => row.target_kind === "document" && row.target_id === document,
+  );
+  expect(native).toHaveLength(1);
+  const state = native[0];
+  if (!state) throw new Error("RESTORE_STAGE_STATE_MISSING");
+  const entry = captured.zip.file(z.string().parse(state.state_entry));
+  if (!entry) throw new Error("RESTORE_STAGE_STATE_MISSING");
+  expect(state.encoding).toBe(1);
+  const updates = await Promise.all(
+    rows(state, "updates").map(async (update) => {
+      const payload = captured.zip.file(z.string().parse(update.payload_entry));
+      if (!payload) throw new Error("RESTORE_STAGE_UPDATE_MISSING");
+      return {
+        seq: update.seq,
+        op: update.op_id,
+        hex: (await payload.async("nodebuffer")).toString("hex"),
+      };
+    }),
+  );
+  const body = rows(captured.graph, "documents").find((row) => row.id === document);
+  if (!body) throw new Error("RESTORE_STAGE_DOCUMENT_MISSING");
+  return {
+    state: (await entry.async("nodebuffer")).toString("hex"),
+    cutoff: state.snapshot_cutoff_seq,
+    tail: state.tail_seq,
+    content: body.content_json,
+    updates,
+    receipts: rows(state, "receipts").map((receipt) => ({
+      seq: receipt.seq,
+      op: receipt.op_id,
+      len: receipt.payload_len,
+      sha: receipt.payload_sha256,
+      actor: receipt.actor_user_id,
+    })),
+  };
+}
+
+/** Installed lib0/Yjs codecs read only document sync writes and SyncStatus.
+ * Auth, awareness and unknown frame bodies are never read or retained here;
+ * stateless capture retains only the existing allowlisted persist UUIDs. */
+function freshSyncWitness(page: Page, routingKey: string, before: Record<string, unknown>) {
+  const sync: Array<{
+    sha: string;
+    len: number;
+    empty: boolean;
+    applied: boolean;
+    fullStateUnchanged: boolean;
+  }> = [];
+  let invalid = false;
+  let connections = 0;
+  let order = 0;
+  const syncOrder: number[] = [];
+  const persistOrder = new Map<string, number>();
+  const wire: CollabWireLog = { sent: [], received: [] };
+  page.on("websocket", (ws) => {
+    connections += 1;
+    const pending: typeof sync = [];
+    const read = (payload: string | Buffer, sent: boolean) => {
+      const frameOrder = order++;
+      const bytes = frameBytes(payload);
+      if (bytes.length <= 1) return;
+      try {
+        const decoder = decoding.createDecoder(bytes);
+        const routing = decoding.readVarString(decoder);
+        const type = MessageType[decoding.readVarUint(decoder)];
+        if (sent && type === "Sync") {
+          const step = decoding.readVarUint(decoder);
+          if (step !== messageYjsSyncStep2 && step !== messageYjsUpdate) return;
+          if (routing !== routingKey) {
+            invalid = true;
+            return;
+          }
+          const update = decoding.readVarUint8Array(decoder);
+          if (decoding.hasContent(decoder) || update.length === 0) {
+            invalid = true;
+            return;
+          }
+          const record = {
+            sha: hash(update),
+            len: update.length,
+            empty: update.length === 2 && update[0] === 0 && update[1] === 0,
+            applied: false,
+            fullStateUnchanged: restoreStateDigest(before, [update]) === restoreStateDigest(before),
+          };
+          sync.push(record);
+          syncOrder.push(frameOrder);
+          pending.push(record);
+        } else if (!sent && type === "SyncStatus") {
+          if (routing !== routingKey) {
+            invalid = true;
+            return;
+          }
+          const applied = decoding.readVarInt(decoder);
+          const write = pending.shift();
+          if (!write || applied !== 1 || decoding.hasContent(decoder)) {
+            invalid = true;
+            return;
+          }
+          write.applied = true;
+        } else if (type === "Stateless" && routing === routingKey) {
+          const payload = decoding.readVarString(decoder);
+          const parts = persistParts(payload);
+          if (parts && !decoding.hasContent(decoder)) {
+            (sent ? wire.sent : wire.received).push({ kind: "stateless", routingKey, payload });
+            if (sent && parts.kind === "request") persistOrder.set(parts.id, frameOrder);
+          }
+        }
+      } catch {
+        invalid = true;
+      }
+    };
+    ws.on("framesent", (frame) => {
+      read(frame.payload, true);
+    });
+    ws.on("framereceived", (frame) => {
+      read(frame.payload, false);
+    });
+  });
+  return {
+    sync,
+    wire,
+    valid: (requestId: string) =>
+      !invalid &&
+      connections === 1 &&
+      sync.length > 0 &&
+      sync.every((item) => item.applied) &&
+      syncOrder.every((sent) => sent < (persistOrder.get(requestId) ?? -1)),
+  };
+}
+
+async function freshStage(
+  page: Page,
+  state: Checkpoint,
+  beforeArchive: NativeArchive,
+  info: TestInfo,
+  destination = false,
+): Promise<void> {
+  const workspace = destination ? state.destination?.workspace : state.source.workspace;
+  const actor = destination ? state.destination?.actor : state.source.actor;
+  if (!workspace || !actor) throw new Error("RESTORE_STAGE_IDENTITY_MISSING");
+  const before = await archiveRow(beforeArchive, state.source.document.id);
+  const capture = freshSyncWitness(
+    page,
+    `${workspace.id}:document:${state.source.document.id}`,
+    before,
+  );
+  const editor = await openEditor(page, documentUrl(state, workspace.slug));
+  await expect(editor).toContainText(LITERALS.before);
+  await expect(editor).not.toContainText(LITERALS.after);
+  await persistBody(page);
+  const requestId = await expectMatchingPersistAck(page, capture.wire);
+  expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
+  const base = documentBase(state, workspace.id);
+  const preview = await jsonObject(
+    page.request.get(`${base}/revisions/${state.source.sourceRevision}/restore-preview`),
+  );
+  const finalTail = z.string().parse(preview.currentTailSeq);
+  // Closing the editor before capture prevents a later client write from
+  // being folded into this independently observed durable barrier.
+  await page.close();
+  expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
+  const afterArchive = await archive(page.request, workspace.id, state.source.project.id);
+  const after = await archiveRow(afterArchive, state.source.document.id);
+  const priorState = rows(beforeArchive.graph, "states").find(
+    (row) => row.target_id === state.source.document.id,
+  );
+  const finalState = rows(afterArchive.graph, "states").find(
+    (row) => row.target_id === state.source.document.id,
+  );
+  if (!priorState || !finalState) throw new Error("RESTORE_STAGE_STATE_MISSING");
+  expect(finalState.created_at).toBe(priorState.created_at);
+  expect(finalState.state_entry).toBe(priorState.state_entry);
+  for (const receipt of rows(priorState, "receipts"))
+    expect(rows(finalState, "receipts")).toContainEqual(receipt);
+  const witness = {
+    document: state.source.document.id,
+    actor,
+    beforeTail: String(before.tail),
+    finalTail,
+    fullStateSha256: restoreStateDigest(before),
+    ack: { requestId, matched: true },
+    sync: capture.sync,
+  };
+  verifyRestoreStage(before, after, witness, state.source.document.id, actor);
+  // The acknowledged sync response may compact this one native state. All
+  // other content, IDs, precision, revisions and archive members stay exact.
+  const graph = structuredClone(beforeArchive.graph);
+  const states = rows(graph, "states");
+  const target = states.findIndex(
+    (row) => row.target_id === state.source.document.id && row.target_kind === "document",
+  );
+  if (target < 0) throw new Error("RESTORE_STAGE_STATE_MISSING");
+  states[target] = finalState;
+  graph.states = states;
+  graph.captured_at = afterArchive.graph.captured_at;
+  const inventory = rows(afterArchive.graph, "native_inventory");
+  graph.native_inventory = rows(graph, "native_inventory").map((row, index) => {
+    const current = inventory[index];
+    if (!current) throw new Error("RESTORE_STAGE_INVENTORY_MISSING");
+    if (index === target) {
+      expect(current).toEqual({ ...row, binding: current.binding, work: current.work });
+      return current;
+    }
+    return { ...row, binding: current.binding };
+  });
+  expect(afterArchive.graph).toEqual(graph);
+  const nativePrefix = `native/document/${state.source.document.id}/`;
+  const retained = (name: string) =>
+    !name.startsWith(nativePrefix) && name !== "graph.json" && name !== "manifest.json";
+  expect(Object.keys(afterArchive.zip.files).filter(retained).sort()).toEqual(
+    Object.keys(beforeArchive.zip.files).filter(retained).sort(),
+  );
+  for (const name of Object.keys(beforeArchive.zip.files).filter(retained)) {
+    const old = beforeArchive.zip.file(name),
+      current = afterArchive.zip.file(name);
+    if (!old || !current) throw new Error("RESTORE_ARCHIVE_MEMBER_MISSING");
+    expect(await current.async("nodebuffer")).toEqual(await old.async("nodebuffer"));
+  }
+  await info.attach("restore-stage.private.json", {
+    body: JSON.stringify({ before, witness }),
+    contentType: "application/json",
+  });
+  writeFileSync(stagePath(), JSON.stringify({ base64: afterArchive.bytes.toString("base64") }), {
+    mode: 0o600,
+  });
+  chmodSync(stagePath(), 0o600);
+}
+
+async function exactArchive(
+  actual: NativeArchive,
+  expected: NativeArchive,
+  destination?: { actor: string; workspace: string },
+) {
+  expect(
+    Date.parse(z.iso.datetime({ offset: true }).parse(actual.graph.captured_at)),
+  ).toBeGreaterThanOrEqual(
+    Date.parse(z.iso.datetime({ offset: true }).parse(expected.graph.captured_at)),
+  );
+  let graph: Record<string, unknown>;
+  if (destination)
+    graph = remappedGraph(expected.graph, actual.graph, destination.actor, destination.workspace);
+  else {
+    graph = structuredClone(expected.graph);
+    graph.captured_at = actual.graph.captured_at;
+    const inventory = rows(actual.graph, "native_inventory");
+    expect(inventory).toHaveLength(rows(graph, "native_inventory").length);
+    graph.native_inventory = rows(graph, "native_inventory").map((row, index) => ({
+      ...row,
+      binding: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .parse(inventory[index]?.binding),
+    }));
+  }
+  expect(actual.graph).toEqual(graph);
+  expect(actual.manifest).toEqual({
+    ...expected.manifest,
+    captured_at: actual.graph.captured_at,
+    entries: { ...expected.manifest.entries, "graph.json": actual.manifest.entries["graph.json"] },
+  });
+  expect(new Set(Object.keys(actual.zip.files))).toEqual(new Set(Object.keys(expected.zip.files)));
+  for (const [name, entry] of Object.entries(expected.zip.files)) {
+    if (name === "graph.json" || name === "manifest.json") continue;
+    const current = actual.zip.file(name);
+    if (!current) throw new Error("RESTORE_ARCHIVE_MEMBER_MISSING");
+    expect(await current.async("nodebuffer")).toEqual(await entry.async("nodebuffer"));
+  }
+}
 
 test("Turso restore U6: UI confirm has one forward revision and matching save ACK", async ({
   browser,
@@ -169,15 +475,25 @@ test("Turso restore U6: UI confirm has one forward revision and matching save AC
         expectedTail: intent.expectedTailSeq,
       },
     };
+    await page.close();
+    const restorePoint = await archive(context.request, workspace.id, project.id);
+    expect(
+      BigInt(
+        z
+          .number()
+          .int()
+          .parse((await archiveRow(restorePoint, document.id)).tail),
+      ),
+    ).toBe(BigInt(tail));
     const fresh = await newCollabContext(browser, baseURL);
     let freshFailed = true;
     try {
       const client = await fresh.newPage();
       await login(client, admin.email, admin.password);
-      await expect(await openEditor(client, url)).toContainText(LITERALS.before);
       expect((await jsonObject(client.request.get(base + "/body"))).contentJson).toEqual(
         sourceDetail.contentJson,
       );
+      await freshStage(client, state, restorePoint, info);
       freshFailed = false;
     } finally {
       await closeCollabContext(fresh, freshFailed);
@@ -196,7 +512,7 @@ test("Turso restore U6: UI confirm has one forward revision and matching save AC
 test("Turso restore source restart: fresh client retains U6 body history and tail", async ({
   browser,
   baseURL,
-}) => {
+}, info) => {
   if (!baseURL) throw new Error("Allocated restarted source server required");
   const state = readCheckpoint();
   const context = await newCollabContext(browser, baseURL);
@@ -204,9 +520,10 @@ test("Turso restore source restart: fresh client retains U6 body history and tai
   try {
     const page = await context.newPage();
     await login(page, admin.email, admin.password);
-    const editor = await openEditor(page, documentUrl(state));
-    await expect(editor).toContainText(LITERALS.before);
-    await expect(editor).not.toContainText(LITERALS.after);
+    const before = await archive(page.request, state.source.workspace.id, state.source.project.id);
+    const previous = await previousStage();
+    if (!previous) throw new Error("RESTORE_STAGE_INPUT_MISSING");
+    await exactArchive(before, previous);
     const base = documentBase(state);
     expect((await jsonObject(page.request.get(base + "/body"))).contentJson).toEqual(
       state.source.restoredBody,
@@ -214,7 +531,9 @@ test("Turso restore source restart: fresh client retains U6 body history and tai
     const preview = await jsonObject(
       page.request.get(`${base}/revisions/${state.source.sourceRevision}/restore-preview`),
     );
-    expect(preview.currentTailSeq).toBe(state.source.restoredTail);
+    expect(preview.currentTailSeq).toBe(
+      String((await archiveRow(before, state.source.document.id)).tail),
+    );
     const history = await jsonObject(page.request.get(base + "/revisions"));
     const items = z.array(z.record(z.string(), z.unknown())).parse(history.items);
     for (const old of z
@@ -222,6 +541,7 @@ test("Turso restore source restart: fresh client retains U6 body history and tai
       .parse(z.record(z.string(), z.unknown()).parse(state.source.history).items))
       expect(items).toContainEqual(old);
     expect(items.filter((item) => item.reason === "restore")).toHaveLength(1);
+    await freshStage(page, state, before, info);
     failed = false;
   } finally {
     await closeCollabContext(context, failed);
@@ -520,15 +840,20 @@ test("Turso restore destination: malformed input publishes nothing and identical
       job: { ...queued, status: "completed", projectId: state.source.project.id },
     };
     writeCheckpoint(state);
+    // Import is checked byte for byte before any fresh client can append its
+    // accepted sync response. Later stages retain their own durable witness.
+    const imported = await archive(page.request, workspace.id, state.source.project.id);
+    await exactArchive(imported, await decodeArchive(Buffer.from(exported.base64, "base64")), {
+      actor: actor.userId,
+      workspace: workspace.id,
+    });
     const fresh = await newCollabContext(browser, baseURL);
     let freshFailed = true;
     try {
       const client = await fresh.newPage();
       await login(client, admin.email, admin.password);
       await restoredReadback(client, state);
-      await expect(await openEditor(client, documentUrl(state, workspace.slug))).toContainText(
-        LITERALS.before,
-      );
+      await freshStage(client, state, imported, info, true);
       freshFailed = false;
     } finally {
       await closeCollabContext(fresh, freshFailed);
@@ -555,7 +880,7 @@ test("Turso restore destination: malformed input publishes nothing and identical
 test("Turso restore destination restart: fresh client reads exact archive data and permissions", async ({
   browser,
   baseURL,
-}) => {
+}, info) => {
   if (!baseURL) throw new Error("Allocated restarted destination required");
   const state = readCheckpoint();
   if (!state.destination) throw new Error("Actual destination required");
@@ -566,10 +891,16 @@ test("Turso restore destination restart: fresh client reads exact archive data a
     await login(page, admin.email, admin.password);
     const actor = await json(page.request.get("/api/v1/auth/me"), identitySchema);
     expect(actor.userId).toBe(state.destination.actor);
+    const before = await archive(
+      page.request,
+      state.destination.workspace.id,
+      state.source.project.id,
+    );
+    const previous = await previousStage();
+    if (!previous) throw new Error("RESTORE_STAGE_INPUT_MISSING");
+    await exactArchive(before, previous);
     await restoredReadback(page, state);
-    await expect(
-      await openEditor(page, documentUrl(state, state.destination.workspace.slug)),
-    ).toContainText(LITERALS.before);
+    await freshStage(page, state, before, info, true);
     failed = false;
   } finally {
     await closeCollabContext(context, failed);
@@ -594,31 +925,9 @@ test("Turso restore archive comparison: re-export preserves native bytes with ex
       state.destination.workspace.id,
       state.source.project.id,
     );
-    expect(actual.graph).toEqual(
-      remappedGraph(
-        state.archive.graph,
-        actual.graph,
-        state.destination.actor,
-        state.destination.workspace.id,
-      ),
-    );
-    const sourceArchive = await decodeArchive(Buffer.from(state.archive.base64, "base64"));
-    const sourceZip = sourceArchive.zip;
-    expect(actual.manifest).toEqual({
-      ...sourceArchive.manifest,
-      captured_at: actual.graph.captured_at,
-      entries: {
-        ...sourceArchive.manifest.entries,
-        "graph.json": actual.manifest.entries["graph.json"],
-      },
-    });
-    expect(new Set(Object.keys(actual.zip.files))).toEqual(new Set(Object.keys(sourceZip.files)));
-    for (const [name, entry] of Object.entries(sourceZip.files)) {
-      if (name === "graph.json" || name === "manifest.json") continue;
-      const current = actual.zip.file(name);
-      if (!current) throw new Error("Native archive member missing");
-      expect(await current.async("nodebuffer")).toEqual(await entry.async("nodebuffer"));
-    }
+    const previous = await previousStage();
+    if (!previous) throw new Error("RESTORE_STAGE_INPUT_MISSING");
+    await exactArchive(actual, previous);
     failed = false;
   } finally {
     await closeCollabContext(context, failed);

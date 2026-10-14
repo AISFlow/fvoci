@@ -3,6 +3,7 @@
 import { deepEquals } from "bun";
 import { closeSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import * as Y from "yjs";
 import { root as checkout, digest } from "../selected-backend-ci/io.ts";
 import {
   assertPreserved,
@@ -33,6 +34,84 @@ import type { Scope } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
 
 export const RESTORE_CONFIG = "turso-restore-playwright.config.ts";
+
+/** Compare the full CRDT, including deleted structs, rather than its visible
+ * body or state vector. The archive and primary observer both expose V1 data. */
+export function restoreStateDigest(row: Record_, extra: Uint8Array[] = []): string {
+  const doc = new Y.Doc({ gc: false });
+  const bytes = (value: unknown) => {
+    require(typeof value === "string" &&
+      /^(?:[a-f0-9]{2})+$/.test(value), "RESTORE_STAGE_STATE_INVALID");
+    return Buffer.from(value, "hex");
+  };
+  try {
+    Y.applyUpdate(doc, bytes(get(row, "state")));
+    for (const update of list(row, "updates")) Y.applyUpdate(doc, bytes(get(update, "hex")));
+    for (const update of extra) Y.applyUpdate(doc, update);
+    return digest(Y.encodeStateAsUpdate(doc));
+  } finally {
+    doc.destroy();
+  }
+}
+
+/** A fresh client's independently observed save barrier permits precisely its
+ * acknowledged no-effect sync writes, never an arbitrary later native tail. */
+export function verifyRestoreStage(
+  before: Record_,
+  after: Record_,
+  witness: Record_,
+  document: string,
+  actor: string,
+): void {
+  require(get(witness, "document") === document &&
+    get(witness, "actor") === actor, "RESTORE_STAGE_IDENTITY_MISMATCH");
+  require(get(witness, "ack", "matched") === true &&
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+      String(get(witness, "ack", "requestId")),
+    ), "RESTORE_STAGE_ACK_MISSING");
+  const updates = list(witness, "sync");
+  require(updates.length > 0 &&
+    updates.every(
+      (update) =>
+        get(update, "applied") === true &&
+        get(update, "fullStateUnchanged") === true &&
+        typeof get(update, "empty") === "boolean" &&
+        /^[a-f0-9]{64}$/.test(String(get(update, "sha"))) &&
+        typeof get(update, "len") === "number" &&
+        Number.isSafeInteger(get(update, "len")) &&
+        Number(get(update, "len")) > 0 &&
+        (get(update, "empty") === false ||
+          (get(update, "len") === 2 && get(update, "sha") === digest(new Uint8Array([0, 0])))),
+    ), "RESTORE_STAGE_SYNC_UNCONFIRMED");
+  const writes = updates.filter((update) => get(update, "empty") === false);
+  require(typeof before.tail === "number" &&
+    Number.isSafeInteger(before.tail) &&
+    before.tail >= 0 &&
+    typeof after.tail === "number" &&
+    Number.isSafeInteger(after.tail) &&
+    String(before.tail) === get(witness, "beforeTail") &&
+    String(after.tail) === get(witness, "finalTail") &&
+    BigInt(after.tail) ===
+      BigInt(before.tail) + BigInt(writes.length), "RESTORE_NATIVE_TAIL_MISMATCH");
+  require(restoreStateDigest(before) === get(witness, "fullStateSha256") &&
+    restoreStateDigest(after) === get(witness, "fullStateSha256") &&
+    deepEquals(before.content, after.content, true), "RESTORE_STAGE_STATE_CHANGED");
+  const prior = list(before, "receipts"),
+    current = list(after, "receipts");
+  require(nativeReceiptsRetained(prior, current) &&
+    current.length === prior.length + writes.length, "RESTORE_STAGE_RECEIPTS_CHANGED");
+  for (const [index, update] of writes.entries()) {
+    const seq = before.tail + index + 1;
+    const matches = current.filter((receipt) => get(receipt, "seq") === seq);
+    require(matches.length === 1 &&
+      get(matches[0], "actor") === actor &&
+      get(matches[0], "sha") === get(update, "sha") &&
+      get(matches[0], "len") === get(update, "len") &&
+      /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+        String(get(matches[0], "op")),
+      ), "RESTORE_STAGE_UPDATE_MISMATCH");
+  }
+}
 export const RESTORE_TITLES = Object.freeze([
   "Turso restore U6: UI confirm has one forward revision and matching save ACK",
   "Turso restore source restart: fresh client retains U6 body history and tail",
@@ -263,7 +342,7 @@ export async function executeRestore(
     const owner = setup ? null : await steps.fixture(scope, manifest, "owner", sourceEnv);
     if (owner) rememberActor(audit, owner, namespace);
     const source = await begin("source", sourceEnv, true, setup);
-    await run(0, source, "libsql-remote", setup);
+    const sourceCases = await run(0, source, "libsql-remote", setup);
     const state = privateRead(input);
     const actor = uuidHex(get(state, "source", "actor")),
       team = uuidHex(get(state, "source", "team", "id"));
@@ -276,10 +355,16 @@ export async function executeRestore(
       audit.workspaces[team] = namespace;
     }
     const first = await observe();
-    require(typeof first.tail === "number" &&
-      Number.isSafeInteger(first.tail) &&
-      BigInt(first.tail) ===
-        BigInt(get(state, "source", "restoredTail") as string), "RESTORE_NATIVE_TAIL_MISMATCH");
+    const firstStage = attachment(sourceCases, "restore-stage.private.json");
+    require(String(get(firstStage, "before", "tail")) ===
+      get(state, "source", "restoredTail"), "RESTORE_NATIVE_TAIL_MISMATCH");
+    verifyRestoreStage(
+      record(firstStage, "before"),
+      first,
+      record(firstStage, "witness"),
+      String(get(state, "source", "document", "id")),
+      String(get(state, "source", "actor")),
+    );
     require(list(first, "receipts").length >= 2 &&
       deepEquals(
         first.content,
@@ -292,8 +377,23 @@ export async function executeRestore(
         get(state, "source", "restoredRevision"), "RESTORE_NATIVE_REVISION_MISMATCH");
     await stop(source);
     const restarted = await begin("source-restart", sourceEnv, true);
-    await run(1, restarted, "libsql-remote");
+    const restartCases = await run(1, restarted, "libsql-remote");
     const fresh = await observe();
+    const restartStage = attachment(restartCases, "restore-stage.private.json");
+    require(get(restartStage, "before", "tail") === first.tail &&
+      restoreStateDigest(record(restartStage, "before")) === restoreStateDigest(first) &&
+      deepEquals(
+        get(restartStage, "before", "receipts"),
+        first.receipts,
+        true,
+      ), "RESTORE_SOURCE_RESTART_MISMATCH");
+    verifyRestoreStage(
+      record(restartStage, "before"),
+      fresh,
+      record(restartStage, "witness"),
+      String(get(state, "source", "document", "id")),
+      String(get(state, "source", "actor")),
+    );
     require(deepEquals(first.content, fresh.content, true) &&
       nativeReceiptsRetained(
         list(first, "receipts"),
