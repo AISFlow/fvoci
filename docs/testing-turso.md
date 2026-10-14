@@ -224,7 +224,7 @@ fixture counterexamples with unchanged persisted rows/catalog, and a lost
 commit reply without a fresh blank observer. Loopback sqld is separate from
 the pinned local SQLite engine and actual Turso acceptance.
 
-Other phases (`crud`, `transactions`, `persistence`, `restore`) remain
+Other phases (`crud`, `transactions`, `persistence`) remain
 **NOT IMPLEMENTED** and refuse before credential consumption. `ui-ack` is an
 allowed dispatch input, with `ui-baseline`, on main, the reviewed branch, or
 `fvoci/v060-product-integration-20261005`. Current tenant
@@ -234,6 +234,43 @@ fresh-client history require their own product acceptance in the checkpoint.
 Local SQLite or loopback SDK results cannot be labeled actual Turso PASS. Constant per-database
 concurrency remains `cancel-in-progress:false`; no service resource reset,
 provider/account/secret/policy/permission change is made by the worker.
+
+The separate `restore` phase is admitted only on exact main source, with both
+destructive gates and the just-observed baseline and target digests required
+by `ui-ack`. It uses the same credential-free build seal, private keyring,
+normal migration/server lifecycle, native observer and source preservation
+audit. Its six browser cases cover UI revision preview/confirm and command
+replay with matching save ACK, source restart, authenticated current native
+archive export, malformed input rejection and one-job restore replay into an
+independent SQLite installation, destination restart, and archive comparison.
+All six must actually pass once; missing, skipped, retried or zero-case reports
+refuse success. Existing `ui-ack` retains its ON/restart/OFF counts and reports
+restore and precision as NOTRUN.
+
+This transfer exercises the current single-author private-project archive:
+content IDs, references, native history and revision provenance, attachment
+bytes, numeric and timestamp values travel through authenticated HTTP. The
+source actor and workspace map explicitly to the destination owner and personal
+workspace. Activity actor fields become null under the existing inert provenance
+contract. Capture time and its inventory association binding change on re-export;
+all other inventory evidence and native member bytes remain exact. Each archive
+manifest is checked against actual member sizes and SHA256 digests, and a rebound
+binding with a valid ZIP manifest must be rejected by real product preflight.
+Authentication, sessions, credentials and operational database state
+are outside that content archive. Unsupported archive models remain product
+refusals; SQLite file copying is not this backup contract. Authorized fresh
+clients read the restored data and anonymous requests are denied. A supplemental
+readonly destination count witness checks publication and one-job replay;
+its Bun SQLite version is recorded separately from the product's sealed native
+SQLite, and counts alone do not establish full-row preservation.
+
+Local `tools/turso/ui.ts --local-restore` requires the maintained controller
+allocation for its immutable source, stages, native inputs and owned output.
+It consumes the shared pinned official sqld/TLS fixture as source and a distinct
+owned SQLite destination. Local evidence is separate from hosted acceptance.
+The controller serializes final hosted execution on a green exact main SHA,
+owns the destructive flag lifecycle, and retains one hosted primary. The worker
+does not access hosted credentials or dispatch that execution.
 
 Pure local checks: `bun tools/turso/fixtures.ts` (the admission fixtures, from
 any directory and without `bun install`: it runs the pinned guard
