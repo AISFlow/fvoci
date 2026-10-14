@@ -1,14 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HELPER } from "./fixtures.ts";
+import { groupVerdict } from "./run.ts";
 
-const runner = readFileSync(join(import.meta.dir, "../../scripts/keycloak-oidc-e2e.sh"), "utf8");
-const marker = 'echo "=== summary (Keycloak ';
-const start = runner.indexOf(marker);
-if (start < 0) throw new Error("Keycloak runner summary block is missing");
-const summary = runner.slice(start);
 let dir = "";
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "kc-group-verdict-"));
@@ -25,32 +20,11 @@ function verdict(report: unknown, status = 0, mode = "flows", log?: string) {
   const logFile = join(dir, "out", `${mode}.log`);
   if (log === undefined) rmSync(logFile, { force: true });
   else writeFileSync(logFile, log);
-  const child = Bun.spawnSync(
-    [
-      "bash",
-      "-euo",
-      "pipefail",
-      "-c",
-      `
-kc_bun=$1
-kc_helper=$2
-WORK=$3
-KC_IMAGE=fixture
-ISSUER=fixture
-MODES=("$5")
-declare -A GROUP_STATUS=(["$5"]=$4)
-kc() { "$kc_bun" --no-env-file "$kc_helper" "$@"; }
-${summary}`,
-      "--",
-      process.execPath,
-      HELPER,
-      dir,
-      String(status),
-      mode,
-    ],
-    { env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" },
-  );
-  return { code: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+  let stderr = "";
+  const code = groupVerdict(join(dir, "out"), mode, status, (line) => {
+    stderr += line + "\n";
+  });
+  return { code, stdout: "", stderr };
 }
 
 const stats = (expected: unknown, skipped = 0) => ({

@@ -1,13 +1,13 @@
 // Real Keycloak (official image, start-dev) as an instance OIDC provider for
-// the release FVOCI server and the built web UI, in a real Chromium. Run by
-// scripts/keycloak-oidc-e2e.sh; skipped unless FVOCI_KC_E2E_CONFIG names that
+// the normal FVOCI server and the built web UI, in a real Chromium. Run by
+// tools/keycloak/run.ts; skipped unless FVOCI_KC_E2E_CONFIG names that
 // runner's per-run config. FVOCI_KC_E2E_MODE picks the group: each group has
 // its own server and database (the OIDC rate limit is 30 starts/callbacks per
 // IP per 5 minutes and in memory, so one server cannot take every flow).
 //
 // No value of a password, client secret, code, state, nonce, token or cookie
 // is printed, recorded, or passed to an assertion that would print it.
-import { execFileSync } from "node:child_process";
+import { observeDatabase, type LinkRow } from "./observer";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -215,75 +215,28 @@ async function discovery(): Promise<Discovery> {
 }
 
 // ---------------------------------------------------------------------------
-// This group's database (superuser through the test container: counts only)
+// Fixed native read-only observations on this group's selected backend.
 
-function sql(query: string): string {
-  const container = process.env.FVOCI_TEST_PG_CONTAINER ?? "";
-  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL ?? "";
-  if (!container || !adminUrl) throw new Error("the web e2e harness database is not available");
-  const database = new URL(adminUrl).pathname.slice(1);
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      database,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-tA",
-      "-c",
-      query,
-    ],
-    { encoding: "utf8" },
-  ).trim();
-}
-
-function count(query: string): number {
-  return Number(sql(query));
-}
-
-const userCount = () => count("SELECT count(*) FROM fvoci.users");
-const stateCount = () => count("SELECT count(*) FROM fvoci.oidc_states");
-
-type LinkRow = {
-  user: string;
-  provider: string;
-  subject: string;
-  issuer: string | null;
-  email: string | null;
+const userCount = () => observeDatabase({ operation: "users" });
+const stateCount = () => observeDatabase({ operation: "states" });
+const userId = (email: string) => {
+  const id = observeDatabase({ operation: "user", email });
+  if (!id) throw new Error("Keycloak owner observation missing");
+  return id;
 };
+const invitationAccepted = (email: string) => observeDatabase({ operation: "invitation", email });
 
 function links(): LinkRow[] {
-  return JSON.parse(
-    sql(
-      `SELECT coalesce(json_agg(json_build_object('user', u.email, 'provider', l.provider,
-         'subject', l.provider_user_id, 'issuer', l.issuer, 'email', l.email) ORDER BY u.email), '[]')
-       FROM fvoci.identity_links l JOIN fvoci.users u ON u.id = l.user_id`,
-    ),
-  ) as LinkRow[];
+  return observeDatabase({ operation: "links" });
 }
-
 function linksOf(email: string): LinkRow[] {
   return links().filter((l) => l.user === email);
 }
-
-function membershipRole(email: string): string {
-  return sql(
-    `SELECT m.role FROM fvoci.memberships m JOIN fvoci.workspaces w ON w.id = m.workspace_id
-     JOIN fvoci.users u ON u.id = m.user_id WHERE w.slug = '${WORKSPACE.slug}' AND u.email = '${email}'`,
-  );
+function membershipRole(email: string): string | null {
+  return observeDatabase({ operation: "membership", email, slug: WORKSPACE.slug });
 }
-
 function liveSessions(email: string): number {
-  return count(
-    `SELECT count(*) FROM fvoci.sessions s JOIN fvoci.users u ON u.id = s.user_id
-     WHERE u.email = '${email}' AND s.revoked_at IS NULL AND s.expires_at > now()`,
-  );
+  return observeDatabase({ operation: "sessions", email });
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +682,7 @@ async function servedAssetsWithout(page: Page, secret: string): Promise<Record<s
 // ---------------------------------------------------------------------------
 
 test.describe.configure({ mode: "serial" });
-test.skip(!kc, "opt-in: set by scripts/keycloak-oidc-e2e.sh (real Keycloak)");
+test.skip(!kc, "opt-in: set by tools/keycloak/run.ts (real Keycloak)");
 
 test.afterAll(() => {
   if (!outDir || !kc) return;
@@ -755,7 +708,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
 
   test("setup: provider listed, exact redirect URI registered, one issuer", async ({ browser }) => {
     await prepareInstance(browser);
-    ownerId = sql(`SELECT id FROM fvoci.users WHERE email = '${OWNER.email}'`);
+    ownerId = userId(OWNER.email);
     expect(ownerId.length).toBe(36);
   });
 
@@ -1045,10 +998,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       expect(await leg.pass(idpUser)).toBe("form");
       const result = await callbackResult(await leg.callback);
       const current = result.location === "/" ? await me(page) : null;
-      const accepted =
-        sql(
-          `SELECT accepted_at IS NOT NULL FROM fvoci.invitations WHERE email = '${probe.invited}'`,
-        ) === "t";
+      const accepted = invitationAccepted(probe.invited);
       const observed = {
         invitedEmail: probe.invited,
         idpEmail: idpUser.email,
@@ -1087,7 +1037,7 @@ test.describe("failure boundaries", () => {
 
   test("setup: owner links Keycloak alice; a second password member", async ({ browser }) => {
     await prepareInstance(browser);
-    ownerId = sql(`SELECT id FROM fvoci.users WHERE email = '${OWNER.email}'`);
+    ownerId = userId(OWNER.email);
     const { context, page } = await newPage(browser);
     await login(page, OWNER.email, OWNER.password);
     await openAccountSettings(page);
@@ -1388,11 +1338,7 @@ window.post = async (url, body) => {
       expect(stateCookie(await context.cookies(fvociOrigin))).toBeUndefined();
       expect(stateCount()).toBe(statesBefore);
       expect(links()).toEqual(linksBefore);
-      expect(
-        sql(
-          `SELECT accepted_at IS NULL FROM fvoci.invitations WHERE email = 'kc-xorigin@example.com'`,
-        ),
-      ).toBe("t");
+      expect(invitationAccepted("kc-xorigin@example.com")).toBe(false);
       // The owner's session was attached (same site, other origin) and is intact.
       expect((await me(page))?.userId).toBe(ownerId);
       observe("F_cross_origin", { otherOrigin, sameSite: true, ...refused, statesIssued: 0 });

@@ -1,4 +1,4 @@
-# Local, opt-in Keycloak for scripts/keycloak-oidc-e2e.sh only. Not part of
+# Local, opt-in Keycloak for tools/keycloak/run.ts only. Not part of
 # the product stack (infra/rust/compose.yml) and not a deployment example:
 # start-dev (plain HTTP, in-container dev database, no cluster), the realms
 # rendered from the templates here, published on loopback only.
@@ -20,14 +20,14 @@ services:
       - '--http-access-log-pattern=%h "%m %R" %s host=%{i,Host} ua="%{i,User-Agent}"'
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set by scripts/keycloak-oidc-e2e.sh}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set by tools/keycloak/run.ts}
     ports:
       # Ephemeral host port on loopback; the runner reads it back with
       # `docker compose port keycloak 8080`.
       - "127.0.0.1::8080"
     volumes:
       # The rendered realm files of this run (--import-realm reads them all).
-      - ${FVOCI_KC_REALM_DIR:?set by scripts/keycloak-oidc-e2e.sh}:/opt/keycloak/data/import:ro
+      - ${FVOCI_KC_REALM_DIR:?set by tools/keycloak/run.ts}:/opt/keycloak/data/import:ro
     mem_limit: 1536m
     cpus: 2
     pids_limit: 1024
