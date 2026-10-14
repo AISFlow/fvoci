@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve, join } from "node:path";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const configPath = resolve(import.meta.dir, "collab-playwright.config.ts");
@@ -108,14 +108,39 @@ test("remote setup follows the captured target state and rejects changed allocat
     leases: 0,
   };
   const fixturePath = resolve(import.meta.dir, "selected-backend-fixture.ts");
-  function run(binding: Record<string, unknown>) {
-    writeFileSync(path, JSON.stringify(binding));
-    chmodSync(path, 0o600);
-    return Bun.spawnSync(
+  // These cases vary only the binding file. Import the same real fixture once,
+  // then require it to reread and validate every changed file in the child.
+  try {
+    const result = Bun.spawnSync(
       [
         process.execPath,
         "--eval",
-        `const {selectedSetupNeeded}=await import(${JSON.stringify(fixturePath)}); console.log(selectedSetupNeeded());`,
+        `import { strict as assert } from "node:assert";
+         import { chmodSync, writeFileSync } from "node:fs";
+         const {selectedSetupNeeded}=await import(${JSON.stringify(fixturePath)});
+         const path=${JSON.stringify(path)};
+         const input=${JSON.stringify(input)};
+         function observe(binding) {
+           writeFileSync(path, JSON.stringify(binding));
+           chmodSync(path, 0o600);
+           return selectedSetupNeeded();
+         }
+         const initialized=observe(input);
+         assert.equal(initialized, false);
+         const empty=observe({...input, setupNeeded:true, commit:"not-attempted"});
+         assert.equal(empty, true);
+         const changed=[
+           {namespace:"acme"},
+           {source:"c".repeat(40)},
+           {lifecycleDrain:"failed"},
+           {leases:1},
+           {schemaCurrent:false},
+           {setupNeeded:"false"},
+         ];
+         for (const mutation of changed) {
+           assert.throws(() => observe({...input, ...mutation}));
+         }
+         console.log(JSON.stringify({initialized, empty, refused:changed.length}));`,
       ],
       {
         env: {
@@ -130,24 +155,12 @@ test("remote setup follows the captured target state and rejects changed allocat
         stderr: "pipe",
       },
     );
-  }
-  try {
-    const initialized = run(input);
-    expect(initialized.exitCode).toBe(0);
-    expect(initialized.stdout.toString().trim()).toBe("false");
-    const empty = run({ ...input, setupNeeded: true, commit: "not-attempted" });
-    expect(empty.exitCode).toBe(0);
-    expect(empty.stdout.toString().trim()).toBe("true");
-    for (const changed of [
-      { namespace: "acme" },
-      { source: "c".repeat(40) },
-      { lifecycleDrain: "failed" },
-      { leases: 1 },
-      { schemaCurrent: false },
-      { setupNeeded: "false" },
-    ]) {
-      expect(run({ ...input, ...changed }).exitCode).not.toBe(0);
-    }
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toEqual({
+      initialized: false,
+      empty: true,
+      refused: 6,
+    });
   } finally {
     rmSync(directory, { recursive: true });
   }
