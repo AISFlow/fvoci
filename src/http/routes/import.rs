@@ -386,6 +386,40 @@ mod selected_import_route_tests {
     fn body(workspace: Uuid) -> Value {
         serde_json::json!({"workspaceId":workspace,"source":"office-file","fileName":"normal.md","zipBase64":B64.encode("literal import 한글 😀")})
     }
+    /// `Fixture::new` inserts its wiki document with number 1 directly and
+    /// leaves `next_document_number` at the schema default 0. Every real
+    /// writer allocates from that counter, so record the existing number as
+    /// the real create path would have.
+    async fn align_document_counter(f: &Fixture) {
+        sqlx::query("UPDATE workspaces SET next_document_number=1 WHERE id=?1")
+            .bind(f.workspace.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    async fn document_numbers(
+        pool: &sqlx::SqlitePool,
+        workspace: Uuid,
+        documents: &[Uuid],
+    ) -> (Vec<i64>, i64) {
+        let mut numbers = Vec::new();
+        for document in documents {
+            numbers.push(
+                sqlx::query_scalar("SELECT number FROM documents WHERE workspace_id=?1 AND id=?2")
+                    .bind(workspace.as_bytes().as_slice())
+                    .bind(document.as_bytes().as_slice())
+                    .fetch_one(pool)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let next = sqlx::query_scalar("SELECT next_document_number FROM workspaces WHERE id=?1")
+            .bind(workspace.as_bytes().as_slice())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (numbers, next)
+    }
 
     #[tokio::test]
     async fn import_selected_http_submit_real_queue_claim_fresh_status_and_denials() {
@@ -462,6 +496,77 @@ mod selected_import_route_tests {
         f.close().await;
     }
 
+    /// An import into a workspace that already has a document takes the next
+    /// number, and the ordinary create command continues from the same
+    /// counter. No native input: the publisher runs without a native seed.
+    #[tokio::test]
+    async fn import_selected_http_publication_takes_the_next_number_after_existing_documents() {
+        let f = Fixture::new().await;
+        align_document_counter(&f).await;
+        let (credential, token) = session(&f).await;
+        let storage = crate::attachments::ObjectStorage::local(f.root.join("import-http-storage"));
+        let app = router().with_state(state(f.backend.clone(), storage));
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/import",
+            Some(&token),
+            body(f.workspace),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let claim = crate::db::import_jobs::claim_next_import_job_backend(&f.backend)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(created["id"], claim.job_id.to_string());
+        let imported = crate::db::documents::publish_import_document_backend(
+            &f.backend,
+            crate::db::documents::ImportDocumentPublication {
+                owner: crate::db::documents::ImportDocumentOwner::Async(&claim),
+                title: "normal",
+                parent_id: None,
+                native: None,
+            },
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let path = format!(
+            "/api/v1/import/{}?workspaceId={}",
+            claim.job_id, f.workspace
+        );
+        let (status, observed) = request(app, "GET", &path, Some(&token), Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(observed["status"], "running");
+        assert_eq!(
+            observed["createdDocumentIds"],
+            serde_json::json!([imported.to_string()])
+        );
+        let ordinary = crate::db::documents::create_wiki_document_command_backend(
+            &f.backend,
+            f.workspace,
+            f.user,
+            credential,
+            Uuid::now_v7(),
+            crate::db::documents::CreateDocumentInput {
+                parent_id: None,
+                title: "ordinary",
+                icon: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+        assert_eq!(
+            document_numbers(&f.pool, f.workspace, &[f.document, imported, ordinary]).await,
+            (vec![1, 2, 3], 3)
+        );
+        f.close().await;
+    }
+
     /// This case requires the allocated real server/engine binaries. It fails
     /// on missing native inputs rather than skipping or substituting a mock.
     #[cfg(feature = "db-tests")]
@@ -480,6 +585,7 @@ mod selected_import_route_tests {
             ..crate::import_job::ImportJobSettings::from_env()
         };
         let f = Fixture::new().await;
+        align_document_counter(&f).await;
         let (_, token) = session(&f).await;
         let storage = crate::attachments::ObjectStorage::local(f.root.join("import-http-storage"));
         let mut initial = state(f.backend.clone(), storage.clone());
@@ -559,6 +665,10 @@ mod selected_import_route_tests {
         .await
         .unwrap();
         assert_eq!(current, ("completed".into(), 1, None, None));
+        assert_eq!(
+            document_numbers(&fresh_pool, f.workspace, &[f.document, document]).await,
+            (vec![1, 2], 2)
+        );
         fresh_pool.close().await;
         f.close().await;
     }
