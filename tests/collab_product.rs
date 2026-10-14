@@ -1,5 +1,8 @@
 #![cfg(feature = "db-tests")]
 
+#[path = "collab_product/auth_session_family.rs"]
+mod auth_session_family;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
