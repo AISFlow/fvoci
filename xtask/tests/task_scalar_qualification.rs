@@ -29,17 +29,22 @@ fn measure_reports_the_actual_native_runtime_and_rejects_extra_arguments() {
     assert!(output.stdout.is_empty());
 }
 
-#[cfg(target_arch = "x86_64")]
 #[test]
-fn a_foreign_host_cannot_produce_an_arm_qualification_receipt() {
+fn qualification_without_its_inputs_fails_closed_without_a_receipt() {
+    let directory = std::env::temp_dir().join(format!(
+        "fvoci-task-scalar-never-created-{}",
+        std::process::id()
+    ));
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args([
             "task-scalar-qualification",
             "bootstrap",
             "--image",
             "never-started",
-            "--directory",
-            "never-created",
+        ])
+        .arg("--directory")
+        .arg(&directory)
+        .args([
             "--target-dir",
             "never-built",
             "--sqlite-inputs",
@@ -47,8 +52,9 @@ fn a_foreign_host_cannot_produce_an_arm_qualification_receipt() {
         ])
         .output()
         .unwrap();
+    // A native host now proceeds past the architecture check, but no receipt
+    // directory exists without a clean checkout and its verified install image.
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("requires native aarch64 execution"));
+    assert!(output.stdout.is_empty());
+    assert!(!directory.exists());
 }

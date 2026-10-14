@@ -11,6 +11,9 @@ publish = false
 # zip 8.6.0 is the newest stable release at least two weeks old (2026-04-25);
 # only raw DEFLATE decoding is enabled (no encryption, writers or other codecs).
 [dependencies]
+# task-scalar-qualification reference: the root lockfile's base64 pin, standard
+# alphabet with padding, as the product decoder reads the sealed profile.
+base64 = "=0.22.1"
 libc = "=0.2.190"
 serde_json = "=1.0.154"
 sha2 = "=0.11.0"

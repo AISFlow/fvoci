@@ -1,18 +1,25 @@
 //! Native GNU input measurement for the Task scalar qualification.
 //! Measurements are evidence only; product admission uses its sealed profile.
+//! `reference` recaptures the sealed reference bytes from a pinned image and
+//! `seal` admits CI-produced bootstrap receipts into the profile envelope.
 
 use crate::args::{self, Outcome};
 use crate::process;
 use crate::rust_binaries_archive::file_sha256;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-const USAGE: &str = "usage: xtask task-scalar-qualification {measure | image-measure --image REF --directory DIRECTORY | {bootstrap,final} --image REF --directory DIRECTORY --target-dir TARGET --sqlite-inputs FILE}";
+const USAGE: &str = "usage: xtask task-scalar-qualification {measure | image-measure --image REF --directory DIRECTORY | {bootstrap,final} --image REF --directory DIRECTORY --target-dir TARGET --sqlite-inputs FILE | reference --image NAME:TAG@sha256:DIGEST --directory DIRECTORY | seal --x86-64-receipt FILE --aarch64-receipt FILE}";
 const READ: Duration = Duration::from_secs(300);
+const PROFILE: &str = "src/db/task_scalar_pg18_profile.json";
+const LICENSE: &str = "src/db/task_scalar_pg18_profile.LICENSE";
+const CONSUMER: &str = "src/db/tasks.rs";
+const OWNER_LABEL: &str = "io.fvoci.task-scalar-qualification.owner";
 
 pub fn runtime() -> Result<Value, String> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -60,6 +67,58 @@ fn docker_text(arguments: &[&str]) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Docker's name for the native architecture; foreign images are refused.
+fn native_image_arch() -> Result<&'static str, String> {
+    match std::env::consts::ARCH {
+        "aarch64" => Ok("arm64"),
+        "x86_64" => Ok("amd64"),
+        _ => Err("Task scalar image architecture unsupported".into()),
+    }
+}
+
+/// Create (never start) a container under a preselected owned name. A failed
+/// create may still have reached the daemon: reclaim by that name only after
+/// its label proves ownership.
+fn create_owned(options: Vec<OsString>, image_and_argv: Vec<OsString>) -> Result<String, String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let name = format!("fvoci-task-scalar-{}-{nonce}", std::process::id());
+    let owner = format!("{OWNER_LABEL}={name}");
+    let mut arguments: Vec<OsString> = ["create", "--name", &name, "--label", &owner]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    arguments.extend(options);
+    arguments.extend(image_and_argv);
+    let created = docker(&arguments).and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map(|s| s.trim().to_owned())
+            .map_err(|e| e.to_string())
+    });
+    match created {
+        Ok(id) => Ok(id),
+        Err(error) => {
+            let owned = docker_text(&[
+                "inspect",
+                "--format",
+                &format!("{{{{index .Config.Labels \"{OWNER_LABEL}\"}}}}"),
+                &name,
+            ]);
+            if owned.as_deref() == Ok(name.as_str()) {
+                docker_text(&["rm", "--force", &name])
+                    .map_err(|cleanup| format!("{error}; cleanup: {cleanup}"))?;
+            } else {
+                return Err(format!(
+                    "{error}; create cleanup could not verify an owned container"
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
 fn run_container(
     image: &str,
     entrypoint: &str,
@@ -67,11 +126,7 @@ fn run_container(
     environment: &[String],
     argv: &[&str],
 ) -> Result<(String, String), String> {
-    let expected = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        "x86_64" => "amd64",
-        _ => return Err("Task scalar image architecture unsupported".into()),
-    };
+    let expected = native_image_arch()?;
     let arch = docker_text(&["image", "inspect", "--format", "{{.Architecture}}", image])?;
     if arch != expected {
         return Err("Task scalar image measurement requires the native architecture".into());
@@ -79,18 +134,7 @@ fn run_container(
     let image_id = docker_text(&["image", "inspect", "--format", "{{.Id}}", image])?;
     // SAFETY: these calls have no arguments or borrowed memory.
     let user = unsafe { format!("{}:{}", libc::geteuid(), libc::getegid()) };
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let name = format!("fvoci-task-scalar-{}-{nonce}", std::process::id());
-    let owner = format!("io.fvoci.task-scalar-qualification.owner={name}");
-    let mut arguments: Vec<OsString> = [
-        "create",
-        "--name",
-        &name,
-        "--label",
-        &owner,
+    let mut options: Vec<OsString> = [
         "--network",
         "none",
         "--read-only",
@@ -103,44 +147,15 @@ fn run_container(
     .map(OsString::from)
     .collect();
     for mount in mounts {
-        arguments.extend([OsString::from("--mount"), OsString::from(mount)]);
+        options.extend([OsString::from("--mount"), OsString::from(mount)]);
     }
     for value in environment {
-        arguments.extend([OsString::from("--env"), OsString::from(value)]);
+        options.extend([OsString::from("--env"), OsString::from(value)]);
     }
-    arguments.extend([
-        OsString::from("--entrypoint"),
-        OsString::from(entrypoint),
-        OsString::from(&image_id),
-    ]);
-    arguments.extend(argv.iter().map(OsString::from));
-    let created = docker(&arguments).and_then(|bytes| {
-        String::from_utf8(bytes)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| e.to_string())
-    });
-    let container = match created {
-        Ok(id) => id,
-        Err(error) => {
-            // create may have reached the daemon before its client failed.
-            // Reclaim by the preselected name only after matching our label.
-            let owned = docker_text(&[
-                "inspect",
-                "--format",
-                "{{index .Config.Labels \"io.fvoci.task-scalar-qualification.owner\"}}",
-                &name,
-            ]);
-            if owned.as_deref() == Ok(name.as_str()) {
-                docker_text(&["rm", "--force", &name])
-                    .map_err(|cleanup| format!("{error}; cleanup: {cleanup}"))?;
-            } else {
-                return Err(format!(
-                    "{error}; create cleanup could not verify an owned container"
-                ));
-            }
-            return Err(error);
-        }
-    };
+    options.extend([OsString::from("--entrypoint"), OsString::from(entrypoint)]);
+    let mut image_and_argv = vec![OsString::from(&image_id)];
+    image_and_argv.extend(argv.iter().map(OsString::from));
+    let container = create_owned(options, image_and_argv)?;
     let measured = (|| {
         let raw = docker_text(&["start", "--attach", &container])?;
         let state = docker_text(&[
@@ -241,8 +256,25 @@ fn sha(bytes: &[u8]) -> String {
     crate::host::hex(&Sha256::digest(bytes))
 }
 
-fn aarch64_elf(path: &Path) -> Result<(), String> {
+/// ELF e_machine of each architecture the product admits (EM_X86_64,
+/// EM_AARCH64); any other host has no qualification.
+fn elf_machine(arch: &str) -> Option<u16> {
+    match arch {
+        "x86_64" => Some(62),
+        "aarch64" => Some(183),
+        _ => None,
+    }
+}
+
+fn native_machine() -> Result<u16, String> {
+    elf_machine(std::env::consts::ARCH).ok_or_else(|| {
+        "Task scalar qualification requires native x86_64 or aarch64 execution".into()
+    })
+}
+
+fn native_elf(path: &Path) -> Result<(), String> {
     use std::io::Read;
+    let machine = native_machine()?;
     let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("Task scalar executable must be a physical file".into());
@@ -252,11 +284,19 @@ fn aarch64_elf(path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .read_exact(&mut header)
         .map_err(|e| e.to_string())?;
-    // ELF64, little endian, EM_AARCH64; never qualify a foreign ELF via binfmt.
-    if &header[..6] != b"\x7fELF\x02\x01" || u16::from_le_bytes([header[18], header[19]]) != 183 {
-        return Err("Task scalar qualification executable is not native AArch64 ELF".into());
+    // ELF64, little endian, native e_machine; never qualify a foreign ELF via binfmt.
+    if &header[..6] != b"\x7fELF\x02\x01" || u16::from_le_bytes([header[18], header[19]]) != machine
+    {
+        return Err(format!(
+            "Task scalar qualification executable is not native {} ELF",
+            std::env::consts::ARCH
+        ));
     }
     Ok(())
+}
+
+fn qualification_name(arch: &str) -> String {
+    format!("{arch}-task-scalar-explicit-selectors-v1")
 }
 
 fn dependency_identity(image: &str, executable: &Path) -> Result<Vec<String>, String> {
@@ -391,9 +431,7 @@ fn qualification(
     sdk: &Path,
     final_candidate: bool,
 ) -> Result<(), String> {
-    if std::env::consts::ARCH != "aarch64" {
-        return Err("Task scalar qualification requires native aarch64 execution".into());
-    }
+    native_machine()?;
     let root = std::env::current_dir()
         .map_err(|e| e.to_string())?
         .canonicalize()
@@ -420,15 +458,15 @@ fn qualification(
         }
     }
     let native = native_inputs(sdk)?;
-    let profile_path = root.join("src/db/task_scalar_pg18_profile.json");
+    let profile_path = root.join(PROFILE);
     let profile_sha256 = file_sha256(&profile_path).map_err(|e| e.to_string())?;
-    let source = fs::read_to_string(root.join("src/db/tasks.rs")).map_err(|e| e.to_string())?;
+    let source = fs::read_to_string(root.join(CONSUMER)).map_err(|e| e.to_string())?;
     let consumer_sha256 = consumer_identity(&source, &profile_sha256)?;
     fs::create_dir(directory).map_err(|e| e.to_string())?;
     let directory = directory.canonicalize().map_err(|e| e.to_string())?;
     let records = crate::selected_library::build(Some(target))?;
     let (library, _) = crate::selected_library::library_executable(&records)?;
-    aarch64_elf(&library)?;
+    native_elf(&library)?;
     let http = if final_candidate {
         Some(task_http_executable(
             target,
@@ -440,7 +478,7 @@ fn qualification(
         None
     };
     if let Some(http) = &http {
-        aarch64_elf(http)?;
+        native_elf(http)?;
     }
     let mut binaries = json!({"library": file_sha256(&library).map_err(|e| e.to_string())?});
     if let Some(http) = &http {
@@ -549,7 +587,7 @@ fn qualification(
         &["task-scalar-qualification", "measure"],
     )?;
     let product: Value = serde_json::from_str(&measured).map_err(|e| e.to_string())?;
-    if product["arch"] != "aarch64" || product["locpath_present"] != false {
+    if product["arch"] != std::env::consts::ARCH || product["locpath_present"] != false {
         return Err(
             "Task scalar qualification requires the actual native product GNU input".into(),
         );
@@ -579,7 +617,7 @@ fn qualification(
         return Err("Task scalar source/native inputs changed during qualification".into());
     }
     let receipt = json!({
-        "schema_version": 1, "qualification": "aarch64-task-scalar-explicit-selectors-v1",
+        "schema_version": 1, "qualification": qualification_name(std::env::consts::ARCH),
         "phase": if final_candidate { "final" } else { "bootstrap" },
         "historical_x86_bootstrap14_list": "unavailable; this is a newly explicit selector set",
         "inputs": inputs, "host_runtime": host, "product_runtime": product,
@@ -600,6 +638,581 @@ fn qualification(
     Ok(())
 }
 
+/// Product field order of `TaskScalarReference` and `TaskScalarZone`
+/// (`src/db/tasks.rs`); the sealed file itself has sorted keys.
+const REFERENCE_FIELDS: [&str; 9] = [
+    "encoding",
+    "provider",
+    "deterministic",
+    "lc_collate",
+    "lc_ctype",
+    "collation_version",
+    "tzdata_version",
+    "image_digest",
+    "names_sha256",
+];
+const ZONE_FIELDS: [&str; 3] = ["name", "tzif_base64", "sha256"];
+
+/// The product's data identity: SHA-256 of serde's compact encoding of
+/// `(schema_version, reference, zones)` in product field order. The runtime
+/// envelope that later carries receipts is not part of it.
+fn data_identity(profile: &Value) -> Result<String, String> {
+    let invalid = || "Task scalar profile shape differs from the product decoder".to_string();
+    let reference = profile["reference"].as_object().ok_or_else(invalid)?;
+    let zones = profile["zones"].as_array().ok_or_else(invalid)?;
+    if reference.len() != REFERENCE_FIELDS.len() {
+        return Err(invalid());
+    }
+    let schema = profile["schema_version"].as_u64().ok_or_else(invalid)?;
+    let mut encoded = format!("[{schema},{{");
+    for (index, field) in REFERENCE_FIELDS.iter().enumerate() {
+        let value = reference.get(*field).ok_or_else(invalid)?;
+        if *field == "deterministic" && !value.is_boolean()
+            || *field != "deterministic" && !value.is_string()
+        {
+            return Err(invalid());
+        }
+        let separator = if index == 0 { "" } else { "," };
+        encoded.push_str(&format!("{separator}\"{field}\":{value}"));
+    }
+    encoded.push_str("},[");
+    for (index, zone) in zones.iter().enumerate() {
+        let zone = zone
+            .as_object()
+            .filter(|zone| zone.len() == ZONE_FIELDS.len())
+            .ok_or_else(invalid)?;
+        encoded.push_str(if index == 0 { "{" } else { ",{" });
+        for (position, field) in ZONE_FIELDS.iter().enumerate() {
+            let value = zone
+                .get(*field)
+                .filter(|value| value.is_string())
+                .ok_or_else(invalid)?;
+            let separator = if position == 0 { "" } else { "," };
+            encoded.push_str(&format!("{separator}\"{field}\":{value}"));
+        }
+        encoded.push('}');
+    }
+    encoded.push_str("]]");
+    Ok(sha(encoded.as_bytes()))
+}
+
+/// The sealed file's own encoding: sorted keys, compact, final newline.
+fn canonical(value: &Value) -> String {
+    value.to_string() + "\n"
+}
+
+fn hex64(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| {
+        text.len() == 64
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+enum ImageNode {
+    File(Vec<u8>),
+    Symlink(String),
+    /// Absolute image path of the hard-linked file.
+    Hardlink(String),
+}
+
+/// Add the entries of a `docker cp CONTAINER:SOURCE -` archive under their
+/// absolute image paths.
+fn image_nodes(
+    archive: &[u8],
+    source: &str,
+    nodes: &mut BTreeMap<String, ImageNode>,
+) -> Result<(), String> {
+    use std::io::Read;
+    let parent = source
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .filter(|_| source.starts_with('/'))
+        .ok_or("image path must be absolute")?;
+    let absolute = |path: &Path| -> Result<String, String> {
+        let text = path.to_str().ok_or("image path is not UTF-8")?;
+        normalize(&format!("{parent}/{}", text.trim_end_matches('/')))
+    };
+    let mut archive = tar::Archive::new(archive);
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = absolute(&entry.path().map_err(|e| e.to_string())?)?;
+        let kind = entry.header().entry_type();
+        let link = entry
+            .link_name()
+            .map_err(|e| e.to_string())?
+            .map(|link| link.to_str().map(str::to_owned));
+        let link = || {
+            link.clone()
+                .flatten()
+                .ok_or_else(|| format!("{path}: link target missing"))
+        };
+        let node = if kind.is_dir() {
+            continue;
+        } else if kind.is_file() {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            ImageNode::File(bytes)
+        } else if kind.is_symlink() {
+            ImageNode::Symlink(link()?)
+        } else if kind.is_hard_link() {
+            ImageNode::Hardlink(absolute(Path::new(&link()?))?)
+        } else {
+            return Err(format!("{path}: unsupported image entry type"));
+        };
+        if nodes.insert(path.clone(), node).is_some() {
+            return Err(format!("{path}: duplicate image entry"));
+        }
+    }
+    Ok(())
+}
+
+fn normalize(path: &str) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop().ok_or("image path escapes its root")?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Ok(format!("/{}", parts.join("/")))
+}
+
+struct Resolved<'a> {
+    path: String,
+    /// (link path, link target) hops in the order the image resolves them.
+    chain: Vec<(String, String)>,
+    bytes: &'a [u8],
+}
+
+/// Resolve `path` inside the image root, never on the host.
+fn resolve<'a>(nodes: &'a BTreeMap<String, ImageNode>, path: &str) -> Result<Resolved<'a>, String> {
+    let mut current = normalize(path)?;
+    let mut chain = Vec::new();
+    for _ in 0..16 {
+        // A linked directory above the entry is outside the original layout.
+        let mut ancestor = current.as_str();
+        while let Some((parent, _)) = ancestor.rsplit_once('/').filter(|(p, _)| !p.is_empty()) {
+            if matches!(nodes.get(parent), Some(ImageNode::Symlink(_))) {
+                return Err(format!("{current}: linked directory {parent} unsupported"));
+            }
+            ancestor = parent;
+        }
+        match nodes.get(&current) {
+            Some(ImageNode::File(bytes)) => {
+                return Ok(Resolved {
+                    path: current,
+                    chain,
+                    bytes,
+                })
+            }
+            Some(ImageNode::Hardlink(target)) => match nodes.get(target) {
+                Some(ImageNode::File(bytes)) => {
+                    return Ok(Resolved {
+                        path: current,
+                        chain,
+                        bytes,
+                    })
+                }
+                _ => return Err(format!("{current}: hard link target is not a file")),
+            },
+            Some(ImageNode::Symlink(target)) => {
+                let next = if target.starts_with('/') {
+                    target.clone()
+                } else {
+                    let (parent, _) = current.rsplit_once('/').unwrap_or_default();
+                    format!("{parent}/{target}")
+                };
+                chain.push((current, target.clone()));
+                current = normalize(&next)?;
+            }
+            None => return Err(format!("{current} is absent from the reference image")),
+        }
+    }
+    Err(format!("{path}: link chain too long"))
+}
+
+/// The PROVENANCE table's alias column: the original JSON spelling.
+fn chain_text(chain: &[(String, String)]) -> String {
+    let hops: Vec<String> = chain
+        .iter()
+        .map(|(path, target)| {
+            format!(
+                "{{\"path\": {}, \"target\": {}, \"type\": \"symlink\"}}",
+                json!(path),
+                json!(target)
+            )
+        })
+        .collect();
+    format!("[{}]", hops.join(", "))
+}
+
+/// Reference file identities read through `docker cp -L`.
+const IDENTITY_FILES: [&str; 5] = [
+    "/etc/os-release",
+    "/usr/share/doc/tzdata/copyright",
+    "/usr/share/zoneinfo/tzdata.zi",
+    "/var/lib/dpkg/info/tzdata.md5sums",
+    "/var/lib/dpkg/status",
+];
+
+fn package_version(status: &str, package: &str) -> Option<String> {
+    let header = format!("Package: {package}");
+    status
+        .split("\n\n")
+        .find(|stanza| stanza.lines().any(|line| line == header))?
+        .lines()
+        .find_map(|line| line.strip_prefix("Version: "))
+        .map(str::to_owned)
+}
+
+/// Recapture the sealed zone names' TZif bytes and tzdata identity from a
+/// never-started container of a digest-pinned reference image.
+fn reference(image: &str, directory: &Path) -> Result<(), String> {
+    use base64::Engine;
+    let (name, digest) = image
+        .split_once('@')
+        .filter(|(name, digest)| {
+            name.contains(':')
+                && digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(|hex| hex64(&json!(hex)))
+        })
+        .ok_or("reference image must be NAME:TAG@sha256:DIGEST")?;
+    let repository = name
+        .rsplit_once(':')
+        .map(|(repository, _)| repository)
+        .unwrap();
+    let root = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let sealed_bytes = fs::read(root.join(PROFILE)).map_err(|e| e.to_string())?;
+    let sealed: Value = serde_json::from_slice(&sealed_bytes).map_err(|e| e.to_string())?;
+    if canonical(&sealed).as_bytes() != sealed_bytes {
+        return Err("sealed profile is not in its canonical encoding".into());
+    }
+    let names: Vec<&str> = sealed["zones"]
+        .as_array()
+        .ok_or("sealed profile has no zones")?
+        .iter()
+        .map(|zone| zone["name"].as_str().ok_or("sealed zone name invalid"))
+        .collect::<Result<_, _>>()?;
+    let inspected: Value = serde_json::from_str(&docker_text(&[
+        "image",
+        "inspect",
+        "--format",
+        "{{json .}}",
+        image,
+    ])?)
+    .map_err(|e| e.to_string())?;
+    // The repository digest proves which index the local image came from.
+    if !inspected["RepoDigests"]
+        .as_array()
+        .is_some_and(|digests| digests.contains(&json!(format!("{repository}@{digest}"))))
+        || inspected["Os"] != "linux"
+        || inspected["Architecture"] != native_image_arch()?
+    {
+        return Err("reference image is not the pinned native index".into());
+    }
+    let image_id = inspected["Id"]
+        .as_str()
+        .ok_or("image ID missing")?
+        .to_owned();
+    fs::create_dir(directory).map_err(|e| e.to_string())?;
+    let container = create_owned(
+        ["--pull", "never", "--network", "none"]
+            .iter()
+            .map(OsString::from)
+            .collect(),
+        vec![OsString::from(&image_id)],
+    )?;
+    let copied = (|| -> Result<_, String> {
+        let mut nodes = BTreeMap::new();
+        for source in ["/usr/share/zoneinfo", "/etc/localtime"] {
+            let archive =
+                docker(&["cp", format!("{container}:{source}").as_str(), "-"].map(OsString::from))?;
+            image_nodes(&archive, source, &mut nodes)?;
+        }
+        let mut files = BTreeMap::new();
+        for source in IDENTITY_FILES {
+            let archive = docker(
+                &["cp", "-L", format!("{container}:{source}").as_str(), "-"].map(OsString::from),
+            )?;
+            let mut followed = BTreeMap::new();
+            image_nodes(&archive, source, &mut followed)?;
+            match followed.remove(source) {
+                Some(ImageNode::File(bytes)) if followed.is_empty() => {
+                    files.insert(source, bytes);
+                }
+                _ => return Err(format!("{source} is not one regular file")),
+            }
+        }
+        Ok((nodes, files))
+    })();
+    // The never-started container is removed on every path.
+    let cleanup = docker_text(&["rm", "--force", &container]);
+    let (nodes, files) = match (copied, cleanup) {
+        (Err(error), Err(cleanup)) => return Err(format!("{error}; cleanup: {cleanup}")),
+        (Err(error), _) | (_, Err(error)) => return Err(error),
+        (Ok(copied), Ok(_)) => copied,
+    };
+    let license = fs::read(root.join(LICENSE)).map_err(|e| e.to_string())?;
+    if files["/usr/share/doc/tzdata/copyright"] != license {
+        return Err("tzdata copyright differs from the retained LICENSE bytes".into());
+    }
+    let zi =
+        std::str::from_utf8(&files["/usr/share/zoneinfo/tzdata.zi"]).map_err(|e| e.to_string())?;
+    let tzdata_version = zi
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# version "))
+        .filter(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .ok_or("tzdata.zi version line missing")?;
+    let mut zones = Vec::new();
+    let mut rows = String::new();
+    let mut changed = Vec::new();
+    for (name, sealed_zone) in names.iter().zip(sealed["zones"].as_array().unwrap()) {
+        let resolved = resolve(&nodes, &format!("/usr/share/zoneinfo/{name}"))?;
+        if !resolved.bytes.starts_with(b"TZif") {
+            return Err(format!("{name} is not TZif"));
+        }
+        let checksum = sha(resolved.bytes);
+        if sealed_zone["sha256"] != checksum.as_str() {
+            changed
+                .push(json!({"name": name, "sealed": sealed_zone["sha256"], "captured": checksum}));
+        }
+        rows.push_str(&format!(
+            "| {name} | {} | {checksum} | {} | {} |\n",
+            resolved.path,
+            resolved.bytes.len(),
+            chain_text(&resolved.chain)
+        ));
+        zones.push(json!({
+            "name": name,
+            "tzif_base64": base64::engine::general_purpose::STANDARD.encode(resolved.bytes),
+            "sha256": checksum,
+        }));
+    }
+    let mut profile = sealed.clone();
+    profile["reference"]["tzdata_version"] = json!(tzdata_version);
+    profile["reference"]["image_digest"] = json!(digest);
+    profile["runtime_profiles"] = json!([]);
+    profile["zones"] = Value::Array(zones);
+    if sha(names.join("\n").as_bytes()) != profile["reference"]["names_sha256"] {
+        return Err("sealed zone names differ from their recorded hash".into());
+    }
+    let encoded = canonical(&profile);
+    let identities: Vec<String> = files
+        .iter()
+        .map(|(path, bytes)| {
+            format!(
+                "{}: {{\"bytes\": {}, \"sha256\": \"{}\"}}",
+                json!(path),
+                bytes.len(),
+                sha(bytes)
+            )
+        })
+        .collect();
+    let status = String::from_utf8_lossy(&files["/var/lib/dpkg/status"]);
+    let os_release = String::from_utf8_lossy(&files["/etc/os-release"]);
+    let identity = data_identity(&profile)?;
+    let packages = ["tzdata", "libc6", "locales"]
+        .map(|package| json!({"package": package, "version": package_version(&status, package)}));
+    let provenance = json!({
+        "image": image, "image_id": image_id, "repo_digests": inspected["RepoDigests"],
+        "platform": {"os": inspected["Os"], "architecture": inspected["Architecture"]},
+        "os_release": os_release.lines().find_map(|line| line.strip_prefix("PRETTY_NAME=")),
+        "packages": packages,
+        "tzdata_version": tzdata_version,
+        "file_identities": format!("{{{}}}", identities.join(", ")),
+        "names_sha256": profile["reference"]["names_sha256"],
+        "data_identity": identity,
+        "profile_sha256": sha(encoded.as_bytes()),
+        "changed_zones": changed,
+        "container_removed": true,
+    });
+    fs::write(directory.join("profile.json"), &encoded).map_err(|e| e.to_string())?;
+    fs::write(directory.join("zones.md"), rows).map_err(|e| e.to_string())?;
+    fs::write(directory.join("provenance.json"), pretty(&provenance)).map_err(|e| e.to_string())?;
+    print!("{}", pretty(&provenance));
+    Ok(())
+}
+
+struct Sealed {
+    profile: String,
+    source: String,
+    summary: Value,
+}
+
+/// Admit each architecture's CI bootstrap receipt only when it was produced
+/// from exactly this checkout, its pending profile and scalar consumer; then
+/// derive the runtime envelope and the consumer's checksum from the receipts.
+fn seal_profile(
+    profile: &[u8],
+    source: &str,
+    head: &str,
+    tree: &str,
+    receipts: [(&str, &[u8]); 2],
+) -> Result<Sealed, String> {
+    let pending: Value = serde_json::from_slice(profile).map_err(|e| e.to_string())?;
+    if canonical(&pending).as_bytes() != profile {
+        return Err("profile is not in its canonical sealed encoding".into());
+    }
+    if pending["runtime_profiles"] != json!([]) {
+        return Err("seal requires the pending profile without a runtime envelope".into());
+    }
+    let pending_sha256 = sha(profile);
+    if source.matches(&pending_sha256).count() != 1 {
+        return Err("the scalar consumer must name the pending profile checksum once".into());
+    }
+    let consumer = consumer_identity(source, &pending_sha256)?;
+    let identity = data_identity(&pending)?;
+    let mut runtime_profiles = Vec::new();
+    let mut producer = None;
+    let mut admitted_receipts = serde_json::Map::new();
+    for (arch, bytes) in receipts {
+        let refuse = |what: &str| format!("{arch} receipt {what}");
+        let receipt: Value = serde_json::from_slice(bytes).map_err(|e| refuse(&e.to_string()))?;
+        let inputs = &receipt["inputs"];
+        let product = &receipt["product_runtime"];
+        if receipt["schema_version"] != 1
+            || receipt["qualification"] != qualification_name(arch)
+            || receipt["phase"] != "bootstrap"
+        {
+            return Err(refuse("is not this architecture's bootstrap qualification"));
+        }
+        if inputs["source_sha"] != head || inputs["source_tree"] != tree {
+            return Err(refuse("was not produced from this checkout"));
+        }
+        if inputs["profile_sha256"] != pending_sha256 || inputs["consumer_sha256"] != consumer {
+            return Err(refuse("binds a different profile or scalar consumer"));
+        }
+        if receipt["data_identity"] != identity {
+            return Err(refuse("qualified different reference data"));
+        }
+        let glibc = product["glibc_version"].as_str().filter(|version| {
+            !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        });
+        if receipt["host_runtime"]["arch"] != arch
+            || product["arch"] != arch
+            || product["kernel_arch"] != arch
+            || product["locpath_present"] != false
+            || glibc.is_none()
+            || !hex64(&product["locale_archive_sha256"])
+        {
+            return Err(refuse("lacks the native product GNU measurement"));
+        }
+        if receipt["container_exited"] != true
+            || receipt["container_removed"] != true
+            || !receipt["child_receipt"].is_null()
+        {
+            return Err(refuse("lacks container closure"));
+        }
+        let tests = receipt["tests"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if tests.len() != BOOTSTRAP.len()
+            || tests.iter().zip(BOOTSTRAP).any(|(test, selector)| {
+                test["selector"] != *selector
+                    || test["argv"]
+                        != json!([selector, "--exact", "--test-threads=1", "--show-output"])
+                    || test["passed"] != 1
+                    || test["ignored"] != 0
+                    || test["exit"] != 0
+                    || test["container_exited"] != true
+                    || test["container_removed"] != true
+                    || !hex64(&test["output_sha256"])
+            })
+        {
+            return Err(refuse("does not show each bootstrap body passing once"));
+        }
+        let run = json!({
+            "repository": inputs["repository"],
+            "run_id": inputs["run_id"],
+            "run_attempt": inputs["run_attempt"],
+        });
+        let digits = |key: &str| {
+            run[key]
+                .as_str()
+                .is_some_and(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+        };
+        if !run["repository"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            || !digits("run_id")
+            || !digits("run_attempt")
+        {
+            return Err(refuse("does not identify its CI producer"));
+        }
+        if *producer.get_or_insert_with(|| run.clone()) != run {
+            return Err("receipts come from different CI runs".into());
+        }
+        let runtime = json!({
+            "arch": arch,
+            "glibc_version": glibc,
+            "locale_archive_sha256": product["locale_archive_sha256"],
+            "qualification_sha256": sha(bytes),
+        });
+        admitted_receipts.insert(arch.to_owned(), runtime.clone());
+        runtime_profiles.push(runtime);
+    }
+    let mut admitted = pending;
+    admitted["runtime_profiles"] = Value::Array(runtime_profiles);
+    let encoded = canonical(&admitted);
+    let admitted_sha256 = sha(encoded.as_bytes());
+    let updated = source.replacen(&pending_sha256, &admitted_sha256, 1);
+    if consumer_identity(&updated, &admitted_sha256)? != consumer {
+        return Err("sealing changed the scalar consumer".into());
+    }
+    Ok(Sealed {
+        profile: encoded,
+        source: updated,
+        summary: json!({
+            "producer": producer, "source_sha": head, "data_identity": identity,
+            "consumer_sha256": consumer, "pending_profile_sha256": pending_sha256,
+            "profile_sha256": admitted_sha256, "runtime_profiles": admitted_receipts,
+        }),
+    })
+}
+
+fn seal(x86_64: &Path, aarch64: &Path) -> Result<(), String> {
+    let root = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !captured(
+        "git",
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?
+    .is_empty()
+    {
+        return Err("seal requires a clean committed source tree".into());
+    }
+    let head = captured("git", &["rev-parse", "HEAD"])?;
+    let tree = captured("git", &["rev-parse", "HEAD^{tree}"])?;
+    let profile = fs::read(root.join(PROFILE)).map_err(|e| e.to_string())?;
+    let source = fs::read_to_string(root.join(CONSUMER)).map_err(|e| e.to_string())?;
+    let x86_64 = fs::read(x86_64).map_err(|e| e.to_string())?;
+    let aarch64 = fs::read(aarch64).map_err(|e| e.to_string())?;
+    let sealed = seal_profile(
+        &profile,
+        &source,
+        &head,
+        &tree,
+        [("x86_64", &x86_64), ("aarch64", &aarch64)],
+    )?;
+    fs::write(root.join(PROFILE), &sealed.profile).map_err(|e| e.to_string())?;
+    fs::write(root.join(CONSUMER), &sealed.source).map_err(|e| e.to_string())?;
+    print!("{}", pretty(&sealed.summary));
+    Ok(())
+}
+
 pub fn main(mut argv: Vec<OsString>) -> i32 {
     let action = if argv.is_empty() {
         OsString::new()
@@ -614,6 +1227,11 @@ pub fn main(mut argv: Vec<OsString>) -> i32 {
             args::required("directory"),
             args::required("target-dir"),
             args::required("sqlite-inputs"),
+        ],
+        Some("reference") => vec![args::required("image"), args::required("directory")],
+        Some("seal") => vec![
+            args::required("x86-64-receipt"),
+            args::required("aarch64-receipt"),
         ],
         _ => {
             eprintln!("{USAGE}");
@@ -638,6 +1256,16 @@ pub fn main(mut argv: Vec<OsString>) -> i32 {
             parsed.get("image").unwrap(),
             Path::new(parsed.get("directory").unwrap()),
         )
+    } else if action == "reference" {
+        reference(
+            parsed.get("image").unwrap(),
+            Path::new(parsed.get("directory").unwrap()),
+        )
+    } else if action == "seal" {
+        seal(
+            Path::new(parsed.get("x86-64-receipt").unwrap()),
+            Path::new(parsed.get("aarch64-receipt").unwrap()),
+        )
     } else {
         qualification(
             parsed.get("image").unwrap(),
@@ -660,13 +1288,283 @@ pub fn main(mut argv: Vec<OsString>) -> i32 {
 mod tests {
     use super::*;
 
+    fn root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    }
+
     #[test]
-    fn actual_test_elf_is_accepted_only_when_it_is_native_arm() {
-        let result = aarch64_elf(&std::env::current_exe().unwrap());
-        if std::env::consts::ARCH == "aarch64" {
-            result.unwrap();
-        } else {
-            assert!(result.unwrap_err().contains("not native AArch64 ELF"));
+    fn actual_test_elf_is_accepted_as_native_and_a_foreign_elf_is_refused() {
+        native_elf(&std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(elf_machine("x86_64"), Some(62));
+        assert_eq!(elf_machine("aarch64"), Some(183));
+        assert_eq!(elf_machine("riscv64"), None);
+        let foreign = match std::env::consts::ARCH {
+            "x86_64" => 183u16,
+            _ => 62,
+        };
+        let mut header = b"\x7fELF\x02\x01".to_vec();
+        header.resize(18, 0);
+        header.extend(foreign.to_le_bytes());
+        let directory = std::env::temp_dir().join(format!(
+            "fvoci-task-scalar-elf-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("foreign");
+        fs::write(&path, &header).unwrap();
+        let link = directory.join("link");
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+        let refused = native_elf(&path).unwrap_err();
+        let linked = native_elf(&link).unwrap_err();
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(refused.contains("is not native"), "{refused}");
+        assert!(linked.contains("physical file"), "{linked}");
+        assert_eq!(
+            qualification_name(std::env::consts::ARCH),
+            format!(
+                "{}-task-scalar-explicit-selectors-v1",
+                std::env::consts::ARCH
+            )
+        );
+    }
+
+    #[test]
+    fn data_identity_and_encoding_mirror_the_product_decoder() {
+        let bytes = fs::read(root().join(PROFILE)).unwrap();
+        let profile: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(canonical(&profile).as_bytes(), bytes);
+        // The product's own sealed expectation, read from its decoder test.
+        let source = fs::read_to_string(root().join(CONSUMER)).unwrap();
+        let marker = "        assert_eq!(\n            profile.data_identity,\n            \"";
+        let start = source.find(marker).unwrap() + marker.len();
+        assert_eq!(data_identity(&profile).unwrap(), source[start..start + 64]);
+        let mut extra = profile.clone();
+        extra["reference"]["unexpected"] = json!("x");
+        assert!(data_identity(&extra).is_err());
+    }
+
+    enum Fixture<'a> {
+        Directory,
+        File(&'a [u8]),
+        Symlink(&'a str),
+        Hardlink(&'a str),
+    }
+
+    fn tar_with(entries: &[(&str, Fixture)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, fixture) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(0);
+            match fixture {
+                Fixture::Directory => {
+                    header.set_entry_type(tar::EntryType::Directory);
+                    builder.append_data(&mut header, path, &[][..]).unwrap();
+                }
+                Fixture::File(data) => {
+                    header.set_size(data.len() as u64);
+                    header.set_entry_type(tar::EntryType::Regular);
+                    builder.append_data(&mut header, path, *data).unwrap();
+                }
+                Fixture::Symlink(link) | Fixture::Hardlink(link) => {
+                    header.set_entry_type(if matches!(fixture, Fixture::Hardlink(_)) {
+                        tar::EntryType::Link
+                    } else {
+                        tar::EntryType::Symlink
+                    });
+                    builder.append_link(&mut header, path, link).unwrap();
+                }
+            }
+        }
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn reference_links_resolve_inside_the_image_like_the_original_table() {
+        let utc: &[u8] = b"TZif-utc";
+        let zoneinfo = tar_with(&[
+            ("zoneinfo", Fixture::Directory),
+            ("zoneinfo/Etc/UTC", Fixture::File(utc)),
+            ("zoneinfo/Pacific/Honolulu", Fixture::File(b"TZif-hst")),
+            ("zoneinfo/Pacific/Johnston", Fixture::Symlink("Honolulu")),
+            ("zoneinfo/UTC", Fixture::Symlink("Etc/UTC")),
+            ("zoneinfo/localtime", Fixture::Symlink("/etc/localtime")),
+            ("zoneinfo/Zulu", Fixture::Hardlink("zoneinfo/Etc/UTC")),
+            ("zoneinfo/Loop", Fixture::Symlink("Loop")),
+            ("zoneinfo/Escape", Fixture::Symlink("../../../../x")),
+            ("zoneinfo/posix", Fixture::Symlink(".")),
+        ]);
+        let etc = tar_with(&[("localtime", Fixture::Symlink("/usr/share/zoneinfo/Etc/UTC"))]);
+        let mut nodes = BTreeMap::new();
+        image_nodes(&zoneinfo, "/usr/share/zoneinfo", &mut nodes).unwrap();
+        image_nodes(&etc, "/etc/localtime", &mut nodes).unwrap();
+        let localtime = resolve(&nodes, "/usr/share/zoneinfo/localtime").unwrap();
+        assert_eq!(localtime.path, "/usr/share/zoneinfo/Etc/UTC");
+        assert_eq!(localtime.bytes, utc);
+        assert_eq!(
+            chain_text(&localtime.chain),
+            "[{\"path\": \"/usr/share/zoneinfo/localtime\", \"target\": \"/etc/localtime\", \"type\": \"symlink\"}, {\"path\": \"/etc/localtime\", \"target\": \"/usr/share/zoneinfo/Etc/UTC\", \"type\": \"symlink\"}]"
+        );
+        let johnston = resolve(&nodes, "/usr/share/zoneinfo/Pacific/Johnston").unwrap();
+        assert_eq!(johnston.path, "/usr/share/zoneinfo/Pacific/Honolulu");
+        assert_eq!(
+            chain_text(&johnston.chain),
+            "[{\"path\": \"/usr/share/zoneinfo/Pacific/Johnston\", \"target\": \"Honolulu\", \"type\": \"symlink\"}]"
+        );
+        let zulu = resolve(&nodes, "/usr/share/zoneinfo/Zulu").unwrap();
+        assert_eq!(
+            (zulu.path.as_str(), zulu.bytes),
+            ("/usr/share/zoneinfo/Zulu", utc)
+        );
+        assert_eq!(chain_text(&zulu.chain), "[]");
+        for refused in ["Loop", "Escape", "posix/UTC", "Mars/Olympus"] {
+            assert!(resolve(&nodes, &format!("/usr/share/zoneinfo/{refused}")).is_err());
+        }
+        let mut duplicate = BTreeMap::new();
+        image_nodes(&etc, "/etc/localtime", &mut duplicate).unwrap();
+        assert!(image_nodes(&etc, "/etc/localtime", &mut duplicate).is_err());
+        assert_eq!(
+            package_version(
+                "Package: tzdata\nVersion: 2026c-0+deb13u1\n\nPackage: x\n",
+                "tzdata"
+            )
+            .as_deref(),
+            Some("2026c-0+deb13u1")
+        );
+    }
+
+    struct SealCase {
+        profile: Vec<u8>,
+        source: String,
+        receipts: [Value; 2],
+    }
+
+    /// A pending profile and its consumer derived from the real sealed input;
+    /// only the runtime envelope and its checksum differ.
+    fn seal_case() -> SealCase {
+        let mut profile: Value =
+            serde_json::from_slice(&fs::read(root().join(PROFILE)).unwrap()).unwrap();
+        profile["runtime_profiles"] = json!([]);
+        let pending = canonical(&profile).into_bytes();
+        let source = fs::read_to_string(root().join(CONSUMER)).unwrap();
+        let sealed = file_sha256(&root().join(PROFILE)).unwrap();
+        let source = source.replacen(&sealed, &sha(&pending), 1);
+        let consumer = consumer_identity(&source, &sha(&pending)).unwrap();
+        let identity = data_identity(&profile).unwrap();
+        let receipts = ["x86_64", "aarch64"].map(|arch| {
+            let tests: Vec<Value> = BOOTSTRAP.iter().map(|selector| json!({
+                "selector": selector, "argv": [selector, "--exact", "--test-threads=1", "--show-output"],
+                "passed": 1, "ignored": 0, "exit": 0, "output_sha256": "a".repeat(64),
+                "container_exited": true, "container_removed": true,
+            })).collect();
+            json!({
+                "schema_version": 1, "qualification": qualification_name(arch), "phase": "bootstrap",
+                "inputs": {"source_sha": "1".repeat(40), "source_tree": "2".repeat(40),
+                    "repository": "AISFlow/fvoci", "run_id": "42", "run_attempt": "1",
+                    "profile_sha256": sha(&pending), "consumer_sha256": consumer},
+                "host_runtime": {"arch": arch},
+                "product_runtime": {"arch": arch, "kernel_arch": arch, "glibc_version": "2.43",
+                    "locale_archive_sha256": "b".repeat(64), "locpath_present": false},
+                "data_identity": identity, "tests": tests, "child_receipt": null,
+                "container_exited": true, "container_removed": true,
+            })
+        });
+        SealCase {
+            profile: pending,
+            source,
+            receipts,
+        }
+    }
+
+    fn sealed(case: &SealCase) -> Result<Sealed, String> {
+        let receipts = case
+            .receipts
+            .clone()
+            .map(|receipt| pretty(&receipt).into_bytes());
+        seal_profile(
+            &case.profile,
+            &case.source,
+            &"1".repeat(40),
+            &"2".repeat(40),
+            [("x86_64", &receipts[0]), ("aarch64", &receipts[1])],
+        )
+    }
+
+    #[test]
+    fn seal_admits_only_bootstrap_receipts_bound_to_this_checkout() {
+        let case = seal_case();
+        let admitted = sealed(&case).unwrap();
+        let profile: Value = serde_json::from_str(&admitted.profile).unwrap();
+        let pending: Value = serde_json::from_slice(&case.profile).unwrap();
+        assert_eq!(data_identity(&profile), data_identity(&pending));
+        let runtimes = profile["runtime_profiles"].as_array().unwrap();
+        for (runtime, (arch, receipt)) in runtimes
+            .iter()
+            .zip(["x86_64", "aarch64"].iter().zip(&case.receipts))
+        {
+            assert_eq!(
+                runtime,
+                &json!({"arch": arch, "glibc_version": "2.43", "locale_archive_sha256": "b".repeat(64),
+                    "qualification_sha256": sha(pretty(receipt).as_bytes())})
+            );
+        }
+        let checksum = sha(admitted.profile.as_bytes());
+        assert_eq!(admitted.source.matches(&checksum).count(), 1);
+        assert_eq!(
+            consumer_identity(&admitted.source, &checksum).unwrap(),
+            consumer_identity(&case.source, &sha(&case.profile)).unwrap()
+        );
+        type Mutation = fn(&mut SealCase);
+        let refusals: [(&str, Mutation); 14] = [
+            ("bootstrap qualification", |c| {
+                c.receipts[0]["phase"] = json!("final")
+            }),
+            ("bootstrap qualification", |c| {
+                c.receipts[0]["qualification"] = json!(qualification_name("aarch64"))
+            }),
+            ("produced from this checkout", |c| {
+                c.receipts[1]["inputs"]["source_sha"] = json!("3".repeat(40))
+            }),
+            ("produced from this checkout", |c| {
+                c.receipts[0]["inputs"]["source_tree"] = json!("3".repeat(40))
+            }),
+            ("different profile or scalar consumer", |c| {
+                c.receipts[0]["inputs"]["profile_sha256"] = json!("c".repeat(64))
+            }),
+            ("different profile or scalar consumer", |c| {
+                c.receipts[1]["inputs"]["consumer_sha256"] = json!("c".repeat(64))
+            }),
+            ("different reference data", |c| {
+                c.receipts[0]["data_identity"] = json!("c".repeat(64))
+            }),
+            ("native product GNU measurement", |c| {
+                c.receipts[1]["product_runtime"]["arch"] = json!("x86_64")
+            }),
+            ("native product GNU measurement", |c| {
+                c.receipts[0]["product_runtime"]["locpath_present"] = json!(true)
+            }),
+            ("each bootstrap body", |c| {
+                c.receipts[1]["tests"][3]["ignored"] = json!(1)
+            }),
+            ("each bootstrap body", |c| {
+                c.receipts[0]["tests"].as_array_mut().unwrap().pop();
+            }),
+            ("different CI runs", |c| {
+                c.receipts[1]["inputs"]["run_attempt"] = json!("2")
+            }),
+            ("without a runtime envelope", |c| {
+                let mut profile: Value = serde_json::from_slice(&c.profile).unwrap();
+                profile["runtime_profiles"] = json!([{"arch": "x86_64"}]);
+                c.profile = canonical(&profile).into_bytes();
+            }),
+            ("canonical sealed encoding", |c| c.profile.insert(1, b' ')),
+        ];
+        for (name, mutate) in refusals {
+            let mut case = seal_case();
+            mutate(&mut case);
+            let error = sealed(&case).err().unwrap_or_default();
+            assert!(error.contains(name), "{name}: {error}");
         }
     }
 
