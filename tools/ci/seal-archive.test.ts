@@ -69,9 +69,42 @@ const hash = step("postgres-build", "Hash compressed executable archives");
 
 function fixture() {
   const directory = mkdtempSync(join(root, ".c2b-fixture-"));
-  const relative = `crates/collab-engine/target/${basename(directory)}-helper`;
-  const destination = join(root, relative);
-  const targetExisted = existsSync(dirname(destination));
+  // Synthetic transport bytes and Cargo records; these are never executed and
+  // do not establish that a product executable was built or accepted.
+  const files = [
+    {
+      name: "collab-engine",
+      target: "collab-engine",
+      kind: "bin",
+      features: ["default", "worker"],
+      prefix: "crates/collab-engine/target",
+    },
+    {
+      name: "db-tests-library",
+      target: "fvoci_server",
+      kind: "lib",
+      features: ["db-tests"],
+      prefix: "target",
+    },
+    {
+      name: "fvoci-server",
+      target: "fvoci-server",
+      kind: "bin",
+      features: ["db-tests"],
+      prefix: "target",
+    },
+  ].map((file) => {
+    const relative = `${file.prefix}/${basename(directory)}-${file.name}`;
+    return {
+      ...file,
+      relative,
+      destination: join(root, relative),
+      bytes: Buffer.from(`sealed ${file.name} transport fixture bytes\n`),
+    };
+  });
+  const createdTargets = [...new Set(files.map((file) => dirname(file.destination)))].filter(
+    (target) => !existsSync(target),
+  );
   const env = {
     ...process.env,
     RUNNER_TEMP: directory,
@@ -82,9 +115,7 @@ function fixture() {
   };
   const packet = join(directory, "rust-binaries");
   const stage = join(directory, "stage");
-  const bytes = Buffer.from("sealed helper fixture bytes\n");
   mkdirSync(packet);
-  mkdirSync(dirname(join(stage, relative)), { recursive: true });
   const manifest = {
     version: 1,
     context: {
@@ -108,18 +139,21 @@ function fixture() {
         ].map((name) => [name, process.env[name] ?? null]),
       ),
     },
-    entries: {
-      "collab-engine": {
-        path: relative,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        record: {
-          features: ["default", "worker"],
-          profile: { opt_level: "0", debuginfo: 0, test: false },
-          target: { name: "collab-engine", kind: ["bin"] },
-          executable: destination,
+    entries: Object.fromEntries(
+      files.map((file) => [
+        file.name,
+        {
+          path: file.relative,
+          sha256: createHash("sha256").update(file.bytes).digest("hex"),
+          record: {
+            features: file.features,
+            profile: { opt_level: "0", debuginfo: 0, test: file.kind === "lib" },
+            target: { name: file.target, kind: [file.kind] },
+            executable: file.destination,
+          },
         },
-      },
-    },
+      ]),
+    ),
   };
   const run = (value: Step) => {
     if (value.run === undefined) throw new Error(`step ${String(value.name)} has no run script`);
@@ -136,9 +170,12 @@ function fixture() {
     );
   };
   const pack = (corrupt = false) => {
-    const payload = Buffer.from(bytes);
-    if (corrupt) flipByte(payload, 0);
-    writeFileSync(join(stage, relative), payload);
+    for (const file of files) {
+      const payload = Buffer.from(file.bytes);
+      if (corrupt && file.name === "collab-engine") flipByte(payload, 0);
+      mkdirSync(dirname(join(stage, file.relative)), { recursive: true });
+      writeFileSync(join(stage, file.relative), payload);
+    }
     writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
     for (const cohort of ["postgres", "helper"]) {
       command([
@@ -148,7 +185,7 @@ function fixture() {
         "-C",
         stage,
         "manifest.json",
-        relative,
+        ...files.map((file) => file.relative),
       ]);
     }
     const result = run(compress);
@@ -160,19 +197,14 @@ function fixture() {
   };
   return {
     packet,
-    bytes,
-    destination,
+    files,
     pack,
     run,
     cleanup() {
-      rmSync(destination, { force: true });
+      for (const file of files) rmSync(file.destination, { force: true });
       rmSync(directory, { recursive: true, force: true });
-      if (
-        !targetExisted &&
-        existsSync(dirname(destination)) &&
-        readdirSync(dirname(destination)).length === 0
-      ) {
-        rmdirSync(dirname(destination));
+      for (const target of createdTargets) {
+        if (existsSync(target) && readdirSync(target).length === 0) rmdirSync(target);
       }
     },
   };
@@ -225,7 +257,7 @@ test("zstd transport retains the actual consumer's SHA256 admission", () => {
       ),
     );
     expect(admitted.exitCode).toBe(0);
-    expect(readFileSync(f.destination)).toEqual(f.bytes);
+    for (const file of f.files) expect(readFileSync(file.destination)).toEqual(file.bytes);
   });
 });
 
@@ -241,7 +273,7 @@ test("a one-byte payload change in a valid zstd frame fails the existing digest 
     );
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr.toString()).toContain("Rust binary digest/feature/profile/path mismatch");
-    expect(existsSync(f.destination)).toBe(false);
+    for (const file of f.files) expect(existsSync(file.destination)).toBe(false);
   });
 });
 
@@ -260,7 +292,7 @@ test("a one-byte transport change stops both consumers before admission", () => 
         ),
       );
       expect(refused.exitCode).not.toBe(0);
-      expect(existsSync(f.destination)).toBe(false);
+      for (const file of f.files) expect(existsSync(file.destination)).toBe(false);
     }
   });
 });
