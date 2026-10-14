@@ -52,9 +52,16 @@ fn qualification_without_its_inputs_fails_closed_without_a_receipt() {
         ])
         .output()
         .unwrap();
-    // A native host now proceeds past the architecture check, but no receipt
-    // directory exists without a clean checkout and its verified install image.
+    // A native x86_64/aarch64 host now passes the architecture gate, but no
+    // receipt directory exists without a clean checkout and its verified
+    // install image (refused before any build or container).
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(!directory.exists());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("task-scalar-qualification: "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("requires native"), "{stderr}");
 }

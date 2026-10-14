@@ -1081,7 +1081,7 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   ];
   const versions = steps.map((step) => Number(step[1]));
   const ledger = steps.map((step, index) => [versions[index], "fvoci-postgres-060", step[2]]);
-  assert.ok(flags.user === role && flags.version === "180003");
+  assert.ok(flags.user === role && flags.version === "180006");
   assert.ok(
     flags.superuser === false &&
       flags.bypassrls === false &&

@@ -701,12 +701,12 @@ fn canonical(value: &Value) -> String {
     value.to_string() + "\n"
 }
 
-fn hex64(value: &Value) -> bool {
-    value.as_str().is_some_and(|text| {
+/// A lowercase SHA-256 hex digest, nonzero as the product decoder requires.
+fn digest_text(text: Option<&str>) -> bool {
+    text.is_some_and(|text| {
         text.len() == 64
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && text.bytes().any(|b| b != b'0')
     })
 }
 
@@ -876,12 +876,7 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
     use base64::Engine;
     let (name, digest) = image
         .split_once('@')
-        .filter(|(name, digest)| {
-            name.contains(':')
-                && digest
-                    .strip_prefix("sha256:")
-                    .is_some_and(|hex| hex64(&json!(hex)))
-        })
+        .filter(|(name, digest)| name.contains(':') && digest_text(digest.strip_prefix("sha256:")))
         .ok_or("reference image must be NAME:TAG@sha256:DIGEST")?;
     let repository = name
         .rsplit_once(':')
@@ -902,6 +897,9 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
         .iter()
         .map(|zone| zone["name"].as_str().ok_or("sealed zone name invalid"))
         .collect::<Result<_, _>>()?;
+    if sha(names.join("\n").as_bytes()) != sealed["reference"]["names_sha256"] {
+        return Err("sealed zone names differ from their recorded hash".into());
+    }
     let inspected: Value = serde_json::from_str(&docker_text(&[
         "image",
         "inspect",
@@ -923,7 +921,9 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
         .as_str()
         .ok_or("image ID missing")?
         .to_owned();
-    fs::create_dir(directory).map_err(|e| e.to_string())?;
+    if directory.exists() {
+        return Err(format!("{} already exists", directory.display()));
+    }
     let container = create_owned(
         ["--pull", "never", "--network", "none"]
             .iter()
@@ -973,6 +973,13 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
         .and_then(|line| line.strip_prefix("# version "))
         .filter(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_alphanumeric()))
         .ok_or("tzdata.zi version line missing")?;
+    // The zone files must belong to the installed tzdata package version.
+    let status = String::from_utf8_lossy(&files["/var/lib/dpkg/status"]);
+    if !package_version(&status, "tzdata")
+        .is_some_and(|version| version.starts_with(&format!("{tzdata_version}-")))
+    {
+        return Err("tzdata.zi version differs from the installed tzdata package".into());
+    }
     let mut zones = Vec::new();
     let mut rows = String::new();
     let mut changed = Vec::new();
@@ -1003,9 +1010,6 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
     profile["reference"]["image_digest"] = json!(digest);
     profile["runtime_profiles"] = json!([]);
     profile["zones"] = Value::Array(zones);
-    if sha(names.join("\n").as_bytes()) != profile["reference"]["names_sha256"] {
-        return Err("sealed zone names differ from their recorded hash".into());
-    }
     let encoded = canonical(&profile);
     let identities: Vec<String> = files
         .iter()
@@ -1018,7 +1022,6 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
             )
         })
         .collect();
-    let status = String::from_utf8_lossy(&files["/var/lib/dpkg/status"]);
     let os_release = String::from_utf8_lossy(&files["/etc/os-release"]);
     let identity = data_identity(&profile)?;
     let packages = ["tzdata", "libc6", "locales"]
@@ -1036,6 +1039,7 @@ fn reference(image: &str, directory: &Path) -> Result<(), String> {
         "changed_zones": changed,
         "container_removed": true,
     });
+    fs::create_dir(directory).map_err(|e| e.to_string())?;
     fs::write(directory.join("profile.json"), &encoded).map_err(|e| e.to_string())?;
     fs::write(directory.join("zones.md"), rows).map_err(|e| e.to_string())?;
     fs::write(directory.join("provenance.json"), pretty(&provenance)).map_err(|e| e.to_string())?;
@@ -1103,7 +1107,7 @@ fn seal_profile(
             || product["kernel_arch"] != arch
             || product["locpath_present"] != false
             || glibc.is_none()
-            || !hex64(&product["locale_archive_sha256"])
+            || !digest_text(product["locale_archive_sha256"].as_str())
         {
             return Err(refuse("lacks the native product GNU measurement"));
         }
@@ -1127,7 +1131,7 @@ fn seal_profile(
                     || test["exit"] != 0
                     || test["container_exited"] != true
                     || test["container_removed"] != true
-                    || !hex64(&test["output_sha256"])
+                    || !digest_text(test["output_sha256"].as_str())
             })
         {
             return Err(refuse("does not show each bootstrap body passing once"));
@@ -1516,7 +1520,7 @@ mod tests {
             consumer_identity(&case.source, &sha(&case.profile)).unwrap()
         );
         type Mutation = fn(&mut SealCase);
-        let refusals: [(&str, Mutation); 14] = [
+        let refusals: [(&str, Mutation); 15] = [
             ("bootstrap qualification", |c| {
                 c.receipts[0]["phase"] = json!("final")
             }),
@@ -1543,6 +1547,10 @@ mod tests {
             }),
             ("native product GNU measurement", |c| {
                 c.receipts[0]["product_runtime"]["locpath_present"] = json!(true)
+            }),
+            // The product decoder refuses a zero digest; seal must refuse it first.
+            ("native product GNU measurement", |c| {
+                c.receipts[1]["product_runtime"]["locale_archive_sha256"] = json!("0".repeat(64))
             }),
             ("each bootstrap body", |c| {
                 c.receipts[1]["tests"][3]["ignored"] = json!(1)
