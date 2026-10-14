@@ -911,29 +911,6 @@ async fn patch_locked(
     Ok(PatchUserOutcome::Ok { suspended_at })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn audit_cursor_round_trips_microseconds_and_rejects_extra_keys() {
-        let created_at = DateTime::parse_from_rfc3339("2026-09-26T01:02:03.123456Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let id = Uuid::now_v7();
-        let raw = encode_audit_cursor(AuditCursor { created_at, id });
-        let back = decode_audit_cursor(&raw).unwrap();
-        assert_eq!(back.created_at, created_at);
-        assert_eq!(back.id, id);
-        use base64::Engine;
-        let extra = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            json!({"ca": "2026-09-26T00:00:00Z", "id": id.to_string(), "x": 1}).to_string(),
-        );
-        assert!(decode_audit_cursor(&extra).is_none());
-        assert!(decode_audit_cursor("not base64 !").is_none());
-    }
-}
-
 pub async fn is_live_instance_admin_backend(
     backend: &Backend,
     user: Uuid,
@@ -1128,5 +1105,28 @@ mod selected_admin_family_sdk {
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_cursor_round_trips_microseconds_and_rejects_extra_keys() {
+        let created_at = DateTime::parse_from_rfc3339("2026-09-26T01:02:03.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let id = Uuid::now_v7();
+        let raw = encode_audit_cursor(AuditCursor { created_at, id });
+        let back = decode_audit_cursor(&raw).unwrap();
+        assert_eq!(back.created_at, created_at);
+        assert_eq!(back.id, id);
+        use base64::Engine;
+        let extra = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({"ca": "2026-09-26T00:00:00Z", "id": id.to_string(), "x": 1}).to_string(),
+        );
+        assert!(decode_audit_cursor(&extra).is_none());
+        assert!(decode_audit_cursor("not base64 !").is_none());
     }
 }

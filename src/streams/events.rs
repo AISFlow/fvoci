@@ -705,6 +705,87 @@ async fn access_event_after(
     .await
 }
 
+pub(crate) struct BackendTaskEventPage {
+    pub rows: Vec<StreamEventRow>,
+    pub next: BackendAccessCursor,
+}
+
+pub(crate) struct BackendWorkspaceEventPage {
+    pub rows: Vec<(Uuid, StreamEventRow)>,
+    pub next: BackendAccessCursor,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn family_poll_tasks(
+    backend: &crate::db::backend::Backend,
+    workspace: Uuid,
+    project: Option<Uuid>,
+    actor: Uuid,
+    credential: Uuid,
+    cursor: &BackendAccessCursor,
+    limit: i32,
+) -> Result<Option<BackendWorkspaceEventPage>, sqlx::Error> {
+    use crate::db::backend::{Backend, OperationTx};
+    use crate::db::codec::Cell;
+    let (Backend::Sqlite(_) | Backend::LibsqlRemote(_), BackendAccessCursor::SqliteFamily { seq }) =
+        (backend, cursor)
+    else {
+        return Err(sqlx::Error::Protocol(
+            "task cursor belongs to a different backend".into(),
+        ));
+    };
+    let limit = limit.clamp(1, 100) as usize;
+    let mut tx = backend.begin_read().await?;
+    let result = async {
+        let mut op = tx.operation();
+        op.set_tenant(workspace).await?;
+        // Per-project PG polling checks credentials; delivery separately checks the project.
+        if !op.session_is_live(actor, credential).await? { return Ok(None); }
+        if project.is_none() && family_workspace_access(&mut op, workspace, actor, credential).await? != StreamAccess::Allowed {
+            return Ok(None);
+        }
+        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
+        let horizon = family_access_horizon(family).await?;
+        if *seq < 0 || *seq > horizon { return Err(sqlx::Error::Protocol("invalid task event cursor".into())); }
+        let mut scanned = Vec::new();
+        let mut scan_after=*seq;
+        'scan: loop {
+        let raw = family.query(
+            "SELECT seq,verb,payload FROM events WHERE workspace_id=?1 AND seq>?2 AND seq<=?3
+             AND verb IN ('task.created','task.updated','task.deleted','comment.created') ORDER BY seq LIMIT 128",
+            &[Cell::uuid(workspace), Cell::Integer(scan_after), Cell::Integer(horizon)],
+        ).await?;
+        let full_batch=raw.len()==128;
+        for row in raw {
+            scan_after=row.cell(0)?.integer()?;
+            let row = StreamEventRow { xact: "0".into(), seq: row.cell(0)?.integer()?, verb: row.cell(1)?.string()?, payload: row.cell(2)?.value()? };
+            let resolved = if TASK_VERBS.contains(&row.verb.as_str()) {
+                row.payload.get("projectId").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok())
+            } else {
+                let Some(task) = row.payload.get("taskId").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok()) else { continue; };
+                family.query("SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(task)]).await?
+                    .first().map(|r| r.cell(0)?.id()).transpose()?
+            };
+            if project.is_some() && project != resolved { continue; }
+            scanned.push((resolved, row));
+            if scanned.len() == limit { break 'scan; }
+        }
+        if !full_batch {break;}
+        }
+        let next = BackendAccessCursor::SqliteFamily { seq: if scanned.len() == limit { scanned.last().expect("full page").1.seq } else { horizon } };
+        let mut rows = Vec::new();
+        for (id, row) in scanned {
+            let Some(id) = id else { continue; };
+            if project.is_some() || op.project_permission_by_id(workspace, actor, id).await?.is_some_and(|p| p.at_least(ProjectPermission::View)) {
+                rows.push((id,row));
+            }
+        }
+        Ok(Some(BackendWorkspaceEventPage { rows, next }))
+    }.await;
+    let cleanup = tx.rollback().await;
+    access_read_after_rollback(result, cleanup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,85 +1091,4 @@ mod selected_access_read_tests {
         );
         // Pure propagation seam only: not an actual remote rollback/settlement.
     }
-}
-
-pub(crate) struct BackendTaskEventPage {
-    pub rows: Vec<StreamEventRow>,
-    pub next: BackendAccessCursor,
-}
-
-pub(crate) struct BackendWorkspaceEventPage {
-    pub rows: Vec<(Uuid, StreamEventRow)>,
-    pub next: BackendAccessCursor,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn family_poll_tasks(
-    backend: &crate::db::backend::Backend,
-    workspace: Uuid,
-    project: Option<Uuid>,
-    actor: Uuid,
-    credential: Uuid,
-    cursor: &BackendAccessCursor,
-    limit: i32,
-) -> Result<Option<BackendWorkspaceEventPage>, sqlx::Error> {
-    use crate::db::backend::{Backend, OperationTx};
-    use crate::db::codec::Cell;
-    let (Backend::Sqlite(_) | Backend::LibsqlRemote(_), BackendAccessCursor::SqliteFamily { seq }) =
-        (backend, cursor)
-    else {
-        return Err(sqlx::Error::Protocol(
-            "task cursor belongs to a different backend".into(),
-        ));
-    };
-    let limit = limit.clamp(1, 100) as usize;
-    let mut tx = backend.begin_read().await?;
-    let result = async {
-        let mut op = tx.operation();
-        op.set_tenant(workspace).await?;
-        // Per-project PG polling checks credentials; delivery separately checks the project.
-        if !op.session_is_live(actor, credential).await? { return Ok(None); }
-        if project.is_none() && family_workspace_access(&mut op, workspace, actor, credential).await? != StreamAccess::Allowed {
-            return Ok(None);
-        }
-        let OperationTx::SqliteFamily(family) = &mut op else { unreachable!() };
-        let horizon = family_access_horizon(family).await?;
-        if *seq < 0 || *seq > horizon { return Err(sqlx::Error::Protocol("invalid task event cursor".into())); }
-        let mut scanned = Vec::new();
-        let mut scan_after=*seq;
-        'scan: loop {
-        let raw = family.query(
-            "SELECT seq,verb,payload FROM events WHERE workspace_id=?1 AND seq>?2 AND seq<=?3
-             AND verb IN ('task.created','task.updated','task.deleted','comment.created') ORDER BY seq LIMIT 128",
-            &[Cell::uuid(workspace), Cell::Integer(scan_after), Cell::Integer(horizon)],
-        ).await?;
-        let full_batch=raw.len()==128;
-        for row in raw {
-            scan_after=row.cell(0)?.integer()?;
-            let row = StreamEventRow { xact: "0".into(), seq: row.cell(0)?.integer()?, verb: row.cell(1)?.string()?, payload: row.cell(2)?.value()? };
-            let resolved = if TASK_VERBS.contains(&row.verb.as_str()) {
-                row.payload.get("projectId").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok())
-            } else {
-                let Some(task) = row.payload.get("taskId").and_then(Value::as_str).and_then(|id| Uuid::parse_str(id).ok()) else { continue; };
-                family.query("SELECT project_id FROM tasks WHERE workspace_id=?1 AND id=?2", &[Cell::uuid(workspace),Cell::uuid(task)]).await?
-                    .first().map(|r| r.cell(0)?.id()).transpose()?
-            };
-            if project.is_some() && project != resolved { continue; }
-            scanned.push((resolved, row));
-            if scanned.len() == limit { break 'scan; }
-        }
-        if !full_batch {break;}
-        }
-        let next = BackendAccessCursor::SqliteFamily { seq: if scanned.len() == limit { scanned.last().expect("full page").1.seq } else { horizon } };
-        let mut rows = Vec::new();
-        for (id, row) in scanned {
-            let Some(id) = id else { continue; };
-            if project.is_some() || op.project_permission_by_id(workspace, actor, id).await?.is_some_and(|p| p.at_least(ProjectPermission::View)) {
-                rows.push((id,row));
-            }
-        }
-        Ok(Some(BackendWorkspaceEventPage { rows, next }))
-    }.await;
-    let cleanup = tx.rollback().await;
-    access_read_after_rollback(result, cleanup)
 }
