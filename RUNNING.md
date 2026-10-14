@@ -1581,49 +1581,47 @@ unregistered redirect URI) and remove the old one once no instance `generic`
 provider shares that client. Sign-ins started before the upgrade fail once
 with `oidc_state_mismatch`. Instance providers keep their URIs.
 
-Local check against a real Keycloak (opt-in, not in CI): the official image
-in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
-`127.0.0.1` only, as the instance `generic` provider of the release server built
-from the checkout, driven by Playwright Chromium through the web UI
-(`apps/web/e2e-keycloak/`; sign-in and the other pages are the Vue app). Secrets are
-generated per run; the Keycloak compose project is removed on exit. It does not cover external providers, HTTPS or a
-reverse proxy, or the container deployment path. Workspace SSO needs a
-`workspaceSso` license, which published builds cannot load; `--workspace-sso`
-adds two workspace realms and runs the ignored Rust test
-`keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
-license, not the release server) against them.
+Local real-Keycloak check (allocated local execution, outside the ordinary CI
+browser groups): `bun --no-env-file tools/keycloak/run.ts --backend=postgres`
+selects the instance OIDC witness. Select `--backend=sqlite` or
+`--backend=libsql-remote` for the same 16 Chromium cases (8 flows, 7 failure
+boundaries, 1 wrong client secret). Every mode uses a fresh database and normal
+`fvoci-migrate --start` process under the allocated nonroot actor. PostgreSQL
+uses a restricted app role; its owner connection belongs only to preparation
+and the fixed native read-only observer. SQLite observers open read-only files;
+libSQL observations use the existing Rust adapter and SDK, with explicit
+rollback and connection drain. Selected-mode skips, retries and zero tests fail.
 
-Needs docker with compose, openssl, git, cargo, bun, setsid (util-linux),
-realpath (coreutils), the web dependencies and Chromium from
-`scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
-image pull. As in the web e2e harness, the web build (`bun --bun run build`)
-and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
-node and npm are not used. The script exits non-zero when a group
-fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
-completely; the last command below removes a leftover one (the two variables
-only satisfy the compose file). A failing group's
-Playwright output and server log are copied, redacted, to
-`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`. The groups run with a TMPDIR
-inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
-at most 36 characters), which is removed on exit together with the raw copies
-the web e2e harness keeps; Ctrl-C stops the run once the current group has
-cleaned up; a further Ctrl-C, or a closed pipe on stderr, during the script's
-own cleanup is ignored, so the run directory (per-run secrets) and the
-Keycloak project are always removed. The
-script refuses to run under `set -x`. `--skip-build` checks only that
-`fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
-version output) and `apps/web/dist` are used as they are. The clean-tree
-check (`versions.json`) looks at tracked files only; untracked files under
-`apps/web/public` still end up in `dist`.
+The runner imports per-run realms into the digest-pinned official Keycloak
+image in `scripts/keycloak/compose.yml`, published on loopback only. It owns
+and removes that compose project, server and browser children, database fixtures
+and private files on completion, failure and interruption. Evidence is redacted
+before retention; passwords, tokens, callback state, connection URLs and hosts
+are excluded. Chromium trace, screenshot and video recording remain disabled.
+Cleanup failures fail the run. The local libSQL fixture uses the pinned official
+sqld and a standard TLS forwarder with a run-only certificate, IP SAN and token;
+only native children receive its CA file. It is a local protocol witness, not a
+hosted Turso acceptance result. Hosted credentials and dispatch remain behind
+the existing main-only admission and explicit destructive gates.
 
-```sh
-bash scripts/prepare-web-e2e.sh    # once
-TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
-bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
-bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
-KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
-  docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
-```
+A maintained purpose-specific local allocation is required. It binds the exact
+source/tree, actor, output root, registered consumer modules and native/web/
+Bun/Chromium inputs. The existing current-build recorder supplies
+`--record-before` and `--freeze`; the consumer rechecks that frozen cohort
+before and after execution. Builds use the recorder's dev profile
+(`api-schema,db-tests`, opt0 with debug assertions), so these results establish
+functional behavior, not release optimization or performance. A version string
+alone is insufficient to reuse binaries or web assets. Prepare locked web
+dependencies and Chromium with `scripts/prepare-web-e2e.sh`; build the native
+cohort and web assets between recording and freezing the inputs.
+
+`--backend=postgres --workspace-sso` additionally imports two workspace realms
+and runs the separately compiled ignored Rust test
+`keycloak_workspace_sso_with_a_test_entitlement` with a test entitlement.
+This single in-process PostgreSQL test is separate from the 16 public-instance
+browser cases and does not enable enterprise SSO in the normal server. These
+checks do not cover external providers, HTTPS for browser OIDC, reverse proxies,
+container deployment or other browsers.
 
 `scripts/backup-restore-smoke.sh` takes the same image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,
