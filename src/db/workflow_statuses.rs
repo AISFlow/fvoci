@@ -98,7 +98,7 @@ pub async fn list_workspace_statuses(
         ORDER BY s.sort_key COLLATE "C", s.id
         "#
     );
-    let rows: Vec<StatusTuple> = sqlx::query_as(&sql)
+    let rows: Vec<StatusTuple> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(role == WorkspaceRole::Guest)
         .bind(actor_user_id)
@@ -279,7 +279,7 @@ async fn list_workflow_statuses(
         ORDER BY sort_key COLLATE "C", id
         "#
     );
-    let rows: Vec<StatusTuple> = sqlx::query_as(&sql)
+    let rows: Vec<StatusTuple> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(workflow_id)
         .fetch_all(&mut **tx)
@@ -294,7 +294,7 @@ async fn fetch_status(
 ) -> Result<Option<StatusRow>, sqlx::Error> {
     let sql =
         format!("SELECT {STATUS_COLUMNS} FROM fvoci.statuses WHERE workspace_id = $1 AND id = $2");
-    let row: Option<StatusTuple> = sqlx::query_as(&sql)
+    let row: Option<StatusTuple> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(status_id)
         .fetch_optional(&mut **tx)
@@ -355,7 +355,7 @@ pub async fn create_status(
         RETURNING {STATUS_COLUMNS}
         "#
     );
-    let row: StatusTuple = sqlx::query_as(&sql)
+    let row: StatusTuple = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(Uuid::now_v7())
         .bind(workspace_id)
         .bind(project_id)
@@ -513,7 +513,7 @@ pub async fn update_status(
         RETURNING {STATUS_COLUMNS}
         "#
     );
-    let row: StatusTuple = sqlx::query_as(&sql)
+    let row: StatusTuple = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(status_id)
         .bind(input.name)

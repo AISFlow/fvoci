@@ -66,10 +66,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -80,10 +83,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -111,18 +114,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
     }
@@ -408,7 +417,7 @@ async fn session_id_for_cookie(harness: &TestDb, cookie: &str) -> Uuid {
 }
 
 async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -417,17 +426,17 @@ async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str
         END;
         $$;
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE TRIGGER fvoci_{fn_name}
         BEFORE INSERT ON fvoci.{target}
         FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();

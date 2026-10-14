@@ -123,6 +123,9 @@ The accepted feature families remain:
   selection on keydown, so a pending editor focus repair can no longer
   restore the previous caret or collapse a Shift+Home selection before
   formatting. Three intermittent browser tests were also made deterministic.
+- **PostgreSQL `sslmode=verify-ca`** now checks only the certificate chain,
+  as libpq documents. 0.4.0 and 0.5.0 also refused a certificate that did
+  not name the host; use `verify-full` to keep that check.
 
 The release workflow separately builds and smoke-tests the exact tagged
 image on native amd64 and arm64 before publishing it. A local fixture,
@@ -278,8 +281,9 @@ The following remain unverified or optional for this trial:
 - **Mail can be sent twice to one recipient** when the server restarts
   between retries of one mail event: the list of recipients already accepted
   is kept in memory only.
-- **Database connection check.** Until sqlx 0.9, each reuse of a pooled
-  connection runs one check query in place of sqlx's ping. In the author's
+- **Database connection check.** Each reuse of a pooled connection runs one
+  check query in place of sqlx's ping; sqlx 0.9.0 still leaves a cancelled
+  `BEGIN` open on the connection. In the author's
   local measurement (a bare `SELECT 1` through the pool) it cost about
   10–12% per query run one at a time and 1–24% with the pool saturated;
   requests that run several queries on one connection pay relatively less.

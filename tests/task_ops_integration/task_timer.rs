@@ -2450,7 +2450,7 @@ mod task_timer {
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
         // Reuse exact production binds. No session/system setting, planner knob,
         // pool growth, copied record query, or diagnostic HTTP endpoint.
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace)
             .bind(task)
             .bind(actor)
@@ -2555,7 +2555,7 @@ mod task_timer {
                 "task_timer_legacy_open",
                 "task_timer_runs",
             ] {
-                sqlx::query(&format!("ANALYZE fvoci.{table}"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE fvoci.{table}")))
                     .execute(&admin)
                     .await
                     .unwrap();
@@ -3398,7 +3398,7 @@ mod task_timer {
             .await
             .unwrap();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(workspace)
             .bind(task)
             .bind(actor)
@@ -3537,7 +3537,7 @@ mod task_timer {
                 "task_timer_segments",
                 "task_timer_legacy_open",
             ] {
-                sqlx::query(&format!("ANALYZE fvoci.{table}"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE fvoci.{table}")))
                     .execute(&admin)
                     .await
                     .unwrap();
@@ -5033,7 +5033,7 @@ mod task_timer {
             for original in immutable[key].as_array().unwrap() {
                 let mut row = original.clone();
                 row["workspace_id"] = json!(destination);
-                sqlx::query(&format!("INSERT INTO fvoci.{table} SELECT * FROM jsonb_populate_record(NULL::fvoci.{table},$1)"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO fvoci.{table} SELECT * FROM jsonb_populate_record(NULL::fvoci.{table},$1)")))
                     .bind(row).execute(&mut *relocation).await.unwrap();
                 if table == "time_entries" && original["ended_at"].is_null() {
                     sqlx::query("DELETE FROM fvoci.task_timer_legacy_open WHERE time_entry_id=$1")
@@ -5338,7 +5338,7 @@ mod task_timer {
                 } else {
                     format!("DELETE FROM fvoci.{table}")
                 };
-                let error = sqlx::query(&statement)
+                let error = sqlx::query(sqlx::AssertSqlSafe(statement))
                     .execute(&restricted)
                     .await
                     .unwrap_err();

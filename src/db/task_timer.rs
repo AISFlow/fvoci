@@ -170,7 +170,7 @@ async fn state_in(
     let run = active.filter(|r| r.workspace_id == workspace && r.task_id == task);
     // Personal effective closed intervals include canonical fractions/cleanup
     // once and exclude duplicate projections and other actors' history.
-    let actual: i64 = sqlx::query_scalar(&format!("WITH records AS ({RECORDS_SQL}) SELECT COALESCE(sum(EXTRACT(EPOCH FROM(date_trunc('milliseconds',ended_at)-date_trunc('milliseconds',started_at)))*1000),0)::bigint FROM records WHERE ended_at IS NOT NULL"))
+    let actual: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("WITH records AS ({RECORDS_SQL}) SELECT COALESCE(sum(EXTRACT(EPOCH FROM(date_trunc('milliseconds',ended_at)-date_trunc('milliseconds',started_at)))*1000),0)::bigint FROM records WHERE ended_at IS NOT NULL")))
         .bind(workspace).bind(task).bind(actor).fetch_one(&mut **tx).await?;
     Ok(TaskTimerState {
         server_now: clock(tx).await?,
@@ -1617,7 +1617,7 @@ pub async fn history(
         Option<i64>,
         Option<bool>,
     );
-    let rows: Vec<HistoryRow> = sqlx::query_as(&sql)
+    let rows: Vec<HistoryRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace)
         .bind(task)
         .bind(actor)
@@ -1853,7 +1853,7 @@ pub async fn summary(
  SELECT day,COALESCE(sum(GREATEST(0,EXTRACT(EPOCH FROM(LEAST(i.ended_at,b)-GREATEST(i.started_at,a)))*1000)) FILTER (WHERE i.started_at IS NOT NULL),0)::bigint
  FROM days LEFT JOIN intervals i ON i.started_at<b AND i.ended_at>a GROUP BY day ORDER BY day"#
     );
-    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&sql)
+    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace)
         .bind(task)
         .bind(actor)
@@ -1863,7 +1863,7 @@ pub async fn summary(
         .bind(at)
         .fetch_all(&mut *tx)
         .await?;
-    let flags:(bool,bool)=sqlx::query_as(&format!("WITH records AS ({RECORDS_SQL}) SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND status<>'stopped'),EXISTS(SELECT 1 FROM records WHERE kind='manual' AND ended_at IS NULL)")).bind(workspace).bind(task).bind(actor).fetch_one(&mut *tx).await?;
+    let flags:(bool,bool)=sqlx::query_as(sqlx::AssertSqlSafe(format!("WITH records AS ({RECORDS_SQL}) SELECT EXISTS(SELECT 1 FROM fvoci.task_timer_runs WHERE workspace_id=$1 AND task_id=$2 AND user_id=$3 AND status<>'stopped'),EXISTS(SELECT 1 FROM records WHERE kind='manual' AND ended_at IS NULL)"))).bind(workspace).bind(task).bind(actor).fetch_one(&mut *tx).await?;
     let days = rows
         .into_iter()
         .map(|(date, milliseconds)| TimerDayTotal { date, milliseconds })
@@ -2281,7 +2281,7 @@ pub async fn correct(
     }
     let sql =
         format!("WITH records AS ({RECORDS_SQL}) SELECT * FROM records WHERE id=$4 AND kind=$5");
-    let row: RecordTuple = sqlx::query_as(&sql)
+    let row: RecordTuple = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace)
         .bind(task)
         .bind(actor)

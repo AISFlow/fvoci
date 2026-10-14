@@ -102,7 +102,7 @@ async fn admin_pool(harness: &TestDb) -> PgPool {
         .unwrap()
 }
 
-async fn admin_exec(harness: &TestDb, sql: &str, id: Uuid) {
+async fn admin_exec(harness: &TestDb, sql: &'static str, id: Uuid) {
     let admin = admin_pool(harness).await;
     sqlx::query(sql).bind(id).execute(&admin).await.unwrap();
     admin.close().await;

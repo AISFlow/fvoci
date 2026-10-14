@@ -1874,10 +1874,11 @@ mod sqlite_port {
         }
         async fn count(&self, table: &str) -> i64 {
             let fresh = pool::connect_sqlite_app(&self.path, 1).await.unwrap();
-            let n = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&fresh)
-                .await
-                .unwrap();
+            let n =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&fresh)
+                    .await
+                    .unwrap();
             fresh.close().await;
             n
         }

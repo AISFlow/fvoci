@@ -275,10 +275,10 @@ async fn install_delivery_table(admin: &PgPool, role: &str) {
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT SELECT, INSERT ON fvoci.outbox_reset_deliveries TO \"{}\"",
         role.replace('"', "\"\"")
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
@@ -939,22 +939,25 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
     ];
     let password = Uuid::now_v7().simple().to_string();
     for (role, inherit) in roles.iter().zip(["INHERIT", "NOINHERIT", "INHERIT"]) {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE {role} LOGIN NOSUPERUSER {inherit} PASSWORD '{password}'"
-        ))
+        )))
         .execute(&admin)
         .await
         .unwrap();
     }
     // Members of pg_read_all_stats without its privileges stay blind.
-    sqlx::query(&format!("GRANT pg_read_all_stats TO {}", roles[1]))
-        .execute(&admin)
-        .await
-        .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT pg_read_all_stats TO {}",
+        roles[1]
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "GRANT pg_read_all_stats TO {} WITH INHERIT FALSE",
         roles[2]
-    ))
+    )))
     .execute(&admin)
     .await
     .unwrap();
@@ -966,7 +969,7 @@ async fn apply_refuses_blind_owner_and_in_flight_xmin() {
 
     let admin = self::admin(&harness).await;
     for role in &roles {
-        sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
             .execute(&admin)
             .await
             .unwrap();

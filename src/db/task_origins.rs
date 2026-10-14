@@ -340,7 +340,7 @@ pub async fn task_projects(
         ORDER BY p.updated_at DESC, p.id ASC
         "#
     );
-    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(&picker_sql)
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(picker_sql))
         .bind(workspace_id)
         .bind(guest)
         .bind(actor_user_id)
@@ -1196,7 +1196,7 @@ pub async fn list_document_task_origins(
         "#
     );
     let count_sql = format!("SELECT count(*)::bigint {from_where}");
-    let total: i64 = sqlx::query_scalar(&count_sql)
+    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql))
         .bind(workspace_id)
         .bind(guest)
         .bind(actor_user_id)
@@ -1213,7 +1213,7 @@ pub async fn list_document_task_origins(
         LIMIT $6
         "#
     );
-    let rows: Vec<OriginRow> = sqlx::query_as(&page_sql)
+    let rows: Vec<OriginRow> = sqlx::query_as(sqlx::AssertSqlSafe(page_sql))
         .bind(workspace_id)
         .bind(guest)
         .bind(actor_user_id)
@@ -2052,22 +2052,26 @@ mod selected_document_origin_create_tests {
             ("projects", "deleted_at", project),
             ("workspaces", "deleted_at", f.workspace),
         ] {
-            sqlx::query(&format!("UPDATE {table} SET {column}=1 WHERE id=?1"))
-                .bind(id.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {column}=1 WHERE id=?1"
+            )))
+            .bind(id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
             let denied = inverse(&f, credential, task).await.unwrap();
             if table == "sessions" || table == "users" {
                 assert!(matches!(denied, Err(TaskOriginDbError::Forbidden)));
             } else {
                 assert!(matches!(denied, Err(TaskOriginDbError::NotFound)));
             }
-            sqlx::query(&format!("UPDATE {table} SET {column}=NULL WHERE id=?1"))
-                .bind(id.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {column}=NULL WHERE id=?1"
+            )))
+            .bind(id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
             assert_eq!(
                 inverse(&f, credential, task).await.unwrap().unwrap(),
                 visible
@@ -2758,7 +2762,7 @@ mod selected_document_origin_create_tests {
         );
         for table in ["events", "audit_log"] {
             let before_failure = state(&f, project).await;
-            sqlx::query(&format!("CREATE TRIGGER reject_self_assignment BEFORE INSERT ON {table} WHEN NEW.verb='task.updated' BEGIN SELECT RAISE(ABORT,'self assignment publication failure'); END;")).execute(&f.pool).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER reject_self_assignment BEFORE INSERT ON {table} WHEN NEW.verb='task.updated' BEGIN SELECT RAISE(ABORT,'self assignment publication failure'); END;"))).execute(&f.pool).await.unwrap();
             let mut failure = request(
                 f.document,
                 project,
@@ -2971,7 +2975,7 @@ mod selected_document_origin_create_tests {
             ("task_origins", "1"),
         ] {
             let before = state(&f, project).await;
-            sqlx::query(&format!("CREATE TRIGGER reject_origin_publish BEFORE INSERT ON {table} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'origin publication failure'); END;"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER reject_origin_publish BEFORE INSERT ON {table} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'origin publication failure'); END;")))
                 .execute(&f.pool).await.unwrap();
             let error = create(
                 &f,

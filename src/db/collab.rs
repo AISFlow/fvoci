@@ -1427,9 +1427,9 @@ impl OperationTx<'_, '_> {
     ) -> Result<Value, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let (body,): (Value,) = sqlx::query_as(&t.sql(
+                let (body,): (Value,) = sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
                     "SELECT content_json FROM {resource} WHERE workspace_id = $1 AND id = $2",
-                ))
+                )))
                 .bind(workspace)
                 .bind(resource)
                 .fetch_one(&mut ***tx)
@@ -1505,7 +1505,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<Option<i64>, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let row: Option<(i64,)> = sqlx::query_as(&t.sql("SELECT writer_generation FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE"))
+                let row: Option<(i64,)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql("SELECT writer_generation FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE")))
                     .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await?;
                 Ok(row.map(|(generation,)| generation))
             }
@@ -1533,7 +1533,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                sqlx::query(&t.sql("INSERT INTO {states} (workspace_id, {id}, state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq) VALUES ($1, $2, $3, $4, 0, 0, 0)"))
+                sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {states} (workspace_id, {id}, state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq) VALUES ($1, $2, $3, $4, 0, 0, 0)")))
                     .bind(workspace).bind(resource).bind(EMPTY_YJS_STATE_V1).bind(COLLAB_STATE_ENCODING_V1)
                     .execute(&mut ***tx).await?;
             }
@@ -1570,14 +1570,14 @@ async fn fetch_append_fence_for_update(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Result<Option<(i64, i64, i64, i64)>, sqlx::Error> {
-    sqlx::query_as(&t.sql(
+    sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
         r#"
         SELECT octet_length(state)::bigint, writer_generation, snapshot_cutoff_seq, tail_seq
         FROM {states}
         WHERE workspace_id = $1 AND {id} = $2
         FOR UPDATE
         "#,
-    ))
+    )))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut **tx)
@@ -1714,7 +1714,7 @@ impl OperationTx<'_, '_> {
         let t = CollabTables::for_kind(kind);
         match self {
             Self::Postgres(tx) => {
-                sqlx::query(&t.sql("INSERT INTO {states}(workspace_id,{id},state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,created_at,updated_at,compacted_at) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,$9)"))
+                sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {states}(workspace_id,{id},state,encoding,writer_generation,snapshot_cutoff_seq,tail_seq,created_at,updated_at,compacted_at) VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,$9)")))
                     .bind(workspace).bind(resource).bind(&snapshot).bind(state.encoding).bind(state.snapshot_cutoff_seq).bind(state.tail_seq).bind(created).bind(updated).bind(compacted).execute(&mut ***tx).await?;
             }
             Self::SqliteFamily(writer) => {
@@ -1748,7 +1748,7 @@ impl OperationTx<'_, '_> {
             let created = super::revisions::archive_native_instant(&update.created_at)?;
             match self {
                 Self::Postgres(tx) => {
-                    sqlx::query(&t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload,created_at) VALUES($1,$2,$3,$4,$5,$6)"))
+                    sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload,created_at) VALUES($1,$2,$3,$4,$5,$6)")))
                         .bind(workspace).bind(resource).bind(update.seq).bind(update.op_id).bind(payload).bind(created).execute(&mut ***tx).await?;
                 }
                 Self::SqliteFamily(writer) => {
@@ -1778,7 +1778,7 @@ impl OperationTx<'_, '_> {
             let created = super::revisions::archive_native_instant(&receipt.created_at)?;
             match self {
                 Self::Postgres(tx) => {
-                    sqlx::query(&t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,actor_user_id,payload_len,payload_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)"))
+                    sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,actor_user_id,payload_len,payload_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")))
                         .bind(workspace).bind(resource).bind(receipt.op_id).bind(receipt.seq).bind(claim.created_by).bind(receipt.payload_len).bind(digest).bind(created).execute(&mut ***tx).await?;
                 }
                 Self::SqliteFamily(writer) => {
@@ -1861,7 +1861,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<Option<CollabOperationLookup>, sqlx::Error> {
         let t = CollabTables::for_kind(kind);
         let row: Option<(i64,i64,Vec<u8>,Uuid)> = match self {
-            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT seq,payload_len,payload_sha256,actor_user_id FROM {receipts} WHERE workspace_id=$1 AND {id}=$2 AND op_id=$3"))
+            Self::Postgres(tx) => sqlx::query_as(sqlx::AssertSqlSafe(t.sql("SELECT seq,payload_len,payload_sha256,actor_user_id FROM {receipts} WHERE workspace_id=$1 AND {id}=$2 AND op_id=$3")))
                 .bind(workspace).bind(resource).bind(operation).fetch_optional(&mut ***tx).await?,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
@@ -1894,7 +1894,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<Option<i64>, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let row: Option<(i64,)> = sqlx::query_as(&t.sql("UPDATE {states} SET tail_seq=tail_seq+1,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$3 AND tail_seq=$4 RETURNING tail_seq"))
+                let row: Option<(i64,)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql("UPDATE {states} SET tail_seq=tail_seq+1,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$3 AND tail_seq=$4 RETURNING tail_seq")))
                     .bind(workspace).bind(resource).bind(generation).bind(expected_tail).fetch_optional(&mut ***tx).await?;
                 Ok(row.map(|(seq,)| seq))
             }
@@ -1936,9 +1936,9 @@ impl OperationTx<'_, '_> {
     ) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                sqlx::query(&t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload) VALUES($1,$2,$3,$4,$5)"))
+                sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {updates}(workspace_id,{id},seq,op_id,payload) VALUES($1,$2,$3,$4,$5)")))
                     .bind(workspace).bind(resource).bind(seq).bind(operation).bind(payload).execute(&mut ***tx).await?;
-                sqlx::query(&t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7)"))
+                sqlx::query(sqlx::AssertSqlSafe(t.sql("INSERT INTO {receipts}(workspace_id,{id},op_id,seq,payload_len,payload_sha256,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7)")))
                     .bind(workspace).bind(resource).bind(operation).bind(seq).bind(payload.len() as i64).bind(digest).bind(actor).execute(&mut ***tx).await?;
             }
             Self::SqliteFamily(tx) => {
@@ -2047,7 +2047,7 @@ impl OperationTx<'_, '_> {
     ) -> Result<Option<i64>, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let row: Option<(i64,)> = sqlx::query_as(&t.sql("UPDATE {states} SET writer_generation = writer_generation + 1, updated_at = now() WHERE workspace_id = $1 AND {id} = $2 RETURNING writer_generation"))
+                let row: Option<(i64,)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql("UPDATE {states} SET writer_generation = writer_generation + 1, updated_at = now() WHERE workspace_id = $1 AND {id} = $2 RETURNING writer_generation")))
                     .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await?;
                 Ok(row.map(|(generation,)| generation))
             }
@@ -2074,7 +2074,7 @@ impl OperationTx<'_, '_> {
         resource: Uuid,
     ) -> Result<Option<StateRow>, sqlx::Error> {
         match self {
-            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE"))
+            Self::Postgres(tx) => sqlx::query_as(sqlx::AssertSqlSafe(t.sql("SELECT state, encoding, writer_generation, snapshot_cutoff_seq, tail_seq, updated_at FROM {states} WHERE workspace_id = $1 AND {id} = $2 FOR UPDATE")))
                 .bind(workspace).bind(resource).fetch_optional(&mut ***tx).await,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?; tx.require_tenant(workspace)?;
@@ -2098,7 +2098,7 @@ impl OperationTx<'_, '_> {
         cutoff: i64,
     ) -> Result<(i64, i64), sqlx::Error> {
         match self {
-            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3"))
+            Self::Postgres(tx) => sqlx::query_as(sqlx::AssertSqlSafe(t.sql("SELECT count(*)::bigint, coalesce(sum(octet_length(payload)), 0)::bigint FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3")))
                 .bind(workspace).bind(resource).bind(cutoff).fetch_one(&mut ***tx).await,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?; tx.require_tenant(workspace)?;
@@ -2128,7 +2128,7 @@ impl OperationTx<'_, '_> {
             return Ok(Err(error));
         }
         let rows: Vec<(i64, Uuid, Vec<u8>)> = match self {
-            Self::Postgres(tx) => sqlx::query_as(&t.sql("SELECT seq, op_id, payload FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3 ORDER BY seq ASC LIMIT $4"))
+            Self::Postgres(tx) => sqlx::query_as(sqlx::AssertSqlSafe(t.sql("SELECT seq, op_id, payload FROM {updates} WHERE workspace_id = $1 AND {id} = $2 AND seq > $3 ORDER BY seq ASC LIMIT $4")))
                 .bind(workspace).bind(resource).bind(cutoff).bind(MAX_COLLAB_TAIL_UPDATES).fetch_all(&mut ***tx).await?,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?; tx.require_tenant(workspace)?;
@@ -3015,7 +3015,7 @@ impl OperationTx<'_, '_> {
         // held: post-commit revocation can deny recovery without leaving the
         // durable body API on the content that the committed restore replaced.
         // Correlation/receipt replays returned above and never project again.
-        let updated: Option<(Uuid,)> = sqlx::query_as(&t.sql(
+        let updated: Option<(Uuid,)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
             r#"
             UPDATE {resource}
             SET content_json = $3,
@@ -3027,7 +3027,7 @@ impl OperationTx<'_, '_> {
               AND content_json IS DISTINCT FROM $3::jsonb
             RETURNING id
             "#,
-        ))
+        )))
         .bind(workspace_id)
         .bind(document_id)
         .bind(restore.prepared_body.content_json())
@@ -3572,13 +3572,13 @@ pub async fn lookup_collab_operation(
         tx.rollback().await?;
         return Ok(Err(err));
     }
-    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(&t.sql(
+    let row: Option<(i64, i64, Vec<u8>, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
         r#"
         SELECT seq, payload_len, payload_sha256, actor_user_id
         FROM {receipts}
         WHERE workspace_id = $1 AND {id} = $2 AND op_id = $3
         "#,
-    ))
+    )))
     .bind(workspace_id)
     .bind(document_id)
     .bind(op_id)
@@ -3866,8 +3866,8 @@ impl OperationTx<'_, '_> {
         cutoff: i64,
     ) -> Result<(bool, bool), sqlx::Error> {
         match self {
-            Self::Postgres(tx) => sqlx::query_as(&t.sql(
-                "SELECT EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq>$3), EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3)"))
+            Self::Postgres(tx) => sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
+                "SELECT EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq>$3), EXISTS(SELECT 1 FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3)")))
                 .bind(workspace).bind(resource).bind(cutoff).fetch_one(&mut ***tx).await,
             Self::SqliteFamily(tx) => {
                 tx.require_writer()?;
@@ -3897,11 +3897,11 @@ impl OperationTx<'_, '_> {
     ) -> Result<(), sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                sqlx::query(&t.sql("UPDATE {states} SET state=$3,snapshot_cutoff_seq=$4,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$5"))
+                sqlx::query(sqlx::AssertSqlSafe(t.sql("UPDATE {states} SET state=$3,snapshot_cutoff_seq=$4,updated_at=now() WHERE workspace_id=$1 AND {id}=$2 AND writer_generation=$5")))
                     .bind(workspace).bind(resource).bind(snapshot).bind(cutoff).bind(generation).execute(&mut ***tx).await?;
-                sqlx::query(
-                    &t.sql("DELETE FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3"),
-                )
+                sqlx::query(sqlx::AssertSqlSafe(t.sql(
+                    "DELETE FROM {updates} WHERE workspace_id=$1 AND {id}=$2 AND seq<=$3",
+                )))
                 .bind(workspace)
                 .bind(resource)
                 .bind(cutoff)
@@ -4152,7 +4152,7 @@ pub async fn estimate_persisted_collab_bytes_kind(
     let t = CollabTables::for_kind(kind);
     let mut tx = conn.begin().await?;
     set_tenant(&mut tx, workspace_id).await?;
-    let row: Option<(i64, i64)> = sqlx::query_as(&t.sql(
+    let row: Option<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
         r#"
         SELECT
             coalesce(octet_length(ds.state), 0)::bigint,
@@ -4166,7 +4166,7 @@ pub async fn estimate_persisted_collab_bytes_kind(
         FROM {states} ds
         WHERE ds.workspace_id = $1 AND ds.{id} = $2
         "#,
-    ))
+    )))
     .bind(workspace_id)
     .bind(document_id)
     .fetch_optional(&mut *tx)
@@ -4520,9 +4520,9 @@ impl OperationTx<'_, '_> {
     ) -> Result<bool, sqlx::Error> {
         match self {
             Self::Postgres(tx) => {
-                let updated:Option<(Uuid,)>=sqlx::query_as(&t.sql(
+                let updated:Option<(Uuid,)>=sqlx::query_as(sqlx::AssertSqlSafe(t.sql(
                     "UPDATE {resource} SET content_json=$3,text=$4,chosung=$5,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND content_json IS DISTINCT FROM $3::jsonb RETURNING id"
-                )).bind(workspace).bind(resource).bind(prepared.content_json()).bind(prepared.text()).bind(prepared.chosung()).fetch_optional(&mut ***tx).await?;
+                ))).bind(workspace).bind(resource).bind(prepared.content_json()).bind(prepared.text()).bind(prepared.chosung()).fetch_optional(&mut ***tx).await?;
                 Ok(updated.is_some())
             }
             Self::SqliteFamily(tx) => {

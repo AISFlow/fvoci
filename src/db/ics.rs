@@ -369,7 +369,7 @@ async fn list_visible_ics_tasks(
         LIMIT {ICS_FEED_LIMIT}
         "#
     );
-    sqlx::query_as(&sql)
+    sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(is_guest)
         .bind(user_id)

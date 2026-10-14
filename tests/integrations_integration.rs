@@ -2994,7 +2994,7 @@ async fn ai_routes_are_member_gated_and_use_the_document_markdown() {
 // Round 2: GitHub sync finality, isolation and concurrency
 
 /// Reads through RLS with the system context, as product workers do.
-async fn system_scalar_uuid(admin: &PgPool, sql: &str, bind: Uuid) -> Option<Uuid> {
+async fn system_scalar_uuid(admin: &PgPool, sql: &'static str, bind: Uuid) -> Option<Uuid> {
     let mut tx = admin.begin().await.unwrap();
     sqlx::query("SELECT set_config('app.system_ctx', 'on', true)")
         .execute(&mut *tx)
@@ -3654,10 +3654,12 @@ async fn integration_tables_force_rls_and_isolate_tenants() {
                     .await
                     .unwrap();
             }
-            let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM fvoci.{table}"))
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM fvoci.{table}"
+            )))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
             tx.rollback().await.unwrap();
             n
         }
@@ -3711,7 +3713,7 @@ async fn integration_tables_force_rls_and_isolate_tenants() {
         .await
         .unwrap();
     for table in ["webhooks", "github_installations", "github_issue_links"] {
-        let n = sqlx::query(&format!("DELETE FROM fvoci.{table}"))
+        let n = sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM fvoci.{table}")))
             .execute(&mut *tx)
             .await
             .unwrap()

@@ -98,7 +98,7 @@ fn row_from(row: &sqlx::postgres::PgRow) -> Result<QueryRow, sqlx::Error> {
 }
 
 fn bind_all<'q>(
-    sql: &'q str,
+    sql: impl sqlx::SqlSafeStr,
     args: &'q [String],
 ) -> sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments> {
     let mut query = sqlx::query(sql);
@@ -119,11 +119,12 @@ pub(crate) async fn load_item_values(
     workspace_id: Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<(Uuid, Uuid, Value)>, sqlx::Error> {
-    let rows: Vec<(Uuid, Uuid, Option<Value>)> = sqlx::query_as(&values_sql("$2"))
-        .bind(workspace_id)
-        .bind(ids)
-        .fetch_all(&mut **tx)
-        .await?;
+    let rows: Vec<(Uuid, Uuid, Option<Value>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(values_sql("$2")))
+            .bind(workspace_id)
+            .bind(ids)
+            .fetch_all(&mut **tx)
+            .await?;
     Ok(rows
         .into_iter()
         .filter_map(|(item, field, value)| value.map(|value| (item, field, value)))
@@ -455,14 +456,14 @@ async fn run(
 
     let count: i64 = {
         let sql = format!("{source} SELECT count(*) FROM visible");
-        bind_all(&sql, &args.values)
+        bind_all(sqlx::AssertSqlSafe(sql), &args.values)
             .fetch_one(&mut **tx)
             .await?
             .try_get(0)?
     };
     let buckets: Vec<(Option<String>, i64)> = {
         let sql = format!("{source} SELECT grp, count(*) FROM visible GROUP BY grp");
-        bind_all(&sql, &args.values)
+        bind_all(sqlx::AssertSqlSafe(sql), &args.values)
             .fetch_all(&mut **tx)
             .await?
             .iter()
@@ -491,7 +492,7 @@ async fn run(
             LEFT JOIN counts ON counts.day IS NOT DISTINCT FROM days.date
             ORDER BY days.date NULLS LAST"
         );
-        for row in bind_all(&sql, &day_args.values)
+        for row in bind_all(sqlx::AssertSqlSafe(sql), &day_args.values)
             .fetch_all(&mut **tx)
             .await?
         {
@@ -502,14 +503,16 @@ async fn run(
                 SELECT *, row_number() OVER (PARTITION BY day ORDER BY {preview_order}) AS rn FROM visible
             ) ranked WHERE rn <= {CALENDAR_PREVIEW_PER_DAY} ORDER BY day NULLS LAST, rn, id"
         );
-        for row in bind_all(&sql, &args.values).fetch_all(&mut **tx).await? {
+        for row in bind_all(sqlx::AssertSqlSafe(sql), &args.values)
+            .fetch_all(&mut **tx)
+            .await?
+        {
             previews.push(row_from(&row)?);
         }
         if let (Some((field_id, _)), false) = (date_field_type, previews.is_empty()) {
             let ids: Vec<Uuid> = previews.iter().map(|p| p.id).collect();
-            let rows: Vec<(Uuid, Uuid, Option<Value>)> = sqlx::query_as(&format!(
-                "SELECT * FROM ({}) v WHERE field_id = $3",
-                values_sql("$2")
+            let rows: Vec<(Uuid, Uuid, Option<Value>)> = sqlx::query_as(sqlx::AssertSqlSafe(
+                format!("SELECT * FROM ({}) v WHERE field_id = $3", values_sql("$2")),
             ))
             .bind(ws)
             .bind(&ids)
@@ -605,7 +608,7 @@ async fn run(
                 "{source} SELECT EXISTS (SELECT 1 FROM visible WHERE id = {id_ph}::uuid \
                  AND {key_hash} = {key_ph} AND ({selected}) AND ({selected_day}))"
             );
-            let found: bool = bind_all(&sql, &page_args.values)
+            let found: bool = bind_all(sqlx::AssertSqlSafe(sql), &page_args.values)
                 .fetch_one(&mut **tx)
                 .await?
                 .try_get(0)?;
@@ -627,7 +630,7 @@ async fn run(
          ORDER BY {order_sql} LIMIT {}",
         q.limit + 1
     );
-    let fetched = bind_all(&sql, &page_args.values)
+    let fetched = bind_all(sqlx::AssertSqlSafe(sql), &page_args.values)
         .fetch_all(&mut **tx)
         .await?;
     let mut has_more = fetched.len() as i64 > q.limit;
@@ -639,10 +642,10 @@ async fn run(
     // Response budget: envelope + each row's JSON (values sized in SQL first).
     if !rows.is_empty() {
         let ids: Vec<Uuid> = rows.iter().map(|(row, _)| row.id).collect();
-        let sizes: Vec<(Uuid, i64)> = sqlx::query_as(&format!(
+        let sizes: Vec<(Uuid, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "WITH v AS ({}) SELECT item_id, sum(octet_length(value::text) + 40)::bigint FROM v GROUP BY item_id",
             values_sql("$2")
-        ))
+        )))
         .bind(ws)
         .bind(&ids)
         .fetch_all(&mut **tx)
@@ -677,11 +680,12 @@ async fn run(
     }
     let ids: Vec<Uuid> = rows.iter().map(|(row, _)| row.id).collect();
     if !ids.is_empty() {
-        let values: Vec<(Uuid, Uuid, Option<Value>)> = sqlx::query_as(&values_sql("$2"))
-            .bind(ws)
-            .bind(&ids)
-            .fetch_all(&mut **tx)
-            .await?;
+        let values: Vec<(Uuid, Uuid, Option<Value>)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(values_sql("$2")))
+                .bind(ws)
+                .bind(&ids)
+                .fetch_all(&mut **tx)
+                .await?;
         for (item_id, field_id, value) in values {
             if let (Some((row, _)), Some(value)) =
                 (rows.iter_mut().find(|(row, _)| row.id == item_id), value)

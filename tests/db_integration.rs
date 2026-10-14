@@ -55,10 +55,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -69,10 +72,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -103,18 +106,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
     }
@@ -292,7 +301,7 @@ async fn setup_session(harness: &TestDb) -> (axum::Router, String, Uuid) {
 }
 
 async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -301,17 +310,17 @@ async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str
         END;
         $$;
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE TRIGGER fvoci_{fn_name}
         BEFORE INSERT ON fvoci.{target}
         FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
@@ -3852,10 +3861,12 @@ async fn migrated_db_without_grants() -> UngrantedDb {
         .connect(&server_url)
         .await
         .expect("connect admin");
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{db_name}\""
+    )))
+    .execute(&admin_pool)
+    .await
+    .expect("create database");
     admin_pool.close().await;
     let admin_url = join_db_url(&server_url, &db_name);
     migrate::run_migrations(&admin_url).await.expect("migrate");
@@ -3864,9 +3875,9 @@ async fn migrated_db_without_grants() -> UngrantedDb {
         .connect(&admin_url)
         .await
         .expect("connect migrated db");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
-    ))
+    )))
     .execute(&admin)
     .await
     .expect("create role");
@@ -3893,20 +3904,25 @@ async fn drop_ungranted(db: UngrantedDb) {
         .connect(&server_url)
         .await
         .expect("connect server");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
-    ))
+    )))
     .execute(&pool)
     .await
     .ok();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
-        .execute(&pool)
-        .await
-        .expect("drop database");
-    sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", db.role_name))
-        .execute(&pool)
-        .await
-        .expect("drop role");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS \"{db_name}\""
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP ROLE IF EXISTS \"{}\"",
+        db.role_name
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop role");
     pool.close().await;
 }
 
@@ -4140,7 +4156,7 @@ async fn grant_refuses_owner_superuser_bypassrls_and_missing_roles() {
         format!("CREATE ROLE \"{bypass}\" NOSUPERUSER BYPASSRLS"),
         format!("CREATE ROLE \"{superuser}\" SUPERUSER"),
     ] {
-        sqlx::query(&statement)
+        sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
             .execute(&admin)
             .await
             .expect(&statement);
@@ -4173,7 +4189,7 @@ async fn grant_refuses_owner_superuser_bypassrls_and_missing_roles() {
         .await
         .unwrap();
     for role in [&inherits_owner, &owns_table, &bypass, &superuser] {
-        sqlx::query(&format!("DROP ROLE \"{role}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE \"{role}\"")))
             .execute(&admin)
             .await
             .unwrap();
@@ -4483,10 +4499,12 @@ async fn server_exits_on_unmigrated_database() {
         .connect(&server_url)
         .await
         .expect("connect admin");
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE \"{db_name}\""
+    )))
+    .execute(&admin_pool)
+    .await
+    .expect("create database");
     admin_pool.close().await;
     let admin_url = join_db_url(&server_url, &db_name);
     let admin = PgPoolOptions::new()
@@ -4494,9 +4512,9 @@ async fn server_exits_on_unmigrated_database() {
         .connect(&admin_url)
         .await
         .expect("connect fresh db");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_password}' NOSUPERUSER NOBYPASSRLS"
-    ))
+    )))
     .execute(&admin)
     .await
     .expect("create role");
@@ -4523,20 +4541,24 @@ async fn server_exits_on_unmigrated_database() {
         .connect(&server_url)
         .await
         .expect("connect server");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{db_name}'"
-    ))
+    )))
     .execute(&cleanup_pool)
     .await
     .ok();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db_name}\""))
-        .execute(&cleanup_pool)
-        .await
-        .expect("drop database");
-    sqlx::query(&format!("DROP ROLE IF EXISTS \"{role_name}\""))
-        .execute(&cleanup_pool)
-        .await
-        .expect("drop role");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS \"{db_name}\""
+    )))
+    .execute(&cleanup_pool)
+    .await
+    .expect("drop database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP ROLE IF EXISTS \"{role_name}\""
+    )))
+    .execute(&cleanup_pool)
+    .await
+    .expect("drop role");
     cleanup_pool.close().await;
 }
 
@@ -4577,10 +4599,12 @@ impl EmptyDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-            .execute(&pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{db_name}\""
+        )))
+        .execute(&pool)
+        .await
+        .expect("create database");
         pool.close().await;
         let admin_url = join_db_url(&server_url, &db_name);
         Self {
@@ -4596,22 +4620,27 @@ impl EmptyDb {
             .connect(&self.server_url)
             .await
             .expect("connect server");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
             self.db_name
-        ))
+        )))
         .execute(&pool)
         .await
         .ok();
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{}\"",
+            self.db_name
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop database");
+        for role in roles {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{role}\""
+            )))
             .execute(&pool)
             .await
-            .expect("drop database");
-        for role in roles {
-            sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
-                .execute(&pool)
-                .await
-                .expect("drop role");
+            .expect("drop role");
         }
         pool.close().await;
     }
@@ -4926,15 +4955,20 @@ async fn uuidv7_compat_preflight_fails_closed_on_foreign_or_altered_function() {
         .connect(&db.admin_url)
         .await
         .unwrap();
-    sqlx::query(&format!("CREATE ROLE \"{foreign_role}\" NOLOGIN"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE \"{foreign_role}\" NOLOGIN"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
     let major = server_version_num(&admin).await / 10_000;
     let exec = |sql: String| {
         let admin = admin.clone();
         async move {
-            sqlx::query(&sql).execute(&admin).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&admin)
+                .await
+                .unwrap();
         }
     };
     let foreign_body = "CREATE FUNCTION public.uuidv7() RETURNS uuid LANGUAGE sql VOLATILE AS 'SELECT gen_random_uuid()'";

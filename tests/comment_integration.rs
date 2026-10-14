@@ -2197,7 +2197,7 @@ async fn comment_create_unknown_fields_and_empty_group_ids() {
 
 async fn begin_row_blocker(
     admin: &sqlx::PgPool,
-    sql: &str,
+    sql: &'static str,
     id: Uuid,
 ) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
     let mut blocker = admin.begin().await.unwrap();
@@ -2219,9 +2219,9 @@ async fn comment_verb_count(
     verb: &str,
     comment_id: Uuid,
 ) -> i64 {
-    sqlx::query_scalar(&format!(
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM fvoci.{table} WHERE verb = $1 AND payload->>'commentId' = $2"
-    ))
+    )))
     .bind(verb)
     .bind(comment_id.to_string())
     .fetch_one(admin)
@@ -2505,9 +2505,9 @@ async fn comment_permission_query_failure_is_internal_error() {
     let role = format!("\"{}\"", app_role.replace('"', "\"\""));
     // The project permission check reads project_members after the parent
     // lookup; nothing earlier on these paths does.
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "REVOKE SELECT ON fvoci.project_members FROM {role}"
-    ))
+    )))
     .execute(&admin)
     .await
     .unwrap();
@@ -2537,10 +2537,12 @@ async fn comment_permission_query_failure_is_internal_error() {
     }
     assert_eq!(count_rows(&admin, "comments").await, comments_before);
 
-    sqlx::query(&format!("GRANT SELECT ON fvoci.project_members TO {role}"))
-        .execute(&admin)
-        .await
-        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT SELECT ON fvoci.project_members TO {role}"
+    )))
+    .execute(&admin)
+    .await
+    .unwrap();
     for path in &paths {
         let (status, body) = json_request(app.clone(), "GET", path, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "GET {path}: {body:?}");

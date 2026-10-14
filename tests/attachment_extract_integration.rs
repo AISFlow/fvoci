@@ -38,10 +38,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -52,10 +55,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -82,18 +85,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
     }
@@ -246,10 +255,10 @@ async fn public_role_cannot_execute_claim_function() {
         .await
         .unwrap();
     let denied_role = format!("fvoci_denied_{}", Uuid::now_v7().simple());
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE ROLE \"{}\" LOGIN PASSWORD 'denied' NOSUPERUSER NOBYPASSRLS",
         denied_role
-    ))
+    )))
     .execute(&admin)
     .await
     .unwrap();
@@ -267,9 +276,12 @@ async fn public_role_cannot_execute_claim_function() {
         .expect_err("ungranted role must not execute claim");
     assert!(err.to_string().contains("permission denied"));
     denied_pool.close().await;
-    let _ = sqlx::query(&format!("DROP ROLE \"{}\"", denied_role))
-        .execute(&admin)
-        .await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP ROLE \"{}\"",
+        denied_role
+    )))
+    .execute(&admin)
+    .await;
     admin.close().await;
     harness.cleanup().await;
 }

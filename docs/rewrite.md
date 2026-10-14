@@ -161,7 +161,7 @@ SQLite/libSQL logout PG gate static 후보·actual HTTP/DB NOTRUN을 유지한�
 - PATCH dueAt은 browser millisecond 비교여서 같은 ms의 sub-ms 충돌을 검출하지 않는다. Gantt DST 막대 하루 차이/overlap rail과 새 Calendar version 계약을 구분한다. 숫자/날짜 정밀도 소스 후보는 실제 검증 전 해결하지 않는다.
 - presigned part900초/download60초는 철회·mode전환·삭제 뒤 만료까지 유효하다. 게시 전 권한 재검사·S3 key회전/NTP·HAR 서명 URL 노출·오류 메시지 한계를 유지한다. 운영 지정 GitHub API host DNS pin 차이·remote DB error log 후보를 새 실제 침해로 단정하지 않는다.
 - room fence PG 연결·pool reserve10/maintenance claim·receipt/event/audit 보존 정책 부재, import 큰 요청 버퍼/동시 admission, HWP 대기+실행 timeout 최대 약2배를 유지한다. parser child의 rlimit/envclear/종료/non-dumpable 보호를 파일/네트워크 namespace sandbox로 주장하지 않는다.
-- 메일 수신자는 최근64 event process memory라 재시작/lease 인계 재발송 가능하며 digest15분/실패 streak가 다음 날 반복 종료돼 뒤 수신자를 굶길 수 있다. SQLx0.8.6 BEGIN 취소는 기존 acquire 검사로 막으며 sqlx0.9/acquire 제거·try_acquire/try_begin은 승인 없이 적용하지 않는다.
+- 메일 수신자는 최근64 event process memory라 재시작/lease 인계 재발송 가능하며 digest15분/실패 streak가 다음 날 반복 종료돼 뒤 수신자를 굶길 수 있다. SQLx0.9.0에서도 BEGIN 취소는 기존 acquire 검사로 막으며 acquire 검사 제거·try_acquire/try_begin은 승인 없이 적용하지 않는다.
 - 긴 purge의 xmin/SSE/outbox 지연·SSE64 poll·Meili chunk backlog/처리량·memory ledger mutex 안 /proc 조회·AppArmor OOM backstop 재측정 없음은 측정 한계다. non-dumpable과 sampler 충돌은 권한을 넓혀 우회하지 않는다.
 - 설치 보안·복귀는 RUNNING.md가 정본이다. 환경값을 Docker 사용자/root/exec가 읽을 수 있음·정상 서버 준비 credential 부재·같은 uid helper 파일/검색키 공유·PG log_statement>=ddl의 CREATE ROLE PASSWORD 노출을 유지한다. 옛0.1→0.2 schema044 downgrade 거부·0.2→0.3 FILE/backup/미완료 presigned 복귀 위험은 역사적 한계이며 현재 신규 설치 upgrade gate가 아니다.
 - BOOT-NETWORK 빈 화면의 원인 UNKNOWN, #237 완화/앱 chunk retry 없음·과거 reconnect afterDestroy 실패/후속 dispose 수락·Dependabot Bun lockfileVersion2/compose recreate 오류는 고정 역사 근거를 보존하고 관련 새 delta에서만 대조한다.

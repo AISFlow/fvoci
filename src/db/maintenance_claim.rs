@@ -191,7 +191,9 @@ pub enum MaintenanceClaimError {
         source: CommitUnknown,
         settlement: CommitSettlement,
         cleanup_error: Option<sqlx::Error>,
-        observation_error: Option<sqlx::Error>,
+        // Boxed: sqlx-core 0.9 widened `sqlx::Error` from 40 to 48 bytes, and two
+        // inline errors pushed this variant past clippy `result_large_err`.
+        observation_error: Option<Box<sqlx::Error>>,
     },
 }
 fn unconfirmed(
@@ -202,7 +204,7 @@ fn unconfirmed(
         source: unknown.source,
         settlement: unknown.settlement,
         cleanup_error: unknown.cleanup_error,
-        observation_error,
+        observation_error: observation_error.map(Box::new),
     }
 }
 

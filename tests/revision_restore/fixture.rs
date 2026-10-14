@@ -105,7 +105,10 @@ impl Fixture {
     }
     pub(super) async fn sql(&self, query: &str) -> Value {
         let raw: String = match &self.backend {
-            Backend::Sqlite(pool) => sqlx::query_scalar(query).fetch_one(pool).await.unwrap(),
+            Backend::Sqlite(pool) => sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+                .fetch_one(pool)
+                .await
+                .unwrap(),
             _ => {
                 let database = self.remote.as_ref().unwrap().database().await.unwrap();
                 let conn = database.connect().unwrap();
@@ -118,7 +121,10 @@ impl Fixture {
     pub(super) async fn execute(&self, query: &str) {
         match &self.backend {
             Backend::Sqlite(pool) => {
-                sqlx::query(query).execute(pool).await.unwrap();
+                sqlx::query(sqlx::AssertSqlSafe(query))
+                    .execute(pool)
+                    .await
+                    .unwrap();
             }
             _ => {
                 self.remote

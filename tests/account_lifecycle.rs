@@ -412,7 +412,7 @@ impl Harness {
     }
 
     async fn count(&self, sql: &str, id: Uuid) -> i64 {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .fetch_one(&self.admin)
             .await
@@ -943,9 +943,9 @@ async fn cancel_after_grace_period_is_not_found() {
             "now() - interval '14 days' - interval '1 second'",
         ),
     ] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE fvoci.users SET deleted_at = {deleted_sql} WHERE id = $1"
-        ))
+        )))
         .bind(user_id)
         .execute(&h.admin)
         .await

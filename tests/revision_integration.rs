@@ -1151,7 +1151,7 @@ async fn restore_body_write_failure_rolls_back_the_whole_commit() {
         // restricted app role; this constraint forces a late body UPDATE error,
         // after append/history/event statements, without mocking a transaction.
         let admin = PgPoolOptions::new().max_connections(1).connect(&run.harness.admin_url).await.unwrap();
-        sqlx::query(&format!("ALTER TABLE fvoci.documents ADD CONSTRAINT w4_restore_body_reject CHECK (id <> '{}'::uuid OR content_json::text LIKE '%후속편집한글%')", wiki.document_id))
+        sqlx::query(sqlx::AssertSqlSafe(format!("ALTER TABLE fvoci.documents ADD CONSTRAINT w4_restore_body_reject CHECK (id <> '{}'::uuid OR content_json::text LIKE '%후속편집한글%')", wiki.document_id)))
             .execute(&admin).await.unwrap();
         let before = witness(&wiki).await;
         assert!(before["body"]["content"].to_string().contains("후속편집한글"));
