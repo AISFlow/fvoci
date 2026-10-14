@@ -159,8 +159,9 @@ export function loadProfile(
   }
   for (const key of ["parentId", "parentInstance", "run", "coordinator"])
     requireThat(typeof p[key] === "string" && p[key].length > 0, `missing reference: ${key}`);
-  for (const key of ["controller", "worker", ...("reviewer" in p ? ["reviewer"] : [])])
-    checkModel(p[key]);
+  checkModel(p.controller, "controller");
+  checkModel(p.worker);
+  if ("reviewer" in p) checkModel(p.reviewer);
   requireThat(
     ![p.worker, p.reviewer].some((m) => m?.adapter === "codex") || "codex" in p,
     "codex adapter requires the codex executable path",
@@ -168,7 +169,7 @@ export function loadProfile(
   return p;
 }
 // Each adapter states its own constraints; unknown adapters are refused, never relabeled.
-export function checkModel(m: any): asserts m is Model {
+export function checkModel(m: any, role: "controller" | "worker" = "worker"): asserts m is Model {
   exactKeys(m, ["adapter", "model", "effort", "tier", "banner"]);
   for (const value of Object.values(m))
     requireThat(
@@ -176,8 +177,11 @@ export function checkModel(m: any): asserts m is Model {
       "invalid model profile",
     );
   requireThat(m.adapter === "codex" || m.adapter === "claude", "unsupported execution adapter");
-  // Codex default tier is Fast off; Claude has no Fast tier, so only default is valid.
-  requireThat(m.tier === "default", "unsupported tier for adapter");
+  // Only Codex controllers may opt into Fast; workers/reviewers stay Fast off.
+  requireThat(
+    m.tier === "default" || (role === "controller" && m.adapter === "codex" && m.tier === "fast"),
+    "unsupported tier for adapter/role",
+  );
   if (m.adapter === "codex")
     requireThat(
       m.model === m.banner.toLowerCase() && /^(low|medium|high|xhigh|max|ultra)$/.test(m.effort),
@@ -228,7 +232,7 @@ export function quoteArg(value: string): string {
 export function assertBanner(text: string, m: Model) {
   const lines = text.split("\n").filter((line) => line.includes(m.banner));
   const expected = new RegExp(
-    `${m.banner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ${m.effort}(?:\\s|[·|]|$)`,
+    `${m.banner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ${m.effort}(?=\\s|[·|]|$)`,
   );
   requireThat(
     m.model === m.banner.toLowerCase() &&
@@ -237,10 +241,15 @@ export function assertBanner(text: string, m: Model) {
     "wrong/missing model or effort banner",
   );
   requireThat(
-    m.tier === "default" &&
-      !lines.some((line) => {
+    (m.tier === "default" || m.tier === "fast") &&
+      lines.every((line) => {
         const match = expected.exec(line);
-        return match && /^\s*(fast|ultrafast)\b/i.test(line.slice(match.index + match[0].length));
+        if (!match) return true;
+        // Only the observed status slot after effort counts; later hints are not settings.
+        const setting = /^(?:\s+(fast))?\s*(?:[·|]|$)/.exec(
+          line.slice(match.index + match[0].length),
+        );
+        return setting && (setting[1] ? "fast" : "default") === m.tier;
       }),
     "Fast/tier mismatch",
   );
@@ -373,6 +382,7 @@ export class Coordinator {
   // one, so a Claude controller is verified from its own session transcript only.
   controllerEvidence(screen: string, identity: unknown) {
     const m = this.p.controller;
+    checkModel(m, "controller");
     if (m.adapter === "codex") {
       assertBanner(screen, m);
       return "screen";

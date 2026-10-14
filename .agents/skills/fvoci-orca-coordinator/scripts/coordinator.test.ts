@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   Coordinator,
+  assertBanner,
   loadProfile,
   quoteArg,
   execute,
@@ -86,7 +87,7 @@ const claudeOpus = {
   tier: "default",
   banner: "Opus 5.5",
 };
-function fixture(scenario = "good", shellTail?: string[]) {
+function fixture(scenario = "good", shellTail?: string[], controllerTail?: string[]) {
   const root = mkdtempSync(join(fixtureRoot!, "case-"));
   roots.push(root);
   for (const d of ["repo", "parent", "unit", "checkout"]) mkdirSync(join(root, d));
@@ -156,7 +157,7 @@ function fixture(scenario = "good", shellTail?: string[]) {
     `import {appendFileSync,existsSync,mkdirSync,readFileSync} from 'node:fs';
 const [root,raw,...argv]=process.argv.slice(2);
 const kind=/^(claude|claudectl)-/.exec(raw)?.[1]??'',scenario=kind?raw.slice(kind.length+1):raw;
-const shellTail=${JSON.stringify(shellTail ?? null)},codexScreen=${JSON.stringify(realScreens["codex screen"])},claudeIdle=${JSON.stringify(realScreens["claude screen"])};
+const controllerTail=${JSON.stringify(controllerTail ?? null)},shellTail=${JSON.stringify(shellTail ?? null)},codexScreen=${JSON.stringify(realScreens["codex screen"])},claudeIdle=${JSON.stringify(realScreens["claude screen"])};
 appendFileSync(root+'/calls.jsonl',JSON.stringify(argv)+'\\n');
 const flag=k=>argv[argv.indexOf(k)+1];
 let r;
@@ -177,7 +178,7 @@ else if(verb==='terminal wait') {
  if(shell&&!existsSync(root+'/sent')) {console.log(JSON.stringify({ok:false,error:{code:'timeout'}}));process.exit(1);}
  r=scenario==='wait-flat'?{satisfied:true}:scenario==='wait-missing'?{}:{wait:{handle:scenario==='wait-wrong'?'term_other':flag('--terminal'),condition:scenario==='wait-condition'?'exit':'tui-idle',satisfied:scenario!=='wait-false',status:scenario==='wait-stopped'?'exited':'running',exitCode:null}};
 }
-else if(verb==='terminal read') { const parent=flag('--terminal')==='term_fixture',before=shell&&!existsSync(root+'/sent'); r={terminal:{handle:!parent&&scenario==='shell-read-wrong'?'term_other':flag('--terminal'),status:!parent&&scenario==='shell-stopped'?'exited':'running',tail:parent?(kind==='claudectl'?(scenario==='screen'?['  Opus 5.5 · xhigh']:scenario==='screen-prose'?['• Claude Opus 5.5 (xhigh) is the selected controller',...claudeIdle]:claudeIdle):['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']):before?(shellTail??(scenario==='shell-no-prompt'?['starting']:scenario==='shell-agent-screen'?[...codexScreen,'fixture$']:['fixture@fixture:'+readFileSync(root+'/created','utf8')+'$ '])):['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}}; }
+else if(verb==='terminal read') { const parent=flag('--terminal')==='term_fixture',before=shell&&!existsSync(root+'/sent'); r={terminal:{handle:!parent&&scenario==='shell-read-wrong'?'term_other':flag('--terminal'),status:!parent&&scenario==='shell-stopped'?'exited':'running',tail:parent?(kind==='claudectl'?(scenario==='screen'?['  Opus 5.5 · xhigh']:scenario==='screen-prose'?['• Claude Opus 5.5 (xhigh) is the selected controller',...claudeIdle]:claudeIdle):controllerTail??['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']):before?(shellTail??(scenario==='shell-no-prompt'?['starting']:scenario==='shell-agent-screen'?[...codexScreen,'fixture$']:['fixture@fixture:'+readFileSync(root+'/created','utf8')+'$ '])):['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}}; }
 else if(verb==='orchestration worker-start'&&argv.includes('--agent')) {
  const s=scenario.replace(/^new-/,''),req={agent:flag('--agent'),model:flag('--model'),effort:flag('--effort')};
  if(s==='nonready') {console.log(JSON.stringify({ok:false,result:{state:'failed',failedStage:'agent_ready',residualResources:[{kind:'terminal',role:'agent',id:'term_claude'}]}}));process.exit(1);}
@@ -239,9 +240,15 @@ test("inspect paginates read-only projections", async () => {
 
 // Exercise the installed command, profile loading and cwd independence together.
 // This fixture is a local CLI double, never a connection to a live Orca Run.
-for (const scenario of ["good", "stalerun"])
+for (const scenario of ["good", "stalerun", "controllerfast"])
   test(`installed inspect CLI from foreign cwd: ${scenario}`, async () => {
-    const f = fixture(scenario);
+    // Observed Codex status grammar, with cwd/title replaced by neutral text.
+    const f = fixture(
+      scenario,
+      undefined,
+      scenario === "controllerfast" ? ["  GPT-6.1-Sol xhigh fast · fixture"] : undefined,
+    );
+    if (scenario === "controllerfast") f.p.controller.tier = "fast";
     for (const tool of [f.p.cli, join(f.root, "git")]) {
       writeFileSync(
         tool,
@@ -272,7 +279,7 @@ for (const scenario of ["good", "stalerun"])
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    if (scenario === "good") {
+    if (scenario !== "stalerun") {
       expect(exit).toBe(0);
       expect(stderr).toBe("");
       expect(JSON.parse(stdout).workers).toHaveLength(2);
@@ -577,6 +584,60 @@ test("Fast-off hint is not an active Fast setting", async () => {
   const f = fixture("hint");
   expect((await f.c.launch(f.request)).state).toBe("ready");
 });
+test("Fast controller supports inspect, default worker launch and full mail decisions", async () => {
+  const f = fixture("good", undefined, ["  GPT-6.1-Sol xhigh fast · fixture"]);
+  f.p.controller.tier = "fast";
+  expect((await f.c.inspect()).controller.tier).toBe("fast");
+  expect((await f.c.launch(f.request)).state).toBe("ready");
+  expect(f.p.worker.tier).toBe("default");
+  const batch = await f.c.wait(join(f.root, "mail.json"));
+  expect(batch.count).toBe(3);
+  const next = await f.c.process({
+    deliveryId: batch.deliveryId,
+    messages: {
+      heartbeat: { handled: true },
+      "question-original": { answer: "fixture answer" },
+      done: { handled: true },
+    },
+  });
+  expect(next.messages.map((m: { id: string }) => m.id)).toEqual(["new-arrival"]);
+  expect(f.calls().filter((a) => a.includes("worker-start"))).toHaveLength(1);
+  expect(f.calls().filter((a) => a.includes("reply"))).toHaveLength(1);
+});
+for (const [tier, suffix, accepted] of [
+  ["default", " · fixture", true],
+  ["fast", " fast · fixture", true],
+  ["fast", " fast", true],
+  ["fast", " · fixture", false],
+  ["default", " fast · fixture", false],
+  ["default", " fast", false],
+  ["default", " ultrafast · fixture", false],
+  ["fast", " ultrafast · fixture", false],
+  ["ultrafast", " ultrafast · fixture", false],
+  ["unknown", " · fixture", false],
+  ["default", " · ultrafast available", true],
+  ["fast", " · fast available", false],
+  ["fast", " · ultrafast available", false],
+  ["fast", " faster · fixture", false],
+  ["fast", " fast available", false],
+] as const)
+  test(`controller banner tier ${tier} with ${JSON.stringify(suffix)}`, () => {
+    const f = fixture();
+    const check = () => assertBanner("  GPT-6.1-Sol xhigh" + suffix, { ...f.p.controller, tier });
+    if (accepted) expect(check).not.toThrow();
+    else expect(check).toThrow();
+  });
+for (const [tier, screen] of [
+  ["fast", "  GPT-6.1-Sol xhigh · fixture"],
+  ["default", "  GPT-6.1-Sol xhigh fast · fixture"],
+] as const)
+  test(`controller ${tier} profile refuses mismatched screen before mutation`, async () => {
+    const f = fixture("good", undefined, [screen]);
+    f.p.controller.tier = tier;
+    await expect(f.c.launch(f.request)).rejects.toThrow();
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(false);
+    expect(f.calls().some((a) => a.includes("worker-start") || a.includes("send"))).toBe(false);
+  });
 for (const scenario of ["wrongrepo", "wrongsource", "controllerwrong"])
   test("context rejects " + scenario + " before mutation", async () => {
     const f = fixture(scenario);
@@ -971,6 +1032,8 @@ test("profile v2 states adapters explicitly; v1 and unknown values refuse", () =
   const claudeOnly = { ...noCodex, controller: claudeOpus, worker: claudeOpus };
   write({ ...claudeOnly, reviewer: fable, concurrency: null });
   expect(loadProfile(path).reviewer?.model).toBe("claude-fable-5-1");
+  write({ ...f.p, controller: { ...f.p.controller, tier: "fast" } });
+  expect(loadProfile(path).controller.tier).toBe("fast");
   for (const bad of [
     { ...f.p, version: 1 },
     { ...f.p, worker: { ...f.p.worker, adapter: "grok" } },
@@ -979,6 +1042,12 @@ test("profile v2 states adapters explicitly; v1 and unknown values refuse", () =
       worker: { model: "gpt-6.1-sol", effort: "high", tier: "default", banner: "GPT-6.1-Sol" },
     },
     { ...f.p, worker: { ...claudeOpus, tier: "fast" } },
+    { ...f.p, controller: { ...claudeOpus, tier: "fast" } },
+    { ...f.p, controller: { ...f.p.controller, tier: "unknown" } },
+    { ...f.p, controller: { ...f.p.controller, tier: "ultrafast" } },
+    { ...f.p, worker: { ...f.p.worker, tier: "fast" } },
+    { ...f.p, reviewer: { ...f.p.worker, tier: "fast" } },
+    { ...f.p, reviewer: { ...claudeOpus, tier: "fast" } },
     { ...f.p, worker: { ...claudeOpus, model: "opus" } },
     { ...noCodex },
     { ...f.p, concurrency: 0 },
