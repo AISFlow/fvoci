@@ -316,6 +316,17 @@ export interface ConsumerInputs {
 /** One backend, a fresh official Keycloak, the unchanged 8/7/1 browser oracle. */
 export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs): Promise<void> {
   inputs.checkInputs();
+  require(sha(process.execPath) ===
+    inputs.manifest.bun.sha256, "current Bun differs from the frozen runtime");
+  const nativeVersion = await runCommand(
+    scope,
+    [inputs.manifest.binaries["fvoci-server"]?.path ?? "", "--version"],
+    { signal: inputs.signal, seconds: 30 },
+  );
+  require(nativeVersion.code === 0 &&
+    nativeVersion.stdout.includes(
+      "(" + inputs.manifest.sourceInputs.source + ")",
+    ), "normal server source marker differs from the frozen compiler cohort");
   require(selftestFailures().length === 0, "redaction selftest failed");
   const work = mkdtempSync(join(inputs.directory, "keycloak-"));
   const realms = join(work, "realm"),
@@ -443,6 +454,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
             ]),
           ) as unknown,
           profile: "dev opt0/debug_assertions; api-schema,db-tests; functional witness",
+          fvociServer: nativeVersion.stdout.trim(),
         },
         null,
         2,
@@ -586,7 +598,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           FVOCI_KC_CHROMIUM_BIN: inputs.manifest.chromium,
         };
         const args = [
-          inputs.manifest.bun.path,
+          process.execPath,
           ...bunIsolation(),
           join(root, "node_modules/@playwright/test/cli.js"),
           "test",
