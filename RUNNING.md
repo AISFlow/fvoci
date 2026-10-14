@@ -1251,6 +1251,22 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 4. Run `--doctor` using the same files, project name and env file (see "Operator
    commands"), then confirm login and an existing document and attachment.
 
+The `meilisearch` service sets `MEILI_UPGRADE_DB=true` in every Compose file,
+the user `compose.yml` of "Release images (0.x)" included. When the new checkout
+or release pins a newer Meilisearch, its first start upgrades the existing
+`searchdata` volume in place; without the setting a newer Meilisearch refuses a
+database written by an older one, so `init` (or the user install's `fvoci`)
+never starts. The upgrade is irreversible: an older Meilisearch cannot open the
+upgraded volume, so going back still means restoring the pre-upgrade backup into
+a new project, whose empty `searchdata` the restore rebuilds. The search index
+is derived from PostgreSQL. If the search upgrade itself fails, stop `server`
+and `meilisearch`, remove this project's `searchdata` volume, repeat step 3
+(`init` recreates the index settings and the scoped key on the empty volume),
+then rebuild the index with the same Compose flags:
+`docker compose ... run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search`
+(user install: `fvoci` in place of `init` and `server`). Search results are
+incomplete until the rebuild finishes.
+
 If init fails, leave the server stopped. Run `logs init` with the same Compose
 flags, fix the cause and repeat step 3: already applied migrations are skipped
 and the grant commits all or nothing. If init fails with `outbox consumer seed
