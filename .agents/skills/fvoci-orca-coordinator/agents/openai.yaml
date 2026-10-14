@@ -1,0 +1,6 @@
+interface:
+  display_name: "FVOCI Orca Coordinator"
+  short_description: "Resume FVOCI supervision with verified Orca context"
+  default_prompt: "Use $fvoci-orca-coordinator to inspect the existing FVOCI coordination context and resume from its external handoff memory."
+policy:
+  allow_implicit_invocation: true
