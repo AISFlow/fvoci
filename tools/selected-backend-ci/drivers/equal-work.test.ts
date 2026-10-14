@@ -10,6 +10,7 @@ import {
   validateSamples,
   workload,
   workloadHash,
+  equalTitle,
   type Sample,
 } from "./equal-work.ts";
 
@@ -258,4 +259,64 @@ test("zero-case, skipped or absent reporter evidence is never a measurement PASS
     },
   ])
     expect(() => validateEqualReport(report, "sqlite", "on")).toThrow();
+});
+
+test("the actual Playwright producer metadata requires exactly one actual worker", () => {
+  const facts = (receipt("on").equal_work as { browser: Record<string, unknown> }).browser;
+  const report = {
+    config: {
+      workers: 1,
+      metadata: {
+        selectedBackend: "sqlite",
+        selectedFlow: "on",
+        purpose: "equal-work",
+        actualWorkers: 1,
+      },
+    },
+    errors: [],
+    stats: { expected: 1, unexpected: 0, flaky: 0, skipped: 0 },
+    suites: [
+      {
+        specs: [
+          {
+            file: "e2e-pending/v060-equal-work.spec.ts",
+            title: equalTitle,
+            ok: true,
+            tests: [
+              {
+                expectedStatus: "passed",
+                results: [
+                  {
+                    status: "passed",
+                    retry: 0,
+                    errors: [],
+                    attachments: [
+                      {
+                        name: "equal-work.json",
+                        contentType: "application/json",
+                        body: Buffer.from(JSON.stringify(facts)).toString("base64"),
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  expect(validateEqualReport(report, "sqlite", "on")).toEqual(facts);
+  for (const actualWorkers of [undefined, 0, 2]) {
+    const changed = structuredClone(report);
+    Reflect.set(changed.config.metadata, "actualWorkers", actualWorkers);
+    expect(() => {
+      validateEqualReport(changed, "sqlite", "on");
+    }).toThrow();
+  }
+  const extra = structuredClone(report);
+  Reflect.set(extra.config.metadata, "unbound", true);
+  expect(() => {
+    validateEqualReport(extra, "sqlite", "on");
+  }).toThrow();
 });

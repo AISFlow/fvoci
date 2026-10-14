@@ -277,6 +277,7 @@ export function validateEqualReport(
       selectedBackend: backend,
       selectedFlow: flow,
       purpose: "equal-work",
+      actualWorkers: 1,
     }),
   );
   assert.ok(deepEquals(r.errors, []) && r.stats.expected === 1);
