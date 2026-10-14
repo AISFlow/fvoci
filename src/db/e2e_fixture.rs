@@ -300,11 +300,37 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             .map(|(_, value)| value)
             .ok_or_else(refused)
     };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0) {
+        return Ok(Value::Null);
+    }
+    let payload = cell("payload")?.value()?;
+    // The normal logout producer has no stored target. Bind its actual actor
+    // explicitly; never manufacture a user target for this event.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.logout") {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("target_id")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Null, Cell::Null, Cell::Blob(actor))
+                if channel == "web" && actor.len() == 16 && payload == json!({}) =>
+            {
+                actor
+            }
+            _ => return Ok(Value::Null),
+        };
+        return Ok(json!({
+            "class":"actor-logout",
+            "sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor)
+        }));
+    }
     let target = match cell("target_id")? {
         Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
         _ => return Ok(Value::Null),
     };
-    let payload = cell("payload")?.value()?;
     let class = match (
         cell("verb")?,
         cell("channel")?,
@@ -325,6 +351,24 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             && payload == json!({"userId":target.to_string(),"method":"password"}) =>
         {
             "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if (verb == "auth.password_changed" || verb == "auth.password_reset")
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string()}) =>
+        {
+            if verb == "auth.password_changed" {
+                "actor-password-change"
+            } else {
+                "actor-password-reset"
+            }
         }
         (
             Cell::Text(verb),
@@ -937,6 +981,106 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auth_event(verb: &str) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let logout = verb == "auth.logout";
+        vec![
+            ("seq".into(), Cell::Integer(7)),
+            ("verb".into(), Cell::text(verb)),
+            ("channel".into(), Cell::text("web")),
+            ("workspace_id".into(), Cell::Null),
+            ("actor_user_id".into(), Cell::uuid(actor)),
+            (
+                "target_id".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::uuid(actor)
+                },
+            ),
+            (
+                "target_type".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::text("user")
+                },
+            ),
+            (
+                "payload".into(),
+                Cell::json(&if logout {
+                    json!({})
+                } else {
+                    json!({"userId":actor.to_string()})
+                })
+                .unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn event_witness_accepts_exact_auth_revocation_producers() {
+        for (verb, class) in [
+            ("auth.logout", "actor-logout"),
+            ("auth.password_changed", "actor-password-change"),
+            ("auth.password_reset", "actor-password-reset"),
+        ] {
+            let witness = event_witness(&auth_event(verb)).unwrap();
+            let mut expected = json!({
+                "class":class,
+                "sequence":["integer","7"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())
+            });
+            if verb == "auth.logout" {
+                expected.as_object_mut().unwrap().remove("target");
+                expected["actor"] = json!(hex::encode(Uuid::from_u128(1).as_bytes()));
+            }
+            assert_eq!(witness, expected, "{verb}");
+        }
+    }
+
+    #[test]
+    fn event_witness_refuses_mismatched_auth_revocation_fields() {
+        for verb in [
+            "auth.logout",
+            "auth.password_changed",
+            "auth.password_reset",
+        ] {
+            let original = auth_event(verb);
+            let wrong = Uuid::from_u128(2);
+            for (name, value) in [
+                ("verb", Cell::text("auth.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1])),
+                ("target_id", Cell::uuid(wrong)),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({"userId":wrong.to_string()})).unwrap()),
+                ("payload", Cell::json(&json!({"userId":Uuid::from_u128(1).to_string(),"extra":"PRIVATE_EVENT_CANARY"})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+                assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb} {name}");
+            }
+            if verb != "auth.logout" {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "actor_user_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} mismatched actor"
+                );
+            }
+        }
+    }
 
     #[test]
     fn event_witness_accepts_only_exact_login_and_projection_producers() {
