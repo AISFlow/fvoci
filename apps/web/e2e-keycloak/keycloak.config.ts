@@ -18,6 +18,19 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL: process.env.PLAYWRIGHT_BASE_URL,
+    // The spec process needs its private oracle inputs; Chromium only needs
+    // runtime/locale/socket settings. In particular it inherits no client
+    // secret, observer capsule, database credential or native CA setting.
+    launchOptions: {
+      executablePath: process.env.FVOCI_KC_CHROMIUM_BIN,
+      env: Object.fromEntries(
+        ["PATH", "LANG", "TZ", "TMPDIR"].flatMap((name) => {
+          const value =
+            name === "TMPDIR" ? process.env.FVOCI_KC_CHROMIUM_TMPDIR : process.env[name];
+          return value === undefined ? [] : [[name, value]];
+        }),
+      ),
+    },
     // A trace, screenshot or video would keep typed test passwords and the
     // URLs that carry codes and state.
     trace: "off",

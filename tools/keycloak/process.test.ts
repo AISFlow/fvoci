@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { safeText } from "./run.ts";
 
-test.each(["normal", "failure", "spawn-failure", "interrupt"])(
+test.each(["normal", "failure", "spawn-failure", "interrupt", "broken-output"])(
   "runner drains and retires an actual %s child",
   async (mode) => {
     const directory = mkdtempSync(join(tmpdir(), "keycloak-process-"));
@@ -24,9 +24,10 @@ test.each(["normal", "failure", "spawn-failure", "interrupt"])(
           stderr: "pipe",
         },
       );
+      if (mode === "broken-output") await child.stderr.cancel();
       const [stdout, stderr, code] = await Promise.all([
         new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
+        mode === "broken-output" ? Promise.resolve("") : new Response(child.stderr).text(),
         child.exited,
       ]);
       expect(code, stderr).toBe(0);

@@ -3,20 +3,25 @@
 import { deepEquals } from "bun";
 import { randomBytes } from "node:crypto";
 import {
+  appendFileSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { databaseUrls } from "../web-e2e/database-urls.ts";
-import { root, sha } from "../selected-backend-ci/io.ts";
+import { below, root, sha } from "../selected-backend-ci/io.ts";
+import { localKeycloakAllocation } from "../selected-backend-ci/admission.ts";
 import { pgImage } from "../selected-backend-ci/drivers/postgres.ts";
 import { cleanEnv, bunIsolation } from "../turso/ui-common.ts";
 import {
@@ -24,6 +29,7 @@ import {
   now,
   pause,
   poll,
+  procIdentity,
   UiProcesses,
   withProcesses,
   type Child,
@@ -62,10 +68,11 @@ import {
   selftestFailures,
 } from "./redact.ts";
 import { startLocalLibsql } from "./local-libsql.ts";
+import { digest, type WitnessInput } from "./process-witness.ts";
 
 export const MODES = ["flows", "failures", "wrong-secret"] as const;
 export type Backend = "postgres" | "sqlite" | "libsql-remote";
-export const lease: { load?: LocalLease } = {};
+export const lease: { load: LocalLease } = { load: localKeycloakAllocation };
 class RunInterrupted extends HelperError {
   constructor(readonly exitCode: number) {
     super("Keycloak run interrupted");
@@ -87,7 +94,12 @@ export function safeText(text: string): string {
     .replace(/\b(?:localhost|127\.0\.0\.1)(?::[0-9]+)?\b/g, "<redacted-host>");
 }
 const emit = (text: string) => {
-  process.stderr.write(safeText(text) + "\n");
+  try {
+    writeSync(2, safeText(text) + "\n");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPIPE") throw error;
+    process.emit("SIGPIPE");
+  }
 };
 
 export interface CommandOptions {
@@ -165,29 +177,121 @@ export function groupVerdict(
   return code === 0 ? 0 : 1;
 }
 
-export function assertServerEnvironment(pid: number, app: Record<string, string>): void {
-  const actual = Object.fromEntries(
-    readFileSync(`/proc/${String(pid)}/environ`, "utf8")
-      .split("\0")
-      .filter(Boolean)
-      .map((line) => {
-        const at = line.indexOf("=");
-        return [line.slice(0, at), line.slice(at + 1)];
-      }),
-  );
-  for (const name of [
-    "DATABASE_URL",
-    "POSTGRES_PASSWORD",
-    "FVOCI_MIGRATION_URL",
-    "TEST_DATABASE_URL",
-    "FVOCI_KC_OBSERVER_DATABASE_URL",
-    "FVOCI_KC_OBSERVER_ENV",
-    "KC_BOOTSTRAP_ADMIN_PASSWORD",
-  ])
-    require(!(name in actual), "normal server inherited a preparation credential");
-  require(actual.DATABASE_APP_URL === app.DATABASE_APP_URL, "normal server app database changed");
-  require(actual.OIDC_GENERIC_CLIENT_SECRET ===
-    app.OIDC_GENERIC_CLIENT_SECRET, "normal server OIDC input changed");
+export interface ProcessObserver {
+  directory: string;
+  bun: { path: string; sha256: string };
+  module: { path: string; sha256: string };
+  config: { path: string; sha256: string };
+}
+export async function assertServerEnvironment(
+  scope: UiProcesses,
+  pid: number,
+  app: Record<string, string>,
+  manifest: Manifest,
+  observer: ProcessObserver,
+  negatives: boolean,
+) {
+  require(realpathSync(observer.directory) ===
+    observer.directory, "privileged observer directory is not physical");
+  const directory = lstatSync(observer.directory);
+  require(directory.isDirectory() &&
+    directory.uid === 0 &&
+    directory.gid === 0 &&
+    (directory.mode & 0o022) === 0, "privileged observer directory is not root owned");
+  for (const [name, reference] of [
+    ["bun", observer.bun],
+    ["process-witness.ts", observer.module],
+    ["bunfig.toml", observer.config],
+  ] as const) {
+    const file = lstatSync(reference.path);
+    require(reference.path === join(observer.directory, name) &&
+      file.isFile() &&
+      !file.isSymbolicLink() &&
+      file.uid === 0 &&
+      file.gid === 0 &&
+      (file.mode & 0o022) === 0, "privileged observer input is not immutable to the worker");
+  }
+  require(observer.module.sha256 === sha(join(root, "tools/keycloak/process-witness.ts")) &&
+    sha(observer.module.path) === observer.module.sha256 &&
+    sha(observer.bun.path) === observer.bun.sha256 &&
+    sha(observer.config.path) === observer.config.sha256 &&
+    observer.bun.sha256 === manifest.bun.sha256 &&
+    observer.config.sha256 === digest(""), "reviewed privileged observer inputs changed");
+  const parent = procIdentity(process.pid),
+    server = procIdentity(pid);
+  require(server.parentPid === parent.pid, "normal server is not the consumer child");
+  let unprivilegedEnvironmentDenied = false;
+  try {
+    readFileSync(`/proc/${String(pid)}/environ`);
+  } catch (error) {
+    if (["EACCES", "EPERM"].includes(String((error as NodeJS.ErrnoException).code)))
+      unprivilegedEnvironmentDenied = true;
+    else throw error;
+  }
+  require(unprivilegedEnvironmentDenied, "normal server environment is readable by the unprivileged actor");
+  const input: WitnessInput = {
+    pid,
+    startTicks: server.startTicks,
+    parentPid: parent.pid,
+    parentStartTicks: parent.startTicks,
+    executableSha256: manifest.binaries["fvoci-server"]?.sha256 ?? "",
+    environmentDigests: Object.fromEntries(
+      Object.entries({
+        DATABASE_APP_URL: app.DATABASE_APP_URL,
+        FVOCI_DATABASE_BACKEND: app.FVOCI_DATABASE_BACKEND,
+        FVOCI_SQLITE_PATH: app.FVOCI_SQLITE_PATH,
+        FVOCI_LIBSQL_URL: app.FVOCI_LIBSQL_URL,
+        FVOCI_LIBSQL_AUTH_TOKEN: app.FVOCI_LIBSQL_AUTH_TOKEN,
+        SSL_CERT_FILE: app.SSL_CERT_FILE,
+        OIDC_GENERIC_ISSUER: app.OIDC_GENERIC_ISSUER,
+        OIDC_GENERIC_CLIENT_ID: app.OIDC_GENERIC_CLIENT_ID,
+        OIDC_GENERIC_CLIENT_SECRET: app.OIDC_GENERIC_CLIENT_SECRET,
+      }).flatMap(([key, value]) => (value === undefined ? [] : [[key, digest(value)]])),
+    ),
+  };
+  const argv = [
+    "sudo",
+    "-n",
+    "/usr/bin/env",
+    "-i",
+    "-C",
+    observer.directory,
+    observer.bun.path,
+    "--no-env-file",
+    "--config=" + observer.config.path,
+    observer.module.path,
+  ];
+  const observed = await runCommand(scope, argv, { input: JSON.stringify(input), seconds: 30 });
+  require(observed.code === 0, "actual protected server environment witness failed");
+  const facts = JSON.parse(observed.stdout) as Record<string, unknown>;
+  require(Object.keys(facts).length === 7 &&
+    facts.accepted === true &&
+    Object.values(facts).every(
+      (value) => value === true,
+    ), "actual protected server environment facts failed");
+  if (negatives)
+    for (const refused of [
+      { ...input, startTicks: "0" },
+      { ...input, parentStartTicks: "0" },
+      { ...input, executableSha256: "0".repeat(64) },
+      {
+        ...input,
+        environmentDigests: {
+          ...input.environmentDigests,
+          OIDC_GENERIC_CLIENT_SECRET: "0".repeat(64),
+        },
+      },
+      { ...input, path: "arbitrary-path-refused" },
+    ]) {
+      const rejected = await runCommand(scope, argv, {
+        input: JSON.stringify(refused),
+        seconds: 30,
+      });
+      require(rejected.code !== 0 &&
+        (JSON.parse(rejected.stdout) as { accepted: unknown }).accepted ===
+          false, "privileged process observer negative control was accepted");
+    }
+  return { ...facts, unprivilegedEnvironmentDenied, negativeControls: negatives ? 5 : 0 };
 }
 
 export interface PreparedBackend {
@@ -205,6 +309,7 @@ export interface ConsumerInputs {
   prepare(mode: string, directory: string): Promise<PreparedBackend>;
   checkInputs(): void;
   heavy?: string;
+  processObserver: ProcessObserver;
   workspaceSso?: { binary: string; environment: Record<string, string> };
 }
 
@@ -252,6 +357,10 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
     command([...composeArgs, ...args], composeEnv, signal);
   let original: unknown;
   const cleanupErrors: string[] = [];
+  const retain = (name: string, text: string) => {
+    if (inputs.evidence)
+      writeFileSync(join(inputs.evidence, name), safeText(text), { mode: 0o600 });
+  };
   let created = false;
   try {
     writeFileSync(
@@ -300,15 +409,12 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         require(now() < deadline, "Keycloak discovery/JWKS readiness failed");
         require((await compose(["ps", "--status", "running", "--quiet", "keycloak"])) !==
           "", "Keycloak exited before readiness");
-        await pause(20);
+        await pause(1000);
       }
     }
     const setup = await verify(config, sso);
     require(setup.problems.length === 0, "Keycloak realm settings differ");
-    const retain = (name: string, text: string) => {
-      if (inputs.evidence)
-        writeFileSync(join(inputs.evidence, name), safeText(text), { mode: 0o600 });
-    };
+
     retain("keycloak-setup.json", JSON.stringify(setup.report, null, 2));
     const image = await compose(["config", "--images"]);
     retain(
@@ -373,9 +479,21 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           "normal-server",
           { env: app, stdin: "ignore", stdout: fd, stderr: fd },
         );
-        base = await awaitListening(logPath, server, now() + 120);
+        base = await awaitListening(logPath, server, now() + 30);
         await requireSetup(base, true);
-        assertServerEnvironment(server.pid, app);
+        retain(
+          `process-environment-${mode}.json`,
+          JSON.stringify(
+            await assertServerEnvironment(
+              scope,
+              server.pid,
+              app,
+              inputs.manifest,
+              inputs.processObserver,
+              mode === "flows",
+            ),
+          ),
+        );
         const native = inputs.manifest.binaries["fvoci-e2e-fixture"]?.path ?? "";
         const observed = await runCommand(scope, [native, "oidc-observe"], {
           env: database.observer,
@@ -463,7 +581,9 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           OIDC_GENERIC_ISSUER: issuer,
           OIDC_GENERIC_CLIENT_SECRET: app.OIDC_GENERIC_CLIENT_SECRET,
           OIDC_ALLOW_INSECURE: "1",
-          TMPDIR: process.env.FVOCI_KC_CHROMIUM_TMPDIR ?? process.env.TMPDIR ?? "",
+          TMPDIR: process.env.TMPDIR ?? "",
+          FVOCI_KC_CHROMIUM_TMPDIR: process.env.FVOCI_KC_CHROMIUM_TMPDIR ?? "",
+          FVOCI_KC_CHROMIUM_BIN: inputs.manifest.chromium,
         };
         const args = [
           inputs.manifest.bun.path,
@@ -519,6 +639,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         });
       }
     }
+    inputs.signal?.throwIfAborted();
     if (inputs.workspaceSso) {
       const test = inputs.workspaceSso;
       const result = await runCommand(
@@ -541,11 +662,25 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         2,
       ),
     );
-    for (const name of readdirSync(out)) retain(name, readFileSync(join(out, name), "utf8"));
     require(codes.every((code) => code === 0), "Keycloak acceptance group failed");
   } catch (error) {
     original = error;
   } finally {
+    if (inputs.evidence) {
+      try {
+        for (const entry of readdirSync(work, { recursive: true, withFileTypes: true }))
+          if (entry.isFile() && /\.(?:md|log|txt)$/.test(entry.name)) {
+            const file = join(entry.parentPath, entry.name);
+            retain(
+              "output-" + file.slice(work.length + 1).replaceAll("/", "_"),
+              readFileSync(file, "utf8"),
+            );
+          }
+        for (const name of readdirSync(out)) retain(name, readFileSync(join(out, name), "utf8"));
+      } catch {
+        cleanupErrors.push("redacted output collection failed");
+      }
+    }
     if (created) {
       if (inputs.evidence) {
         try {
@@ -645,6 +780,9 @@ export async function startPostgres(
         "-p",
         "127.0.0.1::5432",
         pgImage,
+        "postgres",
+        "-c",
+        "max_connections=150",
       ],
       {
         env: { ...cleanEnv(), POSTGRES_PASSWORD: password },
@@ -658,16 +796,34 @@ export async function startPostgres(
     base = "http://" + published.stdout.trim();
     const admin = "postgres://postgres:" + password + "@" + published.stdout.trim() + "/postgres";
     addSecret(admin, "PostgreSQL observer URL");
-    const deadline = now() + 120;
+    const deadline = now() + 30;
     for (;;) {
       const probe = await run(["docker", "exec", container, "pg_isready", "-U", "postgres"]);
       if (probe.code === 0) break;
       require(now() < deadline, "owned PostgreSQL readiness failed");
-      await pause(20);
+      await pause(1000);
     }
+    const version = await run([
+      "docker",
+      "exec",
+      container,
+      "psql",
+      "-U",
+      "postgres",
+      "-tAc",
+      "SHOW server_version_num",
+    ]);
+    require(version.code === 0 &&
+      /^18[0-9]{4}$/.test(version.stdout.trim()), "owned PostgreSQL major version changed");
     return { container, admin, close };
   } catch (error) {
-    await close();
+    try {
+      await close();
+    } catch (cleanup) {
+      throw new AggregateError([error, cleanup], "owned fixture preparation and cleanup failed", {
+        cause: cleanup,
+      });
+    }
     throw error;
   }
 }
@@ -680,6 +836,7 @@ export async function prepareBackend(
   directory: string,
   postgres?: PostgresFixture,
   sqld?: string,
+  libsqlRoot?: string,
 ): Promise<PreparedBackend> {
   const common = {
     ...cleanEnv(),
@@ -710,7 +867,10 @@ export async function prepareBackend(
   }
   if (backend === "libsql-remote") {
     require(sqld !== undefined, "pinned official sqld is required");
-    const local = await startLocalLibsql(scope, sqld as string, join(directory, "libsql"));
+    const localDirectory = join(directory, "libsql");
+    require(libsqlRoot !== undefined &&
+      below(localDirectory, libsqlRoot), "libSQL fixture is outside the allocated namespace");
+    const local = await startLocalLibsql(scope, sqld as string, localDirectory);
     addSecret(local.environment.FVOCI_LIBSQL_AUTH_TOKEN as string, "local libSQL token");
     return {
       backend,
@@ -726,6 +886,11 @@ export async function prepareBackend(
     role = "fvoci_kc_app_" + suffix;
   const password = randomBytes(32).toString("hex");
   addSecret(password, "PostgreSQL app password");
+  const preparationLog = join(directory, "postgres-preparation.log");
+  privateWrite(preparationLog, "");
+  const collect = (stdout: string, stderr: string) => {
+    appendFileSync(preparationLog, safeText(stdout + stderr));
+  };
   const urls = databaseUrls(pg.admin, db, role, password);
   addSecret(urls.admin, "PostgreSQL observer URL");
   addSecret(urls.app, "PostgreSQL app URL");
@@ -746,7 +911,7 @@ export async function prepareBackend(
         "ON_ERROR_STOP=1",
         "-tA",
       ],
-      { input },
+      { input, output: collect },
     );
     require(result.code === 0, "owned PostgreSQL preparation failed");
     return result.stdout.trim();
@@ -761,13 +926,14 @@ export async function prepareBackend(
     await psql("postgres", `CREATE DATABASE "${db}";`);
     const migrated = await runCommand(scope, [manifest.binaries["fvoci-migrate"]?.path ?? ""], {
       env: { ...common, DATABASE_URL: urls.admin },
+      output: collect,
     });
     require(migrated.code === 0, "owned PostgreSQL migration failed");
     await psql(db, `CREATE ROLE "${role}" LOGIN PASSWORD '${password}' NOSUPERUSER NOBYPASSRLS;`);
     const granted = await runCommand(
       scope,
       [manifest.binaries["fvoci-migrate"]?.path ?? "", "--grant-app-role", role],
-      { env: { ...common, DATABASE_URL: urls.admin } },
+      { env: { ...common, DATABASE_URL: urls.admin }, output: collect },
     );
     require(granted.code === 0, "owned PostgreSQL app grant failed");
     require((await psql(
@@ -810,11 +976,14 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
             heavy?: string;
             chromiumTmp?: string;
             sso?: { path: string; sha256: string };
+            processObserver?: ProcessObserver;
           }
         | undefined;
       require(configuration?.backends?.includes(
         selected as Backend,
       ), "backend is outside the local allocation");
+      require(configuration?.processObserver !==
+        undefined, "reviewed privileged process observer is required");
       const manifest = currentBuild(load);
       const directory = resolve(grant.outputRoot, "runtime");
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -822,8 +991,9 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
       mkdirSync(evidence, { mode: 0o700 });
       require(typeof configuration?.heavy ===
         "string", "allocated heavy command wrapper is required");
-      if (configuration?.chromiumTmp)
-        process.env.FVOCI_KC_CHROMIUM_TMPDIR = configuration.chromiumTmp;
+      require(typeof configuration?.chromiumTmp ===
+        "string", "allocated Chromium socket directory is required");
+      process.env.FVOCI_KC_CHROMIUM_TMPDIR = configuration?.chromiumTmp;
       const controller = new AbortController();
       const handlers = (
         [
@@ -862,6 +1032,7 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
                 evidence,
                 signal: controller.signal,
                 heavy: configuration?.heavy,
+                processObserver: configuration?.processObserver as ProcessObserver,
                 prepare: (_mode, path) =>
                   prepareBackend(
                     scope,
@@ -870,6 +1041,7 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
                     path,
                     pg,
                     configuration?.sqld?.path,
+                    (grant.localLibsql as { directory: string } | undefined)?.directory,
                   ),
                 checkInputs: () => {
                   require(deepEquals(currentBuild(load), manifest, true), "current inputs changed");

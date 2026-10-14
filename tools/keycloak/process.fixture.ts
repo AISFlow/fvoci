@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pause, UiProcesses, withProcesses } from "../turso/ui-processes.ts";
 import { addSecret } from "./redact.ts";
-import { runCommand, safeText } from "./run.ts";
+import { groupVerdict, runCommand, safeText } from "./run.ts";
 
 const [kind, mode, directory = ""] = process.argv.slice(2);
 const ready = join(directory, "ready");
@@ -46,6 +46,7 @@ if (kind === "body") {
 } else {
   addSecret("stdout-canary-secret-012345", "fixture canary");
   const controller = new AbortController();
+  if (mode === "broken-output") process.on("SIGPIPE", () => {});
   let captured = "",
     result = "",
     code: number | null = null;
@@ -97,6 +98,7 @@ if (kind === "body") {
       controller.abort(new Error("fixture interrupt"));
     }
     await observed;
+    if (mode === "broken-output") groupVerdict(directory, "flows", 1);
   }, scope);
   process.stdout.write(
     JSON.stringify({
