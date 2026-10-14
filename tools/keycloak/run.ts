@@ -1036,8 +1036,8 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
       mkdirSync(evidence, { mode: 0o700 });
       require(typeof configuration?.heavy ===
         "string", "allocated heavy command wrapper is required");
-      require(typeof configuration?.chromiumTmp ===
-        "string", "allocated Chromium socket directory is required");
+      require(typeof configuration?.chromiumTmp === "string" &&
+        configuration.chromiumTmp.length > 0, "allocated Chromium socket directory is required");
       process.env.FVOCI_KC_CHROMIUM_TMPDIR = configuration?.chromiumTmp;
       const controller = new AbortController();
       const handlers = (
