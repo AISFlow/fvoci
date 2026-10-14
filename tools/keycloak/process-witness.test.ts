@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   digest,
   beforeReadAllowed,
+  callerFrameMatches,
   evaluate,
   parseInput,
   type WitnessInput,
@@ -127,4 +128,31 @@ test("the environment read gate rejects a wrong actor or executable before acces
     mutate(metadata);
     expect(beforeReadAllowed(input(), metadata)).toBe(false);
   }
+});
+
+test("the first actual Bun caller cannot be replaced with a higher owning ancestor", () => {
+  const frame = {
+    pid: 100,
+    parentPid: 50,
+    startTicks: "1000",
+    uids: [1000, 1000, 1000, 1000],
+    gids: [1000, 1000, 1000, 1000],
+    executableName: "bun",
+    executableSha256: "c".repeat(64),
+  };
+  expect(callerFrameMatches(input(), frame, "c".repeat(64))).toBe(true);
+  expect(
+    callerFrameMatches(
+      { ...input(), parentPid: 50, parentStartTicks: "500" },
+      frame,
+      "c".repeat(64),
+    ),
+  ).toBe(false);
+  expect(callerFrameMatches(input(), { ...frame, executableName: "sudo" }, "c".repeat(64))).toBe(
+    false,
+  );
+  expect(
+    callerFrameMatches(input(), { ...frame, executableSha256: "d".repeat(64) }, "c".repeat(64)),
+  ).toBe(false);
+  expect(callerFrameMatches(input(), { ...frame, uids: [0, 0, 0, 0] }, "c".repeat(64))).toBe(false);
 });

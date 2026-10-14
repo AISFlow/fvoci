@@ -2,7 +2,7 @@
 // to a private directory; stdin is a fixed DTO, stdout contains booleans only.
 // Never accepts a path, command, SQL, environment value or output destination.
 import { createHash } from "node:crypto";
-import { readFileSync, readlinkSync, writeSync } from "node:fs";
+import { readFileSync, readlinkSync, statSync, writeSync } from "node:fs";
 import { basename } from "node:path";
 
 const ALLOWED = [
@@ -164,14 +164,50 @@ function identity(pid: number): Identity {
     throw new Error("WITNESS_PROCESS_REFUSED");
   return { pid, parentPid, startTicks };
 }
-function callerBound(input: WitnessInput): boolean {
+const idsOf = (status: string, key: "Uid" | "Gid") =>
+  (new RegExp(`^${key}:\\s*(.+)$`, "m").exec(status)?.[1] ?? "").trim().split(/\s+/).map(Number);
+type CallerFrame = Identity &
+  Pick<WitnessView, "uids" | "gids" | "executableName" | "executableSha256">;
+export function callerFrameMatches(
+  input: WitnessInput,
+  frame: CallerFrame,
+  pinnedBunSha256: string,
+): boolean {
+  return (
+    frame.pid === input.parentPid &&
+    frame.startTicks === input.parentStartTicks &&
+    correctActor(frame) &&
+    frame.executableName === "bun" &&
+    frame.executableSha256 === pinnedBunSha256
+  );
+}
+export function callerBound(input: WitnessInput): boolean {
   // Only our own bounded ancestor chain (sudo's monitor/exec processes), never
   // a scan of unrelated processes. The observed app must be this caller's child.
   let pid = process.ppid;
   for (let depth = 0; depth < 8 && pid > 1; depth++) {
     const parent = identity(pid);
-    if (parent.pid === input.parentPid) return parent.startTicks === input.parentStartTicks;
-    pid = parent.parentPid;
+    const executable = `/proc/${String(pid)}/exe`;
+    const path = readlinkSync(executable);
+    const file = statSync(executable);
+    if (path === "/usr/bin/sudo" && file.uid === 0 && file.gid === 0 && (file.mode & 0o022) === 0) {
+      pid = parent.parentPid;
+      continue;
+    }
+    // The first non-sudo frame must be the immediate unprivileged Bun caller.
+    // Never continue to a higher ancestor that owns another worker's child.
+    const status = readFileSync(`/proc/${String(pid)}/status`, "utf8");
+    return callerFrameMatches(
+      input,
+      {
+        ...parent,
+        uids: idsOf(status, "Uid"),
+        gids: idsOf(status, "Gid"),
+        executableName: basename(path),
+        executableSha256: digest(readFileSync(executable)),
+      },
+      digest(readFileSync(process.execPath)),
+    );
   }
   return false;
 }
@@ -187,12 +223,10 @@ function inspect(input: WitnessInput): WitnessView {
   )
     throw new Error("WITNESS_IDENTITY_REFUSED");
   const status = readFileSync(`/proc/${String(input.pid)}/status`, "utf8");
-  const ids = (key: string) =>
-    (new RegExp(`^${key}:\\s*(.+)$`, "m").exec(status)?.[1] ?? "").trim().split(/\s+/).map(Number);
   const executableName = basename(readlinkSync(`/proc/${String(input.pid)}/exe`));
   const executableSha256 = digest(readFileSync(`/proc/${String(input.pid)}/exe`));
-  const uids = ids("Uid"),
-    gids = ids("Gid");
+  const uids = idsOf(status, "Uid"),
+    gids = idsOf(status, "Gid");
   if (!beforeReadAllowed(input, { uids, gids, executableName, executableSha256 }))
     throw new Error("WITNESS_ACTOR_OR_EXECUTABLE_REFUSED");
   const environment: Record<string, string> = {};
