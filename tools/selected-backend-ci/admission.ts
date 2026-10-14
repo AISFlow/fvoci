@@ -53,6 +53,7 @@ export function localAllocation(
   assert.ok(facts.uid === uid() && (facts.mode & 0o777) === 0o600);
   assert.equal(sha(path), env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
   const grant = read(path) as LocalGrant;
+  assert.ok(grant.purpose === undefined || grant.purpose === "equal-work");
   assert.ok(
     grant.schema === 1 && grant.status === "GRANTED" && grant.executionMode === "orca-local",
   );
@@ -112,6 +113,8 @@ export const registeredModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/equal-work.ts",
+  "tools/selected-backend-ci/drivers/equal-work-policy.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",
   "tools/selected-backend-ci/drivers/install.ts",

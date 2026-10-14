@@ -38,6 +38,7 @@ import {
 } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import { loadCurrent, validateOffReport, type Current } from "./binding.ts";
+import { equalSpec, measureBrowser, measurementInputs, validateEqualReport } from "./equal-work.ts";
 import {
   assertNoEnvFile,
   attachmentJson,
@@ -193,9 +194,11 @@ export async function rebind(): Promise<Lane> {
     owner,
     flow,
     spec:
-      flow === "off"
-        ? "workspace-off-selected-backend.spec.ts"
-        : "workspace-wiki-selected-backend.spec.ts",
+      current.manifest.purpose === "equal-work"
+        ? equalSpec
+        : flow === "off"
+          ? "workspace-off-selected-backend.spec.ts"
+          : "workspace-wiki-selected-backend.spec.ts",
     bun,
     before,
     sourceBefore,
@@ -854,6 +857,7 @@ export async function inside(lane: Lane, run: string): Promise<number> {
     RUST_LOG: "info",
     FVOCI_REALTIME_MODE: flow,
   };
+  if (current.manifest.purpose === "equal-work") serverEnv.METRICS_ALLOW_IPS = "127.0.0.1";
   for (const [file, body] of [
     [join(run, "environment.private.json"), JSON.stringify(serverEnv)],
     [
@@ -1144,6 +1148,9 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
     PASSWORD_PEPPER_KEYS: secrets.serverEnv.PASSWORD_PEPPER_KEYS as string,
     PASSWORD_PEPPER_ACTIVE_KEY_ID: secrets.serverEnv.PASSWORD_PEPPER_ACTIVE_KEY_ID as string,
   };
+  const equal = current.manifest.purpose === "equal-work";
+  const measurements = join(run, "equal-work-samples");
+  if (equal) browserEnv.FVOCI_E2E_EQUAL_WORK_DIR = measurements;
   if (process.env.PLAYWRIGHT_BROWSERS_PATH)
     browserEnv.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH;
   const chromium = (
@@ -1166,6 +1173,7 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   write(join(run, "actual-browser-inputs.json"), browserInputs);
   // Bun itself, without bunx's node shim, for both selected flows.
   const args = browserArgs(lane.bun, playwrightCli, lane.spec);
+  if (equal) args[args.indexOf("--config") + 1] = "e2e-pending/equal-work-playwright.config.ts";
   receipt.phase = "browser";
   Object.assign(receipt, {
     browser_command: args,
@@ -1174,15 +1182,23 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   });
   write(join(run, "browser-start.json"), receipt);
   const started = performance.now();
-  const result = await seam.command(args, {
-    log: join(run, "browser.log"),
-    required: false,
-    env: browserEnv,
-    cwd: join(root, "apps/web"),
-  });
+  const invoke = async () => {
+    const result = await seam.command(args, {
+      log: join(run, "browser.log"),
+      required: false,
+      env: browserEnv,
+      cwd: join(root, "apps/web"),
+    });
+    state.code = result.returncode;
+    if (state.code !== 0) recordBrowserFailure(receipt, run, state.code);
+    return result;
+  };
+  const measured = equal
+    ? await measureBrowser(measurements, name, base, invoke, seam.command)
+    : null;
+  const result = measured?.result ?? (await invoke());
   state.code = result.returncode;
   const code = state.code;
-  if (code !== 0) recordBrowserFailure(receipt, run, code);
   const reportPath = join(run, "playwright-result.private.json");
   Object.assign(receipt, {
     browser_exit: code,
@@ -1193,6 +1209,28 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   if (existsSync(reportPath) && !("actual_json_report_sha256" in receipt)) {
     chmodSync(reportPath, 0o600);
     receipt.actual_json_report_sha256 = sha(reportPath);
+  }
+  if (code === 0 && equal) {
+    receipt.purpose = "equal-work";
+    receipt.equal_work = {
+      inputs: measurementInputs(lane.before, current.build, current.assets, browserInputs, image),
+      browser: validateEqualReport(read(reportPath), "postgres", flow),
+      samples: measured?.samples,
+    };
+    // Owner provisioning is finished; the normal server retains only its
+    // restricted app role. Observer uses the already owned fixture connection.
+    const roles = await seam.pgSql(
+      "SELECT coalesce(jsonb_agg(DISTINCT usename),'[]') FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()",
+      false,
+    );
+    assert.ok(deepEquals(roles, [role]));
+    Object.assign(receipt, {
+      actual_browser_tests: 1,
+      retries: 0,
+      ignored: 0,
+      actual_open_client_roles: roles,
+    });
+    return;
   }
   if (code === 0 && flow === "on") {
     assert.ok(/\b1 passed\b/.test(readText(join(run, "browser.log"))));

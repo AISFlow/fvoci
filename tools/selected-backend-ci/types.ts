@@ -115,6 +115,7 @@ export interface Aggregate {
   launcherFailure: unknown;
 }
 export interface LocalGrant {
+  purpose?: unknown;
   schema: number;
   status: string;
   executionMode: string;
