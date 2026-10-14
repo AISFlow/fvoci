@@ -10,7 +10,7 @@ use crate::args::{self, Outcome, Parsed};
 use crate::host::utc_timestamp;
 use crate::rust_binaries_archive::{file_sha256, pack, unpack};
 use crate::rust_binaries_cohort::{
-    self as cohort, entry, expectation, Entry, Kind, HELPER, SCHEMA,
+    self as cohort, entry, expectation, Entry, Kind, HELPER, LIBRARY, SCHEMA,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,7 +157,7 @@ fn workspace() -> Result<PathBuf, String> {
         .map_err(|e| format!("workspace: {e}"))
 }
 
-fn host(workspace: &Path) -> Result<Host, String> {
+pub(crate) fn host(workspace: &Path) -> Result<Host, String> {
     Ok(Host {
         head: output_text("git", &["rev-parse", "HEAD"])?
             .trim()
@@ -225,6 +225,7 @@ fn build(directory: &Path, names: &[String]) -> Result<i32, String> {
             "--features",
             "db-tests",
             "--no-run",
+            "--lib",
             "--message-format=json",
         ])
         .stdout(output);
@@ -278,13 +279,18 @@ fn pack_cohorts(
     names: &[String],
     products: &[String],
 ) -> Result<(), String> {
-    let helper = entries_for(
+    let mut helper = entries_for(
         &directory.join("helper.jsonl"),
         &[HELPER.to_owned()],
         products,
         root,
     )?;
-    let tests_and_products: Vec<String> = names.iter().chain(products).cloned().collect();
+    let tests_and_products: Vec<String> = names
+        .iter()
+        .chain(products)
+        .cloned()
+        .chain([LIBRARY.to_owned()])
+        .collect();
     let mut postgres = entries_for(
         &directory.join("tests.jsonl"),
         &tests_and_products,
@@ -298,6 +304,9 @@ fn pack_cohorts(
         root,
     )?);
     postgres.extend(helper.clone());
+    for name in [LIBRARY, "fvoci-server"] {
+        helper.insert(name.to_owned(), postgres[name].clone());
+    }
     let helper_tar = directory.join("helper.tar");
     pack(&helper_tar, context, root, &helper)?;
     pack(&directory.join("postgres.tar"), context, root, &postgres).inspect_err(|_| {
@@ -314,13 +323,18 @@ fn unpack_cohort(
     products: &[String],
 ) -> Result<(), String> {
     let expected: BTreeSet<String> = if cohort == "helper" {
-        [HELPER.to_owned()].into()
+        [
+            HELPER.to_owned(),
+            LIBRARY.to_owned(),
+            "fvoci-server".to_owned(),
+        ]
+        .into()
     } else {
         names
             .iter()
             .chain(products)
             .cloned()
-            .chain([SCHEMA.to_owned(), HELPER.to_owned()])
+            .chain([SCHEMA.to_owned(), HELPER.to_owned(), LIBRARY.to_owned()])
             .collect()
     };
     let manifest = unpack(

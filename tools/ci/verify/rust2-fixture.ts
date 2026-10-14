@@ -67,7 +67,11 @@ export class RegistryTree {
     cpSync(join(ROOT, ".github", "workflows"), join(this.root, ".github", "workflows"), {
       recursive: true,
     });
-    for (const rel of [RUST_COLLAB_CI_SCRIPT, RUST_CAPACITY_PROBE_SCRIPT]) {
+    for (const rel of [
+      RUST_COLLAB_CI_SCRIPT,
+      RUST_CAPACITY_PROBE_SCRIPT,
+      "xtask/native-library-cohorts.tsv",
+    ]) {
       mkdirSync(dirname(join(this.root, rel)), { recursive: true });
       copyFileSync(join(ROOT, rel), join(this.root, rel));
     }

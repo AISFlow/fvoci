@@ -678,7 +678,7 @@ fn cli_build_passes_cargo_status_and_never_overwrites() {
         assert_eq!(out.status.code(), Some(expected), "{out:?}");
         assert_eq!(
             fs::read_to_string(root.join("argv")).unwrap(),
-            "test --locked --offline --features db-tests --no-run --message-format=json --test attachment_s3_integration --test first --test schema_baseline_integration --test second --test selected_install_lifetime\n"
+            "test --locked --offline --features db-tests --no-run --lib --message-format=json --test attachment_s3_integration --test first --test schema_baseline_integration --test second --test selected_install_lifetime\n"
         );
         assert_eq!(
             fs::read_to_string(root.join("handoff/tests.jsonl")).unwrap(),

@@ -25,10 +25,13 @@ pub const HELPER: &str = "collab-engine";
 pub const SCHEMA: &str = "schema-migrate";
 pub const SCHEMA_TARGET: &str = "fvoci-migrate";
 pub const DB_TESTS: &str = "db-tests";
+/// Root db-tests libtest harness, shared by native-input consumers.
+pub const LIBRARY: &str = "db-tests-library";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Test,
+    Lib,
     Bin,
 }
 
@@ -36,6 +39,7 @@ impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Test => "test",
+            Self::Lib => "lib",
             Self::Bin => "bin",
         }
     }
@@ -56,9 +60,12 @@ pub fn expectation(name: &str, products: &[String]) -> Expectation {
     let (target, features): (&str, &'static [&'static str]) = match name {
         HELPER => (HELPER, &["default", "worker"]),
         SCHEMA => (SCHEMA_TARGET, &[]),
+        LIBRARY => ("fvoci_server", &[DB_TESTS]),
         _ => (name, &[DB_TESTS]),
     };
-    let kind = if name == HELPER || name == SCHEMA || products.iter().any(|p| p == name) {
+    let kind = if name == LIBRARY {
+        Kind::Lib
+    } else if name == HELPER || name == SCHEMA || products.iter().any(|p| p == name) {
         Kind::Bin
     } else {
         Kind::Test
@@ -209,7 +216,7 @@ pub fn record_matches(record: &Value, expectation: &Expectation) -> bool {
         && record["profile"]["opt_level"] == "0"
         && (debuginfo.is_null() && record["profile"].get("debuginfo").is_some()
             || debuginfo.as_u64() == Some(0))
-        && record["profile"]["test"] == (expectation.kind == Kind::Test)
+        && record["profile"]["test"] == (expectation.kind != Kind::Bin)
         && record["target"]["kind"] == serde_json::json!([expectation.kind.as_str()])
         && record["target"]["name"] == expectation.target.as_str()
 }
@@ -240,7 +247,7 @@ pub fn entry(
     let mut matches = records.iter().filter(|r| {
         r["target"]["name"] == expectation.target.as_str()
             && r["target"]["kind"] == kind
-            && r["profile"]["test"] == (expectation.kind == Kind::Test)
+            && r["profile"]["test"] == (expectation.kind != Kind::Bin)
     });
     let (Some(record), None) = (matches.next(), matches.next()) else {
         return Err(format!(

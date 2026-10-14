@@ -29,9 +29,8 @@ use tokio_util::sync::CancellationToken;
 
 type FixtureResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-/// Official libsql-server-v0.24.32 x86_64 GNU binary, pinned by the root's
-/// upstream-download-proof.json. This upstream reports SQLite 3.45.1.
-pub const SQLD_SHA256: &str = "0863c3fbe68ac9714bca2cec1330def7a0ba5e4a29f199bf60ef46fa0c95b895";
+#[path = "official_sqld.rs"]
+mod official_sqld;
 const FIXTURE_TOKEN: &str = "isolated-protocol-fixture-only";
 const START_DEADLINE: Duration = Duration::from_secs(10);
 const FINISH_DEADLINE: Duration = Duration::from_secs(10);
@@ -137,9 +136,8 @@ impl LibsqlFinishFixture {
     /// `root` must be a new caller-owned run directory. No installed service,
     /// account, global environment, or production credential is touched.
     pub async fn start(sqld: &Path, root: &Path) -> FixtureResult<Self> {
-        if hex::encode(Sha256::digest(tokio::fs::read(sqld).await?)) != SQLD_SHA256 {
-            return Err("official sqld fixture binary digest mismatch".into());
-        }
+        let digest = hex::encode(Sha256::digest(tokio::fs::read(sqld).await?));
+        official_sqld::verify(sqld, &digest, std::env::consts::ARCH)?;
         tokio::fs::create_dir(root).await?;
         let log = std::fs::File::create(root.join("sqld.log"))?;
         let mut child = Command::new(sqld)

@@ -252,6 +252,8 @@ jobs:
       - name: Selected SQLite library controls (56 exact tests)
         run: |
           xtask/target/debug/xtask selected-library --target-dir target/db-lib
+      - name: Additional SQLite library controls (105 exact tests)
+        run: xtask/target/debug/xtask selected-library --cohort no-input --target-dir target/db-lib
       - name: Save SQLite library build outputs after validation
         if: steps.db_lib_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -725,6 +727,19 @@ jobs:
           set -euo pipefail
           xtask/target/debug/xtask schema-baseline
 
+      - name: Native PostgreSQL library control (1 exact test)
+        if: matrix.shard == 'a'
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+        run: xtask/target/debug/xtask native-library run --cohort postgres --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+
+      - name: Restricted PostgreSQL app library control (1 exact test)
+        if: matrix.shard == 'a'
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          PREPARATION_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+        run: xtask/target/debug/xtask native-library run --cohort pg-app --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+
       - name: Selected SQLite install lifetime controls
         if: matrix.shard == 'b' && matrix.pg_major == '18'
         env:
@@ -738,6 +753,10 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
         run: bash scripts/start-test-minio.sh xtask/target/debug/xtask rust-binaries run --directory "$RUNNER_TEMP/rust-binaries" --test attachment_s3_integration
+
+      - name: Native S3 library control (1 exact test)
+        if: matrix.shard == 'b'
+        run: bash scripts/start-test-minio.sh xtask/target/debug/xtask native-library run --cohort s3 --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
 
   collaboration:
     needs: [ci-plan, postgres-build]
@@ -833,6 +852,31 @@ jobs:
           zstd --decompress --no-progress -- "$RUNNER_TEMP/rust-binaries/helper.tar.zst"
       - name: Validate and restore finished helper executables (no rebuild fallback)
         run: xtask/target/debug/xtask rust-binaries unpack --cohort helper --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Native collaboration library controls (28 exact tests)
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci-ephemeral-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+          FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
+          FVOCI_IMPORT_TEST_SERVER_BIN: ${{ github.workspace }}/target/db-tests/debug/fvoci-server
+        run: xtask/target/debug/xtask native-library run --cohort collaboration --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Native preview library controls (6 exact tests)
+        env:
+          FVOCI_PREVIEW_TEST_HELPER: ${{ github.workspace }}/target/db-tests/debug/fvoci-server
+        run: xtask/target/debug/xtask native-library run --cohort preview --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Prepare pinned official native sqld
+        run: xtask/target/debug/xtask native-library prepare-sqld --directory "$RUNNER_TEMP/native-library-sqld"
+      - name: Official sqld library controls (15 exact tests)
+        env:
+          FVOCI_TEST_SQLD: ${{ runner.temp }}/native-library-sqld/sqld
+        run: xtask/target/debug/xtask native-library run --cohort sqld --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Explicit official sqld library controls (15 exact tests)
+        env:
+          FVOCI_TEST_SQLD: ${{ runner.temp }}/native-library-sqld/sqld
+          FVOCI_COLLAB_ENGINE: ${{ github.workspace }}/crates/collab-engine/target/debug/collab-engine
+        run: xtask/target/debug/xtask native-library run --cohort sqld-ignored --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
+      - name: Explicit local sqld migration controls (6 exact tests)
+        env:
+          FVOCI_TEST_SQLD: ${{ runner.temp }}/native-library-sqld/sqld
+        run: xtask/target/debug/xtask native-library run --cohort sqld-migration --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"
       - run: cargo fetch --locked
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
