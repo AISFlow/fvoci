@@ -60,6 +60,7 @@ import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
 
+// Hosted qualification only; local authority supplies its own qualified digest.
 export const QUALIFIED_CANONICAL_IMAGE =
   "sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35";
 export const QUALIFIED_SHELL = "/bin/sh";
@@ -173,6 +174,9 @@ export function allocationCaps(grant?: unknown): Record<string, string> {
 }
 
 export function readShellProof(runtime: unknown): string {
+  const image = isRecord(runtime) ? runtime.imageId : undefined;
+  require(typeof image === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(image), "UI_CANONICAL_SHELL_UNAVAILABLE");
   const proof = isRecord(runtime) ? runtime.shellProof : undefined;
   require(isRecord(proof), "UI_CANONICAL_SHELL_UNAVAILABLE");
   const path = proof.path,
@@ -180,26 +184,62 @@ export function readShellProof(runtime: unknown): string {
   require(typeof path === "string" &&
     path.startsWith("/") &&
     !path.startsWith("//"), "UI_CANONICAL_SHELL_UNAVAILABLE");
-  let link: boolean;
+  let file: boolean;
   try {
-    link = lstatSync(path).isSymbolicLink();
+    file = lstatSync(path).isFile();
   } catch {
-    link = false;
+    file = false;
   }
-  require(isAbsolute(path) && !link, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  require(isAbsolute(path) && file, "UI_CANONICAL_SHELL_UNAVAILABLE");
   require(typeof hash === "string" &&
     /^[0-9a-f]{64}$/.test(hash), "UI_CANONICAL_SHELL_UNAVAILABLE");
   require(sha(path) === hash, "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const config = record(JSON.parse(readFileSync(path, "utf8")), "Config");
-  require(config.Image === QUALIFIED_CANONICAL_IMAGE &&
-    get(runtime, "imageId") === QUALIFIED_CANONICAL_IMAGE, "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const cmd = Array.isArray(config.Cmd) ? config.Cmd : [];
-  require(cmd.includes(QUALIFIED_SHELL), "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const environment = Array.isArray(config.Env) ? config.Env : [];
-  require(!environment.some(
-    (item) => String(item).startsWith("FVOCI_LIBSQL_") || String(item).startsWith("ENCRYPTION_"),
-  ), "UI_DOCKER_ENV_SECRET_REFUSED");
+  const inspect: unknown = JSON.parse(readFileSync(path, "utf8"));
+  require(isRecord(inspect) &&
+    isRecord(inspect.Config) &&
+    isRecord(inspect.State), "UI_CANONICAL_SHELL_UNAVAILABLE");
+  const config = inspect.Config,
+    state = inspect.State;
+  require(config.Image === image &&
+    inspect.Image === image &&
+    inspect.Path === QUALIFIED_SHELL &&
+    Array.isArray(config.Entrypoint) &&
+    config.Entrypoint.length === 1 &&
+    config.Entrypoint[0] === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  require(state.Status === "exited" &&
+    state.Running === false &&
+    state.Pid === 0 &&
+    state.ExitCode === 0 &&
+    state.OOMKilled === false &&
+    state.Error === "" &&
+    typeof state.FinishedAt === "string" &&
+    Date.parse(state.FinishedAt) > 0, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  admitLocalConfig(config);
   return QUALIFIED_SHELL;
+}
+
+function canonicalImage(grant: unknown): string {
+  if (executionMode() === "github-ci") return QUALIFIED_CANONICAL_IMAGE;
+  const runtime = get(grant, "canonicalRuntime");
+  require(readShellProof(runtime) === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  return get(runtime, "imageId") as string;
+}
+
+/** Local receipts and inherited image config must publish no private inputs. */
+function admitLocalConfig(config: Record_, secretValues: string[] = []): void {
+  require(config.Env === null ||
+    (Array.isArray(config.Env) &&
+      config.Env.every((item) => typeof item === "string")), "UI_DOCKER_ENV_SECRET_REFUSED");
+  const environment = config.Env ?? [];
+  require(!environment.some((item) => {
+    const key = item.split("=", 1)[0] as string;
+    return (
+      key.startsWith("FVOCI_LIBSQL_") ||
+      key.startsWith("ENCRYPTION_") ||
+      /PASSWORD|TOKEN|SECRET|CREDENTIAL/.test(key)
+    );
+  }), "UI_DOCKER_ENV_SECRET_REFUSED");
+  admitPublishedConfig(Array.isArray(config.Cmd) ? config.Cmd : [], environment, secretValues);
 }
 
 export function openReferencedGrant(
@@ -298,11 +338,13 @@ export function containerArgv(
 ): string[] {
   require(launcher.startsWith("/") && capsule.startsWith("/"), "UI_CURRENT_ARTIFACT_MISSING");
   const caps = allocationCaps(grant);
+  const image = canonicalImage(grant);
   const limit = caps["memory.max"] as string;
   const memory = limit === "max" ? [] : ["--memory", limit, "--memory-swap", limit];
   const argv = [
     "docker",
     "create",
+    ...(executionMode() === "orca-local" ? ["--pull", "never"] : []),
     "--name",
     name,
     "--read-only",
@@ -322,7 +364,7 @@ export function containerArgv(
     "--entrypoint",
     QUALIFIED_SHELL,
     ...mountArgs,
-    QUALIFIED_CANONICAL_IMAGE,
+    image,
     LAUNCHER_DST,
     CAPSULE_DST,
     binary,
@@ -370,12 +412,19 @@ export function creationIdentity(
   argv: string[],
   secretValues: string[],
   kind: string,
+  grant?: unknown,
 ): Creation {
   const config = record(inspect, "Config"),
     host = record(inspect, "HostConfig");
   require(get(inspect, "State", "Pid") === 0 &&
     get(inspect, "State", "Running") === false, "UI_DAEMON_PID_REFUSED");
-  require(config.Image === QUALIFIED_CANONICAL_IMAGE, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  const image = canonicalImage(grant);
+  require(config.Image === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  if (executionMode() === "orca-local") {
+    require(get(inspect, "Image") === image &&
+      get(inspect, "Path") === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+    admitLocalConfig(config, secretValues);
+  }
   const entrypoint = Array.isArray(config.Entrypoint) ? config.Entrypoint : [];
   require(entrypoint.length === 1 &&
     entrypoint[0] === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
@@ -403,7 +452,7 @@ export function creationIdentity(
     qualification: BLOCKED,
     cgroupCaps: "not-observed",
     shell: QUALIFIED_SHELL,
-    image: QUALIFIED_CANONICAL_IMAGE,
+    image,
   };
 }
 
@@ -984,6 +1033,19 @@ export async function publishContainer(
     typeof environment[key] === "string" ? [environment[key]] : [],
   );
   if (environment.ENCRYPTION_KEYS) secretValues.push(environment.ENCRYPTION_KEYS);
+  // No create/start or private FIFO/capsule publication before local qualification.
+  if (executionMode() === "orca-local") {
+    allocationCaps(grant);
+    const image = canonicalImage(grant);
+    require(scope !== null, "UI_OWNED_PROCESS_SCOPE_REQUIRED");
+    const inspected = parseBytes(
+      await docker.client(scope, ["docker", "image", "inspect", image], 10),
+    );
+    require(Array.isArray(inspected) &&
+      inspected.length === 1 &&
+      get(inspected, 0, "Id") === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+    admitLocalConfig(record(inspected, 0, "Config"), secretValues);
+  }
   const storage = environment.FVOCI_STORAGE_DIR;
   require(typeof storage === "string" &&
     storage.startsWith("/") &&
@@ -1033,7 +1095,7 @@ export async function publishContainer(
     const inspected = parseBytes(
       await docker.client(scope, ["docker", "inspect", containerId], 10),
     );
-    const creation = creationIdentity(get(inspected, 0), argv, secretValues, kind);
+    const creation = creationIdentity(get(inspected, 0), argv, secretValues, kind, grant);
     require(creation.qualification === BLOCKED &&
       get(grant, "canonicalRuntime", "imageId") ===
         creation.image, "UI_DAEMON_OBSERVATION_UNSUPPORTED");
