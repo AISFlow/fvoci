@@ -39,7 +39,7 @@ options:
   --test TEST               test executable to run (repeatable)
   --nocapture               pass --nocapture to libtest
 ";
-const PINNED_RUSTC: &str = "rustc 1.98.1 ";
+const PINNED_RUSTC: &str = "rustc 1.99.0 ";
 const PROFILE: &str = "dev-test-nodebug";
 const BUILD_ENVIRONMENT: [&str; 6] = [
     "CARGO_INCREMENTAL",
@@ -515,7 +515,7 @@ mod tests {
             runner_arch: Some("X64".into()),
             run_id: Some("42".into()),
             run_attempt: Some("1".into()),
-            rustc: "rustc 1.98.1 (48a229cea 2026-09-01)\nhost: x86_64-unknown-linux-gnu\n".into(),
+            rustc: "rustc 1.99.0 (b940084d7 2026-09-28)\nhost: x86_64-unknown-linux-gnu\n".into(),
             workspace: "/w".into(),
             os_release: "ID=ubuntu\n".into(),
             build_environment: vec![("CARGO_INCREMENTAL", Some("0".into())), ("RUSTFLAGS", None)],
@@ -586,7 +586,7 @@ mod tests {
                 "toolchain mismatch",
             ),
             (
-                Box::new(|h| h.rustc = h.rustc.replace("1.98.1", "1.98.0")),
+                Box::new(|h| h.rustc = h.rustc.replace("1.99.0", "1.98.1")),
                 Some(&sqlite),
                 "toolchain mismatch",
             ),

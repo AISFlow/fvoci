@@ -11,12 +11,12 @@ export const DOWNLOAD_ARTIFACT_PIN =
 // expected_select_if("postgres-build"): the producer shares the postgres selection output.
 export const POSTGRES_BUILD_SELECT_IF = "needs.ci-plan.outputs.select_postgres == 'true'";
 export const RUST_POSTGRES_BUILD_CACHE_KEY =
-  "v3-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-postgres-db-tests-test-nodebug-" +
+  "v3-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-postgres-db-tests-test-nodebug-" +
   "${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-" +
   "${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', '.cargo/**') }}-" +
   "${{ steps.sqlite.outputs.cache_identity }}";
 export const RUST_HELPER_CACHE_KEY =
-  "v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-dev-nodebug-" +
+  "v2-collab-product-helper-ubuntu-26.04-${{ runner.arch }}-1.99.0-worker-dev-nodebug-" +
   "${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock', 'rust-toolchain.toml') }}-" +
   "${{ hashFiles('crates/collab-engine/**', 'crates/vendor/**', '.cargo/**') }}";
 

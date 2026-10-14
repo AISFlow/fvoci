@@ -148,13 +148,11 @@ async fn doctor_passes_a_healthy_install_and_names_each_broken_setting() {
         "disabled (FVOCI_EXTRACTOR_BIN unset)"
     );
     // Probes provided by the environment actually ran (not "disabled").
-    for (var, name) in [("FVOCI_MEILI_URL", "meilisearch")] {
-        if healthy.iter().any(|(k, _)| *k == var) {
-            assert!(
-                check(&report, name).get("detail").is_none(),
-                "{name}: {report}"
-            );
-        }
+    if healthy.iter().any(|(k, _)| *k == "FVOCI_MEILI_URL") {
+        assert!(
+            check(&report, "meilisearch").get("detail").is_none(),
+            "meilisearch: {report}"
+        );
     }
     if healthy.iter().any(|(k, _)| *k == "FVOCI_COLLAB_ENGINE") {
         assert_eq!(check(&report, "collab_engine")["ok"], true, "{report}");

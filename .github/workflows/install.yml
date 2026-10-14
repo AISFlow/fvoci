@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: rustup toolchain install 1.99.0 --profile minimal
       - name: Build and label the install image
         run: cargo xtask install-image build
       - name: Measure product Task scalar runtime
@@ -158,7 +158,7 @@ jobs:
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/install-image
-      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: rustup toolchain install 1.99.0 --profile minimal
       - name: Load and verify the install image
         run: cargo xtask install-image load "$RUNNER_TEMP/install-image" >>"$GITHUB_ENV"
       - name: Run container install smoke
@@ -188,7 +188,7 @@ jobs:
         with:
           name: install-image-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/install-image
-      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: rustup toolchain install 1.99.0 --profile minimal
       - name: Load and verify the install image
         run: cargo xtask install-image load "$RUNNER_TEMP/install-image" >>"$GITHUB_ENV"
       - name: Run container backup/restore smoke

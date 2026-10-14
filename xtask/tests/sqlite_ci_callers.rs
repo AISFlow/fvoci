@@ -326,7 +326,7 @@ fn masked(block: &str) -> bool {
 
 const IDENTITY: &str = "${{ steps.sqlite.outputs.cache_identity }}";
 /// The former run-scoped cache key's arch/toolchain/SHA/attempt/SQLite parts.
-const NATIVE_IDENTITY: &str = "${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}";
+const NATIVE_IDENTITY: &str = "${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}";
 /// (consumer, producer) of the web preparation target artifacts.
 const NATIVE_HANDOFFS: [(&str, &str); 2] = [
     ("collaboration-test-build", "collaboration-main-build"),

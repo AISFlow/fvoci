@@ -14,7 +14,7 @@ import { RUST_XTASK } from "./rust-shared.ts";
 export const SQLITE_PREFIX_PATH =
   "${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}";
 export const SQLITE_PREFIX_KEY =
-  "v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ steps.sqlite.outputs.cache_identity }}";
+  "v1-sqlite-prefix-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ steps.sqlite.outputs.cache_identity }}";
 export const SQLITE_PACKAGES =
   'dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"';
 const SQLITE_PREFLIGHT =

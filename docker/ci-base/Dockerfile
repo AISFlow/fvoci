@@ -1,9 +1,9 @@
 # Tool-only CI image; no application source, credentials or SQLite prefix.
 # Borrow the Debian bookworm CA bundle from the digest-pinned Rust image only
 # for HTTPS bootstrap before apt installs Ubuntu's ca-certificates package.
-FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS rust-toolchain
 RUN rustup set profile minimal \
- && rustup component add --toolchain 1.98.1 rustfmt clippy \
+ && rustup component add --toolchain 1.99.0 rustfmt clippy \
  && if rustup component list --installed | grep -q '^rust-docs'; then rustup component remove rust-docs; fi \
  && rustup set auto-self-update disable \
  && chmod -R go-w /usr/local/rustup /usr/local/cargo
@@ -52,7 +52,7 @@ ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/home/ci/.cargo \
     PATH=/opt/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN install -d -o 1000 -g 1000 -m 0755 /home/ci/.cargo /home/ci/.cargo/registry /home/ci/.cargo/git \
- && test "$(rustc --version | cut -d' ' -f2)" = 1.98.1 \
+ && test "$(rustc --version | cut -d' ' -f2)" = 1.99.0 \
  && cargo --version && cargo fmt --version && cargo clippy --version
 
 FROM rust-tools AS ci-base

@@ -121,8 +121,8 @@ const get = (name: string): unknown => JSON.parse(readFileSync(join(f.output, na
 // A real ldd receipt with fixed mapping addresses: ASLR differs per run.
 const recordedLdd = (path: string) => call(["ldd", path]).replace(/0x[0-9a-f]+/g, "0x1111") + "\n";
 const toolchain = () => ({
-  rustc: "release: 1.98.1\nhost: x86_64-unknown-linux-gnu",
-  cargo: "cargo 1.98.1",
+  rustc: "release: 1.99.0\nhost: x86_64-unknown-linux-gnu",
+  cargo: "cargo 1.99.0",
   bun: "1.4.3",
 });
 const abiRecord = () => Object.fromEntries(abiFiles().map((p) => [p, sha(p)]));
@@ -240,7 +240,7 @@ function collaborationFixture(): void {
   });
   put("build-environment.json", {
     rustc: toolchain().rustc,
-    cargo: "cargo 1.98.1",
+    cargo: "cargo 1.99.0",
     bun: "1.4.3",
     os_release: readFileSync("/etc/os-release", "utf8"),
     target,

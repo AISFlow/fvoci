@@ -36,7 +36,7 @@ const RUST_FAST_CACHES = [
 ] as const;
 const SAFE_CARGO_DOWNLOAD = {
   path: "~/.cargo/registry\n~/.cargo/git\n",
-  key: "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
+  key: "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
 };
 const PRODUCER_STRATEGY = {
   "fail-fast": false,

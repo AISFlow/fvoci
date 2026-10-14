@@ -8,7 +8,7 @@ Source inspected locally (read-only) at `393795261322b916e588043cf94feca99917584
 
 | Piece | Version |
 | --- | --- |
-| rustc / cargo | 1.98.1 (`rust-toolchain.toml`) |
+| rustc / cargo | 1.99.0 (`rust-toolchain.toml`) |
 | yrs | 0.23.5 (`skip_gc`, update V1) |
 | yjs | 13.6.33 |
 | y-protocols | 1.0.7 |
@@ -27,7 +27,7 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 # Use the checked-in fixtures. Optional synthetic specimens go elsewhere:
 # bun fixtures/gen.ts --output-dir /tmp/fvoci-synthetic-fixtures
 npm --prefix js ci --ignore-scripts
-# Rust 1.98.1 from rust-toolchain.toml; for a non-default toolchain set
+# Rust 1.99.0 from rust-toolchain.toml; for a non-default toolchain set
 # CARGO_HOME, RUSTUP_HOME and PATH as in RUNNING.md.
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build --locked --bins

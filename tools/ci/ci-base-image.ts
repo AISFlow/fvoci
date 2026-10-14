@@ -485,7 +485,7 @@ if (import.meta.main) {
       case "inputs": {
         const rust = Bun.TOML.parse(await text("rust-toolchain.toml"));
         check(
-          at(rust, "toolchain", "channel") === "1.98.1" &&
+          at(rust, "toolchain", "channel") === "1.99.0" &&
             (await text(".bun-version")).trim() === "1.4.3",
           "tool versions differ from recipe",
         );

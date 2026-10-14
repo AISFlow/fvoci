@@ -649,8 +649,8 @@ function caseList(): MutationCase[] {
       "maintained pinned compiler/native preparation",
     ],
     [
-      TARGET_INIT + "          rustup toolchain install 1.98.1 --profile minimal\n",
-      "          rustup toolchain install 1.98.1 --profile minimal\n" + TARGET_INIT,
+      TARGET_INIT + "          rustup toolchain install 1.99.0 --profile minimal\n",
+      "          rustup toolchain install 1.99.0 --profile minimal\n" + TARGET_INIT,
       "maintained pinned compiler/native preparation",
     ],
   ];
@@ -1093,7 +1093,7 @@ function caseList(): MutationCase[] {
   const aptLine =
     "          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
   const rustup =
-    "      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy\n";
+    "      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy\n";
   const thinNeedle =
     "documents.yml: native-extraction must check the process client's cargo metadata";
   const pythonNeedle = "documents.yml: native-extraction must not run or install Python";

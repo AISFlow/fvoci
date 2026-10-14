@@ -116,7 +116,7 @@ test("collaboration preparation hands exact current-run targets over by artifact
 
 test("the producer check admits only this run's attempt, SHA and SQLite identity", () => {
   const jobs = realJobs("web.yml");
-  const identity = `X64-1.98.1-${"a".repeat(40)}-1-${"b".repeat(64)}`;
+  const identity = `X64-1.99.0-${"a".repeat(40)}-1-${"b".repeat(64)}`;
   const good = {
     PRODUCER_RESULT: "success",
     PRODUCER_ARTIFACT: "4242",

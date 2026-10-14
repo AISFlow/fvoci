@@ -81,7 +81,7 @@ export const COLLABORATION_PREPARATION_JOBS = [
 // artifact's own scope.
 type NativePhase = "main" | "tests";
 export const COLLABORATION_NATIVE_IDENTITY =
-  "${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-" +
+  "${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-" +
   "${{ steps.sqlite.outputs.cache_identity }}";
 export const COLLABORATION_NATIVE_OUTPUTS = {
   artifact_id: "${{ steps.publish_native.outputs.artifact-id }}",
@@ -120,7 +120,7 @@ export function collaborationRequireEnv(producer: string): Mapping {
 export const COLLABORATION_REQUIRE_RUN =
   "set -euo pipefail\n" +
   '[[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]\n' +
-  '[[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\\.98\\.1-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]\n';
+  '[[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\\.99\\.0-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]\n';
 export function collaborationDownloadWith(producer: string, phase: NativePhase): Mapping {
   return {
     "artifact-ids": `\${{ needs.${producer}.outputs.artifact_id }}`,
@@ -532,7 +532,7 @@ export const RUSTUP_METADATA_RUN =
   "  cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
   'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
 const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
-const TOOLCHAIN_INSTALL = "rustup toolchain install 1.98.1 --profile minimal --component clippy";
+const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
 const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
 const TIMED_RUSTUP_JOBS = [
   ...COLLABORATION_PREPARATION_JOBS,
