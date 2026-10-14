@@ -2,11 +2,15 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:c
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -349,9 +353,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       expect(new URL(origin).hostname).toBe("127.0.0.1");
       expect(origin).not.toBe(before.listeningOrigin);
       expect(current.witness.pid).not.toBe(before.pid);
-      expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(
-        binaryHash,
-      );
+      expect(serverBinarySha256(configuredBin)).toBe(binaryHash);
       const setup = await page.request.get(`${origin}/api/v1/setup`);
       expect(setup.status(), await setup.text()).toBe(200);
       expect(runtimeHash(inherited)).toBe(inheritedHash);
@@ -576,11 +578,48 @@ const witnessRows = z.array(
     ),
   }),
 );
+// The debug server binary is close to 1 GB; reading it whole for every witness
+// spent half of the restart test's budget. A digest is reused only while the
+// kernel-owned file identity is unchanged: a rebuild, replacement or in-place
+// write changes the inode or ctime. A digest is not kept when the identity moved
+// during the read or the last change is under a second old, so a write within
+// the same coarse ctime tick is still read again.
+const serverBinaryDigests = new Map<string, string>();
+function serverBinarySha256(file: string): string {
+  const identity = () => {
+    const stat = statSync(file, { bigint: true });
+    return {
+      key: `${String(stat.dev)}:${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeNs)}:${String(stat.ctimeNs)}`,
+      ctimeNs: stat.ctimeNs,
+    };
+  };
+  const before = identity();
+  const known = serverBinaryDigests.get(before.key);
+  if (known) return known;
+  const hash = createHash("sha256");
+  const fd = openSync(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(8 << 20);
+    for (
+      let read = readSync(fd, buffer, 0, buffer.length, null);
+      read > 0;
+      read = readSync(fd, buffer, 0, buffer.length, null)
+    )
+      hash.update(buffer.subarray(0, read));
+  } finally {
+    closeSync(fd);
+  }
+  const digest = hash.digest("hex");
+  const after = identity();
+  if (after.key === before.key && BigInt(Date.now()) * 1_000_000n - after.ctimeNs > 1_000_000_000n)
+    serverBinaryDigests.set(after.key, digest);
+  return digest;
+}
 function captureTimerNative(page: Page) {
   const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
   if (!serverBin) throw new Error("own server binary missing");
   const configuredBin = realpathSync(serverBin);
-  const binaryHash = createHash("sha256").update(readFileSync(configuredBin)).digest("hex");
+  const binaryHash = serverBinarySha256(configuredBin);
   const native: TimerNative[] = [];
   const owned = restartedTimerServers.get(page);
   if (owned) {
@@ -663,7 +702,7 @@ function captureTimerNative(page: Page) {
       /* Processes can disappear between directory read and inspection. */
     }
   }
-  expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(binaryHash);
+  expect(serverBinarySha256(configuredBin)).toBe(binaryHash);
   return { native, configuredBin, binaryHash };
 }
 
