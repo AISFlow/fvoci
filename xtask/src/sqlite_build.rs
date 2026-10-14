@@ -1,5 +1,5 @@
 //! `xtask sqlite-build`: authenticated native SQLite static build for SQLx
-//! 0.8.6 `sqlite-unbundled` / libsqlite3-sys 0.30.1. No downloads, system
+//! 0.9.0 `sqlite-unbundled` / libsqlite3-sys 0.37.0. No downloads, system
 //! installation, Cargo source edits, CLI or extension artifacts.
 //! Entry point: `bash scripts/prepare-sqlite-build.sh --archive FILE
 //! --prefix NEW_PATH --target x86_64-unknown-linux-gnu [--cc cc] [--ar ar]`.
@@ -40,8 +40,10 @@ options:
 
 // Required SQLx C APIs plus conservative libsqlite3-sys bundled defaults.
 // JSON is built in upstream. Optional FTS/RTREE/preupdate features are not enabled.
-// SQLx unconditionally references load_extension; retain its API, disabled by
-// default at connection open. No extension is built, loaded, or installed here.
+// SQLx 0.8.6 always referenced load_extension; 0.9.0 does only with its
+// `sqlite-load-extension` feature, which FVOCI leaves off. The API stays built,
+// disabled by default at connection open, so the build inputs do not change.
+// No extension is built, loaded, or installed here.
 pub const FLAGS: [&str; 13] = [
     "-O2",
     "-fPIC",
@@ -76,8 +78,10 @@ pub const COMPILE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const ARCHIVE_TIMEOUT: Duration = COMPILE_TIMEOUT;
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Every function API used by the default SQLx SQLite driver, including metadata,
-// notify, hooks, serialize/deserialize, progress and extension entry points.
+// Every function API the SQLx SQLite driver calls with any of its optional
+// APIs, including metadata, notify, hooks, serialize/deserialize, progress and
+// extension entry points (0.9.0 calls serialize/deserialize and
+// load_extension only behind features FVOCI leaves off).
 // Type names and optional preupdate/regexp implementation names are excluded.
 const SYMBOLS: &str = "bind_blob64 bind_double bind_int bind_int64 bind_null
 bind_parameter_count bind_parameter_name bind_text64 busy_timeout changes
