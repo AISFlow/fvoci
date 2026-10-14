@@ -67,7 +67,13 @@ export async function fixture(
   input?: Record_,
 ): Promise<Record_> {
   if (executionMode() === "orca-local")
-    return localFixture(scope as Scope, manifest, mode, environment, input);
+    return localFixture(
+      scope as Scope,
+      manifest,
+      mode,
+      { ...environment, E2E_DATABASE_BACKEND: "libsql-remote", FVOCI_E2E_TURSO_UI_SELECTED: "1" },
+      input,
+    );
   const env = cleanEnv();
   for (const key of FIXTURE_KEYS)
     if (Object.hasOwn(environment, key)) env[key] = environment[key] as string;

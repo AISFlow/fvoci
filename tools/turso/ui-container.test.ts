@@ -46,6 +46,7 @@ import {
 } from "./ui-container.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import type { Child } from "./ui-processes.ts";
+import { fixture } from "./ui-native.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 import { constants } from "node:fs";
 
@@ -429,6 +430,49 @@ describe("local grant and publish", () => {
         ["docker", "image", "inspect"],
         ["docker", "image", "inspect"],
       ]);
+    } finally {
+      lease.load = undefined;
+    }
+  });
+
+  test("a local fixture capsule selects the libSQL fixture like the hosted child env", async () => {
+    // Without these two keys the native fixture takes its postgres branch.
+    const grant = qualifiedGrant();
+    const binary = join(directory, "fvoci-e2e-fixture");
+    writeFileSync(binary, "");
+    process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
+    lease.load = () => grant as never;
+    const capsules: string[] = [];
+    docker.client = (_scope, args) => {
+      if (args[1] === "image")
+        return Promise.resolve(
+          new TextEncoder().encode(JSON.stringify([{ Id: LOCAL_IMAGE, Config: { Env: [] } }])),
+        );
+      const capsule = args.find((arg) =>
+        arg.endsWith(",dst=/fvoci-private/native-env.sh,readonly"),
+      );
+      if (capsule !== undefined)
+        capsules.push(
+          readFileSync(capsule.slice("type=bind,src=".length, capsule.indexOf(",dst=")), "utf8"),
+        );
+      return Promise.reject(new UiError("UI_DOCKER_CLIENT_FAILED"));
+    };
+    const root = join(directory, "root");
+    mkdirSync(root, 0o700);
+    const { scope } = fakeScope({ root: () => root });
+    const environment = {
+      FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+      FVOCI_LIBSQL_AUTH_TOKEN: "invented",
+      FVOCI_STORAGE_DIR: "/work/storage",
+    };
+    const manifest = { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never;
+    try {
+      expect(await failureOf(fixture(scope, manifest, "baseline", environment))).toBe(
+        "UI_DOCKER_CLIENT_FAILED",
+      );
+      expect(capsules).toHaveLength(1);
+      expect(capsules[0]).toContain("E2E_DATABASE_BACKEND=libsql-remote\n");
+      expect(capsules[0]).toContain("FVOCI_E2E_TURSO_UI_SELECTED=1\n");
     } finally {
       lease.load = undefined;
     }

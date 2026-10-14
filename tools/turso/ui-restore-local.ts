@@ -103,7 +103,11 @@ export async function localRestore(): Promise<void> {
       } finally {
         closeSync(started.log);
       }
-      const baseline = await fixture(scope, manifest, "baseline", environment);
+      // The local fixture runs in the same container shape and needs a storage mount.
+      const baseline = await fixture(scope, manifest, "baseline", {
+        ...environment,
+        FVOCI_STORAGE_DIR: storage,
+      });
       write(join(root(), "local-baseline.private.json"), {
         baseline,
         source: grant.source,
