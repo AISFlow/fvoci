@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   digest,
+  beforeReadAllowed,
   evaluate,
   parseInput,
   type WitnessInput,
@@ -104,4 +105,26 @@ test("witness facts require stable owning identities, the real actor/binary and 
   }
   const output = JSON.stringify(evaluate(input(), view()));
   for (const value of Object.values(environment)) expect(output).not.toContain(value);
+});
+
+test("the environment read gate rejects a wrong actor or executable before accessing environment bytes", () => {
+  expect(beforeReadAllowed(input(), view())).toBe(true);
+  for (const mutate of [
+    (v: WitnessView) => {
+      v.uids[1] = 0;
+    },
+    (v: WitnessView) => {
+      v.gids = [1000];
+    },
+    (v: WitnessView) => {
+      v.executableName = "bun";
+    },
+    (v: WitnessView) => {
+      v.executableSha256 = "b".repeat(64);
+    },
+  ]) {
+    const metadata = view();
+    mutate(metadata);
+    expect(beforeReadAllowed(input(), metadata)).toBe(false);
+  }
 });

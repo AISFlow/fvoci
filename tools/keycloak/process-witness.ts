@@ -103,6 +103,20 @@ export function parseInput(value: unknown): WitnessInput {
   return value as unknown as WitnessInput;
 }
 
+const correctActor = (view: Pick<WitnessView, "uids" | "gids">) =>
+  view.uids.length === 4 &&
+  view.gids.length === 4 &&
+  [...view.uids, ...view.gids].every((id) => id === 1000);
+export function beforeReadAllowed(
+  input: WitnessInput,
+  view: Pick<WitnessView, "uids" | "gids" | "executableName" | "executableSha256">,
+): boolean {
+  return (
+    correctActor(view) &&
+    view.executableName === "fvoci-server" &&
+    view.executableSha256 === input.executableSha256
+  );
+}
 export function evaluate(input: WitnessInput, view: WitnessView) {
   const same = (a: Identity, b: Identity) =>
     a.pid === b.pid && a.parentPid === b.parentPid && a.startTicks === b.startTicks;
@@ -114,10 +128,7 @@ export function evaluate(input: WitnessInput, view: WitnessView) {
     view.before.parentPid === input.parentPid &&
     view.parentBefore.pid === input.parentPid &&
     view.parentBefore.startTicks === input.parentStartTicks;
-  const actorCorrect =
-    view.uids.length === 4 &&
-    view.gids.length === 4 &&
-    [...view.uids, ...view.gids].every((id) => id === 1000);
+  const actorCorrect = correctActor(view);
   const executableMatches =
     view.executableName === "fvoci-server" &&
     view.executableAfterName === view.executableName &&
@@ -180,6 +191,10 @@ function inspect(input: WitnessInput): WitnessView {
     (new RegExp(`^${key}:\\s*(.+)$`, "m").exec(status)?.[1] ?? "").trim().split(/\s+/).map(Number);
   const executableName = basename(readlinkSync(`/proc/${String(input.pid)}/exe`));
   const executableSha256 = digest(readFileSync(`/proc/${String(input.pid)}/exe`));
+  const uids = ids("Uid"),
+    gids = ids("Gid");
+  if (!beforeReadAllowed(input, { uids, gids, executableName, executableSha256 }))
+    throw new Error("WITNESS_ACTOR_OR_EXECUTABLE_REFUSED");
   const environment: Record<string, string> = {};
   const bytes = new TextDecoder("utf-8", { fatal: true }).decode(
     readFileSync(`/proc/${String(input.pid)}/environ`),
@@ -198,8 +213,8 @@ function inspect(input: WitnessInput): WitnessView {
     after: identity(input.pid),
     parentAfter: identity(input.parentPid),
     callerBound: callerBound(input),
-    uids: ids("Uid"),
-    gids: ids("Gid"),
+    uids,
+    gids,
     executableName,
     executableSha256,
     executableAfterName,
