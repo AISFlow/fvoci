@@ -1,4 +1,4 @@
-// Redaction of every log and evidence line of scripts/keycloak-oidc-e2e.sh.
+// Redaction of every log and evidence line of tools/keycloak/run.ts.
 //
 // Patterns use Python `re` semantics on purpose: `\b` and `\s` are the
 // Unicode word boundary and whitespace of the replaced helper, so a log line

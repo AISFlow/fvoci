@@ -26,7 +26,7 @@ trap 'echo "web-e2e step ${STEP} failed (exit $?)" >&2' ERR
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 # Cargo profile of the server and migrate binaries: debug for the normal
-# groups; scripts/keycloak-oidc-e2e.sh runs the release build.
+# groups; tools/keycloak/run.ts uses a separately frozen native cohort.
 E2E_PROFILE="${FVOCI_E2E_PROFILE:-debug}"
 case "$E2E_PROFILE" in
   debug | release) ;;

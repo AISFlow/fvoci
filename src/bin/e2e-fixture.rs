@@ -13,8 +13,18 @@ mod sqlite;
 #[path = "e2e-fixture/libsql_remote.rs"]
 mod libsql_remote;
 
+#[path = "e2e-fixture/keycloak.rs"]
+mod keycloak;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("oidc-observe") {
+        if let Err(code) = keycloak::run().await {
+            eprintln!("{code}");
+            std::process::exit(78);
+        }
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("zotero-readonly") {
         return zotero::serve().await;
     }

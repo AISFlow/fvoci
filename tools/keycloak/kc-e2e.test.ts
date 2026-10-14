@@ -140,14 +140,9 @@ describe("realm files and configs", () => {
   });
 
   test("SECRET_ENV is every secret the runner passes in the environment", () => {
-    const script = readFileSync(
-      join(import.meta.dir, "../../scripts/keycloak-oidc-e2e.sh"),
-      "utf8",
-    );
-    const body = /\nwith_secrets\(\) \{\n([\s\S]*?)\n\}\n/.exec(script)?.[1] ?? "";
-    const passed = [...body.matchAll(/\b(KC_[A-Z0-9_]+)=/g)].map((match) => match[1] as string);
-    expect(passed.length).toBeGreaterThan(0);
-    expect([...SECRET_ENV].sort()).toEqual(passed.sort());
+    // The Bun runner generates the secret environment from this canonical list.
+    const script = readFileSync(join(import.meta.dir, "run.ts"), "utf8");
+    expect(script).toContain("SECRET_ENV.map");
     expect([...SECRET_ENV].sort()).toEqual(Object.keys(ENV).sort());
   });
 

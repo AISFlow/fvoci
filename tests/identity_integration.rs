@@ -4905,7 +4905,7 @@ async fn email_change_invalidates_links_mailed_before_it() {
 // `license_fixture::signed_license()`, signed by a key generated in this
 // process and trusted only by this app state. Release builds trust no license
 // key (src/license-trust.json is empty), so this is not a release-server run.
-// `scripts/keycloak-oidc-e2e.sh --workspace-sso` starts Keycloak with two
+// `bun tools/keycloak/run.ts --backend=postgres --workspace-sso` starts Keycloak with two
 // realms (two issuers, one confidential client each) and names their settings
 // in FVOCI_KC_SSO_E2E_CONFIG.
 
@@ -4947,7 +4947,7 @@ fn kc_http() -> reqwest::Client {
 impl KcSso {
     fn from_env() -> Self {
         let path = std::env::var("FVOCI_KC_SSO_E2E_CONFIG")
-            .expect("FVOCI_KC_SSO_E2E_CONFIG: run scripts/keycloak-oidc-e2e.sh --workspace-sso");
+            .expect("FVOCI_KC_SSO_E2E_CONFIG: run bun tools/keycloak/run.ts --backend=postgres --workspace-sso");
         serde_json::from_str(&std::fs::read_to_string(path).expect("config")).expect("config json")
     }
 
@@ -5172,7 +5172,7 @@ fn assert_workspace_authorization(url: &str, realm: &KcRealm, workspace: Uuid) {
 }
 
 #[tokio::test]
-#[ignore = "needs a real Keycloak: scripts/keycloak-oidc-e2e.sh --workspace-sso"]
+#[ignore = "needs a real Keycloak: bun tools/keycloak/run.ts --backend=postgres --workspace-sso"]
 async fn keycloak_workspace_sso_with_a_test_entitlement() {
     let kc = KcSso::from_env();
     let [realm_a, realm_b] = &kc.realms[..] else {
