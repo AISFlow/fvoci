@@ -246,7 +246,10 @@ export async function runPrimary(
   return connectionResult(result.status, result.output);
 }
 
-export type UiConsume = (phase: "ui-baseline" | "ui-ack", inputs: Inputs) => Promise<void>;
+export type UiConsume = (
+  phase: "ui-baseline" | "ui-ack" | "restore",
+  inputs: Inputs,
+) => Promise<void>;
 
 async function loadUiConsume(): Promise<UiConsume> {
   // Loaded only for UI phases so the non-UI path never depends on it.
@@ -256,7 +259,7 @@ async function loadUiConsume(): Promise<UiConsume> {
 }
 
 export async function runUi(
-  phase: "ui-baseline" | "ui-ack",
+  phase: "ui-baseline" | "ui-ack" | "restore",
   checkoutSha: string,
   inputs: Inputs,
   env: Env,
@@ -324,7 +327,11 @@ export async function main(
       out("COMPILED_TEST_FROZEN_RUNTIME_NOT_RUN");
     } else if (action.kind === "diagnostic-unit") {
       verdict = await runDiagnosticUnit(sha, env, effects.seams);
-    } else if (action.phase === "ui-baseline" || action.phase === "ui-ack") {
+    } else if (
+      action.phase === "ui-baseline" ||
+      action.phase === "ui-ack" ||
+      action.phase === "restore"
+    ) {
       await runUi(action.phase, sha, inputs, env, effects.uiConsume);
     } else {
       verdict = await runPrimary(action.phase, sha, inputs, env, effects.seams);

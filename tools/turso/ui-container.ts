@@ -73,6 +73,8 @@ export const DAEMON_CAPS: Readonly<Record<string, string>> = {
 export const SECRET_ENV_KEYS = ["FVOCI_LIBSQL_URL", "FVOCI_LIBSQL_AUTH_TOKEN"];
 export const NATIVE_CAPSULE_KEYS = [
   ...SECRET_ENV_KEYS,
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
   "PASSWORD_PEPPER_KEYS",
   "PASSWORD_PEPPER_ACTIVE_KEY_ID",
   "ENCRYPTION_KEYS",
@@ -83,6 +85,7 @@ export const NATIVE_CAPSULE_KEYS = [
   "E2E_DATABASE_BACKEND",
   "FVOCI_E2E_TURSO_UI_SELECTED",
   "FVOCI_DATABASE_BACKEND",
+  "FVOCI_SQLITE_PATH",
   "FVOCI_REALTIME_MODE",
   "FVOCI_BIND",
   "FVOCI_PUBLIC_ORIGIN",
@@ -240,9 +243,19 @@ export function capsuleText(environment: Record<string, string>): string {
       !value.includes("\n"), "UI_DOCKER_ENV_SECRET_REFUSED");
     lines.push(key + "=" + shellQuote(value) + "\n");
   }
-  require(SECRET_ENV_KEYS.every((key) =>
-    lines.some((line) => line.startsWith(key + "=")),
-  ), "UI_DOCKER_ENV_SECRET_REFUSED");
+  if (environment.FVOCI_DATABASE_BACKEND === "sqlite") {
+    const file = environment.FVOCI_SQLITE_PATH,
+      storage = environment.FVOCI_STORAGE_DIR;
+    require(typeof file === "string" &&
+      typeof storage === "string" &&
+      file === join(storage, "app.sqlite") &&
+      SECRET_ENV_KEYS.every(
+        (key) => !Object.hasOwn(environment, key),
+      ), "UI_SQLITE_DESTINATION_REFUSED");
+  } else
+    require(SECRET_ENV_KEYS.every((key) =>
+      lines.some((line) => line.startsWith(key + "=")),
+    ), "UI_DOCKER_ENV_SECRET_REFUSED");
   return lines.join("");
 }
 
@@ -967,7 +980,9 @@ export async function publishContainer(
   grantFor: (kind: string) => Record_ = (k) => openReferencedGrant(k),
 ): Promise<[string, Creation, Record_]> {
   const grant = grantFor(kind);
-  const secretValues = SECRET_ENV_KEYS.map((key) => get(environment, key) as string);
+  const secretValues = SECRET_ENV_KEYS.flatMap((key) =>
+    typeof environment[key] === "string" ? [environment[key]] : [],
+  );
   if (environment.ENCRYPTION_KEYS) secretValues.push(environment.ENCRYPTION_KEYS);
   const storage = environment.FVOCI_STORAGE_DIR;
   require(typeof storage === "string" &&
@@ -996,6 +1011,12 @@ export async function publishContainer(
       mountSpec(join(checkout, "apps/web/dist"), DIST_DST, true),
       mountSpec(storage, storage, false),
     ];
+    if (environment.SSL_CERT_FILE) {
+      require(isAbsolute(environment.SSL_CERT_FILE) &&
+        !lstatSync(environment.SSL_CERT_FILE).isSymbolicLink() &&
+        statSync(environment.SSL_CERT_FILE).isFile(), "UI_LOCAL_CA_REFUSED");
+      mounts.push(mountSpec(environment.SSL_CERT_FILE, environment.SSL_CERT_FILE, true));
+    }
     const argv = containerArgv(
       "fvoci-tui-" + token(6),
       launcher,

@@ -27,6 +27,9 @@ export const FIXTURE_SUITES = [
   "tools/turso/ui-native.test.ts",
   "tools/turso/ui-processes.test.ts",
   "tools/turso/ui-start.test.ts",
+  "tools/turso/ui-server.test.ts",
+  "tools/turso/ui-restore.test.ts",
+  "tools/turso/ui-restore-observe.test.ts",
   "tools/ci/verify/registry.test.ts",
 ] as const;
 

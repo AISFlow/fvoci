@@ -600,7 +600,12 @@ function caseList(): MutationCase[] {
     ["default: connection", "default: migration", "fixed phase inputs"],
     ["default: false", "default: true", "fixed phase inputs"],
     [
-      "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED",
+      " && github.event.inputs.phase != 'restore'",
+      "",
+      "runtime needs successful trusted admission",
+    ],
+    [
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack and main-only restore require both destructive gates; others NOT IMPLEMENTED",
       "All phases implemented",
       "fixed phase inputs",
     ],
@@ -665,6 +670,11 @@ function caseList(): MutationCase[] {
     "          FVOCI_TEST_TURSO_ENCRYPTION_KEYS: ${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}\n";
   const ui: [string, string][] = [
     ["    needs: admission\n", "    needs: []\n"],
+    [
+      "(github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'restore'",
+    ],
+    ["github.event.inputs.phase == 'restore'", "github.event.inputs.phase != 'restore'"],
     ["github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"],
     ["github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'"],
     ["github.ref == 'refs/heads/main'", "startsWith(github.ref, 'refs/heads/')"],
@@ -710,8 +720,8 @@ function caseList(): MutationCase[] {
     ["--features worker --jobs 2", "--jobs 2"],
     ["          bun --no-env-file tools/turso/ui.ts --freeze\n", ""],
     [
-      "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
-      "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer\n        if: false\n",
     ],
     ["${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"],
     ["${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"],

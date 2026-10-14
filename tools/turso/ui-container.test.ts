@@ -80,6 +80,21 @@ const paused = (clientPid = 77) =>
   );
 
 describe("container shape", () => {
+  test("SQLite restore capsule binds the independent file and refuses source credentials", () => {
+    const environment = {
+      FVOCI_DATABASE_BACKEND: "sqlite",
+      FVOCI_STORAGE_DIR: directory,
+      FVOCI_SQLITE_PATH: join(directory, "app.sqlite"),
+    };
+    expect(capsuleText(environment)).toContain("FVOCI_DATABASE_BACKEND=sqlite");
+    for (const changed of [
+      { ...environment, FVOCI_SQLITE_PATH: join(directory, "foreign.sqlite") },
+      { ...environment, FVOCI_LIBSQL_URL: "libsql://invented.invalid" },
+      { ...environment, FVOCI_LIBSQL_AUTH_TOKEN: "invented" },
+    ])
+      expect(() => capsuleText(changed)).toThrow("UI_SQLITE_DESTINATION_REFUSED");
+  });
+
   test("the shell proof comes only from the grant and the config env stays clean", () => {
     const environment = {
       FVOCI_LIBSQL_URL: "libsql://invented.invalid",

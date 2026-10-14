@@ -4,7 +4,8 @@
 // admission belongs to the guard and ROOT's exact current dataset binding.
 // No reset/restore cleanup exists.
 import process from "node:process";
-import { stdio, UiError, type Output } from "./ui-common.ts";
+import { executionMode, stdio, UiError, type Output } from "./ui-common.ts";
+import { localTursoUiAllocation } from "../selected-backend-ci/admission.ts";
 import { lease } from "./ui-container.ts";
 import { actor } from "./ui-flow.ts";
 import { withProcesses } from "./ui-processes.ts";
@@ -15,11 +16,17 @@ export { consume } from "./ui-flow.ts";
 
 export async function main(argv: string[], output: Output = stdio): Promise<number> {
   try {
+    if (executionMode() === "orca-local") lease.load ??= localTursoUiAllocation;
     const mode = argv.join("\0");
     if (mode === "--record-before") recordBefore(lease.load);
     else if (mode === "--freeze") freeze(lease.load);
     else if (mode === "--actor") await withProcesses((scope) => actor(scope));
-    else throw new UiError("UI_EXPLICIT_MODE_REQUIRED");
+    else if (mode === "--local-restore") {
+      await (await import("./ui-restore-local.ts")).localRestore();
+      output.out(
+        "TURSO_LOCAL_RESTORE_PASS cases=6 source=official-local-libsql destination=sqlite hosted=NOTRUN",
+      );
+    } else throw new UiError("UI_EXPLICIT_MODE_REQUIRED");
     return 0;
   } catch (error) {
     output.err(error instanceof UiError ? error.message : "UI_CONSUMER_FAILED");
