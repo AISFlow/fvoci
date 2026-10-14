@@ -9,8 +9,9 @@
 //! certificate authorities outbound requests trust. With
 //! `rustls-no-provider`, a reqwest client built without this config panics
 //! only while no process-wide rustls provider is installed. FVOCI installs
-//! none, but sqlx installs ring once it connects to PostgreSQL with
-//! `sslmode=verify-ca`. From then on such a client builds and trusts the
+//! none, but sqlx (0.9.0, as 0.8.6) installs ring when it tries a PostgreSQL
+//! connection with `sslmode=verify-ca`, even one whose certificate it then
+//! refuses. From then on such a client builds and trusts the
 //! operating system store, `SSL_CERT_FILE` or `SSL_CERT_DIR` instead of the
 //! bundled roots. So every client starts here: clippy.toml rejects the
 //! constructors it can name, and the `Default` ones are left to review.

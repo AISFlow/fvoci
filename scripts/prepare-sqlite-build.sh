@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-only prerequisite for SQLx 0.8.6 sqlite-unbundled/libsqlite3-sys 0.30.1.
+# Build-only prerequisite for SQLx 0.9.0 sqlite-unbundled/libsqlite3-sys 0.37.0.
 # No downloads, system installation, Cargo source edits, CLI or extension artifacts.
 # Usage: bash scripts/prepare-sqlite-build.sh --archive FILE --prefix NEW_PATH
 #        --target x86_64-unknown-linux-gnu [--cc cc] [--ar ar]
