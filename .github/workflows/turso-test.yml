@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           printf 'CARGO_TARGET_DIR=%s/turso-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          rustup toolchain install 1.98.1 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
@@ -132,7 +132,7 @@ jobs:
             printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\n' "$RUNNER_TEMP"
             printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\n' "$RUNNER_TEMP"
           } >> "$GITHUB_ENV"
-          rustup toolchain install 1.98.1 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"

@@ -109,14 +109,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -147,7 +147,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v3-web-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-api-schema-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v3-web-checks-ubuntu-26.04-${{ runner.arch }}-1.99.0-default-api-schema-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -178,14 +178,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -216,7 +216,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v1-web-native-checks-ubuntu-26.04-${{ runner.arch }}-1.98.1-clippy-db-tests-api-schema-static-default-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-web-native-checks-ubuntu-26.04-${{ runner.arch }}-1.99.0-clippy-db-tests-api-schema-static-default-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -242,14 +242,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
@@ -288,14 +288,14 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v1-web-browser-default-fixture-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-server-db-tests-fixture-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-web-browser-default-fixture-ubuntu-26.04-${{ runner.arch }}-1.99.0-default-server-db-tests-fixture-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Restore production collaboration helper outputs
         id: cache_workspace_browser_shard_6
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/collab-engine/target
-          key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
-          restore-keys: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
+          key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.99.0-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          restore-keys: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.99.0-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -338,13 +338,13 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v1-web-browser-default-fixture-ubuntu-26.04-${{ runner.arch }}-1.98.1-default-server-db-tests-fixture-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-web-browser-default-fixture-ubuntu-26.04-${{ runner.arch }}-1.99.0-default-server-db-tests-fixture-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Save production collaboration helper outputs
         if: github.ref == 'refs/heads/main' && steps.cache_workspace_browser_shard_6.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/collab-engine/target
-          key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.98.1-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+          key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.99.0-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
 
   workspace-browser-shard:
     needs: [ci-plan, workspace-browser-build]
@@ -364,14 +364,14 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
@@ -474,7 +474,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.publish_native.outputs.artifact-id }}
       target_sha256: ${{ steps.native.outputs.target_sha256 }}
-      native_identity: ${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
+      native_identity: ${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -486,7 +486,7 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-main-build-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-main-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         id: cache_main_cargo
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -494,7 +494,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -539,7 +539,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.99.0-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked dependencies
         run: cargo fetch --locked
       - name: Compile native preparation
@@ -570,7 +570,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.98.1-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.99.0-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
 
   collaboration-test-build:
     needs: [ci-plan, collaboration-main-build]
@@ -580,7 +580,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.publish_native.outputs.artifact-id }}
       target_sha256: ${{ steps.native.outputs.target_sha256 }}
-      native_identity: ${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
+      native_identity: ${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -592,7 +592,7 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-test-build-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-test-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         id: cache_tests_cargo
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -600,7 +600,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -647,11 +647,11 @@ jobs:
           PRODUCER_ARTIFACT: ${{ needs.collaboration-main-build.outputs.artifact_id }}
           PRODUCER_DIGEST: ${{ needs.collaboration-main-build.outputs.target_sha256 }}
           PRODUCER_IDENTITY: ${{ needs.collaboration-main-build.outputs.native_identity }}
-          CURRENT_IDENTITY: ${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
+          CURRENT_IDENTITY: ${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\.98\.1-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]
+          [[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\.99\.0-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]
       - name: Download this run's exact native preparation by ID
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -717,7 +717,7 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         id: cache_collaboration_flow_4
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -725,7 +725,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -771,11 +771,11 @@ jobs:
           PRODUCER_ARTIFACT: ${{ needs.collaboration-test-build.outputs.artifact_id }}
           PRODUCER_DIGEST: ${{ needs.collaboration-test-build.outputs.target_sha256 }}
           PRODUCER_IDENTITY: ${{ needs.collaboration-test-build.outputs.native_identity }}
-          CURRENT_IDENTITY: ${{ runner.arch }}-1.98.1-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
+          CURRENT_IDENTITY: ${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\.98\.1-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]
+          [[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\.99\.0-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]
       - name: Download this run's exact native preparation by ID
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -856,7 +856,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
   collaboration-install-on:
     needs: [ci-plan, collaboration-build]
     if: needs.ci-plan.outputs.select_collaboration_install_on == 'true'
@@ -875,14 +875,14 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-install-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -1033,14 +1033,14 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -1190,14 +1190,14 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-on-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -1347,14 +1347,14 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-off-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS
@@ -1504,14 +1504,14 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-off-step-03 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-03 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - name: Prepare owned pinned Rustup component metadata before input capture
         run: |
           fvoci_timing_started=$SECONDS

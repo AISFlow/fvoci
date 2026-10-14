@@ -92,7 +92,7 @@ const image =
 export const pgImage =
   "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db";
 export const meiliImage =
-  "getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9";
+  "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c";
 const pgScript = join(root, "scripts/start-test-postgres.sh");
 const meiliScript = join(root, "scripts/start-test-meili.sh");
 const playwrightCli = join(root, "node_modules/playwright/cli.js");
@@ -118,7 +118,7 @@ export function qualifyPlaywright(workspace: string, before: Inputs, bun: string
     version?: unknown;
     bin?: { playwright?: unknown };
   };
-  assert.ok(manifest.version === "1.63.0" && manifest.bin?.playwright === "cli.js");
+  assert.ok(manifest.version === "1.64.0" && manifest.bin?.playwright === "cli.js");
   assert.ok(
     sha(cli) === before.external[cli],
     "Playwright CLI must be in the admitted input closure",

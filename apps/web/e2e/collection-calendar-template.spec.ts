@@ -517,8 +517,11 @@ async function offlineCalendarScenario(
       await expect(fieldsError).toBeVisible();
       await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
       expect(patches).toBe(0);
-      await page.unroute(`**${fieldsPath}`);
-      for (const sibling of siblings) await page.unroute(`**${sibling.path}`);
+      // A sibling handler can still be inside route.fetch() for a later
+      // invalidation round; unroute would continue that request under it and
+      // its fulfill would throw. These are the page's only routes here, so
+      // remove them together after the running handlers finish.
+      await page.unrouteAll({ behavior: "wait" });
       const recovered = page.waitForResponse(
         (response) => response.url().endsWith(fieldsPath) && response.ok(),
       );

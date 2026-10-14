@@ -52,7 +52,7 @@ const SQLITE_PREPARATION =
 const CONNECTION_PREPARATION =
   "set -euo pipefail\n" +
   TARGET_INIT +
-  "rustup toolchain install 1.98.1 --profile minimal\n" +
+  "rustup toolchain install 1.99.0 --profile minimal\n" +
   SQLITE_PREPARATION;
 
 const CONNECTION_COMPILE =
@@ -143,7 +143,7 @@ const UI_JOB = {
         `  printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP"\n` +
         `  printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP"\n` +
         '} >> "$GITHUB_ENV"\n' +
-        "rustup toolchain install 1.98.1 --profile minimal\n" +
+        "rustup toolchain install 1.99.0 --profile minimal\n" +
         SQLITE_PREPARATION +
         "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
     },

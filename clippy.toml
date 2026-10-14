@@ -6,7 +6,7 @@
 # operating system store, `SSL_CERT_FILE` or `SSL_CERT_DIR` instead of the
 # bundled roots. Only that module may call these.
 # `reqwest::Client::default` and `reqwest::ClientBuilder::default` are not
-# listed: clippy 1.98 resolves a path only to an inherent method or to the
+# listed: clippy 1.99 resolves a path only to an inherent method or to the
 # whole `Default::default` trait method, never to one type's `Default` impl.
 # Building a client with either is banned by convention only, and clippy
 # does not catch it.

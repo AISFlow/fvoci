@@ -457,7 +457,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
   assert.ok(environment.bun === h.toolchain().bun && environment.bun === "1.4.3");
   assert.equal(environment.os_release, readFileSync("/etc/os-release", "utf8"));
   assert.ok(
-    environment.rustc.includes("release: 1.98.1") &&
+    environment.rustc.includes("release: 1.99.0") &&
       environment.rustc.includes("host: x86_64-unknown-linux-gnu"),
   );
   assert.ok(

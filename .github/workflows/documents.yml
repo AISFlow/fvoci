@@ -88,13 +88,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - name: Restore Cargo downloads
         id: cache_native_extraction_3
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/registry
-          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
+          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Restore document build outputs
         id: cache_native_extraction_4
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -102,8 +102,8 @@ jobs:
           path: |
             crates/document-extract/target
             crates/document-extract-client/target
-          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
-          restore-keys: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-
+          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.99.0-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
+          restore-keys: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.99.0-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Thin process client without native parser dependencies
         working-directory: crates/document-extract-client
         run: |
@@ -144,7 +144,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-clang18-arm64
-          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.98.1-18.1.8-20ubuntu8-arm64
+          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.99.0-18.1.8-20ubuntu8-arm64
       - name: Prepare pinned SQLite root build inputs
         id: sqlite
         env:
@@ -205,13 +205,13 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/fvoci-clang18-arm64
-          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.98.1-18.1.8-20ubuntu8-arm64
+          key: v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.99.0-18.1.8-20ubuntu8-arm64
       - name: Restore attachment product build outputs
         id: cache_native_extraction_15
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.99.0-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
       - name: Prepare locked server dependencies
         working-directory: .
         run: cargo fetch --locked
@@ -238,7 +238,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/registry
-          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
+          key: v3-cargo-documents-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock') }}
       - name: Save document build outputs
         if: github.ref == 'refs/heads/main' && steps.cache_native_extraction_4.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -246,7 +246,7 @@ jobs:
           path: |
             crates/document-extract/target
             crates/document-extract-client/target
-          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.98.1-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
+          key: v2-documents-ubuntu-26.04-${{ runner.arch }}-1.99.0-test-hang-default-nodebug-${{ hashFiles('crates/document-extract/Cargo.toml', 'crates/document-extract/Cargo.lock', 'crates/document-extract-client/Cargo.toml', 'crates/document-extract-client/Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('crates/document-extract/src/**', 'crates/document-extract-client/src/**', 'crates/document-extract/tests/**', 'crates/document-extract/fetch-rhwp.sh') }}
       - name: Save pinned public rhwp source
         if: github.ref == 'refs/heads/main' && steps.cache_native_extraction_6.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -258,7 +258,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.98.1-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+          key: v1-extract-product-ubuntu-26.04-${{ runner.arch }}-1.99.0-extract-native-tests-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'crates/document-extract-client/src/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
 
   documents-ci-gate:
     name: documents-ci-gate

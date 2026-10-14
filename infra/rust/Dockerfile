@@ -7,7 +7,7 @@
 
 # These pinned images supply toolchain executables only. Every build and the
 # final runtime execute on the same Ubuntu 26.04 multiarchitecture base.
-FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS rust-toolchain
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS rust-toolchain
 FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun-toolchain
 FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS ubuntu
 
@@ -17,7 +17,7 @@ COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config git curl ca-certificates \
- && rustc -vV | grep -Fx 'release: 1.98.1' \
+ && rustc -vV | grep -Fx 'release: 1.99.0' \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./

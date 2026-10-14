@@ -350,7 +350,7 @@ const fastCache: Mutation[] = (
     ["wrong-pin", (c) => (c.uses = "actions/cache/restore@v4")],
     ["path", (c) => (c.with.path = "/foreign/target")],
     ["architecture", (c) => (c.with.key = c.with.key.replace("${{ runner.arch }}", "fixed"))],
-    ["toolchain", (c) => (c.with.key = c.with.key.replace("1.98.1", "old"))],
+    ["toolchain", (c) => (c.with.key = c.with.key.replace("1.99.0", "old"))],
     [
       "sqlite",
       (c) => (c.with.key = c.with.key.replace("${{ steps.sqlite.outputs.cache_identity }}", "")),
@@ -398,7 +398,7 @@ const extraCaches: Mutation[] = [
       "restore",
       "target",
       "Extra cache with uncertain qualification",
-      "v2-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-unqualified",
+      "v2-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-unqualified",
     ),
     needle: EXTRA_CACHE,
   },

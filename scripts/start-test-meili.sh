@@ -4,8 +4,8 @@
 # removed on exit, or `source` it and own the lifetime in the caller:
 # fvoci_test_meili_start, with fvoci_test_meili_stop in the caller's EXIT trap.
 
-# Official CE v1.53.2 digest from .github/workflows/rust.yml
-FVOCI_TEST_MEILI_IMAGE="getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9"
+# Official CE v1.55.0 digest from .github/workflows/rust.yml
+FVOCI_TEST_MEILI_IMAGE="getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c"
 
 # Set (not exported) only by this shell's fvoci_test_meili_start: stop never
 # removes a container name inherited from a parent environment.
