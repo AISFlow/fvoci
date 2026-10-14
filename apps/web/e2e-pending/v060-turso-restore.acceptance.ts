@@ -201,6 +201,7 @@ function freshSyncWitness(page: Page, routingKey: string, before: Record<string,
   return {
     sync,
     wire,
+    facts: () => ({ invalid, connections }),
     valid: (requestId: string) =>
       !invalid &&
       connections === 1 &&
@@ -226,86 +227,98 @@ async function freshStage(
     `${workspace.id}:document:${state.source.document.id}`,
     before,
   );
-  const editor = await openEditor(page, documentUrl(state, workspace.slug));
-  await expect(editor).toContainText(LITERALS.before);
-  await expect(editor).not.toContainText(LITERALS.after);
-  await persistBody(page);
-  const requestId = await expectMatchingPersistAck(page, capture.wire);
-  expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
-  const base = documentBase(state, workspace.id);
-  const preview = await jsonObject(
-    page.request.get(`${base}/revisions/${state.source.sourceRevision}/restore-preview`),
-  );
-  const finalTail = z.string().parse(preview.currentTailSeq);
-  // Closing the editor before capture prevents a later client write from
-  // being folded into this independently observed durable barrier.
-  await page.close();
-  expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
-  const afterArchive = await archive(page.request, workspace.id, state.source.project.id);
-  const after = await archiveRow(afterArchive, state.source.document.id);
-  const priorState = rows(beforeArchive.graph, "states").find(
-    (row) => row.target_id === state.source.document.id,
-  );
-  const finalState = rows(afterArchive.graph, "states").find(
-    (row) => row.target_id === state.source.document.id,
-  );
-  if (!priorState || !finalState) throw new Error("RESTORE_STAGE_STATE_MISSING");
-  expect(finalState.created_at).toBe(priorState.created_at);
-  expect(finalState.state_entry).toBe(priorState.state_entry);
-  for (const receipt of rows(priorState, "receipts"))
-    expect(rows(finalState, "receipts")).toContainEqual(receipt);
-  const witness = {
-    document: state.source.document.id,
-    actor,
-    beforeTail: String(before.tail),
-    finalTail,
-    fullStateSha256: restoreStateDigest(before),
-    ack: { requestId, matched: true },
-    sync: capture.sync,
-  };
-  verifyRestoreStage(before, after, witness, state.source.document.id, actor);
-  // The acknowledged sync response may compact this one native state. All
-  // other content, IDs, precision, revisions and archive members stay exact.
-  const graph = structuredClone(beforeArchive.graph);
-  const states = rows(graph, "states");
-  const target = states.findIndex(
-    (row) => row.target_id === state.source.document.id && row.target_kind === "document",
-  );
-  if (target < 0) throw new Error("RESTORE_STAGE_STATE_MISSING");
-  states[target] = finalState;
-  graph.states = states;
-  graph.captured_at = afterArchive.graph.captured_at;
-  const inventory = rows(afterArchive.graph, "native_inventory");
-  graph.native_inventory = rows(graph, "native_inventory").map((row, index) => {
-    const current = inventory[index];
-    if (!current) throw new Error("RESTORE_STAGE_INVENTORY_MISSING");
-    if (index === target) {
-      expect(current).toEqual({ ...row, binding: current.binding, work: current.work });
-      return current;
+  try {
+    const editor = await openEditor(page, documentUrl(state, workspace.slug));
+    await expect(editor).toContainText(LITERALS.before);
+    await expect(editor).not.toContainText(LITERALS.after);
+    await persistBody(page);
+    const requestId = await expectMatchingPersistAck(page, capture.wire);
+    expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
+    const base = documentBase(state, workspace.id);
+    const preview = await jsonObject(
+      page.request.get(`${base}/revisions/${state.source.sourceRevision}/restore-preview`),
+    );
+    const finalTail = z.string().parse(preview.currentTailSeq);
+    // Closing the editor before capture prevents a later client write from
+    // being folded into this independently observed durable barrier.
+    await page.close();
+    expect(capture.valid(requestId), "RESTORE_STAGE_SYNC_UNCONFIRMED").toBe(true);
+    const afterArchive = await archive(page.request, workspace.id, state.source.project.id);
+    const after = await archiveRow(afterArchive, state.source.document.id);
+    const priorState = rows(beforeArchive.graph, "states").find(
+      (row) => row.target_id === state.source.document.id,
+    );
+    const finalState = rows(afterArchive.graph, "states").find(
+      (row) => row.target_id === state.source.document.id,
+    );
+    if (!priorState || !finalState) throw new Error("RESTORE_STAGE_STATE_MISSING");
+    expect(finalState.created_at).toBe(priorState.created_at);
+    expect(finalState.state_entry).toBe(priorState.state_entry);
+    for (const receipt of rows(priorState, "receipts"))
+      expect(rows(finalState, "receipts")).toContainEqual(receipt);
+    const witness = {
+      document: state.source.document.id,
+      actor,
+      beforeTail: String(before.tail),
+      finalTail,
+      fullStateSha256: restoreStateDigest(before),
+      ack: { requestId, matched: true },
+      sync: capture.sync,
+    };
+    verifyRestoreStage(before, after, witness, state.source.document.id, actor);
+    // The acknowledged sync response may compact this one native state. All
+    // other content, IDs, precision, revisions and archive members stay exact.
+    const graph = structuredClone(beforeArchive.graph);
+    const states = rows(graph, "states");
+    const target = states.findIndex(
+      (row) => row.target_id === state.source.document.id && row.target_kind === "document",
+    );
+    if (target < 0) throw new Error("RESTORE_STAGE_STATE_MISSING");
+    states[target] = finalState;
+    graph.states = states;
+    graph.captured_at = afterArchive.graph.captured_at;
+    const inventory = rows(afterArchive.graph, "native_inventory");
+    graph.native_inventory = rows(graph, "native_inventory").map((row, index) => {
+      const current = inventory[index];
+      if (!current) throw new Error("RESTORE_STAGE_INVENTORY_MISSING");
+      if (index === target) {
+        expect(current).toEqual({ ...row, binding: current.binding, work: current.work });
+        return current;
+      }
+      return { ...row, binding: current.binding };
+    });
+    expect(afterArchive.graph).toEqual(graph);
+    const nativePrefix = `native/document/${state.source.document.id}/`;
+    const retained = (name: string) =>
+      !name.startsWith(nativePrefix) && name !== "graph.json" && name !== "manifest.json";
+    expect(Object.keys(afterArchive.zip.files).filter(retained).sort()).toEqual(
+      Object.keys(beforeArchive.zip.files).filter(retained).sort(),
+    );
+    for (const name of Object.keys(beforeArchive.zip.files).filter(retained)) {
+      const old = beforeArchive.zip.file(name),
+        current = afterArchive.zip.file(name);
+      if (!old || !current) throw new Error("RESTORE_ARCHIVE_MEMBER_MISSING");
+      expect(await current.async("nodebuffer")).toEqual(await old.async("nodebuffer"));
     }
-    return { ...row, binding: current.binding };
-  });
-  expect(afterArchive.graph).toEqual(graph);
-  const nativePrefix = `native/document/${state.source.document.id}/`;
-  const retained = (name: string) =>
-    !name.startsWith(nativePrefix) && name !== "graph.json" && name !== "manifest.json";
-  expect(Object.keys(afterArchive.zip.files).filter(retained).sort()).toEqual(
-    Object.keys(beforeArchive.zip.files).filter(retained).sort(),
-  );
-  for (const name of Object.keys(beforeArchive.zip.files).filter(retained)) {
-    const old = beforeArchive.zip.file(name),
-      current = afterArchive.zip.file(name);
-    if (!old || !current) throw new Error("RESTORE_ARCHIVE_MEMBER_MISSING");
-    expect(await current.async("nodebuffer")).toEqual(await old.async("nodebuffer"));
+    await info.attach("restore-stage.private.json", {
+      body: JSON.stringify({ before, witness }),
+      contentType: "application/json",
+    });
+    writeFileSync(stagePath(), JSON.stringify({ base64: afterArchive.bytes.toString("base64") }), {
+      mode: 0o600,
+    });
+    chmodSync(stagePath(), 0o600);
+  } finally {
+    await info.attach("restore-sync.private.json", {
+      body: JSON.stringify({
+        document: state.source.document.id,
+        ...capture.facts(),
+        sync: capture.sync,
+        persist: capture.wire,
+      }),
+      contentType: "application/json",
+    });
   }
-  await info.attach("restore-stage.private.json", {
-    body: JSON.stringify({ before, witness }),
-    contentType: "application/json",
-  });
-  writeFileSync(stagePath(), JSON.stringify({ base64: afterArchive.bytes.toString("base64") }), {
-    mode: 0o600,
-  });
-  chmodSync(stagePath(), 0o600);
 }
 
 async function exactArchive(
