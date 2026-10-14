@@ -83,6 +83,24 @@ function fixture() {
   const packet = join(directory, "rust-binaries");
   const stage = join(directory, "stage");
   const bytes = Buffer.from("sealed helper fixture bytes\n");
+  // The real helper consumer admits exactly these three records. The postgres
+  // archive below exercises transport only; it is not a postgres cohort proof.
+  const members = [
+    {
+      name: "collab-engine",
+      target: "collab-engine",
+      kind: "bin",
+      features: ["default", "worker"],
+    },
+    { name: "db-tests-library", target: "fvoci_server", kind: "lib", features: ["db-tests"] },
+    { name: "fvoci-server", target: "fvoci-server", kind: "bin", features: ["db-tests"] },
+  ];
+  const paths = members.map((member) =>
+    member.name === "collab-engine"
+      ? relative
+      : `crates/collab-engine/target/${basename(directory)}-${member.name}`,
+  );
+  const destinations = paths.map((path) => join(root, path));
   mkdirSync(packet);
   mkdirSync(dirname(join(stage, relative)), { recursive: true });
   const manifest = {
@@ -108,18 +126,21 @@ function fixture() {
         ].map((name) => [name, process.env[name] ?? null]),
       ),
     },
-    entries: {
-      "collab-engine": {
-        path: relative,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        record: {
-          features: ["default", "worker"],
-          profile: { opt_level: "0", debuginfo: 0, test: false },
-          target: { name: "collab-engine", kind: ["bin"] },
-          executable: destination,
+    entries: Object.fromEntries(
+      members.map((member, index) => [
+        member.name,
+        {
+          path: paths[index],
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          record: {
+            features: member.features,
+            profile: { opt_level: "0", debuginfo: 0, test: member.kind === "lib" },
+            target: { name: member.target, kind: [member.kind] },
+            executable: destinations[index],
+          },
         },
-      },
-    },
+      ]),
+    ),
   };
   const run = (value: Step) => {
     if (value.run === undefined) throw new Error(`step ${String(value.name)} has no run script`);
@@ -138,7 +159,7 @@ function fixture() {
   const pack = (corrupt = false) => {
     const payload = Buffer.from(bytes);
     if (corrupt) flipByte(payload, 0);
-    writeFileSync(join(stage, relative), payload);
+    for (const path of paths) writeFileSync(join(stage, path), path === relative ? payload : bytes);
     writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
     for (const cohort of ["postgres", "helper"]) {
       command([
@@ -148,7 +169,7 @@ function fixture() {
         "-C",
         stage,
         "manifest.json",
-        relative,
+        ...paths,
       ]);
     }
     const result = run(compress);
@@ -162,10 +183,11 @@ function fixture() {
     packet,
     bytes,
     destination,
+    destinations,
     pack,
     run,
     cleanup() {
-      rmSync(destination, { force: true });
+      for (const path of destinations) rmSync(path, { force: true });
       rmSync(directory, { recursive: true, force: true });
       if (
         !targetExisted &&
@@ -225,7 +247,7 @@ test("zstd transport retains the actual consumer's SHA256 admission", () => {
       ),
     );
     expect(admitted.exitCode).toBe(0);
-    expect(readFileSync(f.destination)).toEqual(f.bytes);
+    for (const path of f.destinations) expect(readFileSync(path)).toEqual(f.bytes);
   });
 });
 
@@ -241,7 +263,7 @@ test("a one-byte payload change in a valid zstd frame fails the existing digest 
     );
     expect(refused.exitCode).toBe(1);
     expect(refused.stderr.toString()).toContain("Rust binary digest/feature/profile/path mismatch");
-    expect(existsSync(f.destination)).toBe(false);
+    for (const path of f.destinations) expect(existsSync(path)).toBe(false);
   });
 });
 
