@@ -266,6 +266,20 @@ function admittedCommands(grant: LocalConsumerGrant): void {
     ],
     web: [process.execPath, "--bun", "run", "--cwd", "apps/web", "build"],
   };
+  if (grant.purpose === "keycloak")
+    expected.sso = [
+      grant.heavy.path,
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--features",
+      "db-tests",
+      "--test",
+      "identity_integration",
+      "--no-run",
+      "--message-format=json",
+    ];
   if (grant.purpose === "turso-ui")
     expected.run = [process.execPath, "--no-env-file", entry, "--local-restore"];
   else if (grant.stageCommands.run) {

@@ -150,6 +150,8 @@ for (const purpose of ["keycloak", "turso-ui"] as const) {
     "ci",
     "selected-entry",
     "command",
+    "sso-command",
+    "sso-changed-command",
     "untracked",
     "runtime",
     "runtime-manifest",
@@ -203,6 +205,22 @@ for (const purpose of ["keycloak", "turso-ui"] as const) {
         );
       }
       if (fault === "command") f.grant.stageCommands["record-before"]?.push("--unregistered");
+      if (fault === "sso-command" || fault === "sso-changed-command") {
+        f.grant.stageCommands.sso = [
+          f.grant.heavy.path,
+          "cargo",
+          "test",
+          "--locked",
+          "--offline",
+          "--features",
+          "db-tests",
+          "--test",
+          "identity_integration",
+          "--no-run",
+          "--message-format=json",
+        ];
+        if (fault === "sso-changed-command") f.grant.stageCommands.sso.push("--unregistered");
+      }
       if (fault === "untracked")
         writeFileSync(join(f.checkout, "unregistered.ts"), "// untracked\n");
       if (fault.startsWith("runtime")) {
@@ -300,7 +318,12 @@ for (const purpose of ["keycloak", "turso-ui"] as const) {
         },
       );
       expect(result.exitCode).toBe(
-        fault === "none" || fault === "runtime" || fault === "equal-work-selected" ? 0 : 23,
+        fault === "none" ||
+          fault === "runtime" ||
+          fault === "equal-work-selected" ||
+          (fault === "sso-command" && purpose === "keycloak")
+          ? 0
+          : 23,
       );
     });
   }
