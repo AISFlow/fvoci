@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { expect, test, type Page, type Response, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 import { createEncoder, toUint8Array, writeVarString, writeVarUint } from "lib0/encoding";
 import { z } from "zod";
 import { decodeHocuspocusFrame, frameBytes, persistParts } from "../e2e-pending/collab-wire";
@@ -288,11 +288,25 @@ test("actual project write revocation after durable ACK refuses revision creatio
   const gate = await interceptAck(page);
   const text = "edit before project archive";
   const base = target.path(target.a.id);
-  const browserCreates: Response[] = [];
-  page.on("response", (response) => {
-    if (response.request().method() === "POST" && response.url().endsWith(base + "/revisions"))
-      browserCreates.push(response);
-  });
+  // Playwright drops a browser response body once its document is navigated
+  // away from, and page.goto("/") below does that. The UI POST is therefore
+  // sent through route.fetch, whose body is read here before the browser gets
+  // the same response; one that lands after departure is still recorded.
+  const browserCreates: Promise<{ status: number; body: string }>[] = [];
+  await page.route(
+    (url) => url.pathname === base + "/revisions",
+    async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const created = (async () => {
+        const response = await route.fetch();
+        const result = { status: response.status(), body: await response.text() };
+        await route.fulfill({ response });
+        return result;
+      })();
+      browserCreates.push(created);
+      await created;
+    },
+  );
   await edit(page, target.href(target.a.displayId), text);
   await page.getByTestId("revision-save").click();
   await expect.poll(() => gate.held.length).toBe(1);
@@ -336,11 +350,11 @@ test("actual project write revocation after durable ACK refuses revision creatio
   // The native room may retire before a UI POST starts. Every response that
   // does arrive must be a real denial; the explicit POST above always runs.
   const browserRefusals = [];
-  for (const response of browserCreates) {
-    expect(response.status()).toBe(409);
-    const code = z.object({ code: z.string() }).parse(await response.json()).code;
+  for (const response of await Promise.all(browserCreates)) {
+    expect(response.status).toBe(409);
+    const code = z.object({ code: z.string() }).parse(JSON.parse(response.body)).code;
     expect(code).toBe("project_archived");
-    browserRefusals.push({ status: response.status(), code });
+    browserRefusals.push({ status: response.status, code });
   }
   await info.attach("archived-system-revision", {
     body: JSON.stringify({
