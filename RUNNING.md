@@ -1591,6 +1591,9 @@ uses a restricted app role; its owner connection belongs only to preparation
 and the fixed native read-only observer. SQLite observers open read-only files;
 libSQL observations use the existing Rust adapter and SDK, with explicit
 rollback and connection drain. Selected-mode skips, retries and zero tests fail.
+A reviewed root-owned process reader checks the protected server environment
+without changing server privileges; it accepts only process identities and
+digests and returns boolean facts.
 
 The runner imports per-run realms into the digest-pinned official Keycloak
 image in `scripts/keycloak/compose.yml`, published on loopback only. It owns
