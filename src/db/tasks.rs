@@ -2596,11 +2596,12 @@ struct TaskScalarProfile {
     runtime_checked: std::sync::OnceLock<Result<(), &'static str>>,
 }
 
-// Immutable PG18 reference plus the exact canonical x86_64 runtime receipt.
-// Admission remains bound to the exact GNU version and locale archive; other
-// archives and architectures require separate qualification, never a fallback.
+// Immutable PG18 reference plus one native CI bootstrap receipt per admitted
+// architecture. Admission remains bound to the exact GNU version and locale
+// archive; other archives and architectures require separate qualification,
+// never a fallback.
 const TASK_SCALAR_PROFILE_SHA256: &str =
-    "daf54180e0a5fc1444752e6f8bcf7fbe8f67067d7e5ae27fbbc40cd6061255c9";
+    "a4b36bdac3d5afd15859b2f4f6c1781ecf35e3b8291baf60570773c205aeea69";
 
 impl TaskScalarProfile {
     fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
@@ -2622,9 +2623,9 @@ impl TaskScalarProfile {
             || r.lc_collate != "en_US.utf8"
             || r.lc_ctype != "en_US.utf8"
             || r.collation_version != "2.41"
-            || r.tzdata_version != "2026a"
+            || r.tzdata_version != "2026c"
             || r.image_digest
-                != "sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+                != "sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336"
             || r.names_sha256 != "104662bf43ab373bc83f5999f5a18bc5ac094baeeca996e1a8f761fad8279c8c"
         {
             return Err("Task scalar reference profile mismatch");
@@ -8503,7 +8504,7 @@ mod selected_task_projection_tests {
         assert_eq!(profile.zones.len(), 487);
         assert_eq!(
             profile.data_identity,
-            "87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71"
+            "f129f6e7a3d2017f4b39601916a94113b6452c9522c588ae554a15bb461fe585"
         );
         for name in ["UTC", "localtime", "posixrules"] {
             assert!(profile.zones.iter().any(|zone| zone.name == name));

@@ -1,41 +1,43 @@
 # Immutable public PG18 Task scalar reference input
 
-The runtime envelope admits x86_64 and aarch64 GNU 2.43 with the exact canonical
-en_US archive below. Local archive44f7 and all other runtime inputs remain
-NOT QUALIFIED. No whole-product acceptance is claimed.
+PENDING: runtime_profiles is empty. SQLite/libSQL Task and Label scalar reads
+fail closed on every architecture until a native receipt per architecture,
+produced from this exact reference, is sealed. No whole-product acceptance is claimed.
 
-The historical x86_64 envelope is backed by its accepted bootstrap14 receipt.
-Its original receipt, evidence members and exact selector list are no longer
-locally available; the aarch64 qualification does not claim to reconstruct them.
-The new aarch64 qualification executes an explicit set of 12 nonignored bodies:
-the 11 selected Task projection bodies and the selected Task list reference
-qualification body. All execute in the native product runtime image.
-The producer is the dedicated Rust xtask `task-scalar-qualification bootstrap`.
-Aarch64 receipt: bootstrap-receipt.json, SHA256 2c13935d00df44edccb8d6f3402edf1d4b19ac2e7095dbf6e7eeb0563ce8ee0f.
-The original receipt is retained as CI evidence for the acceptance checkpoint.
-It binds actual native GNU and archive measurements, immutable scalar identity,
-the unchanged scalar consumer, source/tree, producer and test ELF identities,
-Cargo.lock, Rust toolchain, prepared SQLite SDK and static/header inputs,
-product image and dynamic dependencies, exact selector output hashes, and
-successful container termination and removal. It is an admission input only
-through its sealed checksum, never a runtime command or an environment bypass.
-The final native CI command additionally requires positive production admission,
-exact version/archive drift refusal, a waited serial LOCPATH refusal child,
-four production Task list bodies, Label reads and Task HTTP readback/refusals:
-20 exact nonignored bodies including the bootstrap set.
-Image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db; Debian13 amd64; tzdata2026a-0+deb13u1.
+This reference was recaptured from PostgreSQL 18.6 (tzdata 2026a -> 2026c; five
+zone TZif files changed). The historical x86_64 receipt
+725715f8df67685bbf60cac6daf9e087f2826b024ad10724f3f1695f7fc13f5d and aarch64 receipt
+2c13935d00df44edccb8d6f3402edf1d4b19ac2e7095dbf6e7eeb0563ce8ee0f qualified the 2026a
+data identity 87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71 and are
+no longer admitted.
+
+Each architecture's qualification executes an explicit set of 12 nonignored
+bodies: the 11 selected Task projection bodies and the selected Task list
+reference qualification body, in the native product runtime image built from
+the same checkout. The producer is the dedicated Rust xtask
+`task-scalar-qualification bootstrap`; `task-scalar-qualification seal` admits a
+receipt only when it binds this checkout, its pending profile, the scalar
+consumer and the data identity. A receipt binds actual native GNU and archive
+measurements, immutable scalar identity, the scalar consumer, source/tree,
+producer and test ELF identities, Cargo.lock, Rust toolchain, prepared SQLite SDK
+and static/header inputs, product image and dynamic dependencies, exact selector
+output hashes, and successful container termination and removal. It is an
+admission input only through its sealed checksum, never a runtime command or an
+environment bypass. The final native CI command additionally requires positive
+production admission, exact version/archive drift refusal, a waited serial
+LOCPATH refusal child, four production Task list bodies, Label reads and Task
+HTTP readback/refusals: 20 exact nonignored bodies including the bootstrap set.
+Image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336; Debian13 amd64; tzdata2026c-0+deb13u1.
 Original PG catalog: UTF8/provider c/deterministic/en_US.utf8/collation2.41.
-GNU reference: libc6/locales2.41-12+deb13u2.
-Historical x86_64 runtime image: sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35.
-Historical x86_64 libc6/libc-bin/locales: 2.43-2ubuntu2.4; GNU 2.43.
-Canonical locale archive: 3064432 bytes, SHA256 74336f094157053703fe153f9fe4efa9efd7589bfc4e9695ac8195cf8d5fa4c4.
-Historical x86_64 receipt: canonical-x86_64-scalar-qualification.json, SHA256 725715f8df67685bbf60cac6daf9e087f2826b024ad10724f3f1695f7fc13f5d.
-Receipt binds 340 verified original evidence members and actual 14 exact nonignored
-bootstrap bodies on the fresh b9e PREP ELF in the canonical image, unchanged consumer,
-negative controls, full source/native/SDK/toolchain/image inputs, and process closure.
-Reference+zone data identity is unchanged: 87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71.
-Compiled JSON SHA256: daf54180e0a5fc1444752e6f8bcf7fbe8f67067d7e5ae27fbbc40cd6061255c9.
-Original reference producer SHA256: e2e16080fc4803d399dd0a30071dfbfa8a8e883193aab9472f2ba7a520b0b7f8.
+PG18.6 catalog re-observation: the same values; pg_timezone_names in C order equals the 487 names below.
+GNU reference: libc6/locales2.41-12+deb13u4.
+Reference+zone data identity: f129f6e7a3d2017f4b39601916a94113b6452c9522c588ae554a15bb461fe585.
+Compiled JSON SHA256: a4b36bdac3d5afd15859b2f4f6c1781ecf35e3b8291baf60570773c205aeea69.
+Reference producer: `cargo xtask task-scalar-qualification reference --image IMAGE --directory DIR`.
+Run against the previous postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+it reproduces that 2026a profile (envelope emptied, SHA256 f3db49e34407399e19fa1654d22b6faf322ab19ee8461e0c214e83e12a82a90c),
+its zone table and file identities byte for byte. The 2026a reference came from an
+uncommitted producer, SHA256 e2e16080fc4803d399dd0a30071dfbfa8a8e883193aab9472f2ba7a520b0b7f8.
 487 exact UTF8 names joined newline WITHOUT final newline SHA256: 104662bf43ab373bc83f5999f5a18bc5ac094baeeca996e1a8f761fad8279c8c.
 TZif bytes were copied from a fresh never-started pinned image container, never synthesized.
 tz-rs0.7.3 is the consumer parser; this producer only retains bytes and alias closure.
@@ -43,9 +45,9 @@ LICENSE is the exact original /usr/share/doc/tzdata/copyright bytes; no license 
 Public originals: https://www.iana.org/time-zones and https://sources.debian.org/src/tzdata/ .
 
 Reference file identities:
-{"/etc/os-release": {"bytes": 286, "sha256": "55179f383ae6c3edc9238d185f2dfa73bf8d048ce0273b2be9adb77128432b26"}, "/usr/share/doc/tzdata/copyright": {"bytes": 375, "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a"}, "/usr/share/zoneinfo/tzdata.zi": {"bytes": 114405, "sha256": "2a3d1b06c4214c390288bf989f543962aeb8a98f6da374527a2de0501746d513"}, "/var/lib/dpkg/info/tzdata.md5sums": {"bytes": 30960, "sha256": "8229a7a88ff9d1e759461f114e9637d72623e9880fc539edfc16e7a51ee4260b"}, "/var/lib/dpkg/status": {"bytes": 139186, "sha256": "ceee5b86603183a2088c02d37e538adac8bfb7fa7c7553ba856429d7e5240a8e"}}
+{"/etc/os-release": {"bytes": 286, "sha256": "e249e69c32d81350fdd6b05ac5575255f14e380ba14b8454acea14e49f088bfa"}, "/usr/share/doc/tzdata/copyright": {"bytes": 375, "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a"}, "/usr/share/zoneinfo/tzdata.zi": {"bytes": 111358, "sha256": "af5c1d3bebe136d372c131bb1a45725f955a8cc2a5ae2fc5a31d3b372e145f49"}, "/var/lib/dpkg/info/tzdata.md5sums": {"bytes": 30960, "sha256": "88dd05354f30be1a1072a5990d33073e352d11f12a4f3e56144253e2f2f5e8d0"}, "/var/lib/dpkg/status": {"bytes": 139610, "sha256": "2b849bf68eee568d722e621bf02aefa1eb8864a4a0da9f4b097de6f112a93833"}}
 
-Original admitted catalog / locale and ligature vectors (immutable observation, not adapter qualification):
+Original admitted catalog / locale and ligature vectors (PG18.3 observation, immutable, not adapter qualification):
 {"pg-literal-vectors.json": "01d9fe09adf261fbec3ec33418a0291d931a1ff21e5d7a72c0ec640439256501", "profile-shell.sh": "381c91ff3e1381b216686e2c84778032d92ff39a07e8d62d0ab4901ae0f574e9", "profile.sql": "adb8a9a99693c841383cf06653bd0904f89c35a102c635c0fd3723fcd0a07ed3", "profile.stdout.log": "a8a621f7bb82b796625ba23be72c10f1153199e08d4e23cecf5de2e53acca352"}
 
 | Name | Resolved original path | SHA256 | Bytes | Actual alias chain |
@@ -63,14 +65,14 @@ Original admitted catalog / locale and ligature vectors (immutable observation, 
 | Africa/Brazzaville | /usr/share/zoneinfo/Africa/Brazzaville | 4680eb49f8aa6b167969f6e27221d859792357cefe0285eb03f60725db664d57 | 149 | [] |
 | Africa/Bujumbura | /usr/share/zoneinfo/Africa/Bujumbura | c880a655aba172cecd4ae8eddd5f8d4cdde07686f00223e4adcc086dad320e7e | 149 | [] |
 | Africa/Cairo | /usr/share/zoneinfo/Africa/Cairo | 2dfb7e1822d085a4899bd56a526b041681c84b55617daee91499fd1990a989fb | 2399 | [] |
-| Africa/Casablanca | /usr/share/zoneinfo/Africa/Casablanca | e11a956f0fc5dd9b9ca29202da2bc027c583c23e7044e0c007aeed0697577200 | 2429 | [] |
+| Africa/Casablanca | /usr/share/zoneinfo/Africa/Casablanca | a7f132b9488727f34030a78a111d9b84f5e0bbb8f56c6eb83e26f26730394171 | 1200 | [] |
 | Africa/Ceuta | /usr/share/zoneinfo/Africa/Ceuta | 0b0fb6fe714319b37c5aa22c56971abb2668a165fc8f72a6c763e70b47c7badf | 2052 | [] |
 | Africa/Conakry | /usr/share/zoneinfo/Africa/Conakry | 93b62b3d76c1d4a477d84d232c576f9b9f21e428a42635db94eaca2c59b7b2ec | 208 | [] |
 | Africa/Dakar | /usr/share/zoneinfo/Africa/Dakar | 40733be9374ab5a9bd38be2be2664e538f97a265bbe7d898a6167d3800cb228b | 182 | [] |
 | Africa/Dar_es_Salaam | /usr/share/zoneinfo/Africa/Dar_es_Salaam | 4fc4f312a5287024c7f8473d753b6d1bcde396138d778adf5fce60dddcc9b53f | 213 | [] |
 | Africa/Djibouti | /usr/share/zoneinfo/Africa/Djibouti | b92bac77f2dd9edd59397c0315e116fd0dc4fbc1ae6cd266687a2822877959f1 | 149 | [] |
 | Africa/Douala | /usr/share/zoneinfo/Africa/Douala | 3b014a5d1cbee2524ae309a895cbe0fe47da87c12016fe8cc2562ac79906590b | 149 | [] |
-| Africa/El_Aaiun | /usr/share/zoneinfo/Africa/El_Aaiun | 516082a902c9c5df2ab13630f36933f56d6cbb05b94d1827670df5b03583cf6d | 2295 | [] |
+| Africa/El_Aaiun | /usr/share/zoneinfo/Africa/El_Aaiun | d9b5d8cf88070b1958cfef9a9bedb8fc252f8cbae64a29dd2b3690f8f58e96d1 | 1066 | [] |
 | Africa/Freetown | /usr/share/zoneinfo/Africa/Freetown | 77d05b2ed586a9d22f6e4a791ec0634256dc919faac6279bdb7db388a9c1f67b | 464 | [] |
 | Africa/Gaborone | /usr/share/zoneinfo/Africa/Gaborone | 3ca27c9dd26ccfd118a270eaee39195154cd63f15700d14de650bf7493cec628 | 235 | [] |
 | Africa/Harare | /usr/share/zoneinfo/Africa/Harare | 22720486f3e24b8e4b4f746afd2e0020f22d3a6c055b79579457e3efc2373ee5 | 149 | [] |
@@ -154,7 +156,7 @@ Original admitted catalog / locale and ligature vectors (immutable observation, 
 | America/Denver | /usr/share/zoneinfo/America/Denver | 32e819c00a43b3c348f539d700d425504f20b8d068c16418d26fa9b693e775c9 | 2460 | [] |
 | America/Detroit | /usr/share/zoneinfo/America/Detroit | 85e733f32a98d828f907ad46de02d9740559bd180af65d0ff7473f80dfae0f98 | 2230 | [] |
 | America/Dominica | /usr/share/zoneinfo/America/Dominica | 7e7db465be161ee7c531100137bf880f3acee56b1874e20661be218ae48f0a8c | 148 | [] |
-| America/Edmonton | /usr/share/zoneinfo/America/Edmonton | f939087dcdd096f6827f4a7c08e678dd8d47441025fa7011522f8975778ad6f1 | 2332 | [] |
+| America/Edmonton | /usr/share/zoneinfo/America/Edmonton | b5e3d3820009abc262c82a3ebfa9261dd12fc210f77322ef121067b040866587 | 2030 | [] |
 | America/Eirunepe | /usr/share/zoneinfo/America/Eirunepe | 8f9784c648c56aab42f83f172b4ac6ce817dc8481b4a54db3ea546f562a111af | 642 | [] |
 | America/El_Salvador | /usr/share/zoneinfo/America/El_Salvador | 82f18df0b923fac1a6dbfaecf0e52300c7f5a0cb4aa765deb3a51f593d16aa05 | 224 | [] |
 | America/Ensenada | /usr/share/zoneinfo/America/Tijuana | 8c2e7b321726e6345912da396796bdb3672bfc4bd1a91c65ee58b38e004d4ca5 | 2906 | [{"path": "/usr/share/zoneinfo/America/Ensenada", "target": "Tijuana", "type": "symlink"}] |
@@ -254,12 +256,12 @@ Original admitted catalog / locale and ligature vectors (immutable observation, 
 | America/Tijuana | /usr/share/zoneinfo/America/Tijuana | 8c2e7b321726e6345912da396796bdb3672bfc4bd1a91c65ee58b38e004d4ca5 | 2906 | [] |
 | America/Toronto | /usr/share/zoneinfo/America/Toronto | a587a1a1607439f7bac283e1815f2bdbafb9649a453d18e06c2e44e6996d888f | 3494 | [] |
 | America/Tortola | /usr/share/zoneinfo/America/Tortola | 2630eeb7e722f660ef4df14899437b18d2cbc092f66304427c0538257a08bda2 | 148 | [] |
-| America/Vancouver | /usr/share/zoneinfo/America/Vancouver | b249ca1f48d23d66a6f831df337e6a5ecf0d6a6edde5316591423d4a0c6bcb28 | 2892 | [] |
+| America/Vancouver | /usr/share/zoneinfo/America/Vancouver | e182e20ec67c46a7dd0aedb3d45fb1395edcb14ff2af2ac694a5776b307bed31 | 2590 | [] |
 | America/Virgin | /usr/share/zoneinfo/America/St_Thomas | 5b1f38380e227d9d815400286437a6fbdd8ef838e724683db5f4655a6f351553 | 148 | [{"path": "/usr/share/zoneinfo/America/Virgin", "target": "St_Thomas", "type": "symlink"}] |
 | America/Whitehorse | /usr/share/zoneinfo/America/Whitehorse | 4eb47a3c29d81be9920a504ca21aa53fcaa76215cc52cc9d23e2feaae5c5c723 | 1614 | [] |
 | America/Winnipeg | /usr/share/zoneinfo/America/Winnipeg | ecffbf610ae77857289fb40a4933a79221a3129a450e7dd9e3c309d6aabc541c | 2868 | [] |
 | America/Yakutat | /usr/share/zoneinfo/America/Yakutat | b45c2729bbf0872ca7e0b353027e727bf2560ddc6309eacd0edee83b05303b63 | 2305 | [] |
-| America/Yellowknife | /usr/share/zoneinfo/America/Edmonton | f939087dcdd096f6827f4a7c08e678dd8d47441025fa7011522f8975778ad6f1 | 2332 | [{"path": "/usr/share/zoneinfo/America/Yellowknife", "target": "Edmonton", "type": "symlink"}] |
+| America/Yellowknife | /usr/share/zoneinfo/America/Edmonton | b5e3d3820009abc262c82a3ebfa9261dd12fc210f77322ef121067b040866587 | 2030 | [{"path": "/usr/share/zoneinfo/America/Yellowknife", "target": "Edmonton", "type": "symlink"}] |
 | Antarctica/Casey | /usr/share/zoneinfo/Antarctica/Casey | 55e68b3b14df0f28df197ab9525f7924420c5cd587496fb4377c8ea12ed52be7 | 423 | [] |
 | Antarctica/Davis | /usr/share/zoneinfo/Antarctica/Davis | 5c1d76744ab443edd793304d4cd0bb1b57f31fe5b1c5cb48b99a88df3a7cca92 | 283 | [] |
 | Antarctica/DumontDUrville | /usr/share/zoneinfo/Antarctica/DumontDUrville | bb609a35ef45882fcaa9d546b9d46cf558149238c53bac702a16b248da182a33 | 180 | [] |
