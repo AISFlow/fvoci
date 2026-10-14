@@ -91,28 +91,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Prepare native ARM64 scalar qualification inputs
-        if: runner.arch == 'ARM64'
+      - name: Prepare native scalar qualification inputs
         env:
           LIBCLANG_PATH: /usr/lib/llvm-18/lib
         run: |
           set -euo pipefail
           . /etc/os-release
           [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          [[ "$(dpkg --print-architecture)" == arm64 ]]
           test -f /etc/apt/apt-mirrors.txt
           grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
           grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
           test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          printf '%s\n' 'https://ports.ubuntu.com/ubuntu-ports/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          # The signed Ubuntu primary archive on x64, Ubuntu ports on ARM.
+          case "$(dpkg --print-architecture)" in
+            amd64) mirror='https://archive.ubuntu.com/ubuntu/' ;;
+            arm64) mirror='https://ports.ubuntu.com/ubuntu-ports/' ;;
+            *) exit 1 ;;
+          esac
+          printf '%s\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/task-scalar-native"
           dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl > "$RUNNER_TEMP/task-scalar-native/build-packages.txt"
           cargo fetch --locked
           cargo xtask sqlite-ci --parent "$RUNNER_TEMP/task-scalar-native" --github-env "$GITHUB_ENV"
-      - name: Verify ARM64 Task scalar admission in the product image
-        if: runner.arch == 'ARM64'
+      - name: Verify native Task scalar admission in the product image
         env:
           LIBCLANG_PATH: /usr/lib/llvm-18/lib
           CARGO_BUILD_JOBS: 2
@@ -120,11 +123,10 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: 0
           CARGO_PROFILE_TEST_DEBUG: 0
         run: cargo xtask task-scalar-qualification final --image fvoci-rust-install:local --directory "$RUNNER_TEMP/task-scalar-final" --target-dir "$RUNNER_TEMP/task-scalar-target" --sqlite-inputs "$RUNNER_TEMP/task-scalar-native/consumer-inputs.json"
-      - name: Retain ARM64 Task scalar final admission evidence
-        if: runner.arch == 'ARM64'
+      - name: Retain native Task scalar final admission evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: task-scalar-final-${{ github.sha }}-${{ github.run_attempt }}
+          name: task-scalar-final-${{ github.sha }}-${{ runner.arch }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/task-scalar-final/*.json
             ${{ runner.temp }}/task-scalar-final/*.log

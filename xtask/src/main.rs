@@ -21,7 +21,8 @@ Commands:
   selected-library
                 Selected SQLite library controls (one build, exact filters)
   task-scalar-qualification
-                Measure and qualify native Task scalar GNU runtime inputs
+                Measure and qualify native Task scalar GNU runtime inputs;
+                recapture its reference and seal CI receipts
   sqlite-build  Authenticated native SQLite static build
                 (entry point: scripts/prepare-sqlite-build.sh)
   sqlite-ci     Pinned SQLite prerequisite and root Cargo entry

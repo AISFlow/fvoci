@@ -520,7 +520,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres",
             "shard": "a",
             "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
@@ -528,7 +528,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres-c",
             "shard": "c",
             "tests": "--test task_integration --test comment_integration"
@@ -536,7 +536,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres-b",
             "shard": "b",
             "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
@@ -544,7 +544,7 @@ jobs:
           {
             "runner": "ubuntu-26.04-arm",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres-arm64",
             "shard": "a",
             "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
@@ -552,7 +552,7 @@ jobs:
           {
             "runner": "ubuntu-26.04-arm",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres-arm64-c",
             "shard": "c",
             "tests": "--test task_integration --test comment_integration"
@@ -560,7 +560,7 @@ jobs:
           {
             "runner": "ubuntu-26.04-arm",
             "pg_major": "18",
-            "postgres_image": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+            "postgres_image": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
             "check": "postgres-arm64-b",
             "shard": "b",
             "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
@@ -568,7 +568,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "16",
-            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "postgres_image": "postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d",
             "check": "postgres-pg16",
             "shard": "a",
             "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
@@ -576,7 +576,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "16",
-            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "postgres_image": "postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d",
             "check": "postgres-pg16-c",
             "shard": "c",
             "tests": "--test task_integration --test comment_integration"
@@ -584,7 +584,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "16",
-            "postgres_image": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
+            "postgres_image": "postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d",
             "check": "postgres-pg16-b",
             "shard": "b",
             "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
@@ -592,7 +592,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "17",
-            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "postgres_image": "postgres:17.11@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3",
             "check": "postgres-pg17",
             "shard": "a",
             "tests": "--test db_integration --test collab_integration --test invitation_integration --test search_index --test api_token_integration --test mail_integration --test task_labels_integration --test workspace_lifecycle --test search_query --test notification_integration --test push_integration --test schedule_ics_integration --test search_meili --test secret_maintenance_integration --test outbox_reset_integration --test pool_release_integration"
@@ -600,7 +600,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "17",
-            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "postgres_image": "postgres:17.11@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3",
             "check": "postgres-pg17-c",
             "shard": "c",
             "tests": "--test task_integration --test comment_integration"
@@ -608,7 +608,7 @@ jobs:
           {
             "runner": "ubuntu-26.04",
             "pg_major": "17",
-            "postgres_image": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
+            "postgres_image": "postgres:17.11@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3",
             "check": "postgres-pg17-b",
             "shard": "b",
             "tests": "--test revision_sqlite_restore --test project_integration --test document_integration --test attachment_integration --test group_integration --test task_activity_integration --test background_jobs --test task_milestones_integration --test outbox_integration --test attachment_extract_integration --test share_stars_integration --test account_lifecycle --test admin_integration --test integrations_integration --test collections_integration --test identity_integration --test attachment_parents_integration --test attachment_preview_integration --test project_lifecycle_integration --test task_ops_integration --test document_export_docx_integration --test document_export_pdf_integration --test search_semantic --test mcp_integration --test doctor_integration --test templates_integration --test unfurl_integration"
@@ -758,7 +758,7 @@ jobs:
     timeout-minutes: ${{ matrix.check == 'collaboration' && 20 || 15 }}
     services:
       postgres:
-        image: postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
+        image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_PASSWORD: ci-ephemeral-only
         ports:

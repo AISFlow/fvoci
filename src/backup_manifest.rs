@@ -265,7 +265,7 @@ pub fn preflight(
     if !valid_project(&manifest.source_project) || manifest.source_project == target {
         return Err("restore target must differ from backup source".into());
     }
-    // The operational Compose image in this slice is PostgreSQL 18.3.
+    // The operational Compose image in this slice is PostgreSQL 18.6.
     if manifest
         .postgres
         .get("serverVersionNum")

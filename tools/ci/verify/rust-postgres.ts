@@ -30,9 +30,9 @@ export const RUST_POSTGRES_C_TARGETS: ReadonlySet<string> = new Set([
 export const RUST_POSTGRES_BUDGET =
   "${{ matrix.shard == 'b' && (matrix.runner == 'ubuntu-26.04-arm' && 25 || 20) || 15 }}";
 export const RUST_POSTGRES_IMAGES: Readonly<Record<string, string>> = {
-  "16": "postgres:16.15@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54",
-  "17": "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f",
-  "18": "postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db",
+  "16": "postgres:16.15@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d",
+  "17": "postgres:17.11@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3",
+  "18": "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
 };
 // [runner, pg_major, check-name suffix] for each platform/major pair; shards a/b/c each.
 const RUST_POSTGRES_PAIRS = [
