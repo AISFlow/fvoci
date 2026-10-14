@@ -93,18 +93,22 @@ const flag=k=>argv[argv.indexOf(k)+1];
 let r;
 if(argv[0]==='git') { if(argv.includes('status')) console.log(scenario==='dirty'?' M fixture':''); else console.log(argv.includes('--git-common-dir')?root+'/repo/.git':scenario==='wrongsha'?'b'.repeat(40):'a'.repeat(40)); process.exit(0); }
 const a=argv.slice(1), verb=a.slice(0,2).join(' ');
+const shell=['new','legacy'].includes(scenario)||scenario.startsWith('shell-')||(scenario==='partial'&&existsSync(root+'/created'));
 if(verb==='status --json') r={runtime:{reachable:true,state:'ready'}};
 else if(verb==='orchestration run-show') r={run:{id:'run_fixture',coordinator_handle:scenario==='stalerun'?'term_other':'term_fixture'}};
 else if(verb==='repo show') { r={repo:{id:scenario==='wrongrepo'?'other':'repo-fixture',path:root+'/repo'}}; }
 else if(verb==='worktree show') {
  const path=flag('--worktree').slice(5),parent=path===root+'/parent';
- r={worktree:{id:parent?'repo-fixture::'+path:'repo-fixture::'+path,repoId:scenario==='wrongsource'&&path===root+'/repo'?'other':'repo-fixture',path,instanceId:parent?'parent-instance':'child-instance',childWorktreeIds:['repo-fixture::'+root+'/checkout','repo-fixture::'+root+'/new-checkout','repo-fixture::'+root+'/fixture','repo-fixture::'+root+'/v6-unit','repo-fixture::'+root+'/rv-grok-unit'],parentWorktreeId:scenario==='wrongparent'?'other':scenario==='missingparent'?null:'repo-fixture::'+root+'/parent',lineage:{parentWorktreeInstanceId:'parent-instance'}}};
+ r={worktree:{id:'repo-fixture::'+path,repoId:scenario==='wrongsource'&&path===root+'/repo'?'other':'repo-fixture',path,instanceId:parent?(scenario==='shell-stale-parent'&&existsSync(root+'/created')?'other':'parent-instance'):'child-instance',childWorktreeIds:scenario==='reverseparent'?[]:['repo-fixture::'+root+'/checkout','repo-fixture::'+root+'/new-checkout','repo-fixture::'+root+'/fixture','repo-fixture::'+root+'/v6-unit','repo-fixture::'+root+'/rv-grok-unit'],parentWorktreeId:scenario==='wrongparent'||(scenario==='shell-wrong-parent'&&!parent)?'other':scenario==='missingparent'?null:'repo-fixture::'+root+'/parent',lineage:{parentWorktreeInstanceId:scenario==='wronginstance'?'other':'parent-instance'}}};
 }
-else if(verb==='worktree create') { if(flag('--repo')!=='id:repo-fixture') {console.log(JSON.stringify({ok:false,error:{code:'repo_not_found'}}));process.exit(1);} const path=root+'/'+flag('--name');mkdirSync(path); r={worktree:{path}};; }
-else if(verb==='terminal list') { const parent=flag('--worktree')==='path:'+root+'/parent'; r={terminals:parent?[{handle:'term_fixture',worktreePath:root+'/parent',connected:true}]:[{handle:'term_agent',connected:true,worktreePath:flag('--worktree').slice(5),agentIdentity:(['new','legacy'].includes(scenario)||(scenario==='partial'&&flag('--worktree')!=='path:'+root+'/checkout')) ? null:'codex'}]}; }
-else if(verb==='terminal send') r={accepted:true};
-else if(verb==='terminal wait') r={satisfied:true};
-else if(verb==='terminal read') r={terminal:{handle:flag('--terminal'),status:'running',tail:flag('--terminal')==='term_fixture'?['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']:(['new','legacy'].includes(scenario)||(scenario==='partial'&&existsSync(root+'/rv-grok-unit')))&&!existsSync(root+'/sent')?['fixture$']:['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}};
+else if(verb==='worktree create') { if(flag('--repo')!=='id:repo-fixture') {console.log(JSON.stringify({ok:false,error:{code:'repo_not_found'}}));process.exit(1);} const path=root+'/'+flag('--name');mkdirSync(path);appendFileSync(root+'/created','created'); r={worktree:{path},startupTerminal:null,warnings:[]}; }
+else if(verb==='terminal list') { const parent=flag('--worktree')==='path:'+root+'/parent'; const t={handle:'term_agent',connected:scenario!=='shell-disconnected',worktreePath:['shell-foreign','foreignterminal'].includes(scenario)?root+'/foreign':flag('--worktree').slice(5),agentIdentity:shell?null:'codex'}; r={terminals:parent?[{handle:'term_fixture',worktreePath:root+'/parent',connected:true}]:scenario==='shell-missing'?[]:scenario==='shell-multiple'?[t,{...t,handle:'term_other'}]:[t]}; }
+else if(verb==='terminal send') r=scenario==='shell-send-flat'?{accepted:true}:scenario==='shell-send-missing'?{}:{send:{handle:scenario==='shell-send-wrong'?'term_other':flag('--terminal'),accepted:scenario!=='shell-send-false',bytesWritten:42,prompt:null}};
+else if(verb==='terminal wait') {
+ if(shell&&!existsSync(root+'/sent')) {console.log(JSON.stringify({ok:false,error:{code:'timeout'}}));process.exit(1);}
+ r=scenario==='wait-flat'?{satisfied:true}:scenario==='wait-missing'?{}:{wait:{handle:scenario==='wait-wrong'?'term_other':flag('--terminal'),condition:scenario==='wait-condition'?'exit':'tui-idle',satisfied:scenario!=='wait-false',status:scenario==='wait-stopped'?'exited':'running',exitCode:null}};
+}
+else if(verb==='terminal read') { const parent=flag('--terminal')==='term_fixture',before=shell&&!existsSync(root+'/sent'); r={terminal:{handle:!parent&&scenario==='shell-read-wrong'?'term_other':flag('--terminal'),status:!parent&&scenario==='shell-stopped'?'exited':'running',tail:parent?['GPT-6.1-Sol '+(scenario==='controllerwrong'?'high':'xhigh')+' · fixture']:before?[scenario==='shell-no-prompt'?'starting':scenario==='shell-agent-screen'?'Codex fixture$':'fixture$']:['GPT-6.1-Sol high'+(scenario==='fast'?' fast':scenario==='hint'?' · ultrafast available':'')].map(s=>scenario==='wrongmodel'?s.replace('Sol','Other'):scenario==='wrongeffort'?s.replace('high','highx'):s)}}; }
 else if(verb==='orchestration worker-start') { if(scenario==='failedstage') {console.log(JSON.stringify({ok:false,result:{failedStage:'inject',residualResources:['term_agent']}}));process.exit(1);} r=scenario==='partial'?{state:'ready',taskId:'task_fixture'}:{runId:'run_fixture',state:'ready',stage:'input_accepted',taskId:'task_fixture',dispatchId:'ctx_fixture',effects:[{kind:'terminal',role:'agent',id:'term_agent'},{kind:'dispatch_input',id:'term_agent',state:'accepted'}]}; }
 else if(verb==='orchestration worker-list') { const second=a.includes('--cursor'); r={scope:{run:'run_fixture'},workers:[{dispatchId:second?'ctx_2':'ctx_1',agentTerminalHandle:scenario==='unknownagent'?null:'term_agent',dispatchStatus:scenario==='liveagent'?'dispatched':'completed',terminalState:'retained',projection:{outcome:scenario==='liveagent'?'in_progress':'succeeded',liveness:{verdict:'live'}}}],page:{hasMore:!second,nextCursor:second?null:'page2'}}; }
 else if(verb==='orchestration reply') r={replied:true};
@@ -340,7 +344,82 @@ test("new child uses explicit parent and exec in its sole startup shell", async 
   expect(sends).toHaveLength(1);
   expect(sends[0][sends[0].indexOf("--text") + 1]).toStartWith("exec '");
   expect(f.calls().filter((a) => a[1] === "terminal" && a[2] === "create")).toHaveLength(0);
+  const calls = f.calls();
+  const sent = calls.indexOf(calls.find((a) => a.includes("send"))!);
+  const waits = calls.filter((a) => a[1] === "terminal" && a[2] === "wait");
+  expect(waits).toHaveLength(1);
+  expect(calls.indexOf(waits[0])).toBeGreaterThan(sent);
+  const created = calls.indexOf(calls.find((a) => a[1] === "worktree" && a[2] === "create")!);
+  expect(
+    calls.slice(0, created).some((a) => a.includes("show") && a.includes(`path:${f.p.parent}`)),
+  ).toBe(true);
+  expect(
+    calls
+      .slice(created + 1, sent)
+      .some((a) => a.includes("show") && a.includes(`path:${join(f.root, "fixture")}`)),
+  ).toBe(true);
+  expect(calls.some((a) => a.includes("--no-parent"))).toBe(false);
 });
+
+for (const scenario of [
+  "wait-flat",
+  "wait-missing",
+  "wait-wrong",
+  "wait-condition",
+  "wait-false",
+  "wait-stopped",
+  "foreignterminal",
+])
+  test(`refuses ${scenario} receipt/ownership without dispatch or cleanup`, async () => {
+    const f = fixture(scenario);
+    await expect(f.c.launch(f.request)).rejects.toThrow();
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(true);
+    expect(f.calls().some((a) => a.includes("worker-start") || a.includes("send"))).toBe(false);
+    expect(f.calls().some((a) => ["release", "stop", "close", "abandon"].includes(a[2]))).toBe(
+      false,
+    );
+  });
+
+for (const scenario of [
+  "shell-missing",
+  "shell-multiple",
+  "shell-foreign",
+  "shell-disconnected",
+  "shell-no-prompt",
+  "shell-read-wrong",
+  "shell-stopped",
+  "shell-agent-screen",
+  "shell-wrong-parent",
+  "shell-stale-parent",
+  "shell-send-flat",
+  "shell-send-missing",
+  "shell-send-wrong",
+  "shell-send-false",
+])
+  test(`preserves new checkout on ${scenario} without retry`, async () => {
+    const f = fixture(scenario);
+    const worktree = join(f.root, "fixture");
+    await expect(f.c.launch({ ...f.request, worktree, terminal: null })).rejects.toThrow();
+    expect(existsSync(worktree)).toBe(true);
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(true);
+    expect(existsSync(join(f.root, "unit/dispatch-prompt.md"))).toBe(true);
+    expect(f.calls().filter((a) => a.includes("send"))).toHaveLength(
+      scenario.startsWith("shell-send-") ? 1 : 0,
+    );
+    expect(f.calls().some((a) => a.includes("worker-start"))).toBe(false);
+    expect(f.calls().filter((a) => a[1] === "worktree" && a[2] === "create")).toHaveLength(1);
+    expect(
+      f.calls().some((a) => a[1] === "terminal" && ["create", "close", "stop"].includes(a[2])),
+    ).toBe(false);
+  });
+
+for (const scenario of ["wronginstance", "reverseparent"])
+  test(`refuses ${scenario} lineage before mutation`, async () => {
+    const f = fixture(scenario);
+    await expect(f.c.launch(f.request)).rejects.toThrow();
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(false);
+    expect(f.calls().some((a) => a.includes("worker-start") || a.includes("send"))).toBe(false);
+  });
 test("new checkout with automatic agent never spawns a nested agent", async () => {
   const f = fixture("newagent");
   await expect(

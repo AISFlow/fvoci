@@ -568,21 +568,8 @@ export class Coordinator {
           !terminals[0].agentIdentity,
         "startup terminal is not a sole shell",
       );
-      requireThat(
-        (
-          await this.cli(
-            "terminal",
-            "wait",
-            "--terminal",
-            newShell,
-            "--for",
-            "tui-idle",
-            "--timeout-ms",
-            "60000",
-          )
-        ).satisfied === true,
-        "shell readiness unproven",
-      );
+      // tui-idle is an agent condition, not a plain-shell readiness signal.
+      // The sole owned shell must positively expose a running prompt before exec.
       const shell = (await this.cli("terminal", "read", "--terminal", newShell)).terminal;
       requireThat(
         shell?.handle === newShell &&
@@ -592,11 +579,10 @@ export class Coordinator {
           !/Codex|Claude|grok/i.test(shell.tail.join("\n")),
         "shell readiness unproven",
       );
-      requireThat(
-        (await this.cli("terminal", "send", "--terminal", newShell, "--text", command, "--enter"))
-          .accepted === true,
-        "exec send unknown",
-      );
+      const sent = (
+        await this.cli("terminal", "send", "--terminal", newShell, "--text", command, "--enter")
+      ).send;
+      requireThat(sent?.handle === newShell && sent.accepted === true, "exec send unknown");
       handle = newShell;
     } else {
       requireThat(terminals.length === 0, "existing terminals require explicit verified reuse");
@@ -613,19 +599,23 @@ export class Coordinator {
       handle = created.handle ?? created.terminal?.handle;
       requireThat(typeof handle === "string", "missing created terminal receipt");
     }
+    const ready = (
+      await this.cli(
+        "terminal",
+        "wait",
+        "--terminal",
+        handle!,
+        "--for",
+        "tui-idle",
+        "--timeout-ms",
+        "60000",
+      )
+    ).wait;
     requireThat(
-      (
-        await this.cli(
-          "terminal",
-          "wait",
-          "--terminal",
-          handle!,
-          "--for",
-          "tui-idle",
-          "--timeout-ms",
-          "60000",
-        )
-      ).satisfied === true,
+      ready?.handle === handle &&
+        ready.condition === "tui-idle" &&
+        ready.satisfied === true &&
+        ready.status === "running",
       "TUI readiness unknown",
     );
     const screen = (await this.cli("terminal", "read", "--terminal", handle!)).terminal;
