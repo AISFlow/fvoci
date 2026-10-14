@@ -27,7 +27,7 @@ function within(start: string, end: string | null, edit: Edit): Edit {
 
 const GATED = ["rust", "web", "install", "documents", "collab-engine"] as const;
 const PHASES =
-  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]";
+  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth]";
 const TARGET_INIT = `          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
 const UNIT =
   "      - name: Credential-free frozen diagnostic unit (exactly one test)\n" +
@@ -605,7 +605,7 @@ function caseList(): MutationCase[] {
       "runtime needs successful trusted admission",
     ],
     [
-      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack and main-only restore require both destructive gates; others NOT IMPLEMENTED",
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore and main-only ui-auth require both destructive gates; others NOT IMPLEMENTED",
       "All phases implemented",
       "fixed phase inputs",
     ],
@@ -657,6 +657,11 @@ function caseList(): MutationCase[] {
       TARGET_INIT + "          rustup toolchain install 1.99.0 --profile minimal\n",
       "          rustup toolchain install 1.99.0 --profile minimal\n" + TARGET_INIT,
       "maintained pinned compiler/native preparation",
+    ],
+    [
+      " && github.event.inputs.phase != 'ui-auth'",
+      "",
+      "runtime needs successful trusted admission",
     ],
   ];
   turso.forEach(([old, replacement, needle], index) => {
@@ -720,13 +725,18 @@ function caseList(): MutationCase[] {
     ["--features worker --jobs 2", "--jobs 2"],
     ["          bun --no-env-file tools/turso/ui.ts --freeze\n", ""],
     [
-      "      - name: Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer\n",
-      "      - name: Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer\n        if: false\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer\n        if: false\n",
     ],
     ["${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"],
     ["${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"],
     [CONSUME, "        run: bun --no-env-file tools/turso/ui.ts --actor\n"],
     [uiKeyring, ""],
+    [
+      "(github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'ui-auth'",
+    ],
+    ["github.event.inputs.phase == 'ui-auth'", "github.event.inputs.phase != 'ui-auth'"],
   ];
   ui.forEach(([old, replacement], index) => {
     add(
@@ -959,6 +969,7 @@ function caseList(): MutationCase[] {
     [PHASES, PHASES.replace("reset", "unapproved-phase")],
     [PHASES, PHASES.replace("reset", "reset, reset")],
     [PHASES, PHASES.replace("reset", "reset, unapproved-phase")],
+    [PHASES, PHASES.replace(", ui-auth", "")],
   ];
   inputs.forEach(([old, replacement], index) => {
     add(

@@ -5,6 +5,9 @@ import {
   authSessionCases,
   authSessionWitnesses,
   authSessionEventEffects,
+  authEventDelta,
+  authEventRows,
+  authSessionActor,
 } from "./ui-auth-session.ts";
 
 const source = "a".repeat(40);
@@ -72,7 +75,7 @@ test("passed browser titles without actual effect attachments cannot supply acce
   expect(() => authSessionWitnesses(report(), binding)).toThrow();
 });
 
-function observedReport() {
+function observedReport(extra: Record<string, unknown> = {}) {
   const actual = report();
   for (const spec of actual.suites[0]?.specs ?? []) {
     const result = spec.tests[0]?.results[0];
@@ -86,6 +89,7 @@ function observedReport() {
       tree,
       actor: id,
       owner: "019b0000-0000-7000-8000-000000000002",
+      workspaceId: "019b0000-0000-7000-8000-000000000003",
       targetId: id,
       before: observation(),
       after: observation(),
@@ -95,6 +99,7 @@ function observedReport() {
       newPasswordStatus: 200,
       tamperedStatus: 400,
       spentStatus: 400,
+      ...extra,
     };
     Reflect.set(result, "attachments", [
       {
@@ -113,6 +118,11 @@ test("consumes the three complete source-bound document effect attachments", () 
 
 test("actual source and ON/OFF request binding cannot be replaced by report titles", () => {
   expect(() => authSessionWitnesses(observedReport(), { ...binding, flow: "off" })).toThrow();
+});
+
+test("every witness names one canonical workspace", () => {
+  for (const workspaceId of [undefined, "", "019B0000-0000-7000-8000-000000000003", "workspace"])
+    expect(() => authSessionWitnesses(observedReport({ workspaceId }), binding)).toThrow();
 });
 
 function nativeEvents() {
@@ -209,4 +219,99 @@ test("refuses missing, duplicate, skipped, failed and retried browser cases", ()
     mutate(invalid);
     expect(() => authSessionCases(invalid, binding)).toThrow();
   }
+});
+
+describe("PostgreSQL/SQLite auth event oracle", () => {
+  const member = id;
+  const other = "019b0000-0000-7000-8000-000000000002";
+  const pgRow = (seq: number, verb: string, overrides: Record<string, unknown> = {}) => ({
+    seq: String(seq),
+    verb,
+    channel: "web",
+    workspace: null,
+    actor: member,
+    targetType: verb === "auth.logout" ? null : "user",
+    target: verb === "auth.logout" ? null : member,
+    payload: verb === "auth.logout" ? {} : { userId: member },
+    ...overrides,
+  });
+  const normal = () => [
+    pgRow(3, "auth.login", { payload: { userId: member, method: "password" } }),
+    pgRow(4, "auth.logout"),
+    pgRow(5, "auth.password_changed"),
+    pgRow(6, "auth.password_reset"),
+  ];
+  const prior = () => [pgRow(1, "auth.login", { actor: other, target: other })];
+  const delta = (before: unknown[], after: unknown[], actor = member) => {
+    authEventDelta(authEventRows(before, "postgres"), authEventRows(after, "postgres"), actor);
+  };
+
+  test("the member's three normal auth mutations occur exactly once around retained history", () => {
+    delta(prior(), [...prior(), ...normal()]);
+  });
+
+  test("SQLite raw blob/text columns normalize to the same rows as PostgreSQL", () => {
+    const blob = (value: string | null) =>
+      value === null ? null : new Uint8Array(Buffer.from(value.replaceAll("-", ""), "hex"));
+    const raw = normal().map((row) => [
+      Number(row.seq),
+      row.verb,
+      row.channel,
+      blob(row.workspace as string | null),
+      blob(row.actor),
+      row.targetType,
+      blob(row.target),
+      JSON.stringify(row.payload),
+    ]);
+    expect(authEventRows(raw, "sqlite")).toEqual(authEventRows(normal(), "postgres"));
+    authEventDelta([], authEventRows(raw, "sqlite"), member);
+  });
+
+  test("missing, repeated, extra, foreign or reshaped auth events refuse", () => {
+    const refusals: [unknown[], unknown[], string?][] = [
+      [[], normal().filter((row) => row.verb !== "auth.logout")],
+      [[], [...normal(), pgRow(7, "auth.password_reset")]],
+      [[], [...normal(), pgRow(7, "auth.mfa_disabled")]],
+      [[], [...normal(), pgRow(7, "auth.unknown")]],
+      [[], normal(), other],
+      [[], normal().map((row) => (row.seq === "4" ? { ...row, target: member } : row))],
+      [[], normal().map((row) => (row.seq === "5" ? { ...row, channel: "api" } : row))],
+      [[], normal().map((row) => (row.seq === "6" ? { ...row, payload: {} } : row))],
+      [
+        [],
+        normal().map((row) =>
+          row.seq === "5" ? { ...row, workspace: "019b0000-0000-7000-8000-000000000003" } : row,
+        ),
+      ],
+      // Earlier history cannot disappear or change behind the new rows.
+      [prior(), normal()],
+      [prior(), [{ ...pgRow(1, "auth.login", { actor: other }) }, ...normal()]],
+    ];
+    for (const [before, after, actor] of refusals)
+      expect(() => {
+        delta(before, after, actor);
+      }).toThrow();
+  });
+
+  test("a bounded observation at the limit and malformed rows refuse instead of truncating", () => {
+    const full = Array.from({ length: 10001 }, (_, index) => pgRow(index + 1, "auth.login"));
+    expect(() => authEventRows(full, "postgres")).toThrow();
+    expect(() => authEventRows([{ ...pgRow(1, "auth.login"), extra: 1 }], "postgres")).toThrow();
+    expect(() => authEventRows([pgRow(1, "document.updated")], "postgres")).toThrow();
+    expect(() => authEventRows([pgRow(0, "auth.login")], "postgres")).toThrow();
+    expect(() =>
+      authEventRows([[1, "auth.login", "web", null, null, null, null, "{"]], "sqlite"),
+    ).toThrow();
+    expect(() => authEventRows({}, "postgres")).toThrow();
+  });
+
+  test("every case must witness the same auth member", () => {
+    const witnesses = authSessionWitnesses(observedReport(), binding);
+    expect(authSessionActor(witnesses)).toBe(id);
+    const mixed = witnesses.map((witness, index) =>
+      index === 2 ? { ...witness, actor: other } : witness,
+    );
+    expect(() => authSessionActor(mixed)).toThrow();
+    expect(() => authSessionActor(witnesses.slice(1))).toThrow();
+  });
 });

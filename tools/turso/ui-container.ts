@@ -103,6 +103,11 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_MAINTENANCE_INTERVAL_SECS",
   "FVOCI_UPLOAD_GC_INTERVAL_SECS",
   "FVOCI_REVISION_SWEEP_INTERVAL_SECS",
+  // The normal mailer relay of a dedicated auth allocation: an owned loopback
+  // sink, no SMTP credential. The native fixture never receives it.
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_FROM",
 ];
 export const FIXED_LAUNCHER =
   "#!/bin/sh\n" +
@@ -1052,7 +1057,11 @@ export async function publishContainer(
     !storage.includes(","), "UI_CURRENT_ARTIFACT_MISSING");
   const prepared: Record<string, string> = {};
   for (const key of NATIVE_CAPSULE_KEYS) {
-    if (binaryName === "fvoci-e2e-fixture" && key.startsWith("ENCRYPTION_")) continue;
+    if (
+      binaryName === "fvoci-e2e-fixture" &&
+      (key.startsWith("ENCRYPTION_") || key.startsWith("SMTP_"))
+    )
+      continue;
     if (Object.hasOwn(environment, key)) prepared[key] = environment[key] as string;
   }
   prepared.FVOCI_COLLAB_ENGINE = BINARY_DST + "/collab-engine";

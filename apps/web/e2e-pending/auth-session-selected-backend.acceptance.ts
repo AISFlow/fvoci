@@ -244,6 +244,7 @@ test(AUTH_CASES[0], async ({ browser }, info) => {
   await saveOwner("healthy owner after logout refusal", target);
   await witness(info, {
     targetId: target.id,
+    workspaceId: target.workspaceId,
     before,
     after,
     refusal,
@@ -311,6 +312,7 @@ test(AUTH_CASES[1], async ({ browser }, info) => {
   await saveOwner("healthy owner after password-change refusal", target);
   await witness(info, {
     targetId: target.id,
+    workspaceId: target.workspaceId,
     before,
     after,
     refusal,
@@ -403,6 +405,7 @@ test(AUTH_CASES[2], async ({ browser }, info) => {
   await saveOwner("healthy owner after reset refusal", target);
   await witness(info, {
     targetId: target.id,
+    workspaceId: target.workspaceId,
     before,
     after,
     refusal,

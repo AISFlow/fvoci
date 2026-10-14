@@ -181,7 +181,7 @@ export function laneRetirement(
   tree: string,
   owner: string,
   driverExit: number,
-  purpose?: "equal-work",
+  purpose?: "equal-work" | "auth-session",
 ): Retirement {
   const facts: Retirement = {
     qualified: false,
@@ -227,6 +227,19 @@ export function laneRetirement(
           assert.equal(receipt.purpose, purpose);
           assert.ok(
             receipt.equal_work && receipt.actual_browser_tests === 1 && receipt.retries === 0,
+          );
+        } else if (purpose === "auth-session") {
+          // Exactly the three dedicated auth cases with their event oracle; no
+          // restart, restore or original suite runs in this lane.
+          assert.equal(receipt.purpose, purpose);
+          assert.ok(
+            typeof receipt.auth_session === "object" &&
+              receipt.auth_session !== null &&
+              (receipt.auth_session as Record<string, unknown>).cases === 3 &&
+              (receipt.auth_session as Record<string, unknown>).events === "PASS" &&
+              receipt.actual_browser_tests === 3 &&
+              receipt.retries === 0 &&
+              receipt.current_schema_server_restart === undefined,
           );
         } else {
           if (flow === "on")
@@ -595,9 +608,12 @@ export async function run(
   };
   const local = process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local";
   const purpose = local ? localAllocation("run").purpose : undefined;
-  assert.ok(purpose === undefined || purpose === "equal-work");
+  assert.ok(purpose === undefined || purpose === "equal-work" || purpose === "auth-session");
   if (purpose)
-    assert.ok(deepEquals(runs, selectedRuns), "equal work requires both complete backend pairs");
+    assert.ok(
+      deepEquals(runs, selectedRuns),
+      "a lane purpose requires both complete backend pairs",
+    );
   const authority = local
     ? {
         executionMode: "orca-local",
@@ -753,7 +769,7 @@ export async function run(
           writeFileSync(closedInstall, readFileSync(receipt), { flag: "wx", mode: 0o600 });
       }
     }
-    if (purpose) {
+    if (purpose === "equal-work") {
       // The registered consumer is loaded only after identity/lease validation
       // and successful driver retirement; CLI discovery loads no driver code.
       const consumer = join(root, "tools/selected-backend-ci/drivers/equal-work.ts");
@@ -805,9 +821,9 @@ export async function run(
         launcherFailure,
         purpose: purpose ?? null,
         equalPairs,
-        normalBothAndRestartRequired: true,
-        offBothRequired: true,
-        offTestsPerBackend: 8,
+        ...(purpose === "auth-session"
+          ? { authCasesPerBackendRun: 3, hostedAuth: "NOT_CONNECTED" }
+          : { normalBothAndRestartRequired: true, offBothRequired: true, offTestsPerBackend: 8 }),
         sqliteAuxiliary: "BLOCKED: normal writers unported",
         whole060Complete: false,
       });

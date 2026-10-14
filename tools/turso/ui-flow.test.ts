@@ -12,12 +12,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { digest, write } from "../selected-backend-ci/io.ts";
+import { digest, listenerAbsent, write } from "../selected-backend-ci/io.ts";
 import { BACKGROUND_TABLES } from "./ui-audit.ts";
 import { privateRead, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
-import { consumeIn, executeUi, memberWrapper, type FlowSteps } from "./ui-flow.ts";
+import { AUTH_CASES, AUTH_SPEC } from "./ui-auth-session.ts";
+import {
+  consumeIn,
+  executeAuth,
+  executeUi,
+  memberWrapper,
+  startSmtpSink,
+  stopSmtpSink,
+  type AuthSteps,
+  type FlowSteps,
+} from "./ui-flow.ts";
 import { registeredTitles } from "./ui-native.ts";
+import { linuxKernel, UiProcesses, withProcesses } from "./ui-processes.ts";
 import { recheckPhysical, type Manifest } from "./ui-record.ts";
 
 let directory: string;
@@ -273,6 +284,96 @@ describe("consumer flow", () => {
     },
   );
 
+  test("ui-auth binds the observed dataset and target and prints its line only after a full PASS", async () => {
+    const baseline = { rows: 1, setupNeeded: false };
+    const manifest = { sourceInputs: { source: "a".repeat(40) } } as unknown as Manifest;
+    const target = "libsql://pure-original.invalid";
+    const bound = {
+      ui_source_sha: "a".repeat(40),
+      ui_baseline_sha256: valueDigest(baseline),
+      ui_target_sha256: digest(target),
+    };
+    const passed = {
+      uiResult: "PASS",
+      originalFailure: null,
+      cleanupErrors: [],
+      auditErrors: [],
+      counts: { on: 3, off: 3 },
+      preservation: { result: "PASS" },
+    };
+    for (const [label, inputs, keys, result, expected] of [
+      ["pass", bound, encryptionKeys, passed, null],
+      ["keyring", bound, undefined, passed, "UI_ENCRYPTION_KEYRING_REQUIRED"],
+      [
+        "dataset",
+        { ...bound, ui_baseline_sha256: "0".repeat(64) },
+        encryptionKeys,
+        passed,
+        "UI_CURRENT_DATASET_BINDING_REQUIRED",
+      ],
+      [
+        "target",
+        { ...bound, ui_target_sha256: "0".repeat(64) },
+        encryptionKeys,
+        passed,
+        "UI_CURRENT_TARGET_BINDING_REQUIRED",
+      ],
+      [
+        "counts",
+        bound,
+        encryptionKeys,
+        { ...passed, counts: { on: 3, off: 2 } },
+        "UI_AUTH_ACCEPTANCE_FAILED",
+      ],
+      [
+        "preservation",
+        bound,
+        encryptionKeys,
+        { ...passed, preservation: { result: "FAIL" } },
+        "UI_AUTH_ACCEPTANCE_FAILED",
+      ],
+      [
+        "cleanup",
+        bound,
+        encryptionKeys,
+        { ...passed, cleanupErrors: ["UI_SMTP_SINK_CLOSURE_FAILED"] },
+        "UI_AUTH_ACCEPTANCE_FAILED",
+      ],
+    ] as const) {
+      for (const key of Object.keys(process.env)) Reflect.deleteProperty(process.env, key);
+      Object.assign(process.env, { FVOCI_LIBSQL_URL: target, FVOCI_LIBSQL_AUTH_TOKEN: "invented" });
+      if (keys !== undefined) process.env.FVOCI_TEST_TURSO_ENCRYPTION_KEYS = keys;
+      const seen: Record<string, string>[] = [];
+      const output = new Captured();
+      const { scope } = fakeScope();
+      const run = consumeIn(scope, "ui-auth", inputs, {
+        currentBuild: () => manifest,
+        fixture: () => Promise.resolve(baseline),
+        executeUi: () => Promise.reject(new Error("the ack consumer must not run")),
+        executeAuth: (_scope, _manifest, _baseline, environment) => {
+          seen.push(environment);
+          return Promise.resolve(result as never);
+        },
+        write,
+        root: () => directory,
+        output,
+      });
+      if (expected === null) {
+        await run;
+        expect(must(seen[0]).ENCRYPTION_KEYS).toBe(encryptionKeys);
+        expect(output.stdout).toEqual([
+          "TURSO_UI_AUTH_PASS on=3 off=3 retries=0 ignored=0 events=PASS preservation=PASS source=libsql-remote cost=NOTRUN",
+        ]);
+      } else {
+        expect([label, await failureOf(run)]).toEqual([label, expected]);
+        expect(output.stdout.filter((line) => line.startsWith("TURSO_UI_AUTH_PASS"))).toEqual([]);
+        // Every binding refuses before the auth consumer starts any allocation.
+        if (expected !== "UI_AUTH_ACCEPTANCE_FAILED") expect(seen).toEqual([]);
+      }
+      rmSync(join(directory, "baseline.private.json"), { force: true });
+    }
+  });
+
   test("the baseline phase prints the dataset and target binding only", async () => {
     Object.assign(process.env, {
       FVOCI_LIBSQL_URL: "libsql://pure.invalid",
@@ -380,5 +481,323 @@ describe("consumer flow", () => {
     expect(text.endsWith("tools/turso/ui.ts --actor\n")).toBe(true);
     Reflect.deleteProperty(process.env, "RUNNER_TEMP");
     expect(() => memberWrapper()).toThrow();
+  });
+});
+
+describe("dedicated auth allocations", () => {
+  const member = "019b0000-0000-7000-8000-00000000000a";
+  const ownerId = "019b0000-0000-7000-8000-00000000000b";
+  const workspace = "019b0000-0000-7000-8000-00000000000c";
+  const target = "019b0000-0000-7000-8000-00000000000d";
+  const source = "a".repeat(40),
+    tree = "b".repeat(40);
+  const manifest = {
+    sourceInputs: { source, tree, files: {} },
+    binaries: { "collab-engine": { path: "/never-executed/engine" } },
+  } as unknown as Manifest;
+  const observation = () => ({
+    targetId: target,
+    body: { contentJson: { type: "doc", content: [] }, version: 1 },
+    ids: [target],
+    nativeV1: "AQEBAA==",
+    revisions: [{ id: target, targetId: target, ySnapshot: "AAA=" }],
+    events: [{ id: target, targetId: target, verb: "document.updated" }],
+  });
+  const actor = (namespace: string, role: "owner" | "member") => ({
+    namespace,
+    userId: role === "owner" ? ownerId : member,
+    workspaceId: workspace,
+    email: namespace + "-" + role + "@example.invalid",
+    commit: "confirmed",
+    freshPrimaryReadback: true,
+    lifecycleDrain: "confirmed",
+    leases: 0,
+  });
+  // The three source-bound witnesses the browser attaches for one flow.
+  const report = (flow: "on" | "off") => ({
+    config: {
+      metadata: {
+        authSession: true,
+        selectedBackend: "libsql-remote",
+        selectedFlow: flow,
+        source,
+        tree,
+      },
+      workers: 1,
+    },
+    errors: [],
+    suites: [
+      {
+        specs: AUTH_CASES.map((title) => ({
+          file: AUTH_SPEC,
+          title,
+          ok: true,
+          tests: [
+            {
+              expectedStatus: "passed",
+              results: [
+                {
+                  status: "passed",
+                  retry: 0,
+                  errors: [],
+                  attachments: [
+                    {
+                      name: "auth-session-document-effects.json",
+                      contentType: "application/json",
+                      body: Buffer.from(
+                        JSON.stringify({
+                          schema: 1,
+                          scope: "document-effects",
+                          backend: "libsql-remote",
+                          flow,
+                          source,
+                          tree,
+                          actor: member,
+                          owner: ownerId,
+                          workspaceId: workspace,
+                          targetId: target,
+                          before: observation(),
+                          after: observation(),
+                          refusal: {
+                            boundary: "pre-auth-http",
+                            method: flow === "on" ? "POST" : "PUT",
+                            status: 401,
+                            directStatus: 401,
+                          },
+                          wrongCurrentStatus: 400,
+                          oldPasswordStatus: 401,
+                          newPasswordStatus: 200,
+                          tamperedStatus: 400,
+                          spentStatus: 400,
+                        }),
+                      ).toString("base64"),
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        })),
+      },
+    ],
+  });
+  type Fault = "browser" | "sink-start" | "sink-stop" | "events" | "background";
+  async function allocate(fault: Fault) {
+    const root = mkdtempSync(join(directory, "root-"));
+    writeFileSync(join(root, "current-build.json"), "pure pinned metadata");
+    process.env.RUNNER_TEMP = root;
+    const calls: string[] = [];
+    const starts: Record<string, string>[] = [];
+    const browsers: { environment: Record<string, string>; spec: string; config?: string }[] = [];
+    const baselines: Record<string, string>[] = [];
+    const output = new Captured();
+    const { scope } = fakeScope();
+    const steps: AuthSteps = {
+      smtp: (_scope, _manifest, allocation) => {
+        calls.push("smtp");
+        if (fault === "sink-start") return Promise.reject(new UiError("UI_SMTP_SINK_START_FAILED"));
+        return Promise.resolve({
+          child: exitedChild(-15, "", 77),
+          port: "2525",
+          capture: join(allocation, "smtp-capture.private.jsonl"),
+        });
+      },
+      stopSmtp: () => {
+        calls.push("stop-smtp");
+        return fault === "sink-stop"
+          ? Promise.reject(new UiError("UI_SMTP_SINK_CLOSURE_FAILED"))
+          : Promise.resolve();
+      },
+      fixture: (_scope, _manifest, mode, environment) => {
+        calls.push("fixture:" + mode);
+        if (mode === "owner")
+          return Promise.resolve(actor(must(environment.FVOCI_E2E_TURSO_NAMESPACE), "owner"));
+        if (mode === "observe") return Promise.resolve({ rows: { [target]: { roomFences: [] } } });
+        baselines.push(environment);
+        return Promise.resolve({
+          ...before(),
+          backend: "libsql-remote",
+          allocations: { events: {} },
+        });
+      },
+      start: (_scope, _manifest, environment) => {
+        calls.push("start");
+        starts.push(environment);
+        return Promise.resolve({
+          server: { child: exitedChild(0, "", 123) },
+          base: "http://127.0.0.1:12345",
+          log: openSync(join(root, "server-" + String(starts.length) + ".log"), "w", 0o600),
+        });
+      },
+      stop: () => {
+        calls.push("stop");
+        return Promise.resolve({
+          serverExit: 0,
+          portClosed: true,
+          recordedIdentitiesRetired: true,
+        });
+      },
+      browser: (_scope, _manifest, allocation, environment, spec, _grep, _workspace, config) => {
+        calls.push("browser");
+        browsers.push({ environment, spec, config });
+        if (fault === "browser" || fault === "sink-stop")
+          return Promise.reject(new UiError("UI_ACTUAL_BROWSER_FAILED"));
+        const namespace = must(environment.FVOCI_E2E_TURSO_NAMESPACE);
+        write(join(allocation, "member-" + namespace + ".json"), actor(namespace, "member"));
+        return Promise.resolve(report(environment.FVOCI_E2E_SELECTED_FLOW as "on" | "off"));
+      },
+      serverIdentity: () => ({ pid: 123, startTicks: "200" }),
+      maintenanceReceipts: () => ({
+        identity: { pid: 123, startTicks: "200" },
+        targetSha256: "a".repeat(64),
+        receipts: [],
+      }),
+      currentBuild: () => manifest,
+      write,
+      root: () => root,
+      token: (bytes) => "c".repeat(bytes * 2),
+      output,
+    };
+    const start = { ...before(), startupHazards: fault === "background" ? 1 : 0 };
+    const failure = await failureOf(
+      executeAuth(
+        scope,
+        manifest,
+        start,
+        {
+          FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+          FVOCI_STORAGE_DIR: join(root, "bootstrap-storage"),
+          ENCRYPTION_KEYS: encryptionKeys,
+          ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+        },
+        steps,
+      ),
+    );
+    const receipt = existsSync(join(root, "auth-result.private.json"))
+      ? (JSON.parse(readFileSync(join(root, "auth-result.private.json"), "utf8")) as Record_)
+      : null;
+    return { root, calls, starts, browsers, baselines, failure, receipt, output };
+  }
+
+  test("existing background work refuses before any sink, actor or server", async () => {
+    const result = await allocate("background");
+    expect(result.failure).toBe("UI_EXISTING_BACKGROUND_WORK_REFUSED");
+    expect(result.calls).toEqual([]);
+  });
+
+  test("each allocation names its owned sink to its own normal server only", async () => {
+    const result = await allocate("events");
+    expect(result.failure).toBe("UI_AUTH_EVENT_EFFECT_COUNTS_FAILED");
+    expect(result.calls).toEqual([
+      "smtp",
+      "fixture:owner",
+      "start",
+      "fixture:baseline",
+      "browser",
+      "fixture:observe",
+      "fixture:baseline",
+      "stop",
+      "stop-smtp",
+      "fixture:baseline",
+    ]);
+    const server = must(result.starts[0]);
+    expect(server).toMatchObject({
+      FVOCI_COLLAB_MAX_ROOMS: "3",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: "2525",
+      SMTP_FROM: "auth-session@example.invalid",
+      FVOCI_REALTIME_MODE: "on",
+      FVOCI_STORAGE_DIR: join(result.root, "auth-on/storage"),
+    });
+    const browser = must(result.browsers[0]);
+    expect(browser.spec).toBe(AUTH_SPEC);
+    expect(browser.config).toBe("auth-session-playwright.config.ts");
+    expect(browser.environment).toMatchObject({
+      FVOCI_E2E_SELECTED_FLOW: "on",
+      FVOCI_E2E_AUTH_SOURCE: source,
+      FVOCI_E2E_AUTH_TREE: tree,
+      FVOCI_E2E_SMTP_CAPTURE: join(result.root, "auth-on/smtp-capture.private.jsonl"),
+    });
+    const capsule = privateRead(join(result.root, "auth-on/actor-input.private.json")) as Record_;
+    for (const key of ["SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "ENCRYPTION_KEYS"])
+      expect(capsule.environment).not.toHaveProperty(key);
+    // Outside an orca-local allocation the consumer is the hosted run itself.
+    expect(result.receipt).toMatchObject({
+      hosted: "THIS_RUN",
+      counts: { on: 3, off: 0 },
+      uiResult: "FAIL",
+      originalFailure: "UI_AUTH_EVENT_EFFECT_COUNTS_FAILED",
+      cleanupErrors: [],
+    });
+  });
+
+  test("a browser failure still retires the server and sink and observes the primary", async () => {
+    const result = await allocate("browser");
+    expect(result.failure).toBe("UI_ACTUAL_BROWSER_FAILED");
+    expect(result.calls).toEqual([
+      "smtp",
+      "fixture:owner",
+      "start",
+      "fixture:baseline",
+      "browser",
+      "stop",
+      "stop-smtp",
+      "fixture:baseline",
+    ]);
+    // The final observation reuses the last allocation environment and its storage.
+    expect(result.baselines.at(-1)?.FVOCI_STORAGE_DIR).toBe(join(result.root, "auth-on/storage"));
+    expect(result.receipt).toMatchObject({
+      counts: { on: 0, off: 0 },
+      originalFailure: "UI_ACTUAL_BROWSER_FAILED",
+    });
+  });
+
+  test("a sink closure failure is recorded without replacing the original failure", async () => {
+    const result = await allocate("sink-stop");
+    expect(result.failure).toBe("UI_ACTUAL_BROWSER_FAILED");
+    expect(result.receipt).toMatchObject({
+      originalFailure: "UI_ACTUAL_BROWSER_FAILED",
+      cleanupErrors: ["UI_SMTP_SINK_CLOSURE_FAILED"],
+    });
+  });
+
+  test("a sink that never started allocates no actor or server", async () => {
+    const result = await allocate("sink-start");
+    expect(result.failure).toBe("UI_SMTP_SINK_START_FAILED");
+    expect(result.calls).toEqual(["smtp", "fixture:baseline"]);
+    expect(result.baselines.at(-1)?.FVOCI_STORAGE_DIR).toBe(join(result.root, "bootstrap-storage"));
+  });
+});
+
+// A real maintained sink child under the owned process scope.
+describe.skipIf(process.platform !== "linux")("owned SMTP sink", () => {
+  const bun = { bun: { path: process.execPath, sha256: "", version: "" } } as unknown as Manifest;
+  test("its own listener serves the reported port and retires on SIGTERM", async () => {
+    const output = new Captured();
+    const port = await withProcesses(
+      async (scope) => {
+        const sink = await startSmtpSink(scope, bun, directory);
+        expect(sink.capture).toBe(join(directory, "smtp-capture.private.jsonl"));
+        expect(listenerAbsent(Number(sink.port))).toBe(false);
+        await stopSmtpSink(scope, sink);
+        return Number(sink.port);
+      },
+      new UiProcesses(linuxKernel, { output, write, root: () => directory }),
+    );
+    expect(listenerAbsent(port)).toBe(true);
+  });
+  test("a listener that remains after the exit refuses the closure", async () => {
+    const output = new Captured();
+    expect(
+      await failureOf(
+        withProcesses(
+          async (scope) => {
+            const sink = await startSmtpSink(scope, bun, directory);
+            await stopSmtpSink(scope, sink, () => false);
+          },
+          new UiProcesses(linuxKernel, { output, write, root: () => directory }),
+        ),
+      ),
+    ).toBe("UI_SMTP_SINK_CLOSURE_FAILED");
   });
 });

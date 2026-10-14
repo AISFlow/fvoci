@@ -86,6 +86,8 @@ export function authSessionWitnesses(report: unknown, binding: AuthSessionBindin
       typeof witness.actor === "string" &&
       typeof witness.owner === "string" &&
       witness.actor !== witness.owner &&
+      typeof witness.workspaceId === "string" &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(witness.workspaceId) &&
       get(witness, "refusal", "boundary") === "pre-auth-http" &&
       get(witness, "refusal", "method") === (binding.flow === "on" ? "POST" : "PUT") &&
       get(witness, "refusal", "status") === 401 &&
@@ -102,6 +104,157 @@ export function authSessionWitnesses(report: unknown, binding: AuthSessionBindin
         witness.spentStatus === 400, "UI_AUTH_RESET_CONTROL_MISSING");
     return witness;
   });
+}
+
+/** The one auth member every case witnessed; the event oracles bind to it. */
+export function authSessionActor(witnesses: Record_[]): string {
+  const actors = new Set(witnesses.map((witness) => witness.actor));
+  const [actor] = actors;
+  require(witnesses.length === AUTH_CASES.length &&
+    actors.size === 1 &&
+    typeof actor === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+      actor,
+    ), "UI_AUTH_WITNESS_REFUSED");
+  return actor;
+}
+
+export interface AuthEventRow {
+  seq: string;
+  verb: string;
+  channel: string;
+  workspace: string | null;
+  actor: string | null;
+  targetType: string | null;
+  target: string | null;
+  payload: unknown;
+}
+
+const AUTH_EVENT_LIMIT = 10000;
+const hex32 = /^[a-f0-9]{32}$/;
+const bareUuid = (value: unknown): string | null => {
+  if (value === null) return null;
+  if (value instanceof Uint8Array) {
+    require(value.length === 16, "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+    return Buffer.from(value).toString("hex");
+  }
+  require(typeof value === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+      value,
+    ), "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+  return value.replaceAll("-", "");
+};
+const nullableText = (value: unknown): string | null => {
+  require(value === null || typeof value === "string", "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+  return value;
+};
+
+/** Complete read-only `auth.%` event rows of one PostgreSQL (jsonb objects) or
+ * SQLite (raw column values) observation. A full bound is a refusal, never a
+ * truncated history. */
+export function authEventRows(value: unknown, backend: "postgres" | "sqlite"): AuthEventRow[] {
+  require(Array.isArray(value) &&
+    value.length <= AUTH_EVENT_LIMIT, "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+  return value.map((row: unknown) => {
+    let cells: unknown[];
+    if (backend === "postgres") {
+      require(isRecord(row) &&
+        isDeepStrictEqual(Object.keys(row).sort(), [
+          "actor",
+          "channel",
+          "payload",
+          "seq",
+          "target",
+          "targetType",
+          "verb",
+          "workspace",
+        ]), "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+      cells = [
+        row.seq,
+        row.verb,
+        row.channel,
+        row.workspace,
+        row.actor,
+        row.targetType,
+        row.target,
+        row.payload,
+      ];
+    } else {
+      require(Array.isArray(row) && row.length === 8, "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+      cells = (row as unknown[]).slice();
+      require(typeof cells[7] === "string", "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+      try {
+        cells[7] = JSON.parse(cells[7]) as unknown;
+      } catch {
+        require(false, "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+      }
+      if (typeof cells[0] === "number" || typeof cells[0] === "bigint") cells[0] = String(cells[0]);
+    }
+    const [seq, verb, channel] = cells;
+    require(typeof seq === "string" &&
+      /^[1-9][0-9]*$/.test(seq) &&
+      typeof verb === "string" &&
+      verb.startsWith("auth.") &&
+      typeof channel === "string", "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+    return {
+      seq,
+      verb,
+      channel,
+      workspace: bareUuid(cells[3]),
+      actor: bareUuid(cells[4]),
+      targetType: nullableText(cells[5]),
+      target: bareUuid(cells[6]),
+      payload: cells[7],
+    };
+  });
+}
+
+const AUTH_MUTATIONS: Record<string, "logout" | "change" | "reset"> = {
+  "auth.logout": "logout",
+  "auth.password_changed": "change",
+  "auth.password_reset": "reset",
+};
+
+/** PostgreSQL/SQLite auth event oracle around one auth browser phase: every
+ * earlier row is retained, only logins are otherwise allowed, and the member's
+ * logout, password change and password reset each occur exactly once in the
+ * exact normal producer shape. */
+export function authEventDelta(
+  before: AuthEventRow[],
+  after: AuthEventRow[],
+  memberId: string,
+): void {
+  const member = bareUuid(memberId);
+  require(member !== null && hex32.test(member), "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+  const fresh = new Map(after.map((row) => [row.seq, row]));
+  require(fresh.size === after.length &&
+    new Set(before.map((row) => row.seq)).size ===
+      before.length, "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+  for (const row of before)
+    require(isDeepStrictEqual(fresh.get(row.seq), row), "UI_AUTH_EVENT_HISTORY_CHANGED");
+  const old = new Set(before.map((row) => row.seq));
+  const counts = { logout: 0, change: 0, reset: 0 };
+  for (const row of after) {
+    if (old.has(row.seq) || row.verb === "auth.login") continue;
+    const kind = AUTH_MUTATIONS[row.verb];
+    require(kind !== undefined, "UI_AUTH_EVENT_UNEXPECTED");
+    require(row.channel === "web" &&
+      row.workspace === null &&
+      row.actor === member &&
+      (kind === "logout"
+        ? row.targetType === null && row.target === null && isDeepStrictEqual(row.payload, {})
+        : row.targetType === "user" &&
+          row.target === member &&
+          isDeepStrictEqual(row.payload, {
+            userId: memberId,
+          })), "UI_AUTH_EVENT_OBSERVATION_REFUSED");
+    counts[kind]++;
+  }
+  require(isDeepStrictEqual(counts, {
+    logout: 1,
+    change: 1,
+    reset: 1,
+  }), "UI_AUTH_EVENT_EFFECT_COUNTS_FAILED");
 }
 
 /** Count exact new auth producer witnesses in the maintained remote baseline.

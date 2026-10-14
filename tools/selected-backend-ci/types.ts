@@ -115,7 +115,6 @@ export interface Aggregate {
   launcherFailure: unknown;
 }
 export interface LocalGrant {
-  purpose?: unknown;
   schema: number;
   status: string;
   executionMode: string;
@@ -137,7 +136,7 @@ export interface LocalGrant {
   outputRoot: string;
   registrationHashes: Record<string, string>;
   stageCommands: Record<string, string[]>;
-  purpose?: "equal-work" | "turso-ui" | "keycloak";
+  purpose?: "equal-work" | "auth-session" | "turso-ui" | "keycloak";
 }
 
 /** Controller-issued local consumer allocation; never an endpoint credential. */

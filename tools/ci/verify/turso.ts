@@ -64,7 +64,7 @@ const CONNECTION_COMPILE =
 const DISPATCH_INPUTS = {
   phase: {
     description:
-      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack and main-only restore require both destructive gates; others NOT IMPLEMENTED",
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore and main-only ui-auth require both destructive gates; others NOT IMPLEMENTED",
     type: "choice",
     default: "connection",
     options: [
@@ -78,6 +78,7 @@ const DISPATCH_INPUTS = {
       "restore",
       "ui-ack",
       "ui-baseline",
+      "ui-auth",
     ],
   },
   destructive: {
@@ -87,17 +88,20 @@ const DISPATCH_INPUTS = {
     default: false,
   },
   ui_source_sha: {
-    description: "ROOT reviewed exact UI source SHA (ui-baseline, ui-ack and restore only)",
+    description:
+      "ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore and ui-auth only)",
     type: "string",
     default: "",
   },
   ui_baseline_sha256: {
-    description: "ROOT verified just-observed current dataset digest (ui-ack and restore only)",
+    description:
+      "ROOT verified just-observed current dataset digest (ui-ack, restore and ui-auth only)",
     type: "string",
     default: "",
   },
   ui_target_sha256: {
-    description: "ROOT verified just-observed primary target digest (ui-ack and restore only)",
+    description:
+      "ROOT verified just-observed primary target digest (ui-ack, restore and ui-auth only)",
     type: "string",
     default: "",
   },
@@ -111,14 +115,15 @@ const BOOTSTRAP_ADMISSION =
 const RUNTIME_IF =
   TRUSTED.replace(
     "github.event_name == 'workflow_dispatch'",
-    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore'",
+    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore' && github.event.inputs.phase != 'ui-auth'",
   ) + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''";
 
 const UI_JOB = {
   needs: "admission",
   if:
     "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || " +
-    `github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main')) && github.repository == '${REPOSITORY}' && (github.ref == ` +
+    "github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main') || " +
+    `(github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main')) && github.repository == '${REPOSITORY}' && (github.ref == ` +
     `'refs/heads/main' || github.ref == '${REVIEWED_REF}' || github.ref == '${UI_REVIEWED_REF}') && ` +
     "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
   environment: "fvoci-turso-test",
@@ -170,7 +175,7 @@ const UI_JOB = {
         `${TURSO_COMMANDS.uiFreeze}\n`,
     },
     {
-      name: "Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer",
+      name: "Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer",
       env: {
         FVOCI_DATABASE_BACKEND: "libsql-remote",
         FVOCI_LIBSQL_URL: "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
@@ -343,7 +348,7 @@ export function verifyTursoWorkflowText(text: string, name = TURSO_MANUAL_WORKFL
     !text.slice(0, secret).includes("secrets."), "no secret before the secret step");
 
   for (const literal of [
-    "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]",
+    "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth]",
     "        default: connection\n",
     "        type: boolean\n        default: false\n",
     "  group: fvoci-turso-test-database\n  cancel-in-progress: false\n",
