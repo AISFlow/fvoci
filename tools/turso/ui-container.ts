@@ -363,7 +363,7 @@ export function containerArgv(
     "host",
     "--entrypoint",
     QUALIFIED_SHELL,
-    ...mountArgs,
+    ...mountArgs.flatMap((mount) => ["--mount", mount]),
     image,
     LAUNCHER_DST,
     CAPSULE_DST,
