@@ -1,7 +1,7 @@
 import { deepEquals, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { constants, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import {
   accessible,
@@ -164,6 +164,8 @@ export const tursoUiModules = Object.freeze([
   "tools/turso/ui-container.ts",
   "tools/turso/ui-browser-diagnostic.ts",
   "tools/turso/ui-restore.ts",
+  "tools/turso/ui-restore-observe.ts",
+  "tools/turso/ui-restore-local.ts",
   "tools/turso/guard.ts",
   "tools/turso/guard-policy.ts",
   "tools/turso/guard-io.ts",
@@ -172,10 +174,12 @@ export const tursoUiModules = Object.freeze([
   "tools/keycloak/local-libsql.ts",
   "tools/keycloak/redact.ts",
   "apps/web/e2e-pending/turso-restore-playwright.config.ts",
-  "apps/web/e2e-pending/v060-turso-restore.spec.ts",
+  "apps/web/e2e-pending/turso-restore-tsconfig.json",
+  "apps/web/e2e-pending/v060-turso-restore.acceptance.ts",
   "apps/web/e2e-pending/turso-restore-helpers.ts",
   "apps/web/e2e-pending/collab-playwright.config.ts",
   "apps/web/e2e-pending/collab-helpers.ts",
+  "apps/web/e2e-pending/collab-attachment-oracle.ts",
   "apps/web/e2e-pending/collab-restart.ts",
   "apps/web/e2e-pending/collab-wire.ts",
   "apps/web/e2e/helpers.ts",
@@ -184,6 +188,7 @@ export const tursoUiModules = Object.freeze([
 export const keycloakModules = Object.freeze([
   ...consumerCommonModules,
   "tools/keycloak/run.ts",
+  "tools/keycloak/process-witness.ts",
   "tools/keycloak/local-libsql.ts",
   "tools/keycloak/realm.ts",
   "tools/keycloak/admin.ts",
@@ -285,6 +290,45 @@ function admittedCommands(grant: LocalConsumerGrant): void {
     );
 }
 
+function admittedProcessObserver(grant: LocalConsumerGrant): void {
+  const witness = grant.keycloak?.processObserver;
+  assert.ok(witness, "Keycloak runtime process observer required");
+  assert.ok(isAbsolute(witness.directory) && realpathSync(witness.directory) === witness.directory);
+  for (let path = witness.directory; ; path = dirname(path)) {
+    const facts = lstatSync(path);
+    assert.ok(
+      facts.isDirectory() &&
+        facts.uid === 0 &&
+        facts.gid === 0 &&
+        (facts.mode & 0o022) === 0 &&
+        !accessible(path, constants.W_OK),
+      "mutable root observer ancestor refused",
+    );
+    if (dirname(path) === path) break;
+  }
+  assert.equal(statSync(witness.directory).mode & 0o777, 0o711);
+  for (const [reference, mode] of [
+    [witness.bun, 0o555],
+    [witness.module, 0o444],
+    [witness.config, 0o444],
+  ] as const) {
+    assert.equal(dirname(reference.path), witness.directory);
+    admittedReference(reference);
+    const facts = lstatSync(reference.path);
+    assert.ok(
+      facts.uid === 0 &&
+        facts.gid === 0 &&
+        facts.nlink === 1 &&
+        (facts.mode & 0o7777) === mode &&
+        !accessible(reference.path, constants.W_OK),
+      "root observer file identity refused",
+    );
+  }
+  assert.equal(witness.bun.sha256, sha(process.execPath));
+  assert.equal(witness.module.sha256, sha(join(root, "tools/keycloak/process-witness.ts")));
+  assert.equal(witness.config.sha256, digest(""));
+}
+
 function consumerAllocation(mode: string, purpose: "turso-ui" | "keycloak"): LocalConsumerGrant {
   const grant = localIdentity([1000, 1000]) as LocalConsumerGrant;
   assert.equal(call(["git", "status", "--short"]), "", "current consumer source must be clean");
@@ -374,6 +418,7 @@ function consumerAllocation(mode: string, purpose: "turso-ui" | "keycloak"): Loc
       assert.ok(deepEquals(keycloak.sqld, grant.localLibsql?.binary));
     }
     if (keycloak.sso) admittedReference(keycloak.sso);
+    admittedProcessObserver(grant);
     if (keycloak.chromiumTmp) {
       assert.match(keycloak.chromiumTmp, /^\/tmp\/fvoci-[a-z0-9-]+$/);
       assert.equal(realpathSync(keycloak.chromiumTmp), keycloak.chromiumTmp);

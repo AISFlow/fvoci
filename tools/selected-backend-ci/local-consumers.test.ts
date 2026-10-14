@@ -159,7 +159,10 @@ for (const purpose of ["keycloak", "turso-ui"] as const) {
     "runtime-output",
     "runtime-binary",
     "runtime-cross-purpose",
+    "runtime-observer-missing",
+    "runtime-observer-foreign-directory",
   ] as const) {
+    if (purpose === "turso-ui" && fault.startsWith("runtime-observer")) continue;
     test(`${purpose} local allocation ${fault}`, () => {
       const f = fixture(purpose);
       let mode = "record-before";
@@ -265,6 +268,17 @@ for (const purpose of ["keycloak", "turso-ui"] as const) {
               shellProof: reference("shell-proof.json"),
             };
           else f.grant.keycloak = { backends: ["sqlite"], heavy: process.execPath };
+        }
+        // The privileged witness is provided only by a controller allocation.
+        // A unit fixture never manufactures a root-owned witness or authority.
+        if (fault === "runtime" && purpose === "keycloak") mode = "current-build";
+        if (fault === "runtime-observer-foreign-directory" && f.grant.keycloak) {
+          f.grant.keycloak.processObserver = {
+            directory: f.grant.outputRoot,
+            bun: f.grant.heavy,
+            module: f.grant.heavy,
+            config: f.grant.heavy,
+          };
         }
       }
       f.grant.inputSha256 = fault === "input-digest" ? "0".repeat(64) : binding(f.grant);
