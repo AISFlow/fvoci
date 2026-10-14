@@ -13,7 +13,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::backend::OperationTx;
-use super::codec::Cell;
+use super::codec::{Cell, PostgresRefusal};
 
 use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
@@ -1589,6 +1589,19 @@ pub async fn complete_email_change(
     Ok(Some(EmailChanged { old_email }))
 }
 
+/// `app_user_update_email`'s address check (PG 02_identity.sql): printable
+/// ASCII, already lower case, one `@` with text on both sides, and at most 320
+/// characters as PostgreSQL `length()` counts them.
+fn update_email_accepts(email: &str) -> bool {
+    !email.is_empty()
+        && email.bytes().all(|b| (b'!'..=b'~').contains(&b))
+        && !email.bytes().any(|b| b.is_ascii_uppercase())
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        })
+        && email.chars().count() <= 320
+}
+
 pub async fn complete_email_change_backend(
     backend: &super::backend::Backend,
     payload: &MagicPayload,
@@ -1604,9 +1617,6 @@ pub async fn complete_email_change_backend(
     let Some(new_email) = payload.new_email.as_deref() else {
         return Ok(None);
     };
-    if normalize_email(new_email).ok().as_deref() != Some(new_email) {
-        return Err(sqlx::Error::Protocol("invalid canonical email".into()));
-    }
     let mut tx = backend.begin_write().await?;
     let OperationTx::SqliteFamily(family) = tx.operation() else {
         unreachable!("family email change")
@@ -1618,6 +1628,12 @@ pub async fn complete_email_change_backend(
         return Ok(None);
     };
     let old_email = row.cell(0)?.string()?;
+    // Where PostgreSQL calls app_user_update_email: its check runs before the
+    // taken-address answer and raises the same SQLSTATE.
+    if !update_email_accepts(new_email) {
+        tx.rollback().await?;
+        return Err(PostgresRefusal::INVALID_EMAIL.into());
+    }
     let taken = family
         .query(
             "SELECT EXISTS(SELECT 1 FROM users WHERE email=?1 AND id<>?2)",

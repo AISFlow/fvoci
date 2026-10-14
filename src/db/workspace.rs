@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::backend::{Backend, OperationTx};
-use super::codec::Cell;
+use super::codec::{Cell, PostgresRefusal};
 
 use crate::db::context::{
     clear_self_user, lock_membership_users, recheck_session, session_is_live, set_self_user,
@@ -2239,6 +2239,16 @@ pub async fn trash_workspace(
     }
     crate::db::invitations::remove_by_workspace(&mut tx, workspace_id).await?;
     crate::db::api_tokens::remove_by_workspace(&mut tx, workspace_id).await?;
+    // Trash goes to every live project with the workspace stamp. The
+    // memberships delete cascades every user grant, and the deferred
+    // project_members_private_lead_check_del only exempts deleted projects, so
+    // a private project led by a user would otherwise refuse the commit.
+    sqlx::query(
+        "UPDATE fvoci.projects SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
         .bind(workspace_id)
         .execute(&mut *tx)
@@ -2330,17 +2340,50 @@ pub async fn trash_workspace_backend(
                 &[Cell::uuid(ws)],
             )
             .await?;
+            // Trash goes to every live project with the workspace stamp, as on
+            // PostgreSQL. The memberships delete then cascades every user
+            // grant; the check below mirrors the deferred
+            // project_members_private_lead_check_del on the projects that lost
+            // a grant, which only refuses a live private project left leadless.
+            let stamp = Cell::instant(crate::db::identity::stored_now())?;
+            f.execute(
+                "UPDATE projects SET deleted_at=?2,updated_at=?2 WHERE workspace_id=?1 AND deleted_at IS NULL",
+                &[Cell::uuid(ws), stamp.clone()],
+            )
+            .await?;
+            let touched = f
+                .query(
+                    "SELECT DISTINCT lower(hex(project_id)) FROM project_members WHERE workspace_id=?1 AND user_id IS NOT NULL",
+                    &[Cell::uuid(ws)],
+                )
+                .await?
+                .iter()
+                .map(|row| row.cell(0)?.string())
+                .collect::<Result<Vec<_>, _>>()?;
             f.execute(
                 "DELETE FROM memberships WHERE workspace_id=?1",
                 &[Cell::uuid(ws)],
             )
             .await?;
+            let leadless = f
+                .query(
+                    "SELECT EXISTS(SELECT 1 FROM projects p WHERE p.workspace_id=?1 AND lower(hex(p.id)) IN (SELECT value FROM json_each(?2))
+                     AND p.deleted_at IS NULL AND p.visibility='private' AND NOT EXISTS(SELECT 1 FROM project_members m
+                     WHERE m.workspace_id=p.workspace_id AND m.project_id=p.id AND m.role='lead'))",
+                    &[Cell::uuid(ws), Cell::json(&json!(touched))?],
+                )
+                .await?;
+            if leadless
+                .first()
+                .ok_or(sqlx::Error::RowNotFound)?
+                .cell(0)?
+                .boolean()?
+            {
+                return Err(PostgresRefusal::PRIVATE_PROJECT_WITHOUT_LEAD.into());
+            }
             f.execute(
                 "UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1",
-                &[
-                    Cell::uuid(ws),
-                    Cell::instant(crate::db::identity::stored_now())?,
-                ],
+                &[Cell::uuid(ws), stamp],
             )
             .await?;
         }
