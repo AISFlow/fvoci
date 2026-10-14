@@ -351,7 +351,12 @@ test(AUTH_CASES[2], async ({ browser }, info) => {
   const token = mail.text.match(/reset-password\?token=([A-Za-z0-9_-]+)/)?.[1];
   if (!token) throw new Error("Normal SMTP capture did not contain the reset token");
   async function confirm(value: string, password: string, status: 200 | 400): Promise<void> {
-    await reset.goto(`/reset-password?token=${value}`);
+    try {
+      await reset.goto(`/reset-password?token=${value}`);
+    } catch {
+      // A navigation error must not copy the one-use token URL into the log.
+      throw new Error("Normal reset UI navigation failed");
+    }
     await reset.getByLabel("새 비밀번호").fill(password);
     const response = reset.waitForResponse(
       (r) =>
@@ -374,7 +379,8 @@ test(AUTH_CASES[2], async ({ browser }, info) => {
   } finally {
     pending.release();
   }
-  await expect(reset).toHaveURL(/\/login\?reset=1/);
+  await expect.poll(() => new URL(reset.url()).pathname).toBe("/login");
+  expect(new URL(reset.url()).searchParams.get("reset")).toBe("1");
   const refusal = await pending.refused();
   if (flow === "on") {
     await expect.poll(() => roomA.closedCodes).toContain(1008);
