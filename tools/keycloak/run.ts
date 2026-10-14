@@ -23,6 +23,7 @@ import { databaseUrls } from "../web-e2e/database-urls.ts";
 import { below, root, sha } from "../selected-backend-ci/io.ts";
 import { localKeycloakAllocation } from "../selected-backend-ci/admission.ts";
 import { pgImage } from "../selected-backend-ci/drivers/postgres.ts";
+import { assertNoEnvFile } from "../selected-backend-ci/drivers/common.ts";
 import { cleanEnv, bunIsolation } from "../turso/ui-common.ts";
 import {
   communicate,
@@ -338,6 +339,11 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
   );
   registerEnvSecrets(secrets);
   const project = "fvoci-kc-e2e-" + randomBytes(6).toString("hex");
+  const projectResources = [
+    ["containers", ["ps", "-aq"]],
+    ["volumes", ["volume", "ls", "-q"]],
+    ["networks", ["network", "ls", "-q"]],
+  ] as const;
   const composeArgs = [
     "docker",
     "compose",
@@ -392,6 +398,13 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           ),
           { mode: 0o644 },
         );
+    for (const [, args] of projectResources)
+      require((await command([
+        "docker",
+        ...args,
+        "--filter",
+        "label=com.docker.compose.project=" + project,
+      ])) === "", "Keycloak project namespace is already allocated");
     created = true;
     await compose(["up", "-d", "--quiet-pull"]);
     const published = await compose(["port", "keycloak", "8080"]);
@@ -709,11 +722,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
       } catch {
         cleanupErrors.push("Keycloak compose cleanup failed");
       }
-      for (const [kind, args] of [
-        ["containers", ["ps", "-aq"]],
-        ["volumes", ["volume", "ls", "-q"]],
-        ["networks", ["network", "ls", "-q"]],
-      ] as const) {
+      for (const [kind, args] of projectResources) {
         try {
           require((await command(
             ["docker", ...args, "--filter", "label=com.docker.compose.project=" + project],
@@ -762,7 +771,25 @@ export async function startPostgres(
   let base: string | undefined;
   const close = async () => {
     if (!created) return;
-    const removed = await runCommand(scope, ["docker", "rm", "-f", "-v", container]);
+    const owned = await runCommand(scope, [
+      "docker",
+      "ps",
+      "-aq",
+      "--filter",
+      "name=^/" + container + "$",
+      "--filter",
+      "label=fvoci.owner=" + owner,
+      "--filter",
+      "label=fvoci.keycloak-fixture=" + container,
+    ]);
+    require(owned.code === 0, "owned PostgreSQL identity could not be observed");
+    if (owned.stdout.trim() !== "") {
+      require(/^[0-9a-f]{12,64}$/.test(
+        owned.stdout.trim(),
+      ), "owned PostgreSQL identity is malformed");
+      const removed = await runCommand(scope, ["docker", "rm", "-f", "-v", owned.stdout.trim()]);
+      require(removed.code === 0, "owned PostgreSQL removal failed");
+    }
     const absent = await runCommand(scope, [
       "docker",
       "ps",
@@ -770,8 +797,7 @@ export async function startPostgres(
       "--filter",
       "name=^/" + container + "$",
     ]);
-    require(removed.code === 0 &&
-      absent.code === 0 &&
+    require(absent.code === 0 &&
       absent.stdout.trim() === "", "owned PostgreSQL cleanup unconfirmed");
     if (base) require(await portClosed(base), "owned PostgreSQL port remains open");
   };
@@ -787,6 +813,8 @@ export async function startPostgres(
         container,
         "--label",
         "fvoci.owner=" + owner,
+        "--label",
+        "fvoci.keycloak-fixture=" + container,
         "-e",
         "POSTGRES_PASSWORD",
         "-p",
@@ -969,6 +997,7 @@ export async function prepareBackend(
 // purpose-specific loader; a caller cannot make a hosted environment local.
 export async function main(argv: string[], load = lease.load): Promise<number> {
   try {
+    assertNoEnvFile();
     const mode = argv.join("\0");
     if (mode === "--record-before") recordBefore(load);
     else if (mode === "--freeze") freeze(load);
@@ -981,6 +1010,10 @@ export async function main(argv: string[], load = lease.load): Promise<number> {
       require(!argv.includes("--workspace-sso") ||
         selected === "postgres", "workspace SSO entitlement witness is PostgreSQL only");
       const grant = loadLocalLease("keycloak", load);
+      require(deepEquals(
+        [process.execPath, ...process.execArgv, import.meta.path, ...argv],
+        grant.stageCommands.run,
+      ), "runtime arguments differ from the allocated exact stage");
       const configuration = grant.keycloak as
         | {
             backends?: Backend[];
