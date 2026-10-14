@@ -144,6 +144,27 @@ const paused = (clientPid = 77) =>
   );
 
 describe("container shape", () => {
+  test("native fixtures keep stdin open at create while normal servers do not", () => {
+    expect(containerArgv(...argvArgs)).not.toContain("--interactive");
+    for (const mode of ["baseline", "owner", "member", "observe"]) {
+      const argv = containerArgv(
+        argvArgs[0],
+        argvArgs[1],
+        argvArgs[2],
+        "/fvoci-current/bin/fvoci-e2e-fixture",
+        [],
+        [mode],
+      );
+      expect(argv.slice(0, argv.indexOf(QUALIFIED_CANONICAL_IMAGE))).toContain("--interactive");
+      expect(argv.slice(argv.indexOf(QUALIFIED_CANONICAL_IMAGE) + 1)).toEqual([
+        "/fvoci-current/launcher.sh",
+        "/fvoci-private/native-env.sh",
+        "/fvoci-current/bin/fvoci-e2e-fixture",
+        mode,
+      ]);
+    }
+  });
+
   test("SQLite restore capsule binds the independent file and refuses source credentials", () => {
     const environment = {
       FVOCI_DATABASE_BACKEND: "sqlite",
