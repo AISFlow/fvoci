@@ -1,8 +1,8 @@
 # Immutable public PG18 Task scalar reference input
 
-PENDING: runtime_profiles is empty. SQLite/libSQL Task and Label scalar reads
-fail closed on every architecture until a native receipt per architecture,
-produced from this exact reference, is sealed. No whole-product acceptance is claimed.
+The runtime envelope admits x86_64 and aarch64 GNU 2.43 with the exact canonical
+en_US archive below. Local archive44f7 and all other runtime inputs remain
+NOT QUALIFIED. No whole-product acceptance is claimed.
 
 This reference was recaptured from PostgreSQL 18.6 (tzdata 2026a -> 2026c; five
 zone TZif files changed). The historical x86_64 receipt
@@ -27,12 +27,20 @@ environment bypass. The final native CI command additionally requires positive
 production admission, exact version/archive drift refusal, a waited serial
 LOCPATH refusal child, four production Task list bodies, Label reads and Task
 HTTP readback/refusals: 20 exact nonignored bodies including the bootstrap set.
+Native bootstrap receipts, both produced by one install workflow run from the
+commit that recaptured this reference and retained as CI evidence for the
+acceptance checkpoint; seal checked them against that commit before admission:
+x86_64 receipt: bootstrap-receipt.json, SHA256 d939354c3017e82de9d7de6e4028a6f76fb7c2b83f6ff6de4393d29cbc72c5a5.
+aarch64 receipt: bootstrap-receipt.json, SHA256 2ff320f07764a8420f7ffd6c91d8d83eb38a205baf3307a183047dd1b86f10f4.
+Both bind the pending JSON SHA256 a4b36bdac3d5afd15859b2f4f6c1781ecf35e3b8291baf60570773c205aeea69 (empty envelope),
+the data identity below and scalar consumer 8ebba73ea2d95b796fc22505bede028c38d2846f7a83bb356b0e9fec7a778ce6.
+Canonical locale archive: 3064432 bytes, SHA256 74336f094157053703fe153f9fe4efa9efd7589bfc4e9695ac8195cf8d5fa4c4.
 Image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336; Debian13 amd64; tzdata2026c-0+deb13u1.
 Original PG catalog: UTF8/provider c/deterministic/en_US.utf8/collation2.41.
 PG18.6 catalog re-observation: the same values; pg_timezone_names in C order equals the 487 names below.
 GNU reference: libc6/locales2.41-12+deb13u4.
 Reference+zone data identity: f129f6e7a3d2017f4b39601916a94113b6452c9522c588ae554a15bb461fe585.
-Compiled JSON SHA256: a4b36bdac3d5afd15859b2f4f6c1781ecf35e3b8291baf60570773c205aeea69.
+Compiled JSON SHA256: 6966d501849130ea718997a96509daa4bc0a1553116fe5aef65c0cc3deae2e1c.
 Reference producer: `cargo xtask task-scalar-qualification reference --image IMAGE --directory DIR`.
 Run against the previous postgres:18.3@sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db
 it reproduces that 2026a profile (envelope emptied, SHA256 f3db49e34407399e19fa1654d22b6faf322ab19ee8461e0c214e83e12a82a90c),

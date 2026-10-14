@@ -2601,7 +2601,7 @@ struct TaskScalarProfile {
 // archive; other archives and architectures require separate qualification,
 // never a fallback.
 const TASK_SCALAR_PROFILE_SHA256: &str =
-    "a4b36bdac3d5afd15859b2f4f6c1781ecf35e3b8291baf60570773c205aeea69";
+    "6966d501849130ea718997a96509daa4bc0a1553116fe5aef65c0cc3deae2e1c";
 
 impl TaskScalarProfile {
     fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
