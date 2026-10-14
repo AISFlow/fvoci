@@ -47,8 +47,10 @@ function tree(files: Record<string, string>): string {
 function withRepoInputs(dir: string): string {
   mkdirSync(join(dir, "tests"));
   mkdirSync(join(dir, "scripts"));
+  mkdirSync(join(dir, "xtask"));
   const rel = [
     "Cargo.toml",
+    "xtask/native-library-cohorts.tsv",
     "scripts/run-rust-collaboration-ci-tests.sh",
     "scripts/collab-capacity-probe.sh",
     ...readdirSync(join(root, "tests"))

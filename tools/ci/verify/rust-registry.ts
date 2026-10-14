@@ -22,6 +22,7 @@ import { postgresS3Inventory, verifyPostgresIntegrationExecution } from "./rust-
 import { selectedInstallInventory } from "./rust-install.ts";
 import { verifyNativeArm64Execution } from "./rust-native.ts";
 import { schemaBaselineInventory } from "./rust-schema.ts";
+import { verifyNativeLibraryExecution } from "./rust-native-library.ts";
 import {
   RUST_AUTOTEST_FAST_NATIVE_EXCLUSIONS,
   RUST_CAPACITY_PROBE_SCRIPT,
@@ -165,6 +166,8 @@ export function verifyRustSuiteRegistry(
   if (cargoErr !== null) return [cargoErr];
   const [jobs, jobsErr] = rustWorkflowJobs(ctx);
   if (jobsErr !== null) return [jobsErr];
+
+  errors.push(...verifyNativeLibraryExecution(jobs, ctx.root));
 
   errors.push(...(hooks.verifySelectedLibraryExecution?.(jobs) ?? []));
   errors.push(...verifyNativeArm64Execution(jobs));

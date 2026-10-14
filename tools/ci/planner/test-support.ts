@@ -68,6 +68,7 @@ const REGISTRY_INPUTS = [
   "scripts/run-rust-collaboration-ci-tests.sh",
   "scripts/collab-capacity-probe.sh",
   "xtask/selected-library-filters.txt",
+  "xtask/native-library-cohorts.tsv",
 ];
 
 /** The real workflows and registry inputs, so the plan's registry check passes. */

@@ -4,6 +4,7 @@ pub mod args;
 pub mod ci_fixture;
 pub mod host;
 pub mod install_image;
+pub mod native_library;
 pub mod process;
 pub mod rust_binaries;
 pub mod rust_binaries_archive;
