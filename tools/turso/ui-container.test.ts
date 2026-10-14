@@ -27,6 +27,7 @@ import {
   lease,
   localFixture,
   localServerStart,
+  mountSpec,
   nativeFailureCode,
   openReferencedGrant,
   parseNspid,
@@ -215,6 +216,22 @@ describe("container shape", () => {
         shellProof: { path: proof, sha256: "0".repeat(64) },
       }),
     ).toThrow("UI_CANONICAL_SHELL_UNAVAILABLE");
+  });
+
+  test("every bind mount reaches docker create behind its own --mount flag", () => {
+    const mounts = [
+      mountSpec("/host/launcher.sh", "/fvoci-current/launcher.sh", true),
+      mountSpec("/host/storage", "/host/storage", false),
+    ];
+    const [name, launcher, capsule, binary, , command] = argvArgs;
+    const argv = containerArgv(name, launcher, capsule, binary, mounts, command);
+    const positions = mounts.map((mount) => argv.indexOf(mount));
+    for (const position of positions) {
+      expect(position).toBeGreaterThan(0);
+      expect(argv[position - 1]).toBe("--mount");
+    }
+    // docker reads the first bare argument as the image reference.
+    expect(argv.indexOf(QUALIFIED_CANONICAL_IMAGE)).toBe(Math.max(...positions) + 1);
   });
 
   test("the capsule refuses LOCPATH, unlisted secrets and multi-line values", () => {
