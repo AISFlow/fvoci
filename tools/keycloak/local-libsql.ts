@@ -122,6 +122,13 @@ export async function startLocalLibsql(
         "/CN=fvoci-local-fixture",
         "-addext",
         "subjectAltName=IP:127.0.0.1",
+        // Explicit server leaf; the host config may default to a CA profile.
+        "-addext",
+        "basicConstraints=critical,CA:FALSE",
+        "-addext",
+        "keyUsage=critical,digitalSignature,keyEncipherment",
+        "-addext",
+        "extendedKeyUsage=serverAuth",
         "-keyout",
         key,
         "-out",
