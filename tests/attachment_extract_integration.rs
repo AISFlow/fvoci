@@ -208,6 +208,25 @@ async fn insert_pending_attachment(
     attachment_id
 }
 
+async fn wait_blocked_by(admin: &PgPool, waiter: i32, blocker: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $2 = ANY(pg_blocking_pids($1))")
+                .bind(waiter)
+                .bind(blocker)
+                .fetch_one(admin)
+                .await
+                .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("product transaction must reach the observed lock wait");
+}
+
 #[tokio::test]
 async fn concurrent_claims_are_disjoint() {
     let harness = TestDb::bootstrap().await;
@@ -766,6 +785,303 @@ async fn deletion_first_barrier_blocks_concurrent_finish() {
     assert_eq!(state.extract_text, "");
     assert_eq!(state.extract_status, "pending");
 
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+/// Pause a real OFF body save after its parent lock, then let extraction
+/// reach that same parent. Its revision and command receipt need a workspace
+/// FK KEY SHARE lock; extraction must allow that lock while fencing deletion.
+#[tokio::test]
+async fn off_body_save_and_extract_finish_do_not_deadlock() {
+    off_body_save_and_extract_finish(fvoci_server::db::collab::CollabKind::Document).await;
+}
+
+#[tokio::test]
+async fn off_task_body_save_and_extract_finish_do_not_deadlock() {
+    off_body_save_and_extract_finish(fvoci_server::db::collab::CollabKind::Task).await;
+}
+
+async fn off_body_save_and_extract_finish(kind: fvoci_server::db::collab::CollabKind) {
+    use fvoci_server::collab::{seed::SeedEngine, CollabConfig};
+    use fvoci_server::config::RealtimeMode;
+    use fvoci_server::db::backend::Backend;
+    use fvoci_server::db::body_save::{save_off_body, OffBodyRequest};
+    use fvoci_server::db::collab::{claim_writer_and_load_kind, CollabKind};
+    use fvoci_server::db::revisions::RevisionTarget;
+
+    let harness = TestDb::bootstrap().await;
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let append_app = pool::connect_app_with_max(&harness.app_url, 1)
+        .await
+        .unwrap();
+    let finish_app = pool::connect_app_with_max(&harness.app_url, 1)
+        .await
+        .unwrap();
+    let flags: (bool, bool) =
+        sqlx::query_as("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
+            .fetch_one(&append_app)
+            .await
+            .unwrap();
+    assert_eq!(flags, (false, false));
+    let (workspace, actor, document) = seed_workspace(&admin).await;
+    sqlx::query("UPDATE fvoci.documents SET content_json=$2 WHERE id=$1")
+        .bind(document)
+        .bind(fvoci_server::db::documents::empty_document_json())
+        .execute(&admin)
+        .await
+        .unwrap();
+    let credential = Uuid::now_v7();
+    sqlx::query("INSERT INTO fvoci.sessions(id,user_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '1 day')")
+        .bind(credential).bind(actor).bind(Uuid::now_v7().to_string())
+        .execute(&admin).await.unwrap();
+    let resource = match kind {
+        CollabKind::Document => document,
+        CollabKind::Task => {
+            let project = Uuid::now_v7();
+            let workflow = Uuid::now_v7();
+            let status = Uuid::now_v7();
+            let task = Uuid::now_v7();
+            sqlx::query("INSERT INTO fvoci.projects(id,workspace_id,key,name,visibility,created_by) VALUES($1,$2,'RACE','Race','workspace',$3)")
+                .bind(project).bind(workspace).bind(actor).execute(&admin).await.unwrap();
+            sqlx::query("INSERT INTO fvoci.workflows(id,workspace_id,project_id) VALUES($1,$2,$3)")
+                .bind(workflow)
+                .bind(workspace)
+                .bind(project)
+                .execute(&admin)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO fvoci.statuses(id,workspace_id,project_id,workflow_id,name,category,sort_key) VALUES($1,$2,$3,$4,'Todo','todo','V')")
+                .bind(status).bind(workspace).bind(project).bind(workflow).execute(&admin).await.unwrap();
+            sqlx::query("INSERT INTO fvoci.tasks(id,workspace_id,project_id,status_id,number,title,content_json,created_by) VALUES($1,$2,$3,$4,1,'Task',$5,$6)")
+                .bind(task).bind(workspace).bind(project).bind(status)
+                .bind(fvoci_server::db::documents::empty_document_json()).bind(actor).execute(&admin).await.unwrap();
+            task
+        }
+    };
+    let (state_table, receipt_table, id_column, target) = match kind {
+        CollabKind::Document => (
+            "document_states",
+            "document_collab_op_receipts",
+            "document_id",
+            RevisionTarget::Document(resource),
+        ),
+        CollabKind::Task => (
+            "task_states",
+            "task_collab_op_receipts",
+            "task_id",
+            RevisionTarget::Task(resource),
+        ),
+    };
+    claim_writer_and_load_kind(&append_app, kind, workspace, actor, credential, resource)
+        .await
+        .unwrap()
+        .unwrap();
+    let attachment =
+        insert_pending_attachment(&admin, workspace, document, actor, "race.hwp").await;
+    if kind == CollabKind::Task {
+        sqlx::query("UPDATE fvoci.attachments SET document_id=NULL,task_id=$2 WHERE id=$1")
+            .bind(attachment)
+            .bind(resource)
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    let engine = CollabConfig::from_env().expect("current owned collab engine required");
+    let update = SeedEngine::new(engine.engine_bin.clone(), engine.limits)
+        .tiptap_to_yjs_update(&serde_json::json!({"type":"doc","content":[
+            {"type":"paragraph","attrs":{"id":"saved-block"},"content":[{"type":"text","text":"saved body"}]}
+        ]}))
+        .await.unwrap();
+    let claim = claim_extract(&finish_app).await.unwrap().unwrap();
+    assert_eq!(claim.attachment_id, attachment);
+    let append_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&append_app)
+        .await
+        .unwrap();
+    let finish_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&finish_app)
+        .await
+        .unwrap();
+    let mut barrier = admin.begin().await.unwrap();
+    let barrier_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await
+        .unwrap();
+    sqlx::query(&format!("SELECT {id_column} FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2 FOR UPDATE"))
+        .bind(workspace).bind(resource).fetch_one(&mut *barrier).await.unwrap();
+    let operation = Uuid::now_v7();
+    let append_pool = append_app.clone();
+    let append = tokio::spawn(async move {
+        save_off_body(
+            &Backend::Postgres(append_pool),
+            RealtimeMode::Off,
+            engine,
+            OffBodyRequest {
+                workspace,
+                actor,
+                credential,
+                target,
+                project: None,
+                expected_tail: 0,
+                command: operation,
+                update,
+                client_ip: None,
+            },
+        )
+        .await
+    });
+    wait_blocked_by(&admin, append_pid, barrier_pid).await;
+    let finish_pool = finish_app.clone();
+    let finish = tokio::spawn(async move {
+        finish_extract(
+            &finish_pool,
+            &claim,
+            &FinishExtract {
+                status: "ok".into(),
+                text: "extracted text".into(),
+                warnings: vec![],
+                rhwp_rev: None,
+            },
+        )
+        .await
+    });
+    wait_blocked_by(&admin, finish_pid, append_pid).await;
+    barrier.commit().await.unwrap();
+    let append_result = append.await.unwrap();
+    let finish_result = finish.await.unwrap();
+    let state = fetch_extract_state(&finish_app, workspace, attachment)
+        .await
+        .unwrap()
+        .unwrap();
+    // OFF saves compact their update into the snapshot; the immutable native
+    // receipt and state head, rather than an uncompacted tail, prove the ACK.
+    let native_count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM fvoci.{receipt_table} WHERE workspace_id=$1 AND {id_column}=$2 AND op_id=$3"))
+        .bind(workspace).bind(resource).bind(operation).fetch_one(&admin).await.unwrap();
+    let native_head: (i64, i64) = sqlx::query_as(&format!("SELECT tail_seq,snapshot_cutoff_seq FROM fvoci.{state_table} WHERE workspace_id=$1 AND {id_column}=$2"))
+        .bind(workspace).bind(resource).fetch_one(&admin).await.unwrap();
+    let committed: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.body_save_commands WHERE command_id=$1),(SELECT count(*) FROM fvoci.revisions WHERE target_id=$2),(SELECT count(*) FROM fvoci.attachment_text WHERE attachment_id=$3),(SELECT count(*) FROM fvoci.events WHERE target_id=$3 AND verb='attachment.extracted')")
+        .bind(operation).bind(resource).bind(attachment).fetch_one(&admin).await.unwrap();
+    append_app.close().await;
+    finish_app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+    assert_eq!(append_result.unwrap().tail_seq, "1");
+    assert!(finish_result.unwrap());
+    assert_eq!(native_count, 1);
+    assert_eq!(native_head, (1, 1));
+    assert_eq!(committed, (1, 1, 1, 1));
+    assert_eq!(state.extract_status, "ok");
+    assert_eq!(state.extract_text, "extracted text");
+    assert!(state.lease_token.is_none());
+}
+
+#[tokio::test]
+async fn workspace_deletion_wait_is_rechecked_before_extract_publication() {
+    let harness = TestDb::bootstrap().await;
+    let app = pool::connect_app_with_max(&harness.app_url, 1)
+        .await
+        .unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (workspace, actor, document) = seed_workspace(&admin).await;
+    let attachment =
+        insert_pending_attachment(&admin, workspace, document, actor, "delete.hwp").await;
+    let claim = claim_extract(&app).await.unwrap().unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&app)
+        .await
+        .unwrap();
+    let mut deletion = admin.begin().await.unwrap();
+    let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *deletion)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fvoci.workspaces SET deleted_at=now() WHERE id=$1")
+        .bind(workspace)
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+    let finish_app = app.clone();
+    let owner = claim.clone();
+    let finish = tokio::spawn(async move {
+        finish_extract(
+            &finish_app,
+            &owner,
+            &FinishExtract {
+                status: "ok".into(),
+                text: "must not publish".into(),
+                warnings: vec![],
+                rhwp_rev: None,
+            },
+        )
+        .await
+    });
+    wait_blocked_by(&admin, pid, deletion_pid).await;
+    deletion.commit().await.unwrap();
+    assert!(!finish.await.unwrap().unwrap());
+    let state = fetch_extract_state(&app, workspace, attachment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.extract_status, "pending");
+    assert_eq!(state.extract_text, "");
+    assert_eq!(state.lease_token, Some(claim.lease_token));
+    app.close().await;
+    admin.close().await;
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn extract_event_failure_rolls_back_text_chunks_and_lease() {
+    let harness = TestDb::bootstrap().await;
+    let app = app_pool(&harness.app_url).await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&harness.admin_url)
+        .await
+        .unwrap();
+    let (workspace, actor, document) = seed_workspace(&admin).await;
+    let attachment =
+        insert_pending_attachment(&admin, workspace, document, actor, "rollback.hwp").await;
+    let claim = claim_extract(&app).await.unwrap().unwrap();
+    sqlx::raw_sql("CREATE FUNCTION fvoci.reject_extract_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected extract event failure'; END $$; CREATE TRIGGER reject_extract_event BEFORE INSERT ON fvoci.events FOR EACH ROW WHEN (NEW.verb='attachment.extracted') EXECUTE FUNCTION fvoci.reject_extract_event();")
+        .execute(&admin).await.unwrap();
+    let finish = FinishExtract {
+        status: "ok".into(),
+        text: "atomic text".into(),
+        warnings: vec![],
+        rhwp_rev: None,
+    };
+    let error = finish_extract(&app, &claim, &finish).await.unwrap_err();
+    assert!(error.to_string().contains("injected extract event failure"));
+    let state = fetch_extract_state(&app, workspace, attachment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.extract_status, "pending");
+    assert_eq!(state.extract_text, "");
+    assert_eq!(state.lease_token, Some(claim.lease_token));
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.attachment_text WHERE attachment_id=$1),(SELECT count(*) FROM fvoci.events WHERE target_id=$1 AND verb='attachment.extracted')")
+        .bind(attachment).fetch_one(&admin).await.unwrap();
+    assert_eq!(counts, (0, 0));
+    sqlx::raw_sql("DROP TRIGGER reject_extract_event ON fvoci.events; DROP FUNCTION fvoci.reject_extract_event();")
+        .execute(&admin).await.unwrap();
+    assert!(finish_extract(&app, &claim, &finish).await.unwrap());
+    let state = fetch_extract_state(&app, workspace, attachment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.extract_text, "atomic text");
+    assert!(state.lease_token.is_none());
     app.close().await;
     admin.close().await;
     harness.cleanup().await;
