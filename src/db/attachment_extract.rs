@@ -142,8 +142,10 @@ async fn finish_extract_pg(
         return Ok(false);
     };
 
+    // Fence workspace deletion while allowing parent writers to insert rows
+    // whose workspace foreign keys take KEY SHARE before they can commit.
     let workspace_live: Option<(bool,)> =
-        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1 FOR UPDATE")
+        sqlx::query_as("SELECT deleted_at IS NULL FROM fvoci.workspaces WHERE id = $1 FOR SHARE")
             .bind(claim.workspace_id)
             .fetch_optional(&mut **tx)
             .await?;

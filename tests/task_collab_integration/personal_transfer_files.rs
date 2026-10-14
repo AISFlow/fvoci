@@ -117,6 +117,81 @@ async fn file_rows(
 }
 
 #[tokio::test]
+async fn personal_transfer_preview_requires_extract_owner_to_finish() {
+    use fvoci_server::db::attachment_extract::{claim_extract, finish_extract, FinishExtract};
+
+    run_test(
+        "personal_transfer_preview_requires_extract_owner_to_finish",
+        async {
+            let mut run = TestRun::new(TestDb::bootstrap().await);
+            let (addr, actor, source, _, _, mut selection) = setup_transfer(&mut run).await;
+            let task = selection["taskId"].as_str().unwrap();
+            let attachment = upload_task_file(
+                addr,
+                &actor.session_token,
+                source,
+                task,
+                "extract.txt",
+                b"transfer extraction body",
+            )
+            .await;
+            let app = fvoci_server::db::pool::connect_app(&run.harness.app_url)
+                .await
+                .unwrap();
+            let claim = claim_extract(&app)
+                .await
+                .unwrap()
+                .expect("real extraction claim");
+            assert_eq!(claim.attachment_id, attachment);
+            selection_versions(&run, source, &mut selection).await;
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &selection,
+                "attachment not ready",
+                "file",
+            )
+            .await;
+            let finish = FinishExtract {
+                status: "ok".into(),
+                text: "transfer extraction body".into(),
+                warnings: vec![],
+                rhwp_rev: None,
+            };
+            let mut stale = claim.clone();
+            stale.lease_token = Uuid::now_v7();
+            assert!(!finish_extract(&app, &stale, &finish).await.unwrap());
+            refuses_before_effects(
+                &run,
+                addr,
+                &actor,
+                source,
+                &selection,
+                "attachment not ready",
+                "file",
+            )
+            .await;
+            assert!(finish_extract(&app, &claim, &finish).await.unwrap());
+            let (status, preview) = session_call(
+                addr,
+                Method::POST,
+                &format!("{}/preview", path(source)),
+                &actor.session_token,
+                Some(selection),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{preview}");
+            assert_eq!(preview["attachmentCount"], 1);
+            app.close().await;
+            run.finish().await.unwrap();
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn personal_transfer_move_carries_attachments_with_fresh_keys() {
     run_test("personal_transfer_move_carries_attachments_with_fresh_keys", async {
         let mut run = TestRun::new(TestDb::bootstrap().await);
