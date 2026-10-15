@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, symlink, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -9,6 +9,9 @@ import {
   verifyManifest,
   verifyMetadata,
   verifyWorkflow,
+  verifyWebBuilderReceipt,
+  admitWebBuilder,
+  type WebBuilderContext,
 } from "./ci-base-image";
 
 let root: string;
@@ -151,6 +154,126 @@ async function saved(
 
 test.each(["amd64", "arm64"])("valid native %s image", async (arch) => {
   await saved([{ "etc/os-release": "ID=ubuntu" }], {}, info(arch));
+});
+
+const webContext: WebBuilderContext = {
+  repository: "AISFlow/fvoci",
+  source: "a".repeat(40),
+  tree: "b".repeat(40),
+  run: "10",
+  attempt: "1",
+  architecture: "amd64",
+  recipe_sha256: "c".repeat(64),
+};
+const hash = (value: string | Uint8Array) =>
+  new Bun.CryptoHasher("sha256").update(value).digest("hex");
+async function refuses(work: Promise<unknown>, message: string) {
+  try {
+    await work;
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw error;
+    expect(error.message).toContain(message);
+    return;
+  }
+  throw new Error("unexpected Web builder acceptance");
+}
+
+test("Web builder receipt refuses source, repository, run, attempt, architecture and recipe replay", () => {
+  const receipt = {
+    schema: 1,
+    ...webContext,
+    image_id: "sha256:" + "d".repeat(64),
+    archive_sha256: "e".repeat(64),
+    inspection_sha256: "f".repeat(64),
+    docker_client_sha256: "0".repeat(64),
+  };
+  expect(verifyWebBuilderReceipt(receipt, webContext)).toEqual(receipt);
+  for (const [key, wrong] of Object.entries({
+    source: "1".repeat(40),
+    tree: "2".repeat(40),
+    repository: "other/fvoci",
+    run: "11",
+    attempt: "2",
+    architecture: "arm64",
+    recipe_sha256: "3".repeat(64),
+    schema: 2,
+    archive_sha256: "invalid",
+    image_id: "mutable:latest",
+  })) {
+    expect(() => verifyWebBuilderReceipt({ ...receipt, [key]: wrong }, webContext)).toThrow();
+  }
+  expect(() => verifyWebBuilderReceipt({ ...receipt, ignored: true }, webContext)).toThrow();
+});
+
+test("Web builder admission binds complete archive, inspection and client bytes before use", async () => {
+  const labels = {
+    ...info().Config.Labels,
+    "org.opencontainers.image.revision": webContext.source,
+  };
+  const config = {
+    architecture: "amd64",
+    os: "linux",
+    config: { ...info().Config, Labels: labels },
+  };
+  const imageId = "sha256:" + hash(JSON.stringify(config));
+  const metadata = { ...info(), Id: imageId, Config: config.config };
+  await saved([{ "etc/public": "complete layer" }], config, metadata);
+  await rename(join(root, "info.json"), join(root, "image.json"));
+  await writeFile(join(root, "docker-client"), "producer static client fixture");
+  const originals = new Map<string, Uint8Array>();
+  for (const name of ["image.tar", "image.json", "docker-client"])
+    originals.set(name, await Bun.file(join(root, name)).bytes());
+  const needBytes = (name: string) => {
+    const bytes = originals.get(name);
+    if (!bytes) throw new Error("missing fixture file");
+    return bytes;
+  };
+  const receipt = {
+    schema: 1,
+    ...webContext,
+    image_id: imageId,
+    archive_sha256: hash(needBytes("image.tar")),
+    inspection_sha256: hash(needBytes("image.json")),
+    docker_client_sha256: hash(needBytes("docker-client")),
+  };
+  const encoded = JSON.stringify(receipt) + "\n";
+  await writeFile(join(root, "receipt.json"), encoded);
+  await admitWebBuilder(root, hash(encoded), imageId, webContext);
+  for (const name of originals.keys()) {
+    await writeFile(join(root, name), concat(needBytes(name), new Uint8Array([0])));
+    await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "digest mismatch");
+    await writeFile(join(root, name), needBytes(name));
+  }
+  await refuses(admitWebBuilder(root, "0".repeat(64), imageId, webContext), "receipt digest");
+  await refuses(
+    admitWebBuilder(root, hash(encoded), "sha256:" + "0".repeat(64), webContext),
+    "expected image",
+  );
+  await writeFile(join(root, "unexpected"), "not admitted");
+  await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "unexpected files");
+});
+
+test("Web scan binds actual archived config source and ID rather than trusting supplied inspection", async () => {
+  const labels = { ...info().Config.Labels, "org.opencontainers.image.revision": "0".repeat(40) };
+  const config = {
+    architecture: "amd64",
+    os: "linux",
+    config: { ...info().Config, Labels: labels },
+  };
+  const metadata = {
+    ...info(),
+    Id: "sha256:" + hash(JSON.stringify(config)),
+    Config: {
+      ...config.config,
+      Labels: { ...labels, "org.opencontainers.image.revision": webContext.source },
+    },
+  };
+  await saved([{ "etc/public": "whole input" }], config, metadata);
+  await refuses(
+    scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64", webContext.source),
+    "config/source mismatch",
+  );
 });
 test.each(compressions)("valid %s-compressed saved layer", async (format) => {
   await saved([await compressed({ "etc/os-release": "ID=ubuntu" }, format)], {}, info(), format);

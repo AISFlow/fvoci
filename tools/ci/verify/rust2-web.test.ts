@@ -26,6 +26,7 @@ import {
   verifyNoRunScopedCacheKeys,
   verifyWebHostInputsJobs,
   WEB_SQLITE_JOBS,
+  verifyWebBuilderJobs,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 import { SQLITE_PACKAGES, verifySqlitePrefixCache } from "./rust-sqlite.ts";
@@ -51,21 +52,15 @@ const runOf = (step: Mapping): string => {
   return run;
 };
 
-test("every Web SQLite caller upgrades complete host inputs before capture without relaxing refusal", () => {
+test("every Web SQLite caller captures complete actual fixed userspace inputs without relaxing refusal", () => {
   const jobs = realJobs("web.yml");
   expect(verifyWebHostInputsJobs(jobs)).toEqual([]);
   for (const name of WEB_SQLITE_JOBS) {
     for (const [before, after] of [
-      ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
-      ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
-      ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
-      ["--with-new-pkgs", ""],
-      ["--no-remove", ""],
-      [" linux-libc-dev", ""],
-      [" libcrypt-dev", ""],
-      ["libclang-18-dev=1:18.1.8-20ubuntu8", "libclang-18-dev"],
       ["dpkg-query -W >", "dpkg-query -W gcc >"],
-      ["Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", "Trusted: yes"],
+      ["= 1.99.0", "= 1.98.1"],
+      ["= 1.4.3", "= 1.4.2"],
+      ['test -f "$LIBCLANG_PATH/libclang.so"', ":"],
     ] as const) {
       const bad = clone(jobs);
       const prep = stepWith(bad, name, byId("sqlite"));
@@ -85,10 +80,7 @@ test("every Web SQLite caller upgrades complete host inputs before capture witho
     const capture = 'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n';
     prep["run"] = runOf(prep)
       .replace(capture, "")
-      .replace(
-        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
-        capture + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
-      );
+      .replace("test -f", capture + "test -f");
     expect(verifyWebHostInputsJobs(reordered).join("\n")).toContain(
       "complete unmasked host preparation",
     );
@@ -131,6 +123,66 @@ test("Rust native handoff callers align host inputs before existing qualified SQ
     const masked = clone(jobs);
     stepWith(masked, name, byId("sqlite"))["continue-on-error"] = true;
     expect(verifySqlitePrefixCache(masked).join("\n")).toContain("exact preflight/restore/verify");
+  }
+});
+
+test("the same-run builder refuses publication, substituted userspace and host execution fallback", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyWebBuilderJobs(jobs)).toEqual([]);
+  for (const [before, after] of [
+    ["web-export", "summary"],
+    ["--platform linux/amd64", "--platform linux/arm64"],
+    ["revision=$GITHUB_SHA", "revision=old"],
+    ["grep -q NEEDED", "grep -q NEVER"],
+    ["grep -q INTERP", "grep -q NEVER"],
+    ["test -s /etc/ssl/certs/ca-certificates.crt", ":"],
+    ["--dump-dom about:blank", "--version"],
+  ] as const) {
+    const bad = clone(jobs),
+      build = stepWith(bad, "web-builder", byId("builder"));
+    expect(runOf(build)).toContain(before);
+    build["run"] = runOf(build).replace(before, after);
+    expect(verifyWebBuilderJobs(bad).join("\n")).toContain(
+      "source-scanned native image/static client",
+    );
+  }
+  const publish = clone(jobs);
+  stepWith(publish, "web-builder", byId("publish_builder"))["if"] = "always()";
+  expect(verifyWebBuilderJobs(publish).join("\n")).toContain(
+    "source-scanned native image/static client",
+  );
+  for (const name of WEB_SQLITE_JOBS) {
+    for (const [before, after] of [
+      ["web-admit", "summary"],
+      ["docker load", "echo skipped-load"],
+      ["web-loaded", "summary"],
+      ["= 1.29.1", "= 1.28.0"],
+      ["rustup component remove rustfmt", "echo ignored"],
+    ] as const) {
+      const bad = clone(jobs),
+        admit = stepWith(bad, name, byId("builder"));
+      expect(runOf(admit)).toContain(before);
+      admit["run"] = runOf(admit).replace(before, after);
+      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("admit/load this run builder");
+    }
+    for (const [before, after] of [
+      ["--network host", "--network bridge"],
+      ["--user 1001:1001", "--user 1000:1000"],
+      ["--env SQLITE3_NO_PKG_CONFIG", ""],
+      ["/usr/local/bin/docker,readonly", "/usr/bin/docker"],
+      ["--mount type=bind", "--mount type=bind,source=/usr,target=/host/usr --mount type=bind"],
+    ] as const) {
+      const bad = clone(jobs),
+        prep = stepWith(bad, name, byId("sqlite"));
+      const shell = prep["shell"];
+      if (typeof shell !== "string") throw new Error("builder shell missing");
+      expect(shell).toContain(before);
+      prep["shell"] = shell.replace(before, after);
+      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("exact fixed userspace");
+    }
+    const host = clone(jobs);
+    delete stepWith(host, name, byId("sqlite"))["shell"];
+    expect(verifyWebBuilderJobs(host).join("\n")).toContain("exact fixed userspace");
   }
 });
 

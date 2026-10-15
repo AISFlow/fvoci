@@ -577,10 +577,15 @@ function needsAndSchema(): GateCase[] {
       name: "needs/web-budget-lanes-ok",
       argv: gateArgv(
         "web",
-        needs(plan("web", { "web-checks": true, "web-native-checks": true }), "web", {
-          "web-checks": "success",
-          "web-native-checks": "success",
-        }),
+        needs(
+          plan("web", { "web-checks": true, "web-native-checks": true, "web-builder": true }),
+          "web",
+          {
+            "web-builder": "success",
+            "web-checks": "success",
+            "web-native-checks": "success",
+          },
+        ),
       ),
       ...base,
       expect: ok(),

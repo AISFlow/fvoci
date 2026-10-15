@@ -2,6 +2,8 @@
 // No extraction to disk and no matched credential values are printed.
 import { basename } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { lstatSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 class PolicyError extends Error {}
 function check(condition: unknown, message: string): asserts condition {
@@ -276,8 +278,9 @@ export function verifyMetadata(info: unknown, architecture: string) {
   checkText(JSON.stringify(info));
 }
 
-export async function scanImage(path: string, inspection: string, arch: string) {
-  verifyMetadata(await json(inspection), arch);
+export async function scanImage(path: string, inspection: string, arch: string, revision?: string) {
+  const info = await json(inspection);
+  verifyMetadata(info, arch);
   const image = new Bun.Archive(await Bun.file(path).bytes());
   async function entry(name: string, missing = "saved image entry missing") {
     const file = (await image.files(name)).get(name);
@@ -351,7 +354,25 @@ export async function scanImage(path: string, inspection: string, arch: string) 
     "saved image OCI/legacy references disagree; content withheld",
   );
   const config = await descriptorBytes(at(manifest, "config"));
-  parseMetadata(config);
+  const configuration = parseMetadata(config);
+  const imageId = at(manifest, "config", "digest");
+  check(typeof imageId === "string", "saved image config digest missing");
+  if (revision !== undefined) {
+    verifyMetadata(
+      {
+        Architecture: at(configuration, "architecture"),
+        Os: at(configuration, "os"),
+        Config: at(configuration, "config"),
+      },
+      arch,
+    );
+    check(
+      at(info, "Id") === imageId &&
+        at(info, "Config", "Labels", "org.opencontainers.image.revision") === revision &&
+        at(configuration, "config", "Labels", "org.opencontainers.image.revision") === revision,
+      "Web builder config/source mismatch",
+    );
+  }
   checkText(utf8.decode(config));
   // Include lower layers: deleting a credential later does not remove it.
   for (const [index, descriptor] of layers.entries()) {
@@ -413,6 +434,208 @@ export async function scanImage(path: string, inspection: string, arch: string) 
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
+  return imageId;
+}
+
+export type WebBuilderContext = {
+  repository: string;
+  source: string;
+  tree: string;
+  run: string;
+  attempt: string;
+  architecture: string;
+  recipe_sha256: string;
+};
+const webReceiptKeys = [
+  "schema",
+  "repository",
+  "source",
+  "tree",
+  "run",
+  "attempt",
+  "architecture",
+  "recipe_sha256",
+  "image_id",
+  "archive_sha256",
+  "inspection_sha256",
+  "docker_client_sha256",
+].sort();
+
+export function verifyWebBuilderReceipt(value: unknown, context: WebBuilderContext) {
+  check(
+    isObject(value) && Bun.deepEquals(Object.keys(value).sort(), webReceiptKeys),
+    "Web builder receipt shape mismatch",
+  );
+  check(value.schema === 1, "Web builder receipt schema mismatch");
+  check(
+    /^[0-9a-f]{40}$/.test(context.source) &&
+      /^[0-9a-f]{40}$/.test(context.tree) &&
+      /^[1-9][0-9]*$/.test(context.run) &&
+      /^[1-9][0-9]*$/.test(context.attempt) &&
+      context.repository.toLowerCase() === "aisflow/fvoci" &&
+      context.architecture === "amd64" &&
+      /^[0-9a-f]{64}$/.test(context.recipe_sha256),
+    "Web builder current context invalid",
+  );
+  for (const [key, expected] of Object.entries(context))
+    check(value[key] === expected, "Web builder source/run/attempt/architecture mismatch");
+  for (const key of ["archive_sha256", "inspection_sha256", "docker_client_sha256"])
+    check(
+      typeof value[key] === "string" && /^[0-9a-f]{64}$/.test(value[key]),
+      "Web builder file digest invalid",
+    );
+  check(
+    typeof value.image_id === "string" && sha256Digest.test(value.image_id),
+    "Web builder image ID invalid",
+  );
+  return value;
+}
+
+async function webFileHash(path: string, bound: number) {
+  const stat = lstatSync(path);
+  check(
+    stat.isFile() &&
+      stat.nlink === 1 &&
+      stat.uid === process.getuid?.() &&
+      stat.size > 0 &&
+      stat.size <= bound,
+    "Web builder file missing, unsafe or oversized",
+  );
+  const hasher = new Bun.CryptoHasher("sha256");
+  let size = 0;
+  for await (const bytes of Bun.file(path).stream()) {
+    size += bytes.length;
+    check(size <= bound, "Web builder file grew beyond bound");
+    hasher.update(bytes);
+  }
+  check(size === stat.size, "Web builder file changed during hashing");
+  return hasher.digest("hex");
+}
+
+async function webBuilderContext(): Promise<WebBuilderContext> {
+  const git = (args: string[]) => {
+    const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+    check(result.exitCode === 0, "Web builder checkout inspection failed");
+    return result.stdout.toString().trim();
+  };
+  check(
+    process.platform === "linux" &&
+      process.arch === "x64" &&
+      git(["status", "--porcelain=v1", "--untracked-files=all"]) === "" &&
+      git(["rev-parse", "HEAD"]) === process.env.GITHUB_SHA,
+    "Web builder checkout/platform mismatch",
+  );
+  return {
+    repository: process.env.GITHUB_REPOSITORY ?? "",
+    source: git(["rev-parse", "HEAD"]),
+    tree: git(["rev-parse", "HEAD^{tree}"]),
+    run: process.env.GITHUB_RUN_ID ?? "",
+    attempt: process.env.GITHUB_RUN_ATTEMPT ?? "",
+    architecture: "amd64",
+    recipe_sha256: await webFileHash("docker/ci-base/Dockerfile", 1024 * 1024),
+  };
+}
+
+async function webBuilderFiles(directory: string) {
+  return {
+    archive_sha256: await webFileHash(join(directory, "image.tar"), 2 * 1024 ** 3),
+    inspection_sha256: await webFileHash(join(directory, "image.json"), 1024 ** 2),
+    docker_client_sha256: await webFileHash(join(directory, "docker-client"), 128 * 1024 ** 2),
+  };
+}
+
+async function webBuilderReceipt(
+  directory: string,
+  expectedReceipt: string,
+  expectedImage: string,
+  context: WebBuilderContext,
+) {
+  check(
+    /^[0-9a-f]{64}$/.test(expectedReceipt) && sha256Digest.test(expectedImage),
+    "Web builder expected digests invalid",
+  );
+  check(
+    (await webFileHash(join(directory, "receipt.json"), 16 * 1024)) === expectedReceipt,
+    "Web builder receipt digest mismatch",
+  );
+  const receipt = verifyWebBuilderReceipt(await json(join(directory, "receipt.json")), context);
+  check(receipt.image_id === expectedImage, "Web builder expected image mismatch");
+  return receipt;
+}
+
+async function exportWebBuilder(directory: string, output: string) {
+  check(
+    Bun.deepEquals(readdirSync(directory).sort(), ["docker-client", "image.json", "image.tar"]),
+    "Web builder export contains unexpected files",
+  );
+  const context = await webBuilderContext();
+  const files = await webBuilderFiles(directory);
+  const imageId = await scanImage(
+    join(directory, "image.tar"),
+    join(directory, "image.json"),
+    "amd64",
+    context.source,
+  );
+  const receipt = { schema: 1, ...context, ...files, image_id: imageId };
+  verifyWebBuilderReceipt(receipt, context);
+  await Bun.write(join(directory, "receipt.json"), JSON.stringify(receipt) + "\n");
+  const digest = await webFileHash(join(directory, "receipt.json"), 16 * 1024);
+  const handle = await import("node:fs/promises");
+  await handle.appendFile(
+    output,
+    `image_id=${imageId}\nreceipt_sha256=${digest}\narchive_sha256=${files.archive_sha256}\n`,
+  );
+}
+
+export async function admitWebBuilder(
+  directory: string,
+  expectedReceipt: string,
+  expectedImage: string,
+  context: WebBuilderContext,
+) {
+  check(
+    Bun.deepEquals(readdirSync(directory).sort(), [
+      "docker-client",
+      "image.json",
+      "image.tar",
+      "receipt.json",
+    ]),
+    "Web builder artifact contains unexpected files",
+  );
+  const receipt = await webBuilderReceipt(directory, expectedReceipt, expectedImage, context);
+  for (const [key, digest] of Object.entries(await webBuilderFiles(directory)))
+    check(receipt[key] === digest, "Web builder archive/client/inspection digest mismatch");
+  check(
+    (await scanImage(
+      join(directory, "image.tar"),
+      join(directory, "image.json"),
+      "amd64",
+      String(receipt.source),
+    )) === expectedImage,
+    "Web builder scanned image mismatch",
+  );
+}
+
+async function loadedWebBuilder(
+  directory: string,
+  expectedReceipt: string,
+  expectedImage: string,
+  inspection: string,
+) {
+  const receipt = await webBuilderReceipt(
+    directory,
+    expectedReceipt,
+    expectedImage,
+    await webBuilderContext(),
+  );
+  await webFileHash(inspection, 1024 ** 2);
+  const info = await json(inspection);
+  verifyMetadata(info, "amd64");
+  check(
+    at(info, "Id") === expectedImage &&
+      at(info, "Config", "Labels", "org.opencontainers.image.revision") === receipt.source,
+    "Web builder loaded image/source mismatch",
+  );
 }
 
 export function buildSummary(log: string, info?: unknown) {
@@ -499,6 +722,25 @@ if (import.meta.main) {
       }
       case "scan":
         await scanImage(operand(args, 0), operand(args, 1), operand(args, 2));
+        break;
+      case "web-export":
+        await exportWebBuilder(operand(args, 0), operand(args, 1));
+        break;
+      case "web-admit":
+        await admitWebBuilder(
+          operand(args, 0),
+          operand(args, 1),
+          operand(args, 2),
+          await webBuilderContext(),
+        );
+        break;
+      case "web-loaded":
+        await loadedWebBuilder(
+          operand(args, 0),
+          operand(args, 1),
+          operand(args, 2),
+          operand(args, 3),
+        );
         break;
       case "summary": {
         const inspection = operand(args, 1);

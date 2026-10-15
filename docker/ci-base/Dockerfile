@@ -47,6 +47,12 @@ RUN if id ubuntu >/dev/null 2>&1; then userdel --remove ubuntu; fi \
  && groupadd --gid 1000 ci \
  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash ci
 
+# Keep the existing runtime actor; Web builds use the hosted runner's separate UID.
+RUN groupadd --gid 1001 builder \
+ && useradd --uid 1001 --gid 1001 --create-home --home-dir /home/runner --shell /bin/bash builder \
+ && printf '%s\n' 'builder ALL=(root) NOPASSWD: ALL' > /etc/sudoers.d/ci-builder \
+ && chmod 0440 /etc/sudoers.d/ci-builder
+
 FROM system-tools AS rust-tools
 COPY --from=rust-toolchain --chown=0:0 /usr/local/rustup /opt/rustup
 COPY --from=rust-toolchain --chown=0:0 /usr/local/cargo /opt/cargo

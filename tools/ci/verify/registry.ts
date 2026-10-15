@@ -24,6 +24,7 @@ export type GatedWorkflow = (typeof GATED_WORKFLOWS)[number];
 export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> = {
   web: [
     "web-static",
+    "web-builder",
     "web-checks",
     "web-native-checks",
     "workspace-browser-build",

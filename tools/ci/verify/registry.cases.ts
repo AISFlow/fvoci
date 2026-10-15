@@ -1469,9 +1469,8 @@ function caseList(): MutationCase[] {
   const META_PYTHON =
     'python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"';
   const SQLITE_STEP = "      - name: Prepare pinned SQLite root build inputs\n";
-  const APT_NO_PYTHON =
-    "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev\n";
-  const APT_PYTHON = APT_NO_PYTHON.replace(" gcc", " python3 gcc");
+  const APT_NO_PYTHON = 'test -f "$LIBCLANG_PATH/libclang.so"\n';
+  const APT_PYTHON = "python3 -V\n          " + APT_NO_PYTHON;
   const helper = (job: string) => `web: ${job} Rustup metadata must build and run the locked xtask`;
   const order = (job: string) => `web: ${job} Rustup metadata must follow the toolchain install`;
   const once = (job: string) => `web: ${job} requires exactly one Rustup metadata step`;
@@ -1533,7 +1532,7 @@ function caseList(): MutationCase[] {
     [
       "stale-timing-label",
       "collaboration-install-on",
-      swap("collaboration-install-on-step-05 started", "collaboration-install-on-step-04 started"),
+      swap("collaboration-install-on-step-07 started", "collaboration-install-on-step-06 started"),
       helper("collaboration-install-on"),
     ],
     [
@@ -1675,7 +1674,7 @@ function caseList(): MutationCase[] {
     inJob(
       "collaboration-build",
       swap(
-        "          path: |\n            ~/.cargo/registry\n            ~/.cargo/git\n",
+        "          path: |\n            ${{ runner.temp }}/fvoci-web-builder-state/cargo/registry\n            ${{ runner.temp }}/fvoci-web-builder-state/cargo/git\n",
         "          path: target\n",
       ),
     ),
