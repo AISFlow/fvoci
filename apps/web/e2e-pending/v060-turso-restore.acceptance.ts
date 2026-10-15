@@ -756,7 +756,7 @@ test("Turso restore destination: malformed input publishes nothing and identical
     const before = await jsonObject(page.request.get(base + "/projects"));
     const beforeCounts = observeRestoreCounts();
     expect(beforeCounts.counts.nativeJobs).toBe(0);
-    const beforeDocuments = await jsonObject(page.request.get(base + "/documents"));
+    const beforeDocuments = await jsonObject(page.request.get(base + "/tree"));
     const invalid = Buffer.from("not a native archive");
     const rebound = await reboundArchive(Buffer.from(exported.base64, "base64"));
     const malformedPreflight = await page.request.post(base + "/native-archive/preflight", {
@@ -777,7 +777,7 @@ test("Turso restore destination: malformed input publishes nothing and identical
     });
     expect(malformedRestore.status()).toBe(422);
     expect(await jsonObject(page.request.get(base + "/projects"))).toEqual(before);
-    expect(await jsonObject(page.request.get(base + "/documents"))).toEqual(beforeDocuments);
+    expect(await jsonObject(page.request.get(base + "/tree"))).toEqual(beforeDocuments);
     expect(observeRestoreCounts().counts).toEqual(beforeCounts.counts);
     const preflight = await jsonObject(
       page.request.post(base + "/native-archive/preflight", {
