@@ -45,6 +45,34 @@ export function denied(code: string, run: () => unknown): void {
 }
 
 describe("dispatch admission", () => {
+  test("restore reaches its guarded UI consumer only on exact main source", () => {
+    const restore: Inputs = {
+      phase: "restore",
+      destructive: true,
+      ui_source_sha: A,
+      ui_baseline_sha256: "b".repeat(64),
+      ui_target_sha256: "c".repeat(64),
+    };
+    expect(decide("--consume", context, restore, A)).toEqual({
+      kind: "consume",
+      phase: "restore",
+    });
+    expect(() => {
+      validateUiInputs("restore", restore, A);
+    }).not.toThrow();
+    for (const key of ["ui_baseline_sha256", "ui_target_sha256"] as const) {
+      const invalid = { ...restore };
+      Reflect.deleteProperty(invalid, key);
+      expect(() => {
+        validateUiInputs("restore", invalid, A);
+      }).toThrow(AdmissionError);
+    }
+    for (const ref of [REVIEWED_REF, UI_REVIEWED_REF, "refs/heads/topic"]) {
+      expect(() => decide("--consume", { ...context, ref }, restore, A)).toThrow(AdmissionError);
+    }
+    denied("DESTRUCTIVE_NOT_ALLOWED", () => validateTarget(restore, settings, secrets));
+  });
+
   test("trusted dispatch configuration", () => {
     expect(validateDispatch(context, inputs, A)).toBe("connection");
   });
@@ -196,7 +224,7 @@ describe("dispatch admission", () => {
   });
 
   test("every fixed unimplemented phase refuses a successful no-op", () => {
-    for (const phase of ["crud", "transactions", "persistence", "restore"]) {
+    for (const phase of ["crud", "transactions", "persistence"]) {
       denied("NOT_IMPLEMENTED", () => {
         requireImplemented(phase);
       });
@@ -260,7 +288,7 @@ describe("target configuration", () => {
       expect(
         validateTarget(confirmed, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets),
       ).toBe(phase);
-      if (!["migration", "reset", "ui-ack"].includes(phase))
+      if (!["migration", "reset", "ui-ack", "restore"].includes(phase))
         denied("NOT_IMPLEMENTED", () => {
           requireImplemented(phase);
         });

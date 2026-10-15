@@ -20,6 +20,7 @@ import {
 
 export const ON = "workspace-wiki-selected-backend.spec.ts";
 export const OFF = "workspace-off-selected-backend.spec.ts";
+export const RESTORE = "v060-turso-restore.acceptance.ts";
 
 export const AUDITED_COUNTERS = new Set([
   "event_sequence",
@@ -540,10 +541,16 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
 }
 
 export type Case = [string, Record_];
-export function reportCases(report: unknown, spec: string, titles: string[]): Case[] {
+export function reportCases(
+  report: unknown,
+  spec: string,
+  titles: string[],
+  backend: "libsql-remote" | "sqlite" = "libsql-remote",
+): Case[] {
+  require(backend === "libsql-remote" || spec === RESTORE, "UI_BROWSER_BACKEND_REFUSED");
   require(get(report, "config", "workers") === 1 &&
     same(get(report, "errors"), []) &&
-    get(report, "config", "metadata", "selectedBackend") === "libsql-remote" &&
+    get(report, "config", "metadata", "selectedBackend") === backend &&
     get(report, "stats", "expected") === titles.length &&
     ["unexpected", "flaky", "skipped"].every(
       (k) => get(report, "stats", k) === 0,

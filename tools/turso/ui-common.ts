@@ -19,7 +19,7 @@ export function require(condition: unknown, code: string): asserts condition {
 
 export function failureCode(error: unknown): string {
   const value = error instanceof UiError ? error.message : "";
-  return /^(?:UI|TURSO_UI)_[A-Z_]+$/.test(value) ? value : "UI_CONSUMER_FAILED";
+  return /^(?:UI|TURSO_UI|RESTORE)_[A-Z_]+$/.test(value) ? value : "UI_CONSUMER_FAILED";
 }
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };

@@ -130,6 +130,23 @@ describe("turso-test.yml literal text", () => {
     expect(verifyTursoWorkflowText(text)).toEqual([]);
   });
 
+  test("restore cannot lose its source or observed dataset and target inputs", () => {
+    for (const key of ["ui_source_sha", "ui_baseline_sha256", "ui_target_sha256"]) {
+      const parsed = parseWorkflow("turso-test.yml", text);
+      if (parsed.error) throw new Error("Actual Turso workflow must parse");
+      const data = parsed.data;
+      if (!data) throw new Error("Actual Turso workflow mapping required");
+      const dispatch = get(triggersOf(data), "workflow_dispatch");
+      const inputs = get(dispatch, "inputs");
+      if (!inputs || typeof inputs !== "object" || Array.isArray(inputs))
+        throw new Error("Actual dispatch input mapping required");
+      Reflect.deleteProperty(inputs, key);
+      expect(verifyTursoWorkflow(data)).toContain(
+        "turso-test.yml: fixed phase inputs and non-destructive default",
+      );
+    }
+  });
+
   test("the connection target is published before preparation, for later steps", () => {
     const prefix =
       "set -euo pipefail\n" +

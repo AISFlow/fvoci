@@ -64,7 +64,7 @@ const CONNECTION_COMPILE =
 const DISPATCH_INPUTS = {
   phase: {
     description:
-      "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED",
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack and main-only restore require both destructive gates; others NOT IMPLEMENTED",
     type: "choice",
     default: "connection",
     options: [
@@ -87,17 +87,17 @@ const DISPATCH_INPUTS = {
     default: false,
   },
   ui_source_sha: {
-    description: "ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)",
+    description: "ROOT reviewed exact UI source SHA (ui-baseline, ui-ack and restore only)",
     type: "string",
     default: "",
   },
   ui_baseline_sha256: {
-    description: "ROOT verified just-observed current dataset digest (ui-ack only)",
+    description: "ROOT verified just-observed current dataset digest (ui-ack and restore only)",
     type: "string",
     default: "",
   },
   ui_target_sha256: {
-    description: "ROOT verified just-observed primary target digest (ui-ack only)",
+    description: "ROOT verified just-observed primary target digest (ui-ack and restore only)",
     type: "string",
     default: "",
   },
@@ -111,14 +111,14 @@ const BOOTSTRAP_ADMISSION =
 const RUNTIME_IF =
   TRUSTED.replace(
     "github.event_name == 'workflow_dispatch'",
-    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack'",
+    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore'",
   ) + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''";
 
 const UI_JOB = {
   needs: "admission",
   if:
     "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || " +
-    `github.event.inputs.phase == 'ui-ack') && github.repository == '${REPOSITORY}' && (github.ref == ` +
+    `github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main')) && github.repository == '${REPOSITORY}' && (github.ref == ` +
     `'refs/heads/main' || github.ref == '${REVIEWED_REF}' || github.ref == '${UI_REVIEWED_REF}') && ` +
     "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
   environment: "fvoci-turso-test",
@@ -170,7 +170,7 @@ const UI_JOB = {
         `${TURSO_COMMANDS.uiFreeze}\n`,
     },
     {
-      name: "Actual current primary UI baseline or guarded ON restart OFF consumer",
+      name: "Actual current primary UI baseline, guarded ON restart OFF or six-case restore consumer",
       env: {
         FVOCI_DATABASE_BACKEND: "libsql-remote",
         FVOCI_LIBSQL_URL: "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
