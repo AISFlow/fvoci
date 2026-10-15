@@ -815,6 +815,7 @@ async fn capture_primary(
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
         let mut instance_config = Vec::new();
+        let mut serial_users = Vec::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             phase = "preservation-read";
@@ -827,6 +828,18 @@ async fn capture_primary(
             for row in &rows {
                 phase = "row-hash";
                 let hash = row_hash(row)?;
+                if *name == "users" && policy.is_some() {
+                    phase = "serial-user-witness";
+                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
+                    let mut columns = Vec::new();
+                    for i in 0..remote.column_count() {
+                        let column = remote.column_name(i).ok_or_else(refused)?;
+                        if matches!(column, "id" | "email") {
+                            columns.push((column.to_string(), row.cell(i as usize)?));
+                        }
+                    }
+                    serial_users.push(serial_user_witness(&columns, &hash)?);
+                }
                 if *name == "instance_config" {
                     let FamilyRow::Remote(remote) = row else { return Err(refused()) };
                     let columns = (0..remote.column_count()).map(|i| {
@@ -875,7 +888,7 @@ async fn capture_primary(
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?});
         phase = "serial-observation";
         let checks = match policy {
-            Some(policy) => Some(serial_checks(f, policy).await?),
+            Some(policy) => Some(serial_checks(f, policy, serial_users).await?),
             None => None,
         };
         Ok(PrimaryCapture { dataset, checks })
@@ -908,6 +921,7 @@ struct SerialChecks {
     policy: SerialPolicy,
     policy_sha256: String,
     policy_binding: &'static str,
+    users: Vec<SerialUser>,
     event_head: String,
     relay_completion: RelayCompletion,
     outbox: Vec<RelayObservation>,
@@ -915,6 +929,39 @@ struct SerialChecks {
     background: Vec<BackgroundFact>,
     revision_candidates: Vec<RevisionObservation>,
     automatic_revision_ranks: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialUser {
+    id: Uuid,
+    email: String,
+    row_fingerprint: String,
+}
+
+fn serial_user_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialUser, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, cell)| cell)
+            .ok_or_else(refused)
+    };
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(refused());
+    }
+    Ok(SerialUser {
+        id: cell("id")?.id()?,
+        email: cell("email")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1102,6 +1149,7 @@ const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
 async fn serial_checks(
     f: &mut FamilyTx,
     policy: SerialPolicy,
+    mut users: Vec<SerialUser>,
 ) -> Result<SerialChecks, sqlx::Error> {
     use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
     let clock = f
@@ -1245,6 +1293,7 @@ async fn serial_checks(
         excess,
     )?);
     let policy_bytes = serde_json::to_vec(&policy).map_err(|_| refused())?;
+    users.sort_unstable_by_key(|user| user.id);
     Ok(SerialChecks {
         schema: 1,
         clock_micros: now.to_string(),
@@ -1253,6 +1302,7 @@ async fn serial_checks(
         policy,
         policy_sha256: hex::encode(Sha256::digest(policy_bytes)),
         policy_binding: "required-from-sealed-server",
+        users,
         event_head: head_seq.to_string(),
         relay_completion: relay_completion(head_seq, &outbox),
         outbox,
@@ -1266,6 +1316,45 @@ async fn serial_checks(
 #[cfg(test)]
 mod serial_tests {
     use super::*;
+
+    #[test]
+    fn serial_user_witness_preserves_actual_identity_and_refuses_missing_or_wrong_types() {
+        let columns = vec![
+            ("id".into(), Cell::uuid(Uuid::from_u128(7))),
+            ("email".into(), Cell::text("exact+한글@example.invalid")),
+            (
+                "password_hash".into(),
+                Cell::text("PRIVATE_PASSWORD_HASH_CANARY"),
+            ),
+        ];
+        let fingerprint = "a".repeat(64);
+        let witness = serial_user_witness(&columns, &fingerprint).unwrap();
+        assert_eq!(witness.id, Uuid::from_u128(7));
+        assert_eq!(witness.email, "exact+한글@example.invalid");
+        assert_eq!(witness.row_fingerprint, fingerprint);
+        let encoded = serde_json::to_value(witness).unwrap();
+        assert_eq!(encoded.as_object().unwrap().len(), 3);
+        assert!(!encoded.to_string().contains("PRIVATE_"));
+        assert!(!encoded.to_string().contains("password"));
+        for missing in ["id", "email"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_user_witness(&absent, &fingerprint).is_err());
+        }
+        for invalid in [
+            Cell::Null,
+            Cell::text("not-a-native-uuid"),
+            Cell::Blob(vec![0; 15]),
+        ] {
+            let mut wrong = columns.clone();
+            wrong[0].1 = invalid;
+            assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        }
+        let mut wrong = columns.clone();
+        wrong[1].1 = Cell::Integer(7);
+        assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        assert!(serial_user_witness(&columns, "unbound").is_err());
+    }
 
     fn policy(interval: u32) -> SerialPolicy {
         SerialPolicy {
