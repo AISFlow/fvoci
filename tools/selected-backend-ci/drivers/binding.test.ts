@@ -269,7 +269,9 @@ describe("SQLite ON PRODUCT4 report", () => {
         const metadata = structuredClone(report().config.metadata) as Record<string, unknown>;
         if (fault === "missing") Reflect.deleteProperty(metadata, key);
         else metadata[key] = fault === "wrong-type" ? 1 : key === "titles" ? ["wrong"] : "wrong";
-        expect(() => assertFinalMetadata(metadata, "d".repeat(64), binding)).toThrow();
+        expect(() => {
+          assertFinalMetadata(metadata, "d".repeat(64), binding);
+        }).toThrow();
         expect(() => checkMetadata(metadata)).toThrow();
       }
     }
