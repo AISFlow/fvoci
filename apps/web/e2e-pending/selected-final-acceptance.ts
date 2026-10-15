@@ -326,7 +326,7 @@ if (binding.suite === "products") {
     try {
       if (!socket) throw new Error("SELECTED_FINAL_ACTUAL_SOCKET_MISSING");
       offline = true;
-      await socket.close({ code: 1012, reason: "owned temporary disconnect" });
+      await socket.close({ code: 1000, reason: "owned temporary disconnect" });
       await expect(owner.page.locator('[data-collab-status="connected"]')).toHaveCount(0);
       await editor.focus();
       await owner.page.keyboard.type(" 끊긴 동안 입력");
