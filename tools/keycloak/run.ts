@@ -78,7 +78,11 @@ import {
   type PreparedBinding,
   type PreparedInstance,
 } from "../../apps/web/e2e-keycloak/config.ts";
-import { assertPreparedDelta, type PreparedDelta, type PreparedSnapshot } from "../../apps/web/e2e-keycloak/observer.ts";
+import {
+  assertPreparedDelta,
+  type PreparedDelta,
+  type PreparedSnapshot,
+} from "../../apps/web/e2e-keycloak/observer.ts";
 
 export const MODES = ["flows", "failures", "wrong-secret"] as const;
 export type Backend = "postgres" | "sqlite" | "libsql-remote";
@@ -321,7 +325,11 @@ export interface PreparedPrimary {
   /** The admitted caller binds native reads to its existing target and full original baseline. */
   observe(binding: PreparedBinding): Promise<PreparedSnapshot>;
   /** Reuse the maintained serial native whole-primary/horizon auditor, with unfiltered inputs. */
-  assertWholePrimary(before: PreparedSnapshot, after: PreparedSnapshot, delta: PreparedDelta): Promise<void>;
+  assertWholePrimary(
+    before: PreparedSnapshot,
+    after: PreparedSnapshot,
+    delta: PreparedDelta,
+  ): Promise<void>;
 }
 export interface ConsumerInputs {
   manifest: Manifest;
@@ -342,24 +350,41 @@ export function validatePreparedInputs(inputs: ConsumerInputs): void {
   const p = inputs.prepared;
   if (p === undefined) return;
   require(p.source === inputs.manifest.sourceInputs.source &&
-    p.tree === inputs.manifest.sourceInputs.tree && typeof p.target === "string" && p.target.length > 0 &&
-    typeof p.observe === "function" && typeof p.assertWholePrimary === "function" &&
+    p.tree === inputs.manifest.sourceInputs.tree &&
+    typeof p.target === "string" &&
+    p.target.length > 0 &&
+    typeof p.observe === "function" &&
+    typeof p.assertWholePrimary === "function" &&
     inputs.workspaceSso === undefined, "Keycloak prepared source or target contract differs");
   const identities = new Set<string>();
   for (const mode of MODES) {
     const actors = p.groups?.[mode];
     require(actors !== undefined, "Keycloak prepared group allocation missing");
     validatePreparedActors(actors);
-    for (const identity of [actors.owner.id, actors.workspace.id, actors.workspace.slug,
-      actors.owner.email, actors.member.email, actors.mismatchEmail, actors.crossOriginEmail,
-      ...Object.values(actors.users).flatMap((user) => [user.username, user.email])]) {
+    for (const identity of [
+      actors.owner.id,
+      actors.workspace.id,
+      actors.workspace.slug,
+      actors.owner.email,
+      actors.member.email,
+      actors.mismatchEmail,
+      actors.crossOriginEmail,
+      ...Object.values(actors.users).flatMap((user) => [user.username, user.email]),
+    ]) {
       require(!identities.has(identity), "Keycloak prepared group identities overlap");
       identities.add(identity);
     }
   }
 }
-export function assertPreparedBinding(expected: PreparedBinding, actual: PreparedBinding | undefined): void {
-  require(deepEquals(expected, actual, true), "Keycloak prepared current source, target, group or issuer differs");
+export function assertPreparedBinding(
+  expected: PreparedBinding,
+  actual: PreparedBinding | undefined,
+): void {
+  require(deepEquals(
+    expected,
+    actual,
+    true,
+  ), "Keycloak prepared current source, target, group or issuer differs");
 }
 
 /** One backend, a fresh official Keycloak, the unchanged 8/7/1 browser oracle. */
@@ -528,10 +553,15 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
       const group = join(work, mode);
       mkdirSync(group, { mode: 0o700 });
       inputs.checkInputs();
-      const binding: PreparedBinding | undefined = inputs.prepared ? {
-        source: inputs.prepared.source, tree: inputs.prepared.tree,
-        target: inputs.prepared.target, group: mode, issuer,
-      } : undefined;
+      const binding: PreparedBinding | undefined = inputs.prepared
+        ? {
+            source: inputs.prepared.source,
+            tree: inputs.prepared.tree,
+            target: inputs.prepared.target,
+            group: mode,
+            issuer,
+          }
+        : undefined;
       const database = await inputs.prepare(mode, group, binding);
       const logPath = join(group, "server.log");
       const fd = openSync(logPath, "wx", 0o600);
@@ -545,28 +575,53 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           assertPreparedBinding(binding, before.binding);
           const actors = inputs.prepared.groups[mode];
           const prepared: PreparedInstance = {
-            binding, actors, baseline: { users: before.users, links: before.links },
+            binding,
+            actors,
+            baseline: { users: before.users, links: before.links },
             idpBefore: MODES.slice(0, MODES.indexOf(mode)).flatMap((prior) =>
-              Object.entries(inputs.prepared?.groups[prior].users ?? {}).map(([key, user]) =>
-                [user.username, user.email, USERS[key]?.[1] ?? false,
-                  prior === "failures" && key === "tina" ? [] : [...(USERS[key]?.[2] ?? [])]] as [string, string, boolean, string[]],
-              )),
+              Object.entries(inputs.prepared?.groups[prior].users ?? {}).map(
+                ([key, user]) =>
+                  [
+                    user.username,
+                    user.email,
+                    USERS[key]?.[1] ?? false,
+                    prior === "failures" && key === "tina" ? [] : [...(USERS[key]?.[2] ?? [])],
+                  ] as [string, string, boolean, string[]],
+              ),
+            ),
           };
           validatePreparedInstance(prepared);
-          require(before.memberships.filter((row) => row.workspaceId === actors.workspace.id &&
-            row.userId === actors.owner.id && row.role === "owner").length === 1,
-          "Keycloak prepared owner membership differs");
+          require(before.memberships.filter(
+            (row) =>
+              row.workspaceId === actors.workspace.id &&
+              row.userId === actors.owner.id &&
+              row.role === "owner",
+          ).length === 1, "Keycloak prepared owner membership differs");
           addSecret(actors.owner.password, "prepared owner password");
           addSecret(actors.member.password, "prepared member password");
           groupConfigPath = join(group, "config.json");
-          privateWrite(groupConfigPath, JSON.stringify({
-            ...config, prepared,
-            users: Object.fromEntries(Object.entries(config.users as Record<string, Record<string, string>>).map(
-              ([key, user]) => [key, { ...user, ...actors.users[key as keyof typeof actors.users] }],
-            )),
-            fvoci: { ownerPassword: actors.owner.password, memberPassword: actors.member.password },
-          }));
-        } else require(database.prepared === undefined, "Keycloak prepared backend requires an admitted caller");
+          privateWrite(
+            groupConfigPath,
+            JSON.stringify({
+              ...config,
+              prepared,
+              users: Object.fromEntries(
+                Object.entries(config.users as Record<string, Record<string, string>>).map(
+                  ([key, user]) => [
+                    key,
+                    { ...user, ...actors.users[key as keyof typeof actors.users] },
+                  ],
+                ),
+              ),
+              fvoci: {
+                ownerPassword: actors.owner.password,
+                memberPassword: actors.member.password,
+              },
+            }),
+          );
+        } else
+          require(database.prepared ===
+            undefined, "Keycloak prepared backend requires an admitted caller");
         const app = {
           ...database.environment,
           OIDC_GENERIC_ISSUER: issuer,
@@ -716,34 +771,65 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         codes.push(groupVerdict(out, mode, result.code));
         if (inputs.prepared && before && binding) {
           require(codes.at(-1) === 0, "Keycloak prepared group failed before serial continuation");
-          const delta = JSON.parse(readFileSync(join(out, `prepared-${mode}.private.json`), "utf8")) as PreparedDelta;
+          const delta = JSON.parse(
+            readFileSync(join(out, `prepared-${mode}.private.json`), "utf8"),
+          ) as PreparedDelta;
           const actors = inputs.prepared.groups[mode];
-          const emails = mode === "flows" ? [actors.users.carol.email, actors.mismatchEmail, actors.users.erin.email]
-            : mode === "failures" ? [actors.member.email] : [];
+          const emails =
+            mode === "flows"
+              ? [actors.users.carol.email, actors.mismatchEmail, actors.users.erin.email]
+              : mode === "failures"
+                ? [actors.member.email]
+                : [];
           require(deepEquals([...delta.emails].sort(), emails.sort(), true) &&
-            delta.links.length === (mode === "flows" ? 4 : mode === "failures" ? 2 : 0),
-          "Keycloak prepared browser delta composition differs");
-          const tuples = mode === "flows" ? [
-            [actors.owner.email, actors.users.alice.email],
-            [actors.users.carol.email, actors.users.carol.email],
-            [actors.mismatchEmail, actors.users.mallory.email],
-            [actors.users.erin.email, actors.users.erin.email],
-          ] : mode === "failures" ? [[actors.owner.email, actors.users.alice.email], [actors.member.email, actors.users.tina.email]] : [];
-          require(deepEquals(delta.links.map((row) => [row.user, row.email]).sort(), tuples.sort(), true) &&
-            delta.links.every((row) => row.provider === "generic" && row.issuer === issuer &&
-              /^[a-f0-9-]{36}$/.test(row.subject)) &&
-            new Set(delta.links.map((row) => row.subject)).size === delta.links.length,
-          "Keycloak prepared IdP or actor link delta differs");
+            delta.links.length ===
+              (mode === "flows"
+                ? 4
+                : mode === "failures"
+                  ? 2
+                  : 0), "Keycloak prepared browser delta composition differs");
+          const tuples =
+            mode === "flows"
+              ? [
+                  [actors.owner.email, actors.users.alice.email],
+                  [actors.users.carol.email, actors.users.carol.email],
+                  [actors.mismatchEmail, actors.users.mallory.email],
+                  [actors.users.erin.email, actors.users.erin.email],
+                ]
+              : mode === "failures"
+                ? [
+                    [actors.owner.email, actors.users.alice.email],
+                    [actors.member.email, actors.users.tina.email],
+                  ]
+                : [];
+          require(deepEquals(
+            delta.links.map((row) => [row.user, row.email]).sort(),
+            tuples.sort(),
+            true,
+          ) &&
+            delta.links.every(
+              (row) =>
+                row.provider === "generic" &&
+                row.issuer === issuer &&
+                /^[a-f0-9-]{36}$/.test(row.subject),
+            ) &&
+            new Set(delta.links.map((row) => row.subject)).size ===
+              delta.links.length, "Keycloak prepared IdP or actor link delta differs");
           const closed = await scope.finish(server, true);
           server = undefined;
-          require(closed === 0 && await portClosed(base), "Keycloak prepared server closure failed");
+          require(closed === 0 &&
+            (await portClosed(base)), "Keycloak prepared server closure failed");
           const after = structuredClone(await inputs.prepared.observe(binding));
           assertPreparedDelta(before, after, delta);
           for (const email of delta.emails) {
             const user = after.users.find((row) => row.email === email);
-            require(user !== undefined && after.memberships.filter((row) =>
-              row.workspaceId === actors.workspace.id && row.userId === user.id && row.role === "member").length === 1,
-            "Keycloak prepared member membership differs");
+            require(user !== undefined &&
+              after.memberships.filter(
+                (row) =>
+                  row.workspaceId === actors.workspace.id &&
+                  row.userId === user.id &&
+                  row.role === "member",
+              ).length === 1, "Keycloak prepared member membership differs");
           }
           await inputs.prepared.assertWholePrimary(before, after, delta);
           inputs.checkInputs();

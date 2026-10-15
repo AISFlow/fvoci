@@ -41,7 +41,10 @@ const fvociOrigin = new URL(baseURL).origin;
 const CALLBACK_PATH = "/api/v1/auth/oidc/generic/callback";
 const redirectUri = `${fvociOrigin}${CALLBACK_PATH}`;
 
-const WORKSPACE = prepared?.actors.workspace ?? { slug: "kc-e2e", name: "Keycloak E2E 워크스페이스" };
+const WORKSPACE = prepared?.actors.workspace ?? {
+  slug: "kc-e2e",
+  name: "Keycloak E2E 워크스페이스",
+};
 const OWNER = {
   email: prepared?.actors.owner.email ?? "kc-owner@example.com",
   password: kc?.fvoci.ownerPassword ?? "",
@@ -59,17 +62,27 @@ const crossOriginEmail = prepared?.actors.crossOriginEmail ?? "kc-xorigin@exampl
 const expectedAddedEmails: string[] = [];
 const expectedAddedLinks: LinkRow[] = [];
 const baselineLinks = prepared?.baseline.links ?? [];
-const expectedCount = (fresh: number) => prepared ? prepared.baseline.users.length + fresh - 1 : fresh;
-const sortedLinks = (rows: LinkRow[]) => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+const expectedCount = (fresh: number) =>
+  prepared ? prepared.baseline.users.length + fresh - 1 : fresh;
+const sortedLinks = (rows: LinkRow[]) =>
+  [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 function expectBaselineLinks(): void {
-  if (prepared) expect(JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(baselineLinks)),
-    "the whole original global link set is unchanged").toBe(true);
+  if (prepared)
+    expect(
+      JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(baselineLinks)),
+      "the whole original global link set is unchanged",
+    ).toBe(true);
   else expect(links()).toEqual([]);
 }
 async function rememberLink(email: string, key: keyof KcConfig["users"]): Promise<void> {
   if (!prepared) return;
-  expectedAddedLinks.push({ user: email, provider: "generic", subject: await kcUserId(key),
-    issuer: config().issuer, email: config().users[key].email });
+  expectedAddedLinks.push({
+    user: email,
+    provider: "generic",
+    subject: await kcUserId(key),
+    issuer: config().issuer,
+    email: config().users[key].email,
+  });
 }
 
 /** Preserve the imported oracle and all earlier groups before adding this group's six identities. */
@@ -81,8 +94,13 @@ async function registerPreparedUsers(): Promise<void> {
     expect(rep.status).toBe(200);
     expect(users.status).toBe(200);
     const problems: string[] = [];
-    realmSummary(await rep.json(), await users.json(), config().realm,
-      [...expectedUsers(), ...prepared.idpBefore, ...extra], problems);
+    realmSummary(
+      await rep.json(),
+      await users.json(),
+      config().realm,
+      [...expectedUsers(), ...prepared.idpBefore, ...extra],
+      problems,
+    );
     expect(problems).toEqual([]);
   };
   await verifyUsers([]);
@@ -92,9 +110,14 @@ async function registerPreparedUsers(): Promise<void> {
     if (!oracle) throw new Error("Keycloak fixture user oracle missing");
     const response = await kcAdmin("/users", {
       method: "POST",
-      body: JSON.stringify({ username: user.username, email: user.email, enabled: true,
-        emailVerified: oracle[1], requiredActions: [...oracle[2]],
-        credentials: [{ type: "password", value: user.password, temporary: false }] }),
+      body: JSON.stringify({
+        username: user.username,
+        email: user.email,
+        enabled: true,
+        emailVerified: oracle[1],
+        requiredActions: [...oracle[2]],
+        credentials: [{ type: "password", value: user.password, temporary: false }],
+      }),
     });
     expect(response.status).toBe(201);
     added.push([user.username, user.email, oracle[1], [...oracle[2]]]);
@@ -235,7 +258,8 @@ async function registerRedirectUri(): Promise<void> {
 }
 
 async function kcUserId(username: string): Promise<string> {
-  if (Object.hasOwn(config().users, username)) username = config().users[username as keyof KcConfig["users"]].username;
+  if (Object.hasOwn(config().users, username))
+    username = config().users[username as keyof KcConfig["users"]].username;
   const response = await kcAdmin(`/users?exact=true&username=${encodeURIComponent(username)}`);
   const users = (await response.json()) as Array<{ id: string }>;
   expect(users).toHaveLength(1);
@@ -289,7 +313,7 @@ async function membershipRole(email: string, page: Page): Promise<string | null>
   expect((await me(page))?.email).toBe(email);
   const response = await page.request.get("/api/v1/me/workspaces");
   expect(response.status()).toBe(200);
-  const body = await response.json() as { items: Array<{ id: string; role: string }> };
+  const body = (await response.json()) as { items: Array<{ id: string; role: string }> };
   const rows = body.items.filter((row) => row.id === prepared.actors.workspace.id);
   expect(rows).toHaveLength(1);
   // The admitted parent also verifies the exact native workspace/user tuple after normal closure.
@@ -751,15 +775,24 @@ test.skip(!kc, "opt-in: set by tools/keycloak/run.ts (real Keycloak)");
 test.afterEach(() => {
   if (!prepared) return;
   expect(userCount()).toBe(prepared.baseline.users.length + expectedAddedEmails.length);
-  expect(JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks([...baselineLinks, ...expectedAddedLinks])),
-    "the whole global link set equals the original plus the exact allocated delta").toBe(true);
+  expect(
+    JSON.stringify(sortedLinks(links())) ===
+      JSON.stringify(sortedLinks([...baselineLinks, ...expectedAddedLinks])),
+    "the whole global link set equals the original plus the exact allocated delta",
+  ).toBe(true);
 });
 
 test.afterAll(() => {
   if (!outDir || !kc) return;
-  if (prepared) writeFileSync(`${outDir}/prepared-${mode}.private.json`, JSON.stringify({
-    emails: expectedAddedEmails, links: expectedAddedLinks,
-  }), { mode: 0o600, flag: "wx" });
+  if (prepared)
+    writeFileSync(
+      `${outDir}/prepared-${mode}.private.json`,
+      JSON.stringify({
+        emails: expectedAddedEmails,
+        links: expectedAddedLinks,
+      }),
+      { mode: 0o600, flag: "wx" },
+    );
   writeFileSync(
     `${outDir}/observations-${mode}.json`,
     `${JSON.stringify(observations, null, 2)}\n`,
@@ -1058,7 +1091,11 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
   // ACC-1 (pending decision): the current behaviour is recorded, not changed.
   for (const probe of [
     { key: "C_invite_email_mismatch", invited: mismatchEmail, user: "mallory" as const },
-    { key: "C_invite_email_unverified", invited: kc?.users.erin.email ?? "kc-erin@example.com", user: "erin" as const },
+    {
+      key: "C_invite_email_unverified",
+      invited: kc?.users.erin.email ?? "kc-erin@example.com",
+      user: "erin" as const,
+    },
   ]) {
     test(`C (ACC-1 record): ${probe.key}`, async ({ browser }) => {
       const owner = await newPage(browser);
@@ -1263,8 +1300,13 @@ test.describe("failure boundaries", () => {
     expect(linksOf(PAT.email)).toEqual([]);
     await owner.context.close();
     if (prepared) {
-      expect(await visitCallback(pat.page, patHeld)).toEqual({ status: 302, location: "/settings/account?linked=1" });
-      const unlink = await pat.page.request.post("/api/v1/auth/oidc/generic/unlink", { headers: { Origin: fvociOrigin } });
+      expect(await visitCallback(pat.page, patHeld)).toEqual({
+        status: 302,
+        location: "/settings/account?linked=1",
+      });
+      const unlink = await pat.page.request.post("/api/v1/auth/oidc/generic/unlink", {
+        headers: { Origin: fvociOrigin },
+      });
       expect(unlink.status()).toBe(200);
       expect(linksOf(PAT.email)).toEqual([]);
       await pat.context.close();
@@ -1435,8 +1477,11 @@ window.post = async (url, body) => {
       }
       expect(stateCookie(await context.cookies(fvociOrigin))).toBeUndefined();
       expect(stateCount()).toBe(statesBefore);
-      if (prepared) expect(JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(linksBefore)),
-        "cross-origin refusal preserves all global links").toBe(true);
+      if (prepared)
+        expect(
+          JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(linksBefore)),
+          "cross-origin refusal preserves all global links",
+        ).toBe(true);
       else expect(links()).toEqual(linksBefore);
       expect(invitationAccepted(crossOriginEmail)).toBe(false);
       // The owner's session was attached (same site, other origin) and is intact.
