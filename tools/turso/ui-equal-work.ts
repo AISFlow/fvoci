@@ -123,6 +123,10 @@ export async function measureHosted(
     "browser seed binding required",
   );
   const facts = validateEqualReport(observed.report, "libsql-remote", flow);
+  assert.ok(
+    deepEquals(facts.allocation, seed, true),
+    "observed prepared browser allocation required",
+  );
   return {
     inputs,
     seed,
@@ -181,6 +185,7 @@ function qualify(value: HostedCase): EqualPairReceipt {
   assert.ok(/^[0-9]+$/.test(m.maintenanceIdentity.startTicks));
   assert.ok(
     same(m.browserAllocation, seed) &&
+      same(m.browser.allocation, seed) &&
       same(validateEqualReport(m.report, "libsql-remote", m.flow), m.browser),
   );
   assert.ok(

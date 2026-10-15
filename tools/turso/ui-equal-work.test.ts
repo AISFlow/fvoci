@@ -167,6 +167,7 @@ function one(flow: "on" | "off", previous?: HostedCase): HostedCase {
     ],
   };
   const browser = facts(flow);
+  browser.allocation = structuredClone(seed);
   const live = metrics(
     'fvoci_process_resident_memory_bytes 1024\nfvoci_collab_helper_resident_memory_bytes 0\nfvoci_db_pool_connections{state="idle"} 2\nfvoci_db_pool_connections{state="active"} 0\nfvoci_db_pool_max_connections 5\nfvoci_task_stream_subscribers 0',
   );
@@ -384,6 +385,13 @@ const faults: [string, (value: HostedCase) => void][] = [
     "browser allocation",
     (v) => {
       v.measurement.browserAllocation.document = id(999);
+    },
+  ],
+  [
+    "observed report allocation",
+    (v) => {
+      record(v.measurement.browser, "allocation").document = id(999);
+      v.measurement.report = reporter(v.measurement.browser);
     },
   ],
   [

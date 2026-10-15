@@ -35,6 +35,7 @@ import {
   requiredFixtureInput,
   selectedSetupNeeded,
 } from "./selected-backend-fixture";
+import { equalWorkPreparedMode, parsePreparedEqualWork } from "./equal-work-prepared";
 
 type Schema = components["schemas"];
 // Reuse the wire helper's endpoint classification. Keep total observations
@@ -72,6 +73,25 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
   expect(["on", "off"]).toContain(flow);
   if (!baseURL) throw new Error("allocated base is required");
   const directory = requiredFixtureInput("FVOCI_E2E_EQUAL_WORK_DIR");
+  const preparedMode = equalWorkPreparedMode(process.env.FVOCI_E2E_EQUAL_WORK_PREPARED, backend);
+  if (preparedMode) expect(selectedSetupNeeded()).toBe(false);
+  const prepared = preparedMode
+    ? parsePreparedEqualWork(
+        JSON.parse(readFileSync(requiredFixtureInput("FVOCI_E2E_TURSO_ACTOR_BINDING"), "utf8")),
+        {
+          backend,
+          flow,
+          namespace: requiredFixtureInput("FVOCI_E2E_TURSO_NAMESPACE"),
+          source: requiredFixtureInput("FVOCI_E2E_TURSO_SOURCE"),
+          tree: requiredFixtureInput("FVOCI_E2E_TURSO_TREE"),
+          targetSha256: requiredFixtureInput("FVOCI_E2E_TURSO_TARGET_SHA256"),
+          ownerEmail: admin.email,
+          memberEmail: member.email,
+          workspaceSlug: admin.workspaceSlug,
+        },
+      )
+    : undefined;
+  let observedMember: string | undefined;
   let phase = 0;
   const marker = async (name: string) => {
     expect(name).toBe(phases[phase]);
@@ -123,13 +143,16 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
     await expect(p.locator('.fvoci-editor .ProseMirror[contenteditable="true"]')).toBeVisible();
   };
   try {
-    expect((await page.request.get("/api/v1/setup")).status()).toBe(200);
-    expect(selectedSetupNeeded()).toBe(true);
-    await ensureInstanceSetup(page);
+    if (!prepared) {
+      expect((await page.request.get("/api/v1/setup")).status()).toBe(200);
+      expect(selectedSetupNeeded()).toBe(true);
+      await ensureInstanceSetup(page);
+    }
     await login(page, admin.email, admin.password);
     const ownerResponse = await page.request.get("/api/v1/auth/me");
     expect(ownerResponse.status()).toBe(200);
     const owner = (await ownerResponse.json()) as Schema["SessionUserOutput"];
+    if (prepared) expect(owner.userId).toBe(prepared.allocation.owner);
     const workspaces = await page.request.get("/api/v1/me/workspaces");
     expect(workspaces.status()).toBe(200);
     const workspace = ((await workspaces.json()) as Schema["WorkspaceListResponse"]).items.find(
@@ -137,25 +160,35 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
     );
     if (!workspace) throw new Error("setup workspace missing");
     expect(workspace.role).toBe("owner");
+    if (prepared) expect(workspace.id).toBe(prepared.allocation.workspace);
     const documents = `/api/v1/workspaces/${workspace.id}/documents`;
-    await page.goto(`/w/${admin.workspaceSlug}/wiki`);
-    const created = page.waitForResponse(
-      (r) => r.request().method() === "POST" && new URL(r.url()).pathname === documents,
-    );
-    await page.getByRole("button", { name: "새 문서", exact: true }).click();
-    const response = await created;
-    expect(response.status()).toBe(201);
-    const document = (await response.json()) as Schema["DocumentMetaResponse"];
+    let document: Schema["DocumentMetaResponse"];
+    if (prepared) {
+      const response = await page.request.get(`${documents}/${prepared.allocation.document}`);
+      expect(response.status()).toBe(200);
+      document = (await response.json()) as Schema["DocumentMetaResponse"];
+      expect(document.id).toBe(prepared.allocation.document);
+      expect(document.displayId).toBe(prepared.displayId);
+    } else {
+      await page.goto(`/w/${admin.workspaceSlug}/wiki`);
+      const created = page.waitForResponse(
+        (r) => r.request().method() === "POST" && new URL(r.url()).pathname === documents,
+      );
+      await page.getByRole("button", { name: "새 문서", exact: true }).click();
+      const response = await created;
+      expect(response.status()).toBe(201);
+      document = (await response.json()) as Schema["DocumentMetaResponse"];
+    }
     expect(document.id).toMatch(UUID_RE);
     expect(document.createdBy).toBe(owner.userId);
     expect(document.workspaceId).toBe(workspace.id);
     const path = `${documents}/${document.id}`;
     if (typeof document.displayId !== "string") throw new Error("created wiki display ID missing");
     const url = `/w/${admin.workspaceSlug}/${document.displayId}`;
-    installSelectedMember(backend);
+    if (!prepared) installSelectedMember(backend);
     // The real Create command already routes to this document. A second full
     // navigation creates a second transport before the first observer retires.
-    await mount(page, url, false);
+    await mount(page, url, !!prepared);
     expect((await editorShape(page)).text).toBe("");
     const readback = async (text: string) => {
       const fresh = await newCollabContext(browser, baseURL);
@@ -178,6 +211,18 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         const identity = await reader.request.get("/api/v1/auth/me");
         expect(identity.status()).toBe(200);
         const user = (await identity.json()) as Schema["SessionUserOutput"];
+        if (prepared) {
+          expect(user.userId).toBe(prepared.allocation.member);
+          observedMember = user.userId;
+          if (text === workload.warm) {
+            // The prepared membership check stays before the warm/start
+            // markers; the measured three save/readback iterations are unchanged.
+            const memberships = await reader.request.get("/api/v1/me/workspaces");
+            expect(memberships.status()).toBe(200);
+            const spaces = (await memberships.json()) as Schema["WorkspaceListResponse"];
+            expect(spaces.items.find((w) => w.id === workspace.id)?.role).toBe("member");
+          }
+        }
         expect(user.userId).not.toBe(owner.userId);
         expect(user.sessionId).not.toBe(owner.sessionId);
         await mount(reader, url);
@@ -328,6 +373,17 @@ test(equalTitle, async ({ browser, baseURL }, info) => {
         ownerAfterClose,
         freshConnections,
         contextsClosed: true,
+        ...(prepared
+          ? {
+              allocation: {
+                ...prepared.allocation,
+                owner: owner.userId,
+                member: observedMember,
+                workspace: workspace.id,
+                document: document.id,
+              },
+            }
+          : {}),
         roomDefinition:
           "unique owner wire routing keys; collaboration sockets use the existing /collab classification and WebSocket.isClosed; totals are separate; context close is positive retirement evidence; not a server room registry gauge",
         latencyDefinition:
