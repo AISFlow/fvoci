@@ -13,10 +13,373 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as runner from "./run.ts";
-import type { PreparedSnapshot } from "../../apps/web/e2e-keycloak/observer.ts";
-import type { PreparedOperationContext, PreparedPrimary } from "./run.ts";
+import {
+  preparedReadValue,
+  type PreparedReadRequest,
+  type PreparedSnapshot,
+} from "../../apps/web/e2e-keycloak/observer.ts";
+import type { PreparedActors } from "../../apps/web/e2e-keycloak/config.ts";
+import type { PreparedOperationContext, PreparedPrimary, PreparedReadContext } from "./run.ts";
 
 const audit = runner.auditPreparedOperation;
+
+function readFixture() {
+  const binding = {
+    source: "a".repeat(40),
+    tree: "b".repeat(40),
+    target: "owned-target",
+    group: "failures" as const,
+    issuer: "owned-issuer",
+  };
+  const actors: PreparedActors = {
+    owner: { id: "1".repeat(36), email: "owner@example.com", password: "unused" },
+    member: { email: "member@example.com", password: "unused" },
+    workspace: { id: "2".repeat(36), slug: "owned", name: "owned" },
+    mismatchEmail: "mismatch@example.com",
+    crossOriginEmail: "cross@example.com",
+    users: Object.fromEntries(
+      ["alice", "bob", "carol", "mallory", "erin", "tina"].map((key) => [
+        key,
+        { username: `owned-${key}`, email: `${key}@example.com` },
+      ]),
+    ) as PreparedActors["users"],
+  };
+  const child = { pid: 201 } as PreparedReadContext["child"];
+  const peer = { pid: 203, startTicks: "567", parentPid: 202, state: "S" };
+  const context: PreparedReadContext = {
+    binding,
+    actors,
+    ordinal: 4,
+    checkpointTaken: false,
+    child,
+    peer,
+    scope: {
+      allocations: [{ process: child, label: "keycloak-command", closed: false, forced: false }],
+      entries: new Map([
+        [
+          "peer",
+          { identity: peer, label: "descendant", allocation: 0, pidfd: null, reaped: false },
+        ],
+      ]),
+      retired: () => false,
+    },
+  };
+  const request: PreparedReadRequest = {
+    binding: structuredClone(binding),
+    ordinal: 5,
+    actor: actors.owner.email,
+    input: { operation: "links" },
+    peer: { pid: peer.pid, startTicks: peer.startTicks },
+  };
+  return { context, request };
+}
+
+test("prepared fixed reads admit only the next owned peer request and isolate caller mutations", () => {
+  const { context, request } = readFixture();
+  const accepted = runner.acceptPreparedRead(request, context);
+  expect(accepted).toEqual(request);
+  accepted.binding.target = "changed";
+  expect(context.binding.target).toBe("owned-target");
+  for (const operation of ["user", "sessions", "invitation"] as const) {
+    request.actor = context.actors.member.email;
+    request.input = { operation, email: request.actor };
+    expect(runner.acceptPreparedRead(request, context).input).toEqual(request.input);
+  }
+});
+
+for (const [label, mutate] of [
+  [
+    "source",
+    (f) => {
+      f.request.binding.source = "d".repeat(40);
+    },
+  ],
+  [
+    "tree",
+    (f) => {
+      f.request.binding.tree = "e".repeat(40);
+    },
+  ],
+  [
+    "target",
+    (f) => {
+      f.request.binding.target = "foreign";
+    },
+  ],
+  [
+    "group",
+    (f) => {
+      f.request.binding.group = "flows";
+    },
+  ],
+  [
+    "issuer",
+    (f) => {
+      f.request.binding.issuer = "foreign";
+    },
+  ],
+  [
+    "duplicate",
+    (f) => {
+      f.request.ordinal = 4;
+    },
+  ],
+  [
+    "out-of-order",
+    (f) => {
+      f.request.ordinal = 6;
+    },
+  ],
+  [
+    "fractional ordinal",
+    (f) => {
+      f.request.ordinal = 4.5;
+    },
+  ],
+  [
+    "foreign actor",
+    (f) => {
+      f.request.actor = "foreign@example.com";
+    },
+  ],
+  [
+    "foreign email",
+    (f) => {
+      f.request.actor = "foreign@example.com";
+      f.request.input = { operation: "user", email: f.request.actor };
+    },
+  ],
+  [
+    "different actor",
+    (f) => {
+      f.request.input = { operation: "sessions", email: f.context.actors.member.email };
+    },
+  ],
+  [
+    "PID",
+    (f) => {
+      f.request.peer.pid++;
+    },
+  ],
+  [
+    "startTicks",
+    (f) => {
+      f.request.peer.startTicks = "999";
+    },
+  ],
+  [
+    "actual identity",
+    (f) => {
+      f.context.peer = { ...f.context.peer, startTicks: "888" };
+    },
+  ],
+  [
+    "zombie peer",
+    (f) => {
+      f.context.peer = { ...f.context.peer, state: "Z" };
+    },
+  ],
+  [
+    "retired peer",
+    (f) => {
+      f.context.scope.retired = () => true;
+    },
+  ],
+  [
+    "closed allocation",
+    (f) => {
+      const a = f.context.scope.allocations[0];
+      if (a) a.closed = true;
+    },
+  ],
+  [
+    "forced allocation",
+    (f) => {
+      const a = f.context.scope.allocations[0];
+      if (a) a.forced = true;
+    },
+  ],
+  [
+    "missing allocation",
+    (f) => {
+      f.context.scope.allocations.length = 0;
+    },
+  ],
+  [
+    "other allocation",
+    (f) => {
+      const e = f.context.scope.entries.get("peer");
+      if (e) e.allocation = 1;
+    },
+  ],
+  [
+    "missing captured peer",
+    (f) => {
+      f.context.scope.entries.clear();
+    },
+  ],
+] satisfies Array<[string, (f: ReturnType<typeof readFixture>) => void]>) {
+  test(`prepared fixed read refuses ${label}`, () => {
+    const f = readFixture();
+    mutate(f);
+    expect(() => runner.acceptPreparedRead(f.request, f.context)).toThrow("Keycloak prepared");
+  });
+}
+
+test("prepared reads reject malformed, arbitrary and extra-field operations", () => {
+  const { context, request } = readFixture();
+  for (const value of [
+    null,
+    [],
+    {},
+    { ...request, path: "untrusted" },
+    { ...request, input: { operation: "sql", sql: "untrusted" } },
+    { ...request, input: { operation: "links", email: context.actors.owner.email } },
+    {
+      ...request,
+      input: { operation: "membership", email: context.actors.owner.email, slug: "owned" },
+    },
+    { ...request, peer: { ...request.peer, approved: true } },
+  ])
+    expect(() => runner.acceptPreparedRead(value, context)).toThrow("Keycloak prepared");
+});
+
+test("the one before-unlink checkpoint binds failure group/member/bob/exact subject", () => {
+  const { context, request } = readFixture();
+  request.actor = context.actors.member.email;
+  request.input = {
+    operation: "before-unlink",
+    email: request.actor,
+    identityEmail: context.actors.users.bob.email,
+    subject: "3".repeat(36),
+  };
+  expect(runner.acceptPreparedRead(request, context)).toEqual(request);
+  const input = request.input;
+  for (const bad of [
+    { ...input, email: context.actors.owner.email },
+    { ...input, identityEmail: context.actors.users.alice.email },
+    { ...input, subject: "foreign" },
+  ])
+    expect(() => runner.acceptPreparedRead({ ...request, input: bad }, context)).toThrow();
+  context.checkpointTaken = true;
+  expect(() => runner.acceptPreparedRead(request, context)).toThrow();
+  context.checkpointTaken = false;
+  context.binding = { ...context.binding, group: "flows" };
+  request.binding = structuredClone(context.binding);
+  expect(() => runner.acceptPreparedRead(request, context)).toThrow();
+});
+
+test("fixed frames reject truncation, extra frames, oversized bytes and malformed UTF-8 without quoting bytes", () => {
+  const { request } = readFixture();
+  const valid = Buffer.from(JSON.stringify(request) + "\n");
+  expect(runner.preparedReadFrame(valid)).toEqual(request);
+  for (const bytes of [
+    valid.subarray(0, -1),
+    Buffer.concat([valid, valid]),
+    Buffer.alloc(4097),
+    Buffer.from("private-canary\n"),
+    Buffer.from([0xff, 10]),
+    Buffer.from("{}\n"),
+  ]) {
+    expect(() => runner.preparedReadFrame(bytes)).toThrow("Keycloak prepared read frame differs");
+  }
+});
+
+test("the parent read is awaited, propagates its original error, and cannot return raw native data", async () => {
+  const { request } = readFixture();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false,
+    settled = false;
+  const pending = runner
+    .readPreparedOperation(
+      {
+        observeOperation: async (r) => {
+          expect(r).toEqual(request);
+          r.binding.target = "mutation";
+          entered = true;
+          await gate;
+          return { value: [], rollback: "confirmed", lifecycleDrain: "confirmed", leases: 0 };
+        },
+      },
+      request,
+    )
+    .then((value) => {
+      settled = true;
+      return value;
+    });
+  expect(entered).toBe(true);
+  expect(settled).toBe(false);
+  release();
+  expect(await pending).toEqual([]);
+  expect(request.binding.target).toBe("owned-target");
+  const original = new Error("parent-checkpoint-rejected");
+  const failure = await runner
+    .readPreparedOperation(
+      {
+        observeOperation: () => {
+          throw original;
+        },
+      },
+      request,
+    )
+    .catch((error: unknown) => error);
+  expect(failure).toBe(original);
+  const datasetFailure = await runner
+    .readPreparedOperation({ observeOperation: () => Promise.resolve({ dataset: {} }) }, request)
+    .catch((error: unknown) => error);
+  expect(datasetFailure).toBeInstanceOf(Error);
+  expect(String(datasetFailure)).toContain("Keycloak prepared native closure differs");
+  const missingFailure = await runner
+    .readPreparedOperation({} as Pick<PreparedPrimary, "observeOperation">, request)
+    .catch((error: unknown) => error);
+  expect(missingFailure).toBeInstanceOf(Error);
+  expect(String(missingFailure)).toContain("callback missing");
+});
+
+test("only bounded OIDC projections and ACK can leave the parent", () => {
+  const envelope = (value: unknown) => ({
+    value,
+    rollback: "confirmed",
+    lifecycleDrain: "confirmed",
+    leases: 0,
+  });
+  const row = {
+    user: "owner@example.com",
+    provider: "generic",
+    subject: "owned-subject",
+    issuer: null,
+    email: null,
+  };
+  expect(preparedReadValue({ operation: "links" }, envelope([row]))).toEqual([row]);
+  for (const value of [
+    [{ ...row, token: "private-canary" }],
+    Array(10001).fill(row),
+    [{ ...row, subject: "s".repeat(513) }],
+  ])
+    expect(() => preparedReadValue({ operation: "links" }, envelope(value))).toThrow();
+  for (const result of [
+    { ...envelope([]), dataset: {} },
+    { ...envelope([]), leases: 1 },
+    { ...envelope([]), rollback: "missing" },
+    { ...envelope([]), lifecycleDrain: "missing" },
+  ])
+    expect(() => preparedReadValue({ operation: "links" }, result)).toThrow();
+  for (const value of [-1, 0.5, NaN, "1"])
+    expect(() => preparedReadValue({ operation: "users" }, envelope(value))).toThrow();
+  expect(preparedReadValue({ operation: "users" }, envelope(8))).toBe(8);
+  const checkpoint = {
+    operation: "before-unlink" as const,
+    email: "member@example.com",
+    identityEmail: "bob@example.com",
+    subject: "3".repeat(36),
+  };
+  expect(preparedReadValue(checkpoint, { ack: true })).toBeNull();
+  for (const result of [{ ack: false }, { ack: true, dataset: {} }, envelope(null)])
+    expect(() => preparedReadValue(checkpoint, result)).toThrow();
+});
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const close of cleanups.splice(0)) close();

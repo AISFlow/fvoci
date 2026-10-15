@@ -126,6 +126,9 @@ function inputs(): ConsumerInputs {
       observe: () => {
         throw new Error("runtime touched");
       },
+      observeOperation: () => {
+        throw new Error("runtime touched");
+      },
       assertWholePrimary: async () => {},
     },
   };
@@ -224,6 +227,9 @@ describe("Keycloak spec config", () => {
       },
       (p: NonNullable<ConsumerInputs["prepared"]>) => {
         p.observe = undefined as unknown as typeof p.observe;
+      },
+      (p: NonNullable<ConsumerInputs["prepared"]>) => {
+        p.observeOperation = undefined as unknown as typeof p.observeOperation;
       },
       (p: NonNullable<ConsumerInputs["prepared"]>) => {
         p.assertWholePrimary = undefined as unknown as typeof p.assertWholePrimary;
