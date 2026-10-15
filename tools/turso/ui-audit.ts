@@ -2,12 +2,22 @@
 // preservation audit. No process, network or file system access except the
 // bounded server log read in maintenanceReceipts.
 import { deepEquals } from "bun";
-import { readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { basename } from "node:path";
 import { jsonInteger } from "../selected-backend-ci/io.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
 import { digest } from "../selected-backend-ci/io.ts";
-import type { Scope } from "./ui-processes.ts";
+import type { Scope, Child } from "./ui-processes.ts";
+import type { Manifest } from "./ui-record.ts";
 import {
   canonical,
   decodeUtf8,
@@ -153,6 +163,73 @@ export interface RoomRetirement {
   targetSha256: string;
   logSha256: string;
   receipts: Record_[];
+  source: string;
+  tree: string;
+  executable: { path: string; sha256: string };
+}
+
+/** Direct producer handles only; never serialized into a continuation or loaded from JSON. */
+export interface RoomLogOrigin {
+  source: string;
+  tree: string;
+  executable: { path: string; sha256: string };
+  targetSha256: string;
+  identity: { pid: number; startTicks: string };
+  retiredIdentity: { pid: number; startTicks: string };
+  child: Child;
+  mapping: {
+    native: { pid: number; startTicks: string };
+    host: { pid: number; startTicks: string };
+    clientPid: number;
+  };
+  log: { path: string; fd: number; dev: number; ino: number; uid: number; gid: number };
+}
+
+export function captureRoomLog(
+  scope: Scope,
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: Child,
+  identity: RoomLogOrigin["identity"],
+  targetSha256: string,
+  retiredIdentity = identity,
+): RoomLogOrigin {
+  const opened = fstatSync(fd),
+    file = lstatSync(path);
+  const allocation = scope.allocations.findIndex((a) => a.process === child);
+  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
+  const executable = manifest.binaries["fvoci-server"];
+  require(executable !== undefined &&
+    /^[a-f0-9]{40}$/.test(manifest.sourceInputs.source) &&
+    /^[a-f0-9]{40}$/.test(manifest.sourceInputs.tree) &&
+    /^[a-f0-9]{64}$/.test(targetSha256) &&
+    identity.startTicks === retiredIdentity.startTicks &&
+    allocation >= 0 &&
+    entry?.allocation === allocation &&
+    !scope.retired(retiredIdentity) &&
+    opened.isFile() &&
+    file.isFile() &&
+    !file.isSymbolicLink() &&
+    realpathSync(path) === path &&
+    file.dev === opened.dev &&
+    file.ino === opened.ino &&
+    file.uid === process.getuid?.() &&
+    file.gid === process.getgid?.() &&
+    (file.mode & 0o777) === 0o600 &&
+    file.nlink === 1 &&
+    digest(readFileSync(executable.path)) === executable.sha256, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return {
+    source: manifest.sourceInputs.source,
+    tree: manifest.sourceInputs.tree,
+    executable: { path: executable.path, sha256: executable.sha256 },
+    targetSha256,
+    identity,
+    retiredIdentity,
+    child,
+    mapping: { native: { ...identity }, host: { ...retiredIdentity }, clientPid: child.pid },
+    log: { path, fd, dev: file.dev, ino: file.ino, uid: file.uid, gid: file.gid },
+  };
 }
 
 /** Native SQL clock resolution is milliseconds; compare without JS rounding. */
@@ -801,18 +878,79 @@ const uuidFromHex = (hex: string) =>
 /** Called only after actual normal stop and the parent's process observation. */
 export function roomRetirement(
   scope: Scope,
-  logpath: string,
-  identity: { pid: number; startTicks: string },
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  origin: RoomLogOrigin,
   targetSha256: string,
-  retiredIdentity = identity,
 ): RoomRetirement {
+  const { identity, retiredIdentity, log } = origin;
+  require(origin.source === manifest.sourceInputs.source &&
+    same(origin.identity, origin.mapping.native) &&
+    same(origin.retiredIdentity, origin.mapping.host) &&
+    origin.child.pid === origin.mapping.clientPid &&
+    origin.tree === manifest.sourceInputs.tree &&
+    same(origin.executable, {
+      path: manifest.binaries["fvoci-server"]?.path,
+      sha256: manifest.binaries["fvoci-server"]?.sha256,
+    }) &&
+    digest(readFileSync(origin.executable.path)) === origin.executable.sha256 &&
+    origin.targetSha256 === targetSha256, "UI_SERIAL_ROOM_ORIGIN_CHANGED");
+  const allocation = scope.allocations.findIndex((a) => a.process === origin.child);
+  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
   require(scope.closure() &&
+    allocation >= 0 &&
+    entry?.allocation === allocation &&
+    scope.allocations[allocation]?.closed === true &&
     scope.allocations.every((allocation) => !allocation.forced) &&
     scope.entries.has(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks) &&
     scope.retired(retiredIdentity), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
-  require(statSync(logpath).size <= 32 * 1024 * 1024, "UI_SERVER_LOG_CAP_REFUSED");
-  const bytes = readFileSync(logpath),
+  const inspect = () => {
+    try {
+      const opened = fstatSync(log.fd),
+        file = lstatSync(log.path);
+      require(file.isFile() &&
+        opened.isFile() &&
+        !file.isSymbolicLink() &&
+        realpathSync(log.path) === log.path &&
+        file.dev === log.dev &&
+        file.ino === log.ino &&
+        opened.dev === log.dev &&
+        opened.ino === log.ino &&
+        file.uid === log.uid &&
+        file.gid === log.gid &&
+        file.uid === process.getuid?.() &&
+        file.gid === process.getgid?.() &&
+        (file.mode & 0o777) === 0o600 &&
+        file.nlink === 1 &&
+        file.size === opened.size &&
+        file.size <= 32 * 1024 * 1024, "UI_SERIAL_ROOM_LOG_CHANGED");
+      return { size: file.size, mtime: file.mtimeMs, ctime: file.ctimeMs };
+    } catch {
+      throw new Error("UI_SERIAL_ROOM_LOG_CHANGED");
+    }
+  };
+  const before = inspect();
+  // Reopen this exact parent's numeric descriptor read-only; do not move its write offset.
+  const descriptor = "/proc/self/fd/" + String(log.fd);
+  const readBound = () => {
+    const reader = openSync(descriptor, "r"),
+      bytes = Buffer.alloc(before.size + 1);
+    try {
+      const file = fstatSync(reader);
+      require(file.dev === log.dev && file.ino === log.ino, "UI_SERIAL_ROOM_LOG_CHANGED");
+      let total = 0;
+      while (total < bytes.length) {
+        const count = readSync(reader, bytes, total, bytes.length - total, total);
+        if (count === 0) break;
+        total += count;
+      }
+      return bytes.subarray(0, total);
+    } finally {
+      closeSync(reader);
+    }
+  };
+  const bytes = readBound(),
     receipts: Record_[] = [];
+  require(bytes.length === before.size && same(before, inspect()), "UI_SERIAL_ROOM_LOG_CHANGED");
   const marker = "FVOCI_ROOM_RELEASE ";
   for (const line of pySplitlines(decodeUtf8(bytes))) {
     const at = line.indexOf(marker);
@@ -836,7 +974,20 @@ export function roomRetirement(
   require(receipts.length <= 10000 &&
     /^[a-f0-9]{64}$/.test(targetSha256) &&
     /^[0-9]+$/.test(identity.startTicks), "UI_SERIAL_ROOM_RECEIPT_REFUSED");
-  return { identity, retiredIdentity, targetSha256, logSha256: digest(bytes), receipts };
+  const logSha256 = digest(bytes);
+  require(same(before, inspect()) &&
+    digest(readBound()) === logSha256 &&
+    same(before, inspect()), "UI_SERIAL_ROOM_LOG_CHANGED");
+  return {
+    identity,
+    retiredIdentity,
+    targetSha256,
+    logSha256,
+    receipts,
+    source: origin.source,
+    tree: origin.tree,
+    executable: { ...origin.executable },
+  };
 }
 
 /** Expiry is necessary, but only a real confirmed release and retirement authorize it. */

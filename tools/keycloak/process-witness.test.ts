@@ -53,6 +53,51 @@ test("strict standalone DTO accepts digests and refuses arbitrary paths, command
   ])
     expect(() => parseInput(value)).toThrow();
 });
+test("prepared actor binds both protected app and immediate Bun caller while legacy stays1000", () => {
+  const actual = view(),
+    prepared = { ...input(), actor: { uid: 1001, gid: 1002 } };
+  actual.uids = [1001, 1001, 1001, 1001];
+  actual.gids = [1002, 1002, 1002, 1002];
+  expect(parseInput(prepared)).toEqual(prepared);
+  expect(evaluate(prepared, actual).accepted).toBe(true);
+  expect(evaluate(input(), actual).accepted).toBe(false);
+  const frame = {
+    ...actual.parentBefore,
+    uids: actual.uids,
+    gids: actual.gids,
+    executableName: "bun",
+    executableSha256: "c".repeat(64),
+  };
+  expect(callerFrameMatches(prepared, frame, "c".repeat(64))).toBe(true);
+  expect(
+    callerFrameMatches(prepared, { ...frame, uids: [1000, 1000, 1000, 1000] }, "c".repeat(64)),
+  ).toBe(false);
+  actual.environment.FVOCI_TEST_TURSO_DESTRUCTIVE = "true";
+  expect(evaluate(prepared, actual).accepted).toBe(false);
+  for (const actor of [
+    { uid: 0, gid: 1001 },
+    { uid: 1001, gid: 0 },
+    { uid: -1, gid: 1001 },
+    { uid: 1.5, gid: 1001 },
+  ])
+    expect(() => parseInput({ ...input(), actor })).toThrow("WITNESS_INPUT_REFUSED");
+  const remote = {
+    ...prepared,
+    environmentDigests: {
+      FVOCI_DATABASE_BACKEND: digest("libsql-remote"),
+      FVOCI_LIBSQL_URL: digest("synthetic"),
+      FVOCI_LIBSQL_AUTH_TOKEN: digest("synthetic"),
+      OIDC_GENERIC_CLIENT_SECRET: digest("synthetic"),
+    },
+  };
+  expect(() => parseInput(remote)).toThrow("WITNESS_INPUT_REFUSED");
+  expect(() =>
+    parseInput({
+      ...remote,
+      environmentDigests: { ...remote.environmentDigests, SSL_CERT_FILE: digest("synthetic-ca") },
+    }),
+  ).not.toThrow();
+});
 test("witness facts require stable owning identities, the real actor/binary and complete matching app input", () => {
   expect(evaluate(input(), view()).accepted).toBe(true);
   for (const mutate of [

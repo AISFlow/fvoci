@@ -23,6 +23,7 @@ import {
   roomRetirement,
   retainRoomHistory,
   assertRoomClosure,
+  type RoomRetirement,
 } from "./ui-audit.ts";
 import {
   diagnosticJson,
@@ -49,7 +50,7 @@ import {
   allocationEnvironment,
   allocationIdentity,
 } from "./ui-flow.ts";
-import { browser, fixture, start, stop } from "./ui-native.ts";
+import { browser, fixture, start, stop, serverRoomLog } from "./ui-native.ts";
 import { withProcesses, type Scope, type UiProcesses } from "./ui-processes.ts";
 import { currentBuild, recheckFinalBrowsers, type Manifest } from "./ui-record.ts";
 import { executeRestore } from "./ui-restore.ts";
@@ -190,13 +191,23 @@ function equalConfig(environment: Record<string, string>, policy: SerialPolicy):
 }
 
 function oidcEnvironment(environment: Record<string, string>): Record<string, string> {
-  return {
+  const env = {
     ...cleanEnv(),
     FVOCI_KC_OBSERVER_SELECTED: "1",
     E2E_DATABASE_BACKEND: "libsql-remote",
     FVOCI_LIBSQL_URL: environment.FVOCI_LIBSQL_URL as string,
     FVOCI_LIBSQL_AUTH_TOKEN: environment.FVOCI_LIBSQL_AUTH_TOKEN as string,
+    SSL_CERT_FILE: environment.SSL_CERT_FILE as string,
   };
+  Reflect.deleteProperty(env, "SSL_CERT_DIR");
+  return env;
+}
+
+/** Fixture mutation authority stays in the parent, outside the normal Keycloak app. */
+export function preparedKeycloakAppEnvironment(environment: Record<string, string>) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => !key.startsWith("FVOCI_TEST_")),
+  );
 }
 
 async function readOidc(
@@ -284,12 +295,8 @@ async function executeFinalKeycloak(
         return Promise.resolve({
           backend: "libsql-remote" as const,
           prepared: binding,
-          environment: allocationEnvironment(
-            manifest,
-            environment,
-            actors.workspace.slug,
-            "on",
-            storage,
+          environment: preparedKeycloakAppEnvironment(
+            allocationEnvironment(manifest, environment, actors.workspace.slug, "on", storage),
           ),
           observer: oidcEnvironment(environment),
           close: async () => {},
@@ -392,10 +399,12 @@ async function executeFinalKeycloak(
             witness.server.identity,
             target,
           );
+          require(witness.log.origin !== undefined &&
+            witness.log.fd === witness.log.origin.log.fd, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
           retainRoomHistory(
             current,
             accepted,
-            roomRetirement(scope, witness.log.path, witness.server.identity, target),
+            roomRetirement(scope, manifest, witness.log.origin, target),
           );
           require(deepEquals(
             maintenance,
@@ -521,8 +530,10 @@ async function executeEqualCase(
     const serverIdentity = allocationIdentity(running.server);
     let original: unknown = null;
     const cleanup: string[] = [];
+    let retired: RoomRetirement | undefined;
     let measurement: HostedCase["measurement"] | undefined, closure: Record_ | undefined;
     try {
+      running.roomLog = serverRoomLog(scope, manifest, running, directory, audit.targetSha256);
       const logged = await requestPublic(running.base, "/api/v1/auth/login", {
         email: get(owner, "email"),
         password: "supersecret1",
@@ -642,9 +653,18 @@ async function executeEqualCase(
       cleanup.push(failureCode(error));
     }
     try {
-      closeSync(running.log);
-    } catch {
-      cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+      if (original === null && cleanup.length === 0) {
+        require(running.roomLog !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+        retired = roomRetirement(scope, manifest, running.roomLog, audit.targetSha256);
+      }
+    } catch (error) {
+      cleanup.push(failureCode(error));
+    } finally {
+      try {
+        closeSync(running.log);
+      } catch {
+        cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+      }
     }
     if (original !== null || cleanup.length) {
       scope.io.output.err(
@@ -668,18 +688,9 @@ async function executeEqualCase(
         audit.targetSha256,
       ),
     );
+    require(retired !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
     const after = await readFinalPrimary(scope, manifest, environment, policy);
-    retainRoomHistory(
-      after,
-      fresh,
-      roomRetirement(
-        scope,
-        join(directory, "server.private.log"),
-        serverIdentity,
-        audit.targetSha256,
-        running.server.hostIdentity,
-      ),
-    );
+    retainRoomHistory(after, fresh, retired);
     const documentRows = Object.values(record(after.dataset, "allocations", "documents")).filter(
       (row) => canonicalId(get(row, "self")) === measurement.seed.document,
     );
@@ -758,6 +769,7 @@ async function executeSelectedStage(
       serverIdentity = allocationIdentity(running.server);
     let original: unknown = null;
     const cleanup: string[] = [];
+    let retired: RoomRetirement | undefined;
     let cases: ReturnType<typeof reportCases> | undefined;
     const writes: SelectedSyncWrite[] = [];
     const targets: {
@@ -904,9 +916,18 @@ async function executeSelectedStage(
       cleanup.push(failureCode(error));
     }
     try {
-      closeSync(running.log);
-    } catch {
-      cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+      if (original === null && cleanup.length === 0) {
+        require(running.roomLog !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+        retired = roomRetirement(scope, manifest, running.roomLog, audit.targetSha256);
+      }
+    } catch (error) {
+      cleanup.push(failureCode(error));
+    } finally {
+      try {
+        closeSync(running.log);
+      } catch {
+        cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+      }
     }
     if (original !== null || cleanup.length) {
       scope.io.output.err(
@@ -925,18 +946,9 @@ async function executeSelectedStage(
         audit.targetSha256,
       ),
     );
+    require(retired !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
     const after = await readFinalPrimary(scope, manifest, environment, policy);
-    retainRoomHistory(
-      after,
-      fresh,
-      roomRetirement(
-        scope,
-        join(directory, "server.private.log"),
-        serverIdentity,
-        audit.targetSha256,
-        running.server.hostIdentity,
-      ),
-    );
+    retainRoomHistory(after, fresh, retired);
     audit.serial = { before: fresh, after, policy };
     if (flow === "on")
       await auditSelectedFinalNative(fresh.dataset, after.dataset, audit, targets, writes);
@@ -1005,6 +1017,7 @@ export async function prepareKeycloakOwners(
       let actors: PreparedActors | undefined;
       let original: unknown = null;
       const cleanup: string[] = [];
+      let retired: RoomRetirement | undefined;
       try {
         const logged = await requestPublic(running.base, "/api/v1/auth/login", {
           email: namespace + "-owner@example.invalid",
@@ -1061,9 +1074,18 @@ export async function prepareKeycloakOwners(
         cleanup.push(failureCode(error));
       }
       try {
-        closeSync(running.log);
-      } catch {
-        cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+        if (original === null && cleanup.length === 0) {
+          require(running.roomLog !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+          retired = roomRetirement(scope, manifest, running.roomLog, phaseAudit.targetSha256);
+        }
+      } catch (error) {
+        cleanup.push(failureCode(error));
+      } finally {
+        try {
+          closeSync(running.log);
+        } catch {
+          cleanup.push("UI_SERVER_LOG_CLOSE_FAILED");
+        }
       }
       if (original !== null || cleanup.length) {
         scope.io.output.err(
@@ -1082,18 +1104,9 @@ export async function prepareKeycloakOwners(
           phaseAudit.targetSha256,
         ),
       );
+      require(retired !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
       const after = await readFinalPrimary(scope, manifest, environment, policy);
-      retainRoomHistory(
-        after,
-        fresh,
-        roomRetirement(
-          scope,
-          join(directory, "server.private.log"),
-          serverIdentity,
-          phaseAudit.targetSha256,
-          running.server.hostIdentity,
-        ),
-      );
+      retainRoomHistory(after, fresh, retired);
       phaseAudit.serial = { before: fresh, after, policy };
       assertPreserved(fresh.dataset, after.dataset, phaseAudit);
       require(actors !== undefined &&
@@ -1150,7 +1163,8 @@ export async function readFinalPrimary(
   return observation;
 }
 
-function finalEnvironment(policy: SerialPolicy): Record<string, string> {
+function finalEnvironment(policy: SerialPolicy, manifest: Manifest): Record<string, string> {
+  require(manifest.finalTrust !== undefined, "UI_FINAL_TRUST_REQUIRED");
   require(process.env.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE === "true" &&
     process.env.FVOCI_DATABASE_BACKEND === "libsql-remote", "UI_FINAL_HUMAN_GATE_REQUIRED");
   let keys: unknown;
@@ -1164,6 +1178,7 @@ function finalEnvironment(policy: SerialPolicy): Record<string, string> {
     typeof keys["turso-test"] === "string" &&
     /^[a-fA-F0-9]{64}$/.test(keys["turso-test"]), "UI_ENCRYPTION_KEYRING_REFUSED");
   return {
+    SSL_CERT_FILE: manifest.finalTrust.path,
     FVOCI_LIBSQL_URL: get(process.env, "FVOCI_LIBSQL_URL") as string,
     FVOCI_LIBSQL_AUTH_TOKEN: get(process.env, "FVOCI_LIBSQL_AUTH_TOKEN") as string,
     FVOCI_DATABASE_BACKEND: "libsql-remote",
@@ -1199,7 +1214,7 @@ export async function consumeFinal(inputs: Record<string, unknown>): Promise<voi
   require(inputs.ui_source_sha === manifest.sourceInputs.source, "UI_REVIEWED_SOURCE_REQUIRED");
   recheckFinalBrowsers(manifest);
   const policy = finalPolicy(manifest),
-    environment = finalEnvironment(policy);
+    environment = finalEnvironment(policy, manifest);
   const initial = await withProcesses((scope) =>
     readFinalPrimary(scope, manifest, environment, policy, true),
   );

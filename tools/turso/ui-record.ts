@@ -78,6 +78,25 @@ export interface Manifest {
   finalRun?: ReturnType<typeof finalRunIdentity>;
   finalRuntime?: FinalRuntime;
   finalProcessObserver?: ProcessObserver;
+  finalTrust?: ReturnType<typeof finalTrustFile>;
+}
+
+/** Fixed maintained system trust, never a caller-supplied CA or disabled TLS. */
+export function finalTrustFile() {
+  const path = "/etc/ssl/certs/ca-certificates.crt",
+    file = lstatSync(path);
+  require(file.isFile() &&
+    !file.isSymbolicLink() &&
+    resolved(path) === path &&
+    file.uid === 0 &&
+    file.gid === 0 &&
+    (file.mode & 0o022) === 0 &&
+    file.size > 0, "UI_FINAL_TRUST_REFUSED");
+  return { path, sha256: sha(path), uid: file.uid, gid: file.gid, mode: file.mode & 0o777 };
+}
+
+export function recheckFinalTrust(trust: Manifest["finalTrust"]) {
+  require(deepEquals(trust, finalTrustFile(), true), "UI_FINAL_TRUST_CHANGED");
 }
 
 function prepareFinalProcessObserver(source: SourceInputs): ProcessObserver {
@@ -532,6 +551,7 @@ export function freeze(lease?: LocalLease): void {
   if (process.env.FVOCI_TURSO_UI_FINAL === "1") {
     manifest.finalRun = finalRunIdentity(manifest.sourceInputs);
     manifest.finalRuntime = freezeFinalRuntime(binaries);
+    manifest.finalTrust = finalTrustFile();
     manifest.finalProcessObserver = privateRead(
       join(root(), "final-observer-before.private.json"),
     ) as ProcessObserver;
@@ -576,6 +596,7 @@ export function currentBuild(lease?: LocalLease): Manifest {
   require(deepEquals(inventory(dist()), manifest.assets, true), "UI_ASSETS_CHANGED");
   if (process.env.FVOCI_TURSO_UI_FINAL === "1" || manifest.finalBrowsers !== undefined) {
     recheckFinalBrowsers(manifest);
+    recheckFinalTrust(manifest.finalTrust);
     require(deepEquals(
       manifest.finalRun,
       finalRunIdentity(manifest.sourceInputs),

@@ -281,7 +281,7 @@ export async function executeRestore(
       allocation.directory,
     );
     allocation.stopped = true;
-    closeSync(allocation.started.log);
+    if (!steps.serial || !allocation.source) closeSync(allocation.started.log);
   };
   const run = async (
     index: number,
@@ -446,16 +446,12 @@ export async function executeRestore(
     }
     if (allocation.source) {
       try {
-        if (steps.serial)
+        if (steps.serial) {
+          require(allocation.started.roomLog !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
           (audit.roomRetirements ??= []).push(
-            roomRetirement(
-              scope,
-              join(allocation.directory, "server.private.log"),
-              allocation.identity,
-              audit.targetSha256,
-              allocation.started.server.hostIdentity,
-            ),
+            roomRetirement(scope, manifest, allocation.started.roomLog, audit.targetSha256),
           );
+        }
         audit.servers.push(
           steps.maintenanceReceipts(
             join(allocation.directory, "server.private.log"),
@@ -465,6 +461,13 @@ export async function executeRestore(
         );
       } catch (error) {
         receipt.auditErrors.push(failureCode(error));
+      } finally {
+        if (steps.serial)
+          try {
+            closeSync(allocation.started.log);
+          } catch {
+            receipt.cleanupErrors.push("RESTORE_SERVER_LOG_CLOSE_FAILED");
+          }
       }
     }
   }

@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import {
   chmodSync,
   closeSync,
+  fstatSync,
+  lstatSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -494,6 +496,8 @@ test("the awaited parent receives actual allocation-only closure and the maintai
       expect(delta).toBe(f.delta);
       expect(witness.binding).toEqual(f.before.binding);
       expect(witness.server).toEqual(expectedServer);
+      expect(witness.log.fd).toBe(f.context.logFd);
+      expect(fstatSync(witness.log.fd).ino).toBe(lstatSync(f.context.logPath).ino);
       expect(witness.retirement.identities.map((row) => row.pid)).toEqual([123, 124]);
       expect(witness.maintenance.receipts).toHaveLength(9);
       expect(witness.maintenance.identity).toEqual(expectedServer.identity);

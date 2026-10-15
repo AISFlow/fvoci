@@ -1,5 +1,15 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { describe, expect, test, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import {
+  openSync,
+  closeSync,
+  renameSync,
+  symlinkSync,
+  readFileSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +17,8 @@ import {
   finalRuntimeImage,
   recheckFinalBrowsers,
   sealFinalBrowsers,
+  finalTrustFile,
+  recheckFinalTrust,
 } from "./ui-record.ts";
 import { image as fixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import { containerArgv } from "./ui-container.ts";
@@ -20,9 +32,11 @@ import {
   type SerialPolicy,
   assertRoomClosure,
   roomRetirement,
+  captureRoomLog,
 } from "./ui-audit.ts";
 import { get, record, type Record_ } from "./ui-common.ts";
-import type { Scope } from "./ui-processes.ts";
+import { preparedKeycloakAppEnvironment } from "./ui-final.ts";
+import type { Scope, Child } from "./ui-processes.ts";
 
 const policy: SerialPolicy = { revisionKeep: 200, revisionSnapshotIntervalHours: 24 };
 const n = (value: bigint | number) => ["integer", String(value)];
@@ -182,19 +196,162 @@ function restartPair(): { before: Record_; after: Record_; audit: Audit } {
   return { before, after, audit };
 }
 
+// Real private files/descriptors; process identity and sealed ELF are synthetic DTO fixtures.
+function roomFixture(directory: string, log: string) {
+  const identity = { pid: 123, startTicks: "456" },
+    child = { pid: 123 } as Child;
+  const state = { retired: false },
+    allocation = { process: child, label: "server", closed: false, forced: false };
+  const scope = {
+    closure: () => state.retired,
+    allocations: [allocation],
+    entries: new Map([["123:456", { identity, allocation: 0 }]]),
+    retired: () => state.retired,
+  } as unknown as Scope;
+  const elf = join(directory, "fvoci-server");
+  writeFileSync(elf, "synthetic-ELF-bytes");
+  const manifest = {
+    sourceInputs: { source: "a".repeat(40), tree: "b".repeat(40), files: {} },
+    binaries: {
+      "fvoci-server": { path: elf, sha256: digest(readFileSync(elf)), features: [], profile: {} },
+    },
+  };
+  const fd = openSync(log, "r+");
+  const origin = captureRoomLog(scope, manifest, log, fd, child, identity, "d".repeat(64));
+  allocation.closed = true;
+  state.retired = true;
+  return { scope, manifest, fd, origin, state };
+}
+
 describe("final native serial admission", () => {
+  test("room history refuses substituted valid inode/symlink, closed FD and foreign origins", () => {
+    for (const mutation of [
+      "inode",
+      "symlink",
+      "closed",
+      "source",
+      "tree",
+      "elf",
+      "target",
+      "pid",
+      "ticks",
+    ] as const) {
+      const directory = mkdtempSync(join(tmpdir(), "room-origin-")),
+        log = join(directory, "server.private.log");
+      writeFileSync(log, "actual producer\n", { mode: 0o600 });
+      const f = roomFixture(directory, log);
+      let closed = false;
+      try {
+        const other = join(directory, "other.private.log");
+        writeFileSync(
+          other,
+          "FVOCI_ROOM_RELEASE " +
+            JSON.stringify({
+              schema: 1,
+              kind: "document",
+              workspaceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              targetId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+              ownerSha256: "c".repeat(64),
+              fence: "1",
+              expiresAtMicros: "1000",
+              pid: 123,
+              commit: "confirmed",
+            }),
+          { mode: 0o600 },
+        );
+        if (mutation === "inode" || mutation === "symlink") {
+          renameSync(log, join(directory, "actual.private.log"));
+          if (mutation === "inode") renameSync(other, log);
+          else symlinkSync(other, log);
+        } else if (mutation === "closed") {
+          closeSync(f.fd);
+          closed = true;
+        } else if (mutation === "source") f.origin.source = "e".repeat(40);
+        else if (mutation === "tree") f.origin.tree = "e".repeat(40);
+        else if (mutation === "elf") writeFileSync(f.origin.executable.path, "changed-ELF");
+        else if (mutation === "target") f.origin.targetSha256 = "e".repeat(64);
+        else if (mutation === "pid") f.origin.retiredIdentity = { pid: 124, startTicks: "456" };
+        else f.origin.retiredIdentity = { pid: 123, startTicks: "457" };
+        expect(
+          () => roomRetirement(f.scope, f.manifest, f.origin, "d".repeat(64)),
+          mutation,
+        ).toThrow();
+      } finally {
+        if (!closed) closeSync(f.fd);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+  test("bounded actual-FD read preserves producer offset and rejects mutation during reading", () => {
+    const directory = mkdtempSync(join(tmpdir(), "room-read-")),
+      log = join(directory, "server.private.log");
+    writeFileSync(log, "producer bytes\n", { mode: 0o600 });
+    const f = roomFixture(directory, log);
+    try {
+      const byte = Buffer.alloc(1);
+      fs.readSync(f.fd, byte, 0, 1, null);
+      expect(roomRetirement(f.scope, f.manifest, f.origin, "d".repeat(64)).receipts).toEqual([]);
+      fs.readSync(f.fd, byte, 0, 1, null);
+      expect(byte.toString()).toBe("r");
+      const actualRead = fs.readSync;
+      let changed = false;
+      const intercepted = spyOn(fs, "readSync").mockImplementation(((
+        fd: number,
+        bytes: Uint8Array,
+        offset: number,
+        length: number,
+        position: number | null,
+      ) => {
+        const count = actualRead(fd, bytes, offset, length, position);
+        if (!changed && count > 0 && fs.fstatSync(fd).ino === f.origin.log.ino) {
+          changed = true;
+          writeFileSync(log, "changed bytes!\n");
+        }
+        return count;
+      }) as typeof fs.readSync);
+      try {
+        expect(() => roomRetirement(f.scope, f.manifest, f.origin, "d".repeat(64))).toThrow(
+          "UI_SERIAL_ROOM_LOG_CHANGED",
+        );
+      } finally {
+        intercepted.mockRestore();
+      }
+      expect(changed).toBe(true);
+    } finally {
+      closeSync(f.fd);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  test("prepared app excludes fixture authority and exact system trust is sealed", () => {
+    const parent = {
+      FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true",
+      FVOCI_TEST_TURSO_DESTRUCTIVE: "true",
+      FVOCI_LIBSQL_URL: "synthetic-private",
+      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
+    };
+    expect(preparedKeycloakAppEnvironment(parent)).toEqual({
+      FVOCI_LIBSQL_URL: parent.FVOCI_LIBSQL_URL,
+      SSL_CERT_FILE: parent.SSL_CERT_FILE,
+    });
+    expect(parent.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE).toBe("true");
+    const trust = finalTrustFile();
+    expect(() => {
+      recheckFinalTrust(trust);
+    }).not.toThrow();
+    for (const changed of [
+      { ...trust, sha256: "e".repeat(64) },
+      { ...trust, path: "/foreign" },
+      { ...trust, uid: 1 },
+    ])
+      expect(() => {
+        recheckFinalTrust(changed);
+      }).toThrow("UI_FINAL_TRUST_CHANGED");
+  });
   test("expired retained rooms require exact confirmed native release and parent retirement", () => {
     const directory = mkdtempSync(join(tmpdir(), "fvoci-final-room-"));
+    let logFd: number | undefined;
     try {
-      const log = join(directory, "server.private.log"),
-        identity = { pid: 123, startTicks: "456" };
-      let retired = true;
-      const scope = {
-        closure: () => retired,
-        allocations: [],
-        entries: new Map([["123:456", { identity }]]),
-        retired: () => retired,
-      } as unknown as Scope;
+      const log = join(directory, "server.private.log");
       const receipt = {
         schema: 1,
         kind: "document",
@@ -224,8 +381,11 @@ describe("final native serial admission", () => {
         pid: 123,
         commit: "confirmed",
       };
-      writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify(receipt) + "\n");
-      const witness = roomRetirement(scope, log, identity, "d".repeat(64));
+      writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify(receipt) + "\n", { mode: 0o600 });
+      const fixture = roomFixture(directory, log);
+      const { scope, manifest, origin, state } = fixture;
+      logFd = fixture.fd;
+      const witness = roomRetirement(scope, manifest, origin, "d".repeat(64));
       const value = observation();
       const rows = [
         [
@@ -278,21 +438,21 @@ describe("final native serial admission", () => {
           .map((item) => "FVOCI_ROOM_RELEASE " + JSON.stringify(item))
           .join("\n"),
       );
-      observed.roomHistory = [roomRetirement(scope, log, identity, "d".repeat(64))];
+      observed.roomHistory = [roomRetirement(scope, manifest, origin, "d".repeat(64))];
       expect(() => {
         assertRoomClosure(observed, "d".repeat(64));
       }).not.toThrow();
-      retired = false;
-      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+      state.retired = false;
+      expect(() => roomRetirement(scope, manifest, origin, "d".repeat(64))).toThrow(
         "UI_SERIAL_ROOM_RETIREMENT_REQUIRED",
       );
-      retired = true;
+      state.retired = true;
       writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify({ ...receipt, pid: 124 }));
-      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+      expect(() => roomRetirement(scope, manifest, origin, "d".repeat(64))).toThrow(
         "UI_SERIAL_ROOM_RECEIPT_REFUSED",
       );
       writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify({ ...receipt, extra: true }));
-      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+      expect(() => roomRetirement(scope, manifest, origin, "d".repeat(64))).toThrow(
         "UI_SERIAL_ROOM_RECEIPT_REFUSED",
       );
       record(value, "checks").roomClosureBinding = "expired-only";
@@ -300,6 +460,7 @@ describe("final native serial admission", () => {
         "UI_SERIAL_ROOM_CLOSURE_BINDING_REQUIRED",
       );
     } finally {
+      if (logFd !== undefined) closeSync(logFd);
       rmSync(directory, { recursive: true, force: true });
     }
   });

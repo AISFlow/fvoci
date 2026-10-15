@@ -36,6 +36,7 @@ import {
   assertNativeClock,
   roomRetirement,
   retainRoomHistory,
+  type RoomLogOrigin,
 } from "./ui-audit.ts";
 import {
   AUTH_SPEC,
@@ -216,6 +217,10 @@ export function allocationEnvironment(
     FVOCI_COLLAB_MAX_ROOMS: "2",
     RUST_LOG: "info",
   };
+  if (manifest.finalTrust !== undefined) {
+    env.SSL_CERT_FILE = manifest.finalTrust.path;
+    Reflect.deleteProperty(env, "SSL_CERT_DIR");
+  }
   // Existing scheduler configuration: retain the immediate startup sweep
   // and account for each generation; avoid a second cadence within this
   // bounded UI allocation. No consumer is disabled.
@@ -343,7 +348,13 @@ export async function executeUi(
     receiptWrite: "not-attempted",
   };
   let lastEnvironment = environment;
-  const serverAllocations: [ServerHandle, string, { pid: number; startTicks: string }][] = [];
+  const serverAllocations: [
+    ServerHandle,
+    string,
+    { pid: number; startTicks: string },
+    RoomLogOrigin | undefined,
+    number,
+  ][] = [];
   let failure: unknown = null;
   try {
     for (const flow of ["on", "off"] as const) {
@@ -366,11 +377,18 @@ export async function executeUi(
       );
       let server: ServerHandle | null = null,
         base: string | null = null,
-        log: number | null = null;
+        log: number | null = null,
+        roomLog: RoomLogOrigin | undefined;
       try {
-        ({ server, base, log } = await steps.start(scope, manifest, env, directory, setupNeeded));
+        ({ server, base, log, roomLog } = await steps.start(
+          scope,
+          manifest,
+          env,
+          directory,
+          setupNeeded,
+        ));
         audit.serverStarts += 1;
-        serverAllocations.push([server, directory, steps.serverIdentity(server)]);
+        serverAllocations.push([server, directory, steps.serverIdentity(server), roomLog, log]);
         const browserEnv: Record<string, string> = {
           PLAYWRIGHT_BASE_URL: base,
           FVOCI_E2E_SELECTED_BACKEND: "libsql-remote",
@@ -446,7 +464,7 @@ export async function executeUi(
           steps.write(join(directory, "native-before-restart.private.json"), observed);
           const old = await steps.stop(scope, server, base, directory);
           server = null;
-          closeSync(log);
+          if (!steps.serial) closeSync(log);
           log = null;
           const checkpoint = join(directory, "restart-checkpoint.private.json");
           steps.write(checkpoint, {
@@ -460,9 +478,9 @@ export async function executeUi(
           });
           const restartDir = join(directory, "restart");
           mkdirSync(restartDir, 0o700);
-          ({ server, base, log } = await steps.start(scope, manifest, env, restartDir));
+          ({ server, base, log, roomLog } = await steps.start(scope, manifest, env, restartDir));
           audit.serverStarts += 1;
-          serverAllocations.push([server, restartDir, steps.serverIdentity(server)]);
+          serverAllocations.push([server, restartDir, steps.serverIdentity(server), roomLog, log]);
           const restartEnv: Record<string, string> = { ...browserEnv };
           delete restartEnv.FVOCI_E2E_SELECTED_FIXTURE_BIN;
           delete restartEnv.FVOCI_E2E_TURSO_PRIVATE_INPUT;
@@ -513,7 +531,7 @@ export async function executeUi(
             }
           }
         }
-        if (log !== null) {
+        if (log !== null && !steps.serial) {
           try {
             closeSync(log);
           } catch {
@@ -544,18 +562,14 @@ export async function executeUi(
       auditErrors.push(failureCode(error));
     }
   });
-  for (const [server, directory, serverIdentity] of serverAllocations) {
+  for (const [, directory, serverIdentity, origin, logFd] of serverAllocations) {
     try {
-      if (steps.serial)
+      if (steps.serial) {
+        require(origin !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
         (audit.roomRetirements ??= []).push(
-          roomRetirement(
-            scope,
-            join(directory, "server.private.log"),
-            serverIdentity,
-            audit.targetSha256,
-            server.hostIdentity,
-          ),
+          roomRetirement(scope, manifest, origin, audit.targetSha256),
         );
+      }
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),
@@ -565,6 +579,13 @@ export async function executeUi(
       );
     } catch (error) {
       auditErrors.push(failureCode(error));
+    } finally {
+      if (steps.serial)
+        try {
+          closeSync(logFd);
+        } catch {
+          auditErrors.push("UI_SERVER_LOG_CLOSE_FAILED");
+        }
     }
   }
   receipt.auditErrors = auditErrors;
@@ -783,7 +804,12 @@ export async function executeAuth(
     receiptWrite: "not-attempted",
   };
   let lastEnvironment = environment;
-  const serverAllocations: [string, { pid: number; startTicks: string }][] = [];
+  const serverAllocations: [
+    string,
+    { pid: number; startTicks: string },
+    RoomLogOrigin | undefined,
+    number,
+  ][] = [];
   let failure: unknown = null;
   try {
     for (const flow of ["on", "off"] as const) {
@@ -796,7 +822,8 @@ export async function executeAuth(
       let sink: SmtpSink | null = null,
         server: ServerHandle | null = null,
         base: string | null = null,
-        log: number | null = null;
+        log: number | null = null,
+        roomLog: RoomLogOrigin | undefined;
       try {
         sink = await steps.smtp(scope, manifest, directory);
         const env: Record<string, string> = {
@@ -817,9 +844,15 @@ export async function executeAuth(
           { audit, namespace, directory, setupNeeded },
           steps,
         );
-        ({ server, base, log } = await steps.start(scope, manifest, env, directory, setupNeeded));
+        ({ server, base, log, roomLog } = await steps.start(
+          scope,
+          manifest,
+          env,
+          directory,
+          setupNeeded,
+        ));
         audit.serverStarts += 1;
-        serverAllocations.push([directory, steps.serverIdentity(server)]);
+        serverAllocations.push([directory, steps.serverIdentity(server), roomLog, log]);
         const before = await steps.fixture(scope, manifest, "baseline", env);
         const report = await steps.browser(
           scope,
@@ -902,7 +935,7 @@ export async function executeAuth(
             }
           }
         }
-        if (log !== null) {
+        if (log !== null && !steps.serial) {
           try {
             closeSync(log);
           } catch {
@@ -927,17 +960,14 @@ export async function executeAuth(
     failure = error;
   }
   const auditErrors: string[] = [];
-  for (const [directory, serverIdentity] of serverAllocations) {
+  for (const [directory, serverIdentity, origin, logFd] of serverAllocations) {
     try {
-      if (steps.serial)
+      if (steps.serial) {
+        require(origin !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
         (audit.roomRetirements ??= []).push(
-          roomRetirement(
-            scope,
-            join(directory, "server.private.log"),
-            serverIdentity,
-            audit.targetSha256,
-          ),
+          roomRetirement(scope, manifest, origin, audit.targetSha256),
         );
+      }
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),
@@ -947,6 +977,13 @@ export async function executeAuth(
       );
     } catch (error) {
       auditErrors.push(failureCode(error));
+    } finally {
+      if (steps.serial)
+        try {
+          closeSync(logFd);
+        } catch {
+          auditErrors.push("UI_SERVER_LOG_CLOSE_FAILED");
+        }
     }
   }
   receipt.auditErrors = auditErrors;

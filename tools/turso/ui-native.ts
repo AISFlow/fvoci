@@ -12,8 +12,15 @@ import {
   readFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { root as checkout, sha } from "../selected-backend-ci/io.ts";
-import { baselineFailureDiagnostic, OFF, ON, RESTORE } from "./ui-audit.ts";
+import { root as checkout, sha, digest } from "../selected-backend-ci/io.ts";
+import {
+  baselineFailureDiagnostic,
+  OFF,
+  ON,
+  RESTORE,
+  captureRoomLog,
+  type RoomLogOrigin,
+} from "./ui-audit.ts";
 import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import {
@@ -67,7 +74,7 @@ const nativeCode = /^(?:TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED)$/;
 
 export async function fixture(
   scope: Scope | null,
-  manifest: Pick<Manifest, "binaries">,
+  manifest: Pick<Manifest, "binaries"> & Partial<Pick<Manifest, "finalTrust">>,
   mode: string,
   environment: Record<string, string>,
   input?: Record_,
@@ -83,6 +90,10 @@ export async function fixture(
   const env = cleanEnv();
   for (const key of FIXTURE_KEYS)
     if (Object.hasOwn(environment, key)) env[key] = environment[key] as string;
+  if (manifest.finalTrust !== undefined) {
+    env.SSL_CERT_FILE = manifest.finalTrust.path;
+    Reflect.deleteProperty(env, "SSL_CERT_DIR");
+  }
   env.E2E_DATABASE_BACKEND = "libsql-remote";
   env.FVOCI_E2E_TURSO_UI_SELECTED = "1";
   require(scope !== null, "UI_OWNED_PROCESS_SCOPE_REQUIRED");
@@ -162,11 +173,51 @@ export interface Started {
   server: ServerHandle;
   base: string;
   log: number;
+  roomLog?: RoomLogOrigin;
+}
+
+/** The maintained same-PID launcher/publisher evidence, with the actual stdout FD. */
+export function serverRoomLog(
+  scope: Scope,
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  started: Started,
+  directory: string,
+  target: string,
+): RoomLogOrigin {
+  const server = started.server,
+    retired = server.hostIdentity ?? identity(server.child.pid);
+  const observed = identity(retired.pid);
+  const native = server.maintenanceIdentity ?? retired;
+  require(observed.startTicks === retired.startTicks &&
+    observed.comm === "fvoci-server" &&
+    (observed.exeInspection === "UNAVAILABLE" ||
+      observed.exe ===
+        (server.containerId === undefined
+          ? manifest.binaries["fvoci-server"]?.path
+          : "/fvoci-current/bin/fvoci-server")), "UI_NORMAL_MAIN_IDENTITY_FAILED");
+  if (server.containerId !== undefined)
+    require(server.daemonSample !== undefined &&
+      server.daemonSample.clientPid === server.child.pid &&
+      server.daemonSample.maintenance.pid === native.pid &&
+      server.daemonSample.maintenance.startTicks === native.startTicks &&
+      server.daemonSample.retirement.pid === retired.pid &&
+      server.daemonSample.retirement.startTicks ===
+        retired.startTicks, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return captureRoomLog(
+    scope,
+    manifest,
+    join(directory, "server.private.log"),
+    started.log,
+    server.child,
+    native,
+    target,
+    retired,
+  );
 }
 
 export async function start(
   scope: Scope,
-  manifest: Pick<Manifest, "binaries">,
+  manifest: Pick<Manifest, "binaries"> & Partial<Pick<Manifest, "sourceInputs" | "finalBrowsers">>,
   environment: Record<string, string>,
   directory: string,
   expectedSetup = false,
@@ -201,7 +252,18 @@ export async function start(
       kernelExeProof: observed.exeInspection,
     });
     await requireSetup(base, expectedSetup);
-    return { server: { child }, base, log };
+    const running: Started = { server: { child }, base, log };
+    if (manifest.finalBrowsers !== undefined) {
+      require(manifest.sourceInputs !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+      running.roomLog = serverRoomLog(
+        scope,
+        { binaries: manifest.binaries, sourceInputs: manifest.sourceInputs },
+        running,
+        directory,
+        digest(environment.FVOCI_LIBSQL_URL ?? ""),
+      );
+    }
+    return running;
   } catch (original) {
     const diagnostic =
       failureCode(original) === "UI_SERVER_START_FAILED"

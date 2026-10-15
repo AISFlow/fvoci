@@ -49,7 +49,7 @@ import {
   type Manifest,
 } from "../turso/ui-record.ts";
 import { awaitListening, portClosed, requireSetup } from "../turso/ui-server.ts";
-import { maintenanceReceipts } from "../turso/ui-audit.ts";
+import { maintenanceReceipts, captureRoomLog, type RoomLogOrigin } from "../turso/ui-audit.ts";
 import { events, ready, verify } from "./admin.ts";
 import {
   CLIENT_ID,
@@ -261,6 +261,11 @@ export async function assertServerEnvironment(
   }
   require(unprivilegedEnvironmentDenied, "normal server environment is readable by the unprivileged actor");
   const input: WitnessInput = {
+    ...(manifest.finalRun === undefined
+      ? {}
+      : {
+          actor: { uid: manifest.finalRuntime?.uid ?? 0, gid: manifest.finalRuntime?.gid ?? 0 },
+        }),
     pid,
     startTicks: server.startTicks,
     parentPid: parent.pid,
@@ -280,6 +285,12 @@ export async function assertServerEnvironment(
       }).flatMap(([key, value]) => (value === undefined ? [] : [[key, digest(value)]])),
     ),
   };
+  if (manifest.finalRun !== undefined)
+    require(input.actor?.uid === process.getuid?.() &&
+      input.actor?.gid === process.getgid?.() &&
+      input.actor !== undefined &&
+      input.actor.uid > 0 &&
+      input.actor.gid > 0, "prepared sealed process actor changed");
   const sudo = systemSudo();
   const argv = [
     sudo,
@@ -337,7 +348,7 @@ export async function assertServerEnvironment(
 export interface PreparedOperationWitness {
   binding: PreparedBinding;
   server: PreparedServerEvidence;
-  log: { path: string; sha256: string };
+  log: { path: string; sha256: string; fd: number; origin?: RoomLogOrigin };
   retirement: {
     exitCode: number;
     allocationClosed: boolean;
@@ -357,6 +368,7 @@ export interface PreparedOperationContext {
   server: PreparedServerEvidence | undefined;
   logPath: string;
   logFd: number;
+  logOrigin?: RoomLogOrigin;
   exitCode: number;
   portClosed: boolean;
 }
@@ -432,7 +444,7 @@ export async function auditPreparedOperation(
   const witness: PreparedOperationWitness = {
     binding: { ...context.binding },
     server: structuredClone(server),
-    log: { path: context.logPath, sha256: hash },
+    log: { path: context.logPath, sha256: hash, fd: context.logFd, origin: context.logOrigin },
     retirement: {
       exitCode: context.exitCode,
       allocationClosed: allocation.closed,
@@ -1051,6 +1063,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         base = await awaitListening(logPath, server, now() + 30);
         await requireSetup(base, binding === undefined);
         let observedServer: PreparedServerEvidence | undefined;
+        let observedRoomLog: RoomLogOrigin | undefined;
         retain(
           `process-environment-${mode}.json`,
           JSON.stringify(
@@ -1064,6 +1077,16 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
               binding
                 ? (observed) => {
                     observedServer = observed;
+                    if (inputs.manifest.finalBrowsers !== undefined)
+                      observedRoomLog = captureRoomLog(
+                        scope,
+                        inputs.manifest,
+                        logPath,
+                        fd,
+                        server as Child,
+                        observed.identity,
+                        binding.target,
+                      );
                   }
                 : undefined,
             ),
@@ -1268,6 +1291,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
             server: observedServer,
             logPath,
             logFd: fd,
+            logOrigin: observedRoomLog,
             exitCode: closed,
             portClosed: serverPortClosed,
           });

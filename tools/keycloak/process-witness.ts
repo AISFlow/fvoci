@@ -59,6 +59,7 @@ const FORBIDDEN = [
   "KC_BOOTSTRAP_ADMIN_PASSWORD",
 ];
 export interface WitnessInput {
+  actor?: { uid: number; gid: number };
   pid: number;
   startTicks: string;
   parentPid: number;
@@ -99,7 +100,8 @@ export function parseInput(value: unknown): WitnessInput {
   if (
     !isObject(value) ||
     Object.keys(value).sort().join(",") !==
-      "environmentDigests,executableSha256,parentPid,parentStartTicks,pid,startTicks" ||
+      (Object.hasOwn(value, "actor") ? "actor," : "") +
+        "environmentDigests,executableSha256,parentPid,parentStartTicks,pid,startTicks" ||
     !integer(value.pid) ||
     !integer(value.parentPid) ||
     value.pid === value.parentPid ||
@@ -107,6 +109,15 @@ export function parseInput(value: unknown): WitnessInput {
     !ticks(value.parentStartTicks) ||
     !hash(value.executableSha256) ||
     !isObject(value.environmentDigests)
+  )
+    throw new Error("WITNESS_INPUT_REFUSED");
+  if (
+    Object.hasOwn(value, "actor") &&
+    (!isObject(value.actor) ||
+      Object.keys(value.actor).sort().join(",") !== "gid,uid" ||
+      ![value.actor.uid, value.actor.gid].every(
+        (id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0 && id <= 4294967295,
+      ))
   )
     throw new Error("WITNESS_INPUT_REFUSED");
   const environment = value.environmentDigests;
@@ -132,16 +143,17 @@ export function parseInput(value: unknown): WitnessInput {
   return value as unknown as WitnessInput;
 }
 
-const correctActor = (view: Pick<WitnessView, "uids" | "gids">) =>
+const correctActor = (input: WitnessInput, view: Pick<WitnessView, "uids" | "gids">) =>
   view.uids.length === 4 &&
   view.gids.length === 4 &&
-  [...view.uids, ...view.gids].every((id) => id === 1000);
+  view.uids.every((id) => id === (input.actor?.uid ?? 1000) && id > 0) &&
+  view.gids.every((id) => id === (input.actor?.gid ?? 1000) && id > 0);
 export function beforeReadAllowed(
   input: WitnessInput,
   view: Pick<WitnessView, "uids" | "gids" | "executableName" | "executableSha256">,
 ): boolean {
   return (
-    correctActor(view) &&
+    correctActor(input, view) &&
     view.executableName === "fvoci-server" &&
     view.executableSha256 === input.executableSha256
   );
@@ -157,7 +169,7 @@ export function evaluate(input: WitnessInput, view: WitnessView) {
     view.before.parentPid === input.parentPid &&
     view.parentBefore.pid === input.parentPid &&
     view.parentBefore.startTicks === input.parentStartTicks;
-  const actorCorrect = correctActor(view);
+  const actorCorrect = correctActor(input, view);
   const executableMatches =
     view.executableName === "fvoci-server" &&
     view.executableAfterName === view.executableName &&
@@ -205,7 +217,7 @@ export function callerFrameMatches(
   return (
     frame.pid === input.parentPid &&
     frame.startTicks === input.parentStartTicks &&
-    correctActor(frame) &&
+    correctActor(input, frame) &&
     frame.executableName === "bun" &&
     frame.executableSha256 === pinnedBunSha256
   );
