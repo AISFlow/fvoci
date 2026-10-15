@@ -2,6 +2,57 @@
 // native child, never a browser or the normal FVOCI server's environment.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { deepEquals } from "bun";
+import type { PreparedBinding, PreparedUserRow } from "./config";
+
+/** Private native facts: complete rows are hashed, never exported as secret columns. */
+export type PreparedSnapshot = {
+  binding: PreparedBinding;
+  users: PreparedUserRow[];
+  links: LinkRow[];
+  memberships: Array<{ workspaceId: string; userId: string; role: string; rowFingerprint: string }>;
+  states: number;
+  /** The maintained native whole-primary observation, passed intact to its auditor. */
+  wholePrimary: Record<string, unknown>;
+};
+export type PreparedDelta = { emails: string[]; links: LinkRow[] };
+
+/** Exact global equality; an allocated email never exempts another row from preservation. */
+export function assertPreparedDelta(before: PreparedSnapshot, after: PreparedSnapshot, delta: PreparedDelta): void {
+  const fail = () => { throw new Error("Keycloak prepared global delta differs"); };
+  if (!deepEquals(before.binding, after.binding, true) ||
+    !Number.isSafeInteger(before.states) || before.states < 0 || after.states !== before.states ||
+    new Set(delta.emails).size !== delta.emails.length) fail();
+  for (const snapshot of [before, after]) {
+    const rows = snapshot.users;
+    if (!Array.isArray(rows) || rows.length > 10000 || new Set(rows.map((row) => row.id)).size !== rows.length ||
+      new Set(rows.map((row) => row.email)).size !== rows.length || rows.some((row) =>
+        !/^[a-f0-9-]{36}$/.test(row.id) || typeof row.email !== "string" ||
+        !/^[a-f0-9]{64}$/.test(row.rowFingerprint))) fail();
+    if (!snapshot.wholePrimary || typeof snapshot.wholePrimary !== "object" || Array.isArray(snapshot.wholePrimary) ||
+      !Array.isArray(snapshot.memberships) || snapshot.memberships.length > 10000 ||
+      new Set(snapshot.memberships.map((row) => `${row.workspaceId}/${row.userId}`)).size !== snapshot.memberships.length ||
+      snapshot.memberships.some((row) => !/^[a-f0-9-]{36}$/.test(row.workspaceId) ||
+        !rows.some((user) => user.id === row.userId) || typeof row.role !== "string" || !row.role ||
+        !/^[a-f0-9]{64}$/.test(row.rowFingerprint)) ||
+      !Array.isArray(snapshot.links) || snapshot.links.length > 10000) fail();
+  }
+  if (after.users.length !== before.users.length + delta.emails.length) fail();
+  for (const row of before.users) {
+    if (!after.users.some((fresh) => deepEquals(row, fresh, true))) fail();
+  }
+  for (const row of before.memberships) {
+    if (!after.memberships.some((fresh) => deepEquals(row, fresh, true))) fail();
+  }
+  const oldIds = new Set(before.users.map((row) => row.id));
+  const added = after.users.filter((row) => !oldIds.has(row.id));
+  if (!deepEquals(added.map((row) => row.email).sort(), [...delta.emails].sort(), true) ||
+    delta.emails.some((email) => before.users.some((row) => row.email === email))) fail();
+  const sorted = (rows: LinkRow[]) => rows.map((row) => JSON.stringify([
+    row.user, row.provider, row.subject, row.issuer, row.email,
+  ])).sort();
+  if (!deepEquals(sorted(after.links), sorted([...before.links, ...delta.links]), true)) fail();
+}
 
 export type Observation =
   | { operation: "users" | "states" | "links" }
