@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return zotero::serve().await;
     }
     match std::env::var("E2E_DATABASE_BACKEND").as_deref() {
-        Ok("sqlite") => return sqlite::create_user().await.map_err(Into::into),
+        Ok("sqlite") => return sqlite::run().await.map_err(Into::into),
         Ok("libsql-remote") => {
             if let Err(code) = libsql_remote::run().await {
                 eprintln!("{code}");

@@ -912,3 +912,74 @@ describe("baseline failure projection", () => {
     expect(project(parseJson(text) as Record_).diagnosticStatus).toBe("refused");
   });
 });
+
+test("SQLite seeded readback state preserves every byte and only admits one native claim", async () => {
+  const { selectedReadbackState } = await import("./ui-audit.ts");
+  const { digest } = await import("../selected-backend-ci/io.ts");
+  const hash = (value: unknown) => digest(JSON.stringify(value));
+  const original = [
+    ["blob", "a".repeat(32)],
+    ["blob", "b".repeat(32)],
+    ["blob", "00ff80"],
+    number(1),
+    ["null"],
+    number(10),
+    number(10),
+    number(7),
+    number(2),
+    number(2),
+  ];
+  const current = structuredClone(original);
+  current[6] = number(30);
+  current[7] = number(8);
+  const dataset = (row: unknown[]) => ({
+    backend: "sqlite",
+    fingerprints: { document_states: { [hash(row)]: 1 } },
+  });
+  const before = dataset(original),
+    after = dataset(current);
+  const prepared = { dataset: dataset(current), checks: { clockMicros: "40" } };
+  const audit = {
+    sqlitePreparation: {
+      workspace: "a".repeat(32),
+      document: "b".repeat(32),
+      prepared,
+      state: { original, current, after: structuredClone(current) },
+    },
+    serial: { expectedBackend: "sqlite", before: { checks: { clockMicros: "20" } } },
+  } as unknown as Audit;
+  expect(selectedReadbackState(before, after, audit)).toBe(hash(original));
+  const changes: ((value: Audit) => void)[] = [
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.state.current[2] = ["blob", "00ff81"];
+    },
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.state.current[7] = number(9);
+    },
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.state.current[6] = number(19);
+    },
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.state.current[8] = number(3);
+    },
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.document = "c".repeat(32);
+    },
+    (a) => {
+      if (a.sqlitePreparation) a.sqlitePreparation.state.after[9] = number(3);
+    },
+    (a) => {
+      if (a.serial) a.serial.expectedBackend = undefined;
+    },
+  ];
+  for (const change of changes) {
+    const wrong = structuredClone(audit);
+    change(wrong);
+    expect(() => selectedReadbackState(before, after, wrong)).toThrow();
+  }
+  const missing = structuredClone(after);
+  missing.fingerprints.document_states = {};
+  expect(() => selectedReadbackState(before, missing, audit)).toThrow();
+  const remote = { ...after, backend: "libsql-remote" };
+  expect(() => selectedReadbackState(before, remote, audit)).toThrow();
+});

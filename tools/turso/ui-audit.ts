@@ -16,7 +16,15 @@ import { basename } from "node:path";
 import { jsonInteger } from "../selected-backend-ci/io.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
 import { digest } from "../selected-backend-ci/io.ts";
-import type { Scope, Child } from "./ui-processes.ts";
+import { identity as processIdentity, type Scope, type Child } from "./ui-processes.ts";
+import {
+  identityGone,
+  portClosed,
+  waitFor,
+  type Child as SelectedChild,
+  type Row,
+} from "../selected-backend-ci/drivers/common.ts";
+import { FINAL_SPEC } from "../../apps/web/e2e-pending/selected-final-contract.ts";
 import type { Manifest } from "./ui-record.ts";
 import {
   canonical,
@@ -124,6 +132,17 @@ const subset = (items: unknown[], set: Set<string>) =>
 
 export interface Audit {
   namespaces: string[];
+  /** Exact original actors used by the existing SQLite public preparation and
+   * unchanged restart readback; every admitted addition is in the native
+   * preparation snapshot and these actors' original whole rows remain. */
+  sqlitePreparation?: {
+    preparationActor: { id: string; email: string; rowFingerprint: string; sessionId: string };
+    readbackActor: { id: string; email: string; rowFingerprint: string; sessionId: string };
+    workspace: string;
+    document: string;
+    prepared: SerialObservation;
+    state: { original: unknown[]; current: unknown[]; after: unknown[] };
+  };
   actors: Record<string, string>;
   workspaces: Record<string, string>;
   documents?: Record<string, string>;
@@ -143,6 +162,7 @@ export interface Audit {
     after: SerialObservation;
     policy: SerialPolicy;
     keycloakGroups?: 1 | 2 | 3;
+    expectedBackend?: "sqlite";
   };
 }
 
@@ -195,19 +215,31 @@ export function captureRoomLog(
   targetSha256: string,
   retiredIdentity = identity,
 ): RoomLogOrigin {
-  const opened = fstatSync(fd),
-    file = lstatSync(path);
   const allocation = scope.allocations.findIndex((a) => a.process === child);
   const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
+  require(allocation >= 0 &&
+    entry?.allocation === allocation &&
+    !scope.retired(retiredIdentity), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return bindRoomLog(manifest, path, fd, child, identity, targetSha256, retiredIdentity);
+}
+
+function bindRoomLog(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: Child,
+  identity: { pid: number; startTicks: string },
+  targetSha256: string,
+  retiredIdentity: { pid: number; startTicks: string },
+): RoomLogOrigin {
+  const opened = fstatSync(fd),
+    file = lstatSync(path);
   const executable = manifest.binaries["fvoci-server"];
   require(executable !== undefined &&
     /^[a-f0-9]{40}$/.test(manifest.sourceInputs.source) &&
     /^[a-f0-9]{40}$/.test(manifest.sourceInputs.tree) &&
     /^[a-f0-9]{64}$/.test(targetSha256) &&
     identity.startTicks === retiredIdentity.startTicks &&
-    allocation >= 0 &&
-    entry?.allocation === allocation &&
-    !scope.retired(retiredIdentity) &&
     opened.isFile() &&
     file.isFile() &&
     !file.isSymbolicLink() &&
@@ -300,11 +332,12 @@ export function validateSerialObservation(
   value: unknown,
   policy: SerialPolicy,
   initial = false,
+  expectedBackend: "libsql-remote" | "sqlite" = "libsql-remote",
 ): SerialObservation {
   const dataset = record(value, "dataset"),
     checks = record(value, "checks");
   require(dataset.schema === 1 &&
-    dataset.backend === "libsql-remote" &&
+    dataset.backend === expectedBackend &&
     dataset.schemaCurrent === true &&
     dataset.lineage === "fvoci-sqlite-060" &&
     list(dataset, "ledger").length === 12 &&
@@ -502,8 +535,14 @@ function serialProgress(before: unknown, after: unknown, audit: Audit): void {
     serial.before,
     serial.policy,
     list(serial.before.checks, "outbox").length === 0,
+    serial.expectedBackend ?? "libsql-remote",
   );
-  validateSerialObservation(serial.after, serial.policy);
+  validateSerialObservation(
+    serial.after,
+    serial.policy,
+    false,
+    serial.expectedBackend ?? "libsql-remote",
+  );
   assertRoomClosure(serial.before, audit.targetSha256);
   assertRoomClosure(serial.after, audit.targetSha256);
   require(valueDigest(before) === valueDigest(serial.before.dataset) &&
@@ -638,7 +677,12 @@ function witnessedEventOperation(
     spaces.length === 0 &&
     people.length === 1 &&
     people[0] === target &&
-    Object.hasOwn(audit.actors, target)
+    (Object.hasOwn(audit.actors, target) ||
+      (audit.serial?.expectedBackend === "sqlite" &&
+        [
+          audit.sqlitePreparation?.preparationActor.id,
+          audit.sqlitePreparation?.readbackActor.id,
+        ].includes(target)))
   )
     return [sequence, ["null"], ["blob", target]];
   if (audit.serial?.keycloakGroups !== undefined && audit.keycloak !== undefined) {
@@ -721,6 +765,49 @@ export function allocatedRows(
         same(row[2], ["text", "team"]), "UI_WORKSPACE_ROWS_CHANGED");
   }
   const actors = new Set(Object.keys(audit.actors));
+  const selected = audit.sqlitePreparation;
+  if (selected !== undefined) {
+    require(audit.serial?.expectedBackend === "sqlite" &&
+      get(before, "backend") === "sqlite" &&
+      get(after, "backend") === "sqlite" &&
+      get(selected.prepared.dataset, "backend") === "sqlite" &&
+      selected.preparationActor.id !==
+        selected.readbackActor.id, "UI_SQLITE_PREPARATION_ACTOR_REFUSED");
+    for (const actor of [selected.preparationActor, selected.readbackActor]) {
+      const original = list(before, "operations", "users").filter(
+        (row) => same(get(row, 0), ["blob", actor.id]) && same(get(row, 1), ["text", actor.email]),
+      );
+      require(original.length === 1 &&
+        !actors.has(actor.id) &&
+        get(before, "fingerprints", "users", actor.rowFingerprint) === 1 &&
+        get(before, "allocations", "users", actor.rowFingerprint, "self") === actor.id &&
+        get(after, "fingerprints", "users", actor.rowFingerprint) ===
+          1, "UI_SQLITE_PREPARATION_ACTOR_REFUSED");
+      const sessions = Object.entries(record(after, "allocations", "sessions")).filter(
+        ([hash, refs]) =>
+          !Object.hasOwn(record(before, "fingerprints", "sessions"), hash) &&
+          list(refs, "actors").includes(actor.id),
+      );
+      require(sessions.length === 1 &&
+        sessions[0] !== undefined &&
+        get(sessions[0][1], "self") === actor.sessionId &&
+        get(selected.prepared.dataset, "fingerprints", "sessions", sessions[0][0]) ===
+          1, "UI_SQLITE_PREPARATION_SESSION_REFUSED");
+      const logins = Object.entries(record(after, "allocations", "events")).filter(
+        ([hash, refs]) =>
+          !Object.hasOwn(record(before, "fingerprints", "events"), hash) &&
+          isRecord(refs) &&
+          isRecord(refs.eventWitness) &&
+          refs.eventWitness.class === "actor-login" &&
+          refs.eventWitness.target === actor.id,
+      );
+      require(logins.length === 1 &&
+        logins[0] !== undefined &&
+        get(selected.prepared.dataset, "fingerprints", "events", logins[0][0]) ===
+          1, "UI_SQLITE_PREPARATION_LOGIN_REFUSED");
+      actors.add(actor.id);
+    }
+  }
   const targets: ProjectionTargets = {
     documents: new Map(Object.entries(audit.documents ?? {})),
     tasks: new Map(),
@@ -812,6 +899,49 @@ export function allocatedRows(
         continue;
       }
       const refs = get(after, "allocations", table, sha);
+      if (selected !== undefined) {
+        for (const actor of [selected.preparationActor, selected.readbackActor]) {
+          if (!list(refs, "actors").includes(actor.id)) continue;
+          const bootstrap = actor === selected.preparationActor;
+          require([
+            "sessions",
+            "events",
+            ...(bootstrap ? ["memberships", "invitations", "audit_log"] : []),
+          ].includes(table) &&
+            get(selected.prepared.dataset, "fingerprints", table, sha) === count &&
+            (table === "sessions" ||
+              (isRecord(refs) &&
+                isRecord(refs.eventWitness) &&
+                refs.eventWitness.class === "actor-login") ||
+              (list(refs, "workspaces").length === 1 &&
+                Object.hasOwn(
+                  audit.workspaces,
+                  String(get(refs, "workspaces", 0)),
+                ))), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
+        }
+      }
+      if (
+        selected !== undefined &&
+        table === "document_states" &&
+        rowHash(selected.state.after) === sha &&
+        count === 1
+      )
+        continue;
+      if (
+        selected !== undefined &&
+        table === "collab_room_fences" &&
+        same(get(refs, "workspaces"), [selected.workspace])
+      ) {
+        const related = list(after, "operations", table).filter(
+          (row) =>
+            same(get(row, 0), ["blob", selected.workspace]) &&
+            same(get(row, 1), ["blob", selected.document]),
+        );
+        require(related.length === 1 &&
+          rowHash(related[0]) === sha &&
+          count === 1, "UI_SQLITE_READBACK_FENCE_REFUSED");
+        continue;
+      }
       require(subset(list(refs, "workspaces"), workspaces) &&
         subset(list(refs, "actors"), actors) &&
         subset(list(refs, "events"), events), "UI_FOREIGN_ROW_ADDITION");
@@ -882,6 +1012,24 @@ export function roomRetirement(
   origin: RoomLogOrigin,
   targetSha256: string,
 ): RoomRetirement {
+  const { retiredIdentity } = origin;
+  const allocation = scope.allocations.findIndex((a) => a.process === origin.child);
+  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
+  require(scope.closure() &&
+    allocation >= 0 &&
+    entry?.allocation === allocation &&
+    scope.allocations[allocation]?.closed === true &&
+    scope.allocations.every((allocation) => !allocation.forced) &&
+    scope.entries.has(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks) &&
+    scope.retired(retiredIdentity), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
+  return readRoomRetirement(manifest, origin, targetSha256);
+}
+
+function readRoomRetirement(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  origin: RoomLogOrigin,
+  targetSha256: string,
+): RoomRetirement {
   const { identity, retiredIdentity, log } = origin;
   require(origin.source === manifest.sourceInputs.source &&
     same(origin.identity, origin.mapping.native) &&
@@ -894,15 +1042,6 @@ export function roomRetirement(
     }) &&
     digest(readFileSync(origin.executable.path)) === origin.executable.sha256 &&
     origin.targetSha256 === targetSha256, "UI_SERIAL_ROOM_ORIGIN_CHANGED");
-  const allocation = scope.allocations.findIndex((a) => a.process === origin.child);
-  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
-  require(scope.closure() &&
-    allocation >= 0 &&
-    entry?.allocation === allocation &&
-    scope.allocations[allocation]?.closed === true &&
-    scope.allocations.every((allocation) => !allocation.forced) &&
-    scope.entries.has(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks) &&
-    scope.retired(retiredIdentity), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
   const inspect = () => {
     try {
       const opened = fstatSync(log.fd),
@@ -988,6 +1127,66 @@ export function roomRetirement(
     tree: origin.tree,
     executable: { ...origin.executable },
   };
+}
+
+/** Existing selected driver ownership, retained in parent memory across stop.
+ * No serialized completion flag can supply the child, PID/start ticks or FD. */
+export interface SelectedRoomOrigin {
+  origin: RoomLogOrigin;
+  child: SelectedChild;
+  row: Row;
+  base: string;
+}
+
+export function captureSelectedRoomLog(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: SelectedChild,
+  row: Row,
+  base: string,
+  targetSha256: string,
+): SelectedRoomOrigin {
+  require("pid" in child &&
+    typeof child.pid === "number" &&
+    child.pid > 0 &&
+    child.exitCode === null &&
+    child.signalCode === null &&
+    row.uid === 1000 &&
+    row.gid === 1000 &&
+    row.args === "/fvoci/bin/fvoci-server" &&
+    row.already_retired_at_observation !== true &&
+    typeof row.namespace_pid === "number" &&
+    row.namespace_pid > 0 &&
+    typeof row.start_ticks === "string" &&
+    /^[0-9]+$/.test(row.start_ticks) &&
+    /^http:\/\/127\.0\.0\.1:[1-9][0-9]*$/.test(base), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  const actual = processIdentity(row.pid);
+  require(actual.startTicks === row.start_ticks &&
+    actual.comm === "fvoci-server" &&
+    (actual.exeInspection === "UNAVAILABLE" ||
+      actual.exe === "/fvoci/bin/fvoci-server"), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  const native = { pid: row.namespace_pid, startTicks: row.start_ticks },
+    retired = { pid: row.pid, startTicks: row.start_ticks };
+  const origin = bindRoomLog(manifest, path, fd, child as Child, native, targetSha256, retired);
+  return { origin, child, row: { ...row }, base };
+}
+
+export async function selectedRoomRetirement(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  selected: SelectedRoomOrigin,
+  targetSha256: string,
+  rows: Row[],
+): Promise<RoomRetirement> {
+  require(selected.origin.child === selected.child &&
+    rows.some(
+      (row) => row.pid === selected.row.pid && row.start_ticks === selected.row.start_ticks,
+    ) &&
+    (await waitFor(selected.child, 10000)) === 0 &&
+    identityGone(selected.row) &&
+    rows.every((row) => identityGone(row)) &&
+    (await portClosed(Number(new URL(selected.base).port))), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
+  return readRoomRetirement(manifest, selected.origin, targetSha256);
 }
 
 /** Expiry is necessary, but only a real confirmed release and retirement authorize it. */
@@ -1166,7 +1365,10 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   for (const row of audit.observedFences) {
     require(row.length === 5 &&
       same(row[0], ["blob", get(row, 0, 1)]) &&
-      workspaces.has(get(row, 0, 1) as string) &&
+      (workspaces.has(get(row, 0, 1) as string) ||
+        (audit.sqlitePreparation !== undefined &&
+          same(row[0], ["blob", audit.sqlitePreparation.workspace]) &&
+          same(row[1], ["blob", audit.sqlitePreparation.document]))) &&
       get(row, 2, 0) === "blob" &&
       /^[a-f0-9]{32}$/.test(text(row, 2, 1)), "UI_FOREIGN_ROOM_FENCE");
     const value = integer(row[3]);
@@ -1205,6 +1407,36 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   }
 }
 
+/** Full typed seeded row, with only its actual one-claim generation/time
+ * transition admitted; every complete hash remains in its native primary. */
+export function selectedReadbackState(before: unknown, after: unknown, audit: Audit): string {
+  const selected = audit.sqlitePreparation;
+  require(selected !== undefined &&
+    audit.serial?.expectedBackend === "sqlite" &&
+    get(before, "backend") === "sqlite" &&
+    get(after, "backend") === "sqlite" &&
+    get(selected.prepared.dataset, "backend") === "sqlite", "UI_SQLITE_READBACK_STATE_REFUSED");
+  const table = "document_states";
+  const state = selected.state;
+  require(state.original.length === 10 &&
+    state.current.length === 10 &&
+    state.after.length === 10 &&
+    same(state.original[0], ["blob", selected.workspace]) &&
+    same(state.original[1], ["blob", selected.document]) &&
+    same(state.current, state.after) &&
+    state.original.every(
+      (value, index) => index === 6 || index === 7 || same(value, state.current[index]),
+    ) &&
+    integer(state.current[7]) === integer(state.original[7]) + 1n &&
+    integer(state.current[6]) >= decimal(audit.serial.before.checks.clockMicros) &&
+    integer(state.current[6]) <= decimal(selected.prepared.checks.clockMicros) &&
+    get(before, "fingerprints", table, rowHash(state.original)) === 1 &&
+    get(selected.prepared.dataset, "fingerprints", table, rowHash(state.current)) === 1 &&
+    get(after, "fingerprints", table, rowHash(state.after)) ===
+      1, "UI_SQLITE_READBACK_STATE_REFUSED");
+  return rowHash(state.original);
+}
+
 export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
   if (audit?.serial !== undefined) serialProgress(before, after, audit);
   require(same(get(before, "ledger"), get(after, "ledger")) &&
@@ -1219,8 +1451,39 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
     if (audit !== undefined && table === "instance_config" && vapidInitialization(before, after))
       continue;
     const now = record(current, table);
+    const selected = audit?.sqlitePreparation;
+    const related =
+      table === "collab_room_fences" && selected !== undefined
+        ? list(before, "operations", table).filter(
+            (row) =>
+              same(get(row, 0), ["blob", selected.workspace]) &&
+              same(get(row, 1), ["blob", selected.document]),
+          )
+        : [];
+    let relatedHash: string | undefined;
+    if (selected !== undefined && table === "document_states") {
+      relatedHash = selectedReadbackState(before, after, audit as Audit);
+    }
+    if (selected !== undefined && table === "collab_room_fences") {
+      require(related.length === 1, "UI_SQLITE_READBACK_FENCE_REFUSED");
+      const original = list(related[0]);
+      relatedHash = rowHash(original);
+      const prepared = list(selected.prepared.dataset, "operations", table).filter(
+        (row) => same(get(row, 0), original[0]) && same(get(row, 1), original[1]),
+      );
+      const final = list(after, "operations", table).filter(
+        (row) => same(get(row, 0), original[0]) && same(get(row, 1), original[1]),
+      );
+      require(prepared.length === 1 &&
+        final.length === 1 &&
+        same(list(prepared[0]).slice(0, 4), list(final[0]).slice(0, 4)) &&
+        integer(get(prepared[0], 3)) > integer(original[3]) &&
+        integer(get(final[0], 4)) <=
+          decimal(audit?.serial?.after.checks.clockMicros), "UI_SQLITE_READBACK_FENCE_REFUSED");
+    }
     for (const [sha, count] of Object.entries(record(rows)))
-      require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
+      if (sha !== relatedHash)
+        require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
   }
   if (audit !== undefined) auditCounters(before, after, audit);
 }
@@ -1265,7 +1528,9 @@ export function reportCases(
   titles: string[],
   backend: "libsql-remote" | "sqlite" = "libsql-remote",
 ): Case[] {
-  require(backend === "libsql-remote" || spec === RESTORE, "UI_BROWSER_BACKEND_REFUSED");
+  require(backend === "libsql-remote" ||
+    spec === RESTORE ||
+    spec === FINAL_SPEC, "UI_BROWSER_BACKEND_REFUSED");
   require(get(report, "config", "workers") === 1 &&
     same(get(report, "errors"), []) &&
     get(report, "config", "metadata", "selectedBackend") === backend &&

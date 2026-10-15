@@ -37,6 +37,8 @@ import {
   restoreSpec,
   validateOffReport,
   validateRestoreReport,
+  productSpec,
+  validateProductReport,
   type Current,
 } from "./binding.ts";
 import {
@@ -111,6 +113,7 @@ export interface Seam extends RestartSeam {
   migrationRows: (db: string) => unknown[][];
   validateOffReport: (report: unknown, backend: "sqlite") => string[];
   restart: (context: RestartContext, seam: RestartSeam) => Promise<Receipt>;
+  products: (state: State, seam: Seam) => Promise<RestartContext["sqliteProducts"]>;
 }
 export interface State {
   current: Current;
@@ -467,7 +470,7 @@ async function startServer(state: State, seam: Seam): Promise<void> {
   const { receipt, run } = state;
   receipt.phase = "server-startup";
   const log = join(run, "normal-server.log");
-  state.serverLog = openSync(log, "w");
+  state.serverLog = openSync(log, "wx", 0o600);
   // prettier-ignore
   const server = seam.spawnServer(["docker", "exec", state.name, "/bin/sh", "-ec",
     ". /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start"], state.serverLog);
@@ -691,10 +694,9 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     receipt.sqlite_restore_browser = { exit: 0, actual_tests: 1, skipped: 0, retries: 0 };
     receipt.sqlite_restore_report_sha256 = sha(restoreReport);
     receipt.phase = "restart";
-    receipt.current_schema_server_restart = await seam.restart(
-      restartContext(state, browserInputs, seam),
-      seam,
-    );
+    const context = restartContext(state, browserInputs, seam);
+    context.sqliteProducts = await seam.products(state, seam);
+    receipt.current_schema_server_restart = await seam.restart(context, seam);
   }
 }
 function restartContext(state: State, browserInputs: Browser, seam: Seam): RestartContext {
@@ -1066,7 +1068,578 @@ export function authEvents(path: string): unknown[][] {
     observer.close();
   }
 }
+/** Source-bound adapter for the existing restart owner, with separate exact
+ * PRODUCT4 browser/report/native receipts and no second normal server manager. */
+export async function productCallbacks(
+  state: State,
+  seam: Seam,
+): Promise<NonNullable<RestartContext["sqliteProducts"]>> {
+  const auditModule = await import("../../turso/ui-audit.ts");
+  const { requestPublic, inviteFinalActor, get, list, record, token } =
+    await import("../../turso/ui-common.ts");
+  const { auditSelectedFinalNative } =
+    await import("../../../apps/web/e2e-pending/selected-final-native.ts");
+  assert.ok(
+    state.flow === "on" &&
+      state.current.manifest.purpose === undefined &&
+      state.serverRow !== null &&
+      state.serverProcess !== null &&
+      state.serverLog !== null &&
+      state.base !== null,
+  );
+  const manifest = {
+    sourceInputs: { source: state.head, tree: state.tree, files: state.before.tracked },
+    binaries: Object.fromEntries(
+      Object.entries(state.current.build.binaries).map(([path, binary]) => [
+        binary.target.name,
+        { ...binary, path },
+      ]),
+    ),
+  };
+  const target = failureDigest(
+    JSON.stringify({ source: state.head, tree: state.tree, inode: state.databaseInode }),
+  );
+  const oldOrigin = auditModule.captureSelectedRoomLog(
+    manifest,
+    join(state.run, "normal-server.log"),
+    state.serverLog,
+    state.serverProcess,
+    state.serverRow,
+    state.base,
+    target,
+  );
+  const directory = join(state.run, "products");
+  mkdirSync(directory, 0o700);
+  const sourceConfig = join(root, "src/config.rs");
+  assert.ok(sha(sourceConfig) === state.before.tracked["src/config.rs"]);
+  const config = readText(sourceConfig);
+  const constant = (name: string) => {
+    const match = new RegExp("pub const " + name + ": u32 = ([0-9]+);").exec(config);
+    assert.ok(match !== null);
+    return Number(match[1]);
+  };
+  const policy = {
+    revisionKeep: constant("DEFAULT_REVISION_KEEP"),
+    revisionSnapshotIntervalHours: constant("DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS"),
+  };
+  assert.ok(
+    (state.serverEnv.REVISION_KEEP ?? String(policy.revisionKeep)) ===
+      String(policy.revisionKeep) &&
+      (state.serverEnv.REVISION_SNAPSHOT_INTERVAL_HOURS ??
+        String(policy.revisionSnapshotIntervalHours)) ===
+        String(policy.revisionSnapshotIntervalHours),
+  );
+  const namespace = "tui-" + token(10);
+  const audit: import("../../turso/ui-audit.ts").Audit = {
+    namespaces: [namespace],
+    actors: {},
+    workspaces: {},
+    documents: {},
+    servers: [],
+    targetSha256: target,
+    serverStarts: 1,
+    observedFences: [],
+  };
+  const nativeEnvironment: Record<string, string> = {};
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LD_LIBRARY_PATH",
+    "TMPDIR",
+    "RUNNER_TEMP",
+    "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITHUB_SHA",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "FVOCI_CI_BUN",
+    "FVOCI_CI_OWNER",
+    "FVOCI_CI_SELECTED_RUNS",
+    "FVOCI_ROOT_RUN_OWNER",
+    "FVOCI_ROOT_CURRENT_BINDING",
+    "FVOCI_ROOT_CURRENT_ALLOCATION",
+    "FVOCI_ROOT_RESTART_GRANT",
+    "FVOCI_SELECTED_EXECUTION_MODE",
+    "FVOCI_SELECTED_LOCAL_ALLOCATION",
+    "FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256",
+    "FVOCI_LOCAL_RUN_ID",
+    "FVOCI_LOCAL_DISPATCH_ID",
+    "FVOCI_LOCAL_TASK_ID",
+    "FVOCI_LOCAL_ROOT_TERMINAL",
+    "ORCA_TERMINAL_HANDLE",
+  ]) {
+    const value = state.source[key];
+    if (value !== undefined) nativeEnvironment[key] = value;
+  }
+  assert.ok(sha(process.execPath) === state.browserInputs?.bun.sha256);
+  const native = async (mode: string, input: Record<string, unknown>, label: string) => {
+    assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
+    const nativeLog = join(directory, label + ".native.private.log");
+    privateText(nativeLog, "");
+    const result = await seam.command(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--config=" + join(root, "bunfig.toml"),
+        join(root, "tools/turso/ui-container.ts"),
+        "--selected-sqlite-observe",
+        mode,
+      ],
+      {
+        env: nativeEnvironment,
+        input: JSON.stringify({ container: state.name, inode: state.databaseInode, input }),
+        cwd: root,
+        log: nativeLog,
+      },
+    );
+    assert.ok(result.returncode === 0 && Buffer.byteLength(result.stdout) < 64 * 1024 * 1024);
+    const parsed = record(JSON.parse(result.stdout));
+    assert.ok(
+      parsed.connectionClose === "confirmed" &&
+        parsed.lifecycleDrain === "confirmed" &&
+        parsed.leases === 0,
+    );
+    assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
+    privateText(join(directory, label + ".native.private.json"), JSON.stringify(parsed));
+    return parsed;
+  };
+  const serial = async (label: string, validate: boolean) => {
+    const start = BigInt(Date.now()) * 1000n;
+    const observation = await native("serial-observe", policy, label);
+    const end = BigInt(Date.now()) * 1000n;
+    if (validate) {
+      const checked = auditModule.validateSerialObservation(observation, policy, false, "sqlite");
+      auditModule.assertNativeClock(checked, start, end);
+      return checked;
+    }
+    return { dataset: record(observation, "dataset"), checks: record(observation, "checks") };
+  };
+  let original: import("../../turso/ui-audit.ts").SerialObservation | undefined;
+  let current: import("../../turso/ui-audit.ts").SerialObservation | undefined;
+  let restartedOrigin: import("../../turso/ui-audit.ts").SelectedRoomOrigin | undefined;
+  let originalSeed: Record<string, unknown> | undefined;
+  let storageOriginal: Record<string, string> | undefined;
+  const targets: {
+    workspaceId: string;
+    documentId: string;
+    receipts: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedNativeReceipt[];
+  }[] = [];
+  const writes: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedSyncWrite[] =
+    [];
+  let productPassed = false;
+  return {
+    async afterSeedStopped(rows, seed) {
+      const retired = await auditModule.selectedRoomRetirement(manifest, oldOrigin, target, rows);
+      original = await serial("original", true);
+      original.roomHistory = [retired];
+      auditModule.assertRoomClosure(original, target);
+      storageOriginal = seam.treeHashes(state.storage);
+      const seedId = String(get(seed, "document", "id")),
+        workspaceId = String(get(seed, "workspaceId"));
+      originalSeed = await native(
+        "observe",
+        { workspaceId, documentIds: [seedId] },
+        "original-seed",
+      );
+    },
+    async afterReadback(server) {
+      assert.ok(original !== undefined && originalSeed !== undefined);
+      assert.ok(
+        get(server.readback, "source") === state.head &&
+          get(server.readback, "tree") === state.tree &&
+          get(server.readback, "freshActorId") === get(server.seed, "freshActorId"),
+      );
+      restartedOrigin = auditModule.captureSelectedRoomLog(
+        manifest,
+        server.logpath,
+        server.log,
+        server.child,
+        server.row,
+        server.base,
+        target,
+      );
+      const logged = await requestPublic(server.base, "/api/v1/auth/login", {
+        email: "Admin@Example.COM",
+        password: "supersecret1",
+      });
+      const bootstrap = await requestPublic(
+        server.base,
+        "/api/v1/auth/me",
+        undefined,
+        logged.cookie,
+      );
+      assert.ok(
+        get(bootstrap.value, "isInstanceAdmin") === true &&
+          get(bootstrap.value, "userId") === get(logged.value, "userId"),
+      );
+      const workspace = await requestPublic(
+        server.base,
+        "/api/v1/workspaces",
+        { name: namespace, slug: namespace },
+        logged.cookie,
+      );
+      const workspaceId = String(get(workspace.value, "id"));
+      const owner = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        logged.cookie,
+        namespace + "-owner@example.invalid",
+        "Aa1!" + token(16),
+        "owner",
+        "owner",
+      );
+      const member = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        owner.cookie,
+        namespace + "-member@example.invalid",
+        "Aa1!" + token(16),
+        "member",
+        "member",
+      );
+      const outsider = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        owner.cookie,
+        namespace + "-outsider@example.invalid",
+        "Aa1!" + token(16),
+        "member",
+        "outsider",
+      );
+      for (const actor of [owner, member, outsider]) {
+        const actual = await requestPublic(server.base, "/api/v1/auth/me", undefined, actor.cookie);
+        assert.ok(
+          get(actual.value, "userId") === actor.userId &&
+            get(actual.value, "email") === actor.email,
+        );
+        audit.actors[auditModule.uuidHex(actor.userId)] = actor.email;
+      }
+      audit.workspaces[auditModule.uuidHex(workspaceId)] = namespace;
+      current = await serial("prepared", false);
+      const nativeActor = (id: string, email?: string) => {
+        const rows = list(current, "checks", "users").filter((row) => get(row, "id") === id);
+        assert.ok(rows.length === 1 && (email === undefined || get(rows[0], "email") === email));
+        return rows[0];
+      };
+      for (const [actor, role] of [
+        [owner, "owner"],
+        [member, "member"],
+        [outsider, "member"],
+      ] as const) {
+        nativeActor(actor.userId, actor.email);
+        assert.ok(
+          list(current, "checks", "memberships").filter(
+            (row) =>
+              get(row, "workspaceId") === workspaceId &&
+              get(row, "userId") === actor.userId &&
+              get(row, "role") === role,
+          ).length === 1,
+        );
+      }
+      const originalActor = (id: string) => {
+        const rows = list(original, "checks", "users").filter((row) => get(row, "id") === id);
+        assert.ok(rows.length === 1);
+        const sessions = Object.entries(
+          record(current, "dataset", "allocations", "sessions"),
+        ).filter(
+          ([hash, refs]) =>
+            !Object.hasOwn(record(original, "dataset", "fingerprints", "sessions"), hash) &&
+            list(refs, "actors").includes(auditModule.uuidHex(id)),
+        );
+        assert.ok(sessions.length === 1 && sessions[0] !== undefined);
+        return {
+          id: auditModule.uuidHex(id),
+          email: String(get(rows[0], "email")),
+          rowFingerprint: String(get(rows[0], "rowFingerprint")),
+          sessionId: String(get(sessions[0][1], "self")),
+        };
+      };
+      const preparationActor = originalActor(String(get(bootstrap.value, "userId")));
+      assert.ok(
+        preparationActor.email === get(bootstrap.value, "email") &&
+          preparationActor.sessionId === auditModule.uuidHex(get(bootstrap.value, "sessionId")),
+      );
+      audit.sqlitePreparation = {
+        preparationActor,
+        readbackActor: originalActor(String(get(server.seed, "freshActorId"))),
+        workspace: auditModule.uuidHex(get(server.seed, "workspaceId")),
+        document: auditModule.uuidHex(get(server.seed, "document", "id")),
+        prepared: current,
+        state: {
+          original: list(
+            get(originalSeed, "rows", String(get(server.seed, "document", "id"))),
+            "stateRow",
+          ),
+          current: [],
+          after: [],
+        },
+      };
+      const binding: import("../../../apps/web/e2e-pending/selected-final-contract.ts").FinalBinding =
+        {
+          schema: 1,
+          backend: "sqlite",
+          source: state.head,
+          tree: state.tree,
+          browser: "chromium",
+          flow: "on",
+          suite: "products",
+          namespace,
+          workspaceId,
+          workspaceSlug: namespace,
+          setupNeeded: false,
+          schemaCurrent: true,
+          commit: "confirmed",
+          lifecycleDrain: "confirmed",
+          leases: 0,
+          owner: { userId: owner.userId, email: owner.email, password: owner.password },
+          member: { userId: member.userId, email: member.email, password: member.password },
+          outsider: { userId: outsider.userId, email: outsider.email, password: outsider.password },
+        };
+      const bindingPath = join(directory, "actors.private.json"),
+        reportPath = join(directory, "playwright.private.json");
+      privateText(bindingPath, JSON.stringify(binding));
+      const bindingHash = sha(bindingPath);
+      const browserEnv: Record<string, string> = {};
+      for (const key of [
+        "PATH",
+        "LANG",
+        "TMPDIR",
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+      ])
+        if (state.browserEnv[key] !== undefined) browserEnv[key] = state.browserEnv[key];
+      Object.assign(browserEnv, {
+        CI: "true",
+        PLAYWRIGHT_BASE_URL: server.base,
+        FVOCI_E2E_SELECTED_BACKEND: "sqlite",
+        FVOCI_E2E_SELECTED_FLOW: "on",
+        FVOCI_E2E_SELECTED_SOURCE: state.head,
+        FVOCI_E2E_SELECTED_TREE: state.tree,
+        FVOCI_E2E_FINAL_BROWSER: "chromium",
+        FVOCI_E2E_FINAL_SUITE: "products",
+        FVOCI_E2E_TURSO_NAMESPACE: namespace,
+        FVOCI_E2E_FINAL_ACTOR_BINDING: bindingPath,
+        FVOCI_E2E_FINAL_BROWSER_BIN: state.browserInputs?.chromium.path ?? "",
+        FVOCI_E2E_RESULT_DIR: directory,
+        PLAYWRIGHT_JSON_OUTPUT_FILE: reportPath,
+      });
+      const args = browserArgs(
+        process.execPath,
+        join(root, "node_modules/playwright/cli.js"),
+        productSpec,
+      );
+      args[args.indexOf("--config") + 1] = "e2e-pending/selected-final-playwright.config.ts";
+      privateText(join(directory, "browser.private.log"), "");
+      const result = await seam.command(args, {
+        env: browserEnv,
+        cwd: join(root, "apps/web"),
+        required: false,
+        log: join(directory, "browser.private.log"),
+      });
+      state.code = result.returncode;
+      if (state.code !== 0)
+        recordFailure(state, state.code, undefined, join(directory, "browser.private.log"));
+      assert.ok(state.code === 0, "SQLite PRODUCT4 browser failed");
+      chmodSync(reportPath, 0o600);
+      const report = read(reportPath);
+      assert.ok(sha(bindingPath) === bindingHash, "PRODUCT4 actor binding changed");
+      const titles = validateProductReport(report, binding, bindingHash);
+      const cases = auditModule.reportCases(
+        report,
+        "selected-final-acceptance.ts",
+        titles,
+        "sqlite",
+      );
+      const expected = cases.map((item) => {
+        const wire = auditModule.attachment([item], "selected-final-writes.json"),
+          readback = auditModule.attachment([item], "selected-final-native-readback.json");
+        for (const evidence of [wire, readback])
+          assert.ok(
+            get(evidence, "source") === state.head &&
+              get(evidence, "tree") === state.tree &&
+              get(evidence, "browser") === "chromium" &&
+              get(evidence, "flow") === "on",
+          );
+        for (const actor of list(wire, "actors")) {
+          assert.ok(Object.hasOwn(audit.actors, auditModule.uuidHex(get(actor, "actorId"))));
+          writes.push(...(list(actor, "writes") as typeof writes));
+        }
+        return readback;
+      });
+      const documents = new Map<string, Set<string>>();
+      for (const row of expected) {
+        const workspace = String(get(row, "workspaceId")),
+          document = String(get(row, "targetId"));
+        auditModule.uuidHex(workspace);
+        auditModule.uuidHex(document);
+        if (!documents.has(workspace)) documents.set(workspace, new Set());
+        documents.get(workspace)?.add(document);
+      }
+      for (const write of writes) {
+        if (!documents.has(write.workspaceId)) documents.set(write.workspaceId, new Set());
+        documents.get(write.workspaceId)?.add(write.documentId);
+      }
+      const seedWorkspace = String(get(server.seed, "workspaceId")),
+        seedId = String(get(server.seed, "document", "id"));
+      const seedNative = await native(
+        "observe",
+        { workspaceId: seedWorkspace, documentIds: [seedId] },
+        "current-seed",
+      );
+      const seedRow = get(seedNative, "rows", seedId),
+        oldSeed = get(originalSeed, "rows", seedId);
+      for (const key of [
+        "state",
+        "cutoff",
+        "tail",
+        "content",
+        "text",
+        "version",
+        "updates",
+        "receipts",
+        "revisions",
+      ])
+        assert.ok(
+          deepEquals(get(oldSeed, key), get(seedRow, key), true),
+          "original wiki native bytes/receipts changed",
+        );
+      assert.ok(
+        deepEquals(get(seedRow, "stateColumns"), [
+          "workspace_id",
+          "document_id",
+          "state",
+          "encoding",
+          "compacted_at",
+          "created_at",
+          "updated_at",
+          "writer_generation",
+          "snapshot_cutoff_seq",
+          "tail_seq",
+        ]),
+      );
+      audit.sqlitePreparation.state.current = list(seedRow, "stateRow");
+      audit.observedFences.push(...(list(seedRow, "roomFences") as unknown[][]));
+      for (const [workspaceId, ids] of documents) {
+        const observed = await native(
+          "observe",
+          { workspaceId, documentIds: [...ids] },
+          "current-products-" + token(4),
+        );
+        for (const documentId of ids) {
+          const row = get(observed, "rows", documentId);
+          if (audit.documents !== undefined)
+            audit.documents[auditModule.uuidHex(documentId)] = auditModule.uuidHex(workspaceId);
+          audit.observedFences.push(...(list(row, "roomFences") as unknown[][]));
+          targets.push({
+            workspaceId,
+            documentId,
+            receipts: list(row, "receipts") as (typeof targets)[number]["receipts"],
+          });
+          for (const readback of expected.filter(
+            (row) => get(row, "workspaceId") === workspaceId && get(row, "targetId") === documentId,
+          ))
+            assert.ok(
+              deepEquals(get(row, "content"), get(readback, "content"), true) &&
+                get(row, "text") === get(readback, "text"),
+            );
+        }
+      }
+      productPassed = true;
+      state.receipt.sqlite_products_browser = {
+        exit: 0,
+        actual_tests: 4,
+        skipped: 0,
+        retries: 0,
+        titles,
+        report_sha256: sha(reportPath),
+        binding_sha256: bindingHash,
+      };
+    },
+    async afterRestartStopped(rows) {
+      assert.ok(
+        original !== undefined &&
+          current !== undefined &&
+          restartedOrigin !== undefined &&
+          storageOriginal !== undefined,
+      );
+      const retired = await auditModule.selectedRoomRetirement(
+        manifest,
+        restartedOrigin,
+        target,
+        rows,
+      );
+      const after = await serial("after", true);
+      auditModule.retainRoomHistory(after, original, retired);
+      auditModule.assertRoomClosure(after, target);
+      audit.servers.push(
+        auditModule.maintenanceReceipts(
+          restartedOrigin.origin.log.path,
+          restartedOrigin.origin.identity,
+          target,
+        ),
+      );
+      audit.serial = { before: original, after, policy, expectedBackend: "sqlite" };
+      assert.ok(
+        productPassed && audit.sqlitePreparation !== undefined && originalSeed !== undefined,
+        "PRODUCT4 did not complete before normal retirement",
+      );
+      const finalSeed = await native(
+        "observe",
+        {
+          workspaceId: audit.sqlitePreparation.workspace.replace(
+            /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+            "$1-$2-$3-$4-$5",
+          ),
+          documentIds: [
+            audit.sqlitePreparation.document.replace(
+              /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+              "$1-$2-$3-$4-$5",
+            ),
+          ],
+        },
+        "after-seed",
+      );
+      const finalRow = get(finalSeed, "rows", Object.keys(record(finalSeed, "rows"))[0] as string);
+      const oldRow = get(
+        originalSeed,
+        "rows",
+        Object.keys(record(originalSeed, "rows"))[0] as string,
+      );
+      for (const key of [
+        "state",
+        "cutoff",
+        "tail",
+        "content",
+        "text",
+        "version",
+        "updates",
+        "receipts",
+        "revisions",
+      ])
+        assert.ok(
+          deepEquals(get(oldRow, key), get(finalRow, key), true),
+          "original wiki native bytes/receipts changed after retirement",
+        );
+      audit.sqlitePreparation.state.after = list(finalRow, "stateRow");
+      await auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
+      const storageAfter = seam.treeHashes(state.storage);
+      for (const [path, hash] of Object.entries(storageOriginal))
+        assert.ok(storageAfter[path] === hash, "original storage bytes changed");
+      privateText(join(directory, "audit.private.json"), JSON.stringify(audit));
+      state.receipt.sqlite_products_native = {
+        observation: "PASS",
+        preservation: "PASS",
+        wire_receipts: "PASS",
+        normal_room_retirement: "PASS",
+        audit_sha256: sha(join(directory, "audit.private.json")),
+      };
+    },
+  };
+}
+
 export const sqliteSeam: Seam = {
+  products: productCallbacks,
   trap: trapInterrupts,
   loadCurrent,
   inputCheck: (before, head, tree) => inputCheck(before, head, tree),

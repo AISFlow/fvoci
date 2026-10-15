@@ -180,6 +180,30 @@ describe("container shape", () => {
       expect(() => capsuleText(changed)).toThrow("UI_SQLITE_DESTINATION_REFUSED");
   });
 
+  test("selected SQLite observer capsule admits only its owned explicit backend and file", () => {
+    const environment = {
+      E2E_DATABASE_BACKEND: "sqlite",
+      FVOCI_DATABASE_BACKEND: "sqlite",
+      FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+      FVOCI_E2E_SQLITE_RUN_ROOT: directory,
+      FVOCI_E2E_SQLITE_PATH: join(directory, "app.sqlite"),
+      FVOCI_STORAGE_DIR: join(directory, "storage"),
+    };
+    expect(capsuleText(environment)).toContain("FVOCI_E2E_SQLITE_OBSERVER_SELECTED=1");
+    for (const change of [
+      { E2E_DATABASE_BACKEND: "libsql-remote" },
+      { FVOCI_DATABASE_BACKEND: "postgres" },
+      { FVOCI_E2E_SQLITE_RUN_ROOT: "relative" },
+      { FVOCI_E2E_SQLITE_PATH: join(directory, "foreign.sqlite") },
+      { PASSWORD_PEPPER_KEYS: "private" },
+      { FVOCI_LIBSQL_URL: "private" },
+      { ENCRYPTION_KEYS: "private" },
+    ])
+      expect(() => capsuleText({ ...environment, ...change })).toThrow(
+        "UI_SQLITE_OBSERVER_TARGET_REFUSED",
+      );
+  });
+
   test("the shell proof comes only from the grant and the config env stays clean", () => {
     const environment = {
       FVOCI_LIBSQL_URL: "libsql://invented.invalid",

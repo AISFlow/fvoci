@@ -5,6 +5,7 @@ use super::codec::{Cell, FamilyRow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use sqlx::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -231,6 +232,47 @@ fn family<'a>(tx: &'a mut DbTransaction<'_>) -> Result<&'a mut FamilyTx, sqlx::E
     }
 }
 
+// Only these fixed observation statements use the detached owned connection.
+// Remote callers retain their original transaction/backend admission.
+enum NativeRead<'a> {
+    Remote(&'a mut FamilyTx),
+    OwnedSqlite(&'a mut sqlx::SqliteConnection),
+}
+impl NativeRead<'_> {
+    async fn query(
+        &mut self,
+        sql: &'static str,
+        args: &[Cell],
+    ) -> Result<Vec<FamilyRow>, sqlx::Error> {
+        match self {
+            Self::Remote(tx) => tx.query(sql, args).await,
+            Self::OwnedSqlite(connection) => {
+                let mut query = sqlx::query(sql);
+                for cell in args {
+                    query = match cell {
+                        Cell::Null => query.bind(Option::<i64>::None),
+                        Cell::Integer(value) => query.bind(*value),
+                        Cell::Text(value) => query.bind(value),
+                        Cell::Blob(value) => query.bind(value),
+                    };
+                }
+                Ok(query
+                    .fetch_all(&mut **connection)
+                    .await?
+                    .into_iter()
+                    .map(FamilyRow::Local)
+                    .collect())
+            }
+        }
+    }
+}
+
+fn column_names(row: &FamilyRow) -> Result<Vec<&str>, sqlx::Error> {
+    (0..row.column_count()?)
+        .map(|index| row.column_name(index))
+        .collect()
+}
+
 fn exact(cell: Cell) -> Value {
     match cell {
         Cell::Null => json!(["null"]),
@@ -241,11 +283,8 @@ fn exact(cell: Cell) -> Value {
 }
 
 fn row_hash(row: &FamilyRow) -> Result<String, sqlx::Error> {
-    let FamilyRow::Remote(remote) = row else {
-        return Err(refused());
-    };
-    let cells = (0..remote.column_count())
-        .map(|i| row.cell(i as usize).map(exact))
+    let cells = (0..column_names(row)?.len())
+        .map(|i| row.cell(i).map(exact))
         .collect::<Result<Vec<_>, _>>()?;
     let bytes = serde_json::to_vec(&cells).map_err(|_| refused())?;
     if bytes.len() > 16 * 1024 * 1024 {
@@ -455,18 +494,15 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
 }
 
 fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
-    let FamilyRow::Remote(remote) = row else {
-        return Err(refused());
-    };
+    let columns = column_names(row)?;
     let mut workspaces = Vec::new();
     let mut actors = Vec::new();
     let mut events = Vec::new();
     let mut own_id = None;
     let mut consumer = None;
     let mut event_columns = Vec::new();
-    for i in 0..remote.column_count() {
-        let name = remote.column_name(i).ok_or_else(refused)?;
-        let cell = row.cell(i as usize)?;
+    for (i, name) in columns.into_iter().enumerate() {
+        let cell = row.cell(i)?;
         if table == "events" {
             event_columns.push((name.to_string(), cell.clone()));
         }
@@ -497,6 +533,8 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
                 return Err(refused());
             }
             own_id = Some(hex::encode(bytes));
+        } else if name == "id" && table == "sessions" && matches!(row, FamilyRow::Local(_)) {
+            own_id = Some(hex::encode(cell.id()?.as_bytes()));
         } else if name == "consumer" {
             consumer = Some(cell.string()?);
         }
@@ -844,10 +882,34 @@ async fn capture_primary(
         .begin_read()
         .await
         .map_err(|error| baseline_failure("begin-read", error))?;
+    let result = match family(&mut tx) {
+        Ok(f) => {
+            capture_primary_read(
+                &mut NativeRead::Remote(f),
+                &current,
+                policy,
+                "libsql-remote",
+            )
+            .await
+        }
+        Err(error) => Err(baseline_failure("family-contract", error)),
+    };
+    let rollback = tx
+        .rollback()
+        .await
+        .map_err(|error| baseline_failure("rollback", error));
+    finished(result, rollback, "not-attempted")
+}
+
+async fn capture_primary_read(
+    f: &mut NativeRead<'_>,
+    current: &super::migrate::SqliteCapability,
+    policy: Option<SerialPolicy>,
+    backend: &'static str,
+) -> Result<PrimaryCapture, sqlx::Error> {
     let mut phase = "family-contract";
     let mut table_comparison = None;
     let result = async {
-        let f = family(&mut tx)?;
         phase = "table-read";
         let tables = f.query("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", &[]).await?;
         phase = "table-conversion";
@@ -880,10 +942,8 @@ async fn capture_primary(
                 let hash = row_hash(row)?;
                 if matches!(*name, "users" | "memberships" | "workspaces") && policy.is_some() {
                     phase = "serial-actor-witness";
-                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
                     let mut columns = Vec::new();
-                    for i in 0..remote.column_count() {
-                        let column = remote.column_name(i).ok_or_else(refused)?;
+                    for (i, column) in column_names(row)?.into_iter().enumerate() {
                         if matches!(column, "id" | "email" | "workspace_id" | "user_id" | "role") {
                             columns.push((column.to_string(), row.cell(i as usize)?));
                         }
@@ -896,9 +956,8 @@ async fn capture_primary(
                     }
                 }
                 if *name == "instance_config" {
-                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
-                    let columns = (0..remote.column_count()).map(|i| {
-                        Ok((remote.column_name(i).ok_or_else(refused)?.to_string(), row.cell(i as usize)?))
+                    let columns = column_names(row)?.into_iter().enumerate().map(|(i, column)| {
+                        Ok((column.to_string(), row.cell(i)?))
                     }).collect::<Result<Vec<_>, sqlx::Error>>()?;
                     instance_config.push(instance_config_witness(&hash, &columns)?);
                 }
@@ -919,8 +978,7 @@ async fn capture_primary(
             if rows.len() > 10000 { return Err(refused()) }
             phase = "ui-conversion";
             let cells = rows.iter().map(|row| {
-                let FamilyRow::Remote(remote) = row else { return Err(refused()) };
-                (0..remote.column_count()).map(|i| row.cell(i as usize).map(exact)).collect::<Result<Vec<_>, _>>()
+                (0..column_names(row)?.len()).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()
             }).collect::<Result<Vec<_>, _>>()?;
             operations.insert(*name, cells);
         }
@@ -935,7 +993,7 @@ async fn capture_primary(
         phase = "ledger-conversion";
         let ledger = ledger.iter().map(|row| (0..4).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
         phase = "summary-conversion";
-        let dataset = json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
+        let dataset = json!({"schema":1,"backend":backend,"schemaCurrent":true,
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
@@ -958,11 +1016,7 @@ async fn capture_primary(
             table_comparison,
         }))
     });
-    let rollback = tx
-        .rollback()
-        .await
-        .map_err(|error| baseline_failure("rollback", error));
-    finished(result, rollback, "not-attempted")
+    result
 }
 
 // Cover the entire existing job limit forwards from the native clock. This is
@@ -1196,7 +1250,7 @@ fn revision_due(
 }
 
 async fn serial_native_cells(
-    f: &mut FamilyTx,
+    f: &mut NativeRead<'_>,
     sql: &'static str,
 ) -> Result<Vec<Vec<Cell>>, sqlx::Error> {
     let rows = f.query(sql, &[]).await?;
@@ -1204,14 +1258,7 @@ async fn serial_native_cells(
         return Err(refused());
     }
     rows.iter()
-        .map(|row| {
-            let FamilyRow::Remote(remote) = row else {
-                return Err(refused());
-            };
-            (0..remote.column_count())
-                .map(|i| row.cell(i as usize))
-                .collect()
-        })
+        .map(|row| (0..column_names(row)?.len()).map(|i| row.cell(i)).collect())
         .collect()
 }
 
@@ -1221,7 +1268,10 @@ fn serial_exact_cells(rows: &[Vec<Cell>]) -> Vec<Vec<Value>> {
         .collect()
 }
 
-async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+async fn serial_cells(
+    f: &mut NativeRead<'_>,
+    sql: &'static str,
+) -> Result<Vec<Vec<Value>>, sqlx::Error> {
     Ok(serial_exact_cells(&serial_native_cells(f, sql).await?))
 }
 
@@ -1286,7 +1336,7 @@ const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
 ];
 
 async fn serial_checks(
-    f: &mut FamilyTx,
+    f: &mut NativeRead<'_>,
     policy: SerialPolicy,
     mut users: Vec<SerialUser>,
     mut memberships: Vec<SerialMembership>,
@@ -1889,8 +1939,23 @@ pub async fn observe_native(
     }
     super::migrate::assert_sqlite_schema_current(backend).await?;
     let mut tx = backend.begin_read().await?;
+    let result = match family(&mut tx) {
+        Ok(f) => {
+            observe_native_read(&mut NativeRead::Remote(f), workspace, ids, "libsql-remote").await
+        }
+        Err(error) => Err(error),
+    };
+    let rollback = tx.rollback().await;
+    finished(result, rollback, "not-attempted")
+}
+
+async fn observe_native_read(
+    f: &mut NativeRead<'_>,
+    workspace: Uuid,
+    ids: &[Uuid],
+    backend: &'static str,
+) -> Result<Value, sqlx::Error> {
     let result = async {
-        let f = family(&mut tx)?;
         let mut rows = BTreeMap::new();
         for id in ids {
             let args = [Cell::uuid(workspace),Cell::uuid(*id)];
@@ -1919,10 +1984,81 @@ pub async fn observe_native(
             let fences = f.query("SELECT workspace_id,document_id,owner_token,fence,expires_at FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2", &args).await?;
             if fences.len() > 1 { return Err(refused()) }
             let fences = fences.iter().map(|r| (0..5).map(|i| r.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
-            rows.insert(id.to_string(),json!({"state":hex::encode(s.cell(0)?.bytes()?),"writer_generation":s.cell(1)?.integer()?,"cutoff":cutoff,"tail":tail,"content":s.cell(4)?.value()?,"text":s.cell(5)?.string()?,"version":s.cell(6)?.integer()?,"updates":output,"receipts":receipts,"revisions":revisions,"roomFences":fences}));
+            let mut observed = json!({"state":hex::encode(s.cell(0)?.bytes()?),"writer_generation":s.cell(1)?.integer()?,"cutoff":cutoff,"tail":tail,"content":s.cell(4)?.value()?,"text":s.cell(5)?.string()?,"version":s.cell(6)?.integer()?,"updates":output,"receipts":receipts,"revisions":revisions,"roomFences":fences});
+            if backend == "sqlite" {
+                let state = f.query("SELECT * FROM document_states WHERE workspace_id=?1 AND document_id=?2", &args).await?;
+                if state.len() != 1 { return Err(refused()) }
+                let columns = column_names(&state[0])?;
+                observed["stateColumns"] = json!(columns);
+                observed["stateRow"] = json!((0..columns.len()).map(|index| state[0].cell(index).map(exact)).collect::<Result<Vec<_>, _>>()?);
+            }
+            rows.insert(id.to_string(), observed);
         }
-        Ok(json!({"backend":"libsql-remote","workspace_id":workspace,"rows":rows}))
+        Ok(json!({"backend":backend,"workspace_id":workspace,"rows":rows}))
     }.await;
+    result
+}
+
+/// Only the owned SQLite CLI admits this branch, after current-schema gating
+/// and detaching the sole native connection. It retains and closes that exact
+/// connection after this awaited read transaction finishes, including failure.
+pub enum OwnedSqliteObservation {
+    Baseline,
+    Serial(SerialPolicy),
+    Native { workspace: Uuid, ids: Vec<Uuid> },
+}
+
+pub async fn observe_owned_sqlite(
+    connection: &mut sqlx::SqliteConnection,
+    current: &super::migrate::SqliteCapability,
+    request: OwnedSqliteObservation,
+) -> Result<Value, sqlx::Error> {
+    if current.mode != super::migrate::SqliteSchemaMode::Raw || current.applied_steps != 12 {
+        return Err(refused());
+    }
+    if let OwnedSqliteObservation::Native { ids, .. } = &request {
+        if ids.is_empty()
+            || ids.len() > 100
+            || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+        {
+            return Err(refused());
+        }
+    }
+    let runtime: (String, String, i64) = sqlx::query_as(
+        "SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if runtime.0 != super::pool::SQLITE_VERSION
+        || runtime.1 != super::pool::SQLITE_SOURCE_ID
+        || runtime.2 != 1
+    {
+        return Err(refused());
+    }
+    let mut tx = connection.begin().await?;
+    let mut reader = NativeRead::OwnedSqlite(&mut tx);
+    let result = match request {
+        OwnedSqliteObservation::Baseline => {
+            capture_primary_read(&mut reader, current, None, "sqlite")
+                .await
+                .map(|captured| captured.dataset)
+        }
+        OwnedSqliteObservation::Serial(policy) => {
+            match capture_primary_read(&mut reader, current, Some(policy), "sqlite").await {
+                Ok(captured) => captured.checks.ok_or_else(refused).and_then(|checks| {
+                    serde_json::to_value(SerialObservation {
+                        dataset: captured.dataset,
+                        checks,
+                    })
+                    .map_err(|_| refused())
+                }),
+                Err(error) => Err(error),
+            }
+        }
+        OwnedSqliteObservation::Native { workspace, ids } => {
+            observe_native_read(&mut reader, workspace, &ids, "sqlite").await
+        }
+    };
     let rollback = tx.rollback().await;
     finished(result, rollback, "not-attempted")
 }
@@ -1930,6 +2066,51 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn owned_sqlite_metadata_preserves_exact_storage_classes_and_rollback() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut tx = connection.begin().await.unwrap();
+        let mut reader = NativeRead::OwnedSqlite(&mut tx);
+        let rows = reader.query("SELECT NULL AS absent,9223372036854775807 AS exact_integer,'0.000000000000000123456789' AS exact_text,x'00ff80' AS exact_blob", &[]).await.unwrap();
+        assert_eq!(
+            column_names(&rows[0]).unwrap(),
+            ["absent", "exact_integer", "exact_text", "exact_blob"]
+        );
+        let expected = json!([
+            ["null"],
+            ["integer", "9223372036854775807"],
+            ["text", "0.000000000000000123456789"],
+            ["blob", "00ff80"]
+        ]);
+        assert_eq!(
+            row_hash(&rows[0]).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&expected).unwrap()))
+        );
+        let real = reader.query("SELECT 1.5 AS lossy", &[]).await.unwrap();
+        assert!(row_hash(&real[0]).is_err());
+        tx.rollback().await.unwrap();
+        // A successful fixed read must leave this same connection usable and
+        // outside its read transaction, before its explicit native close.
+        connection.begin().await.unwrap().rollback().await.unwrap();
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_primary_entry_still_refuses_local_backend_before_connect() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let backend = Backend::Sqlite(pool);
+        let error = capture_baseline(&backend).await.unwrap_err();
+        assert_eq!(
+            failure_receipt(&error)["baselineFailure"]["phase"],
+            "backend-contract"
+        );
+        backend.close().await.unwrap();
+    }
 
     fn auth_event(verb: &str) -> Vec<(String, Cell)> {
         let actor = Uuid::from_u128(1);

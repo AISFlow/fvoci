@@ -266,7 +266,18 @@ function world(
         : { chrome: "4".repeat(64) },
     migrationRows: () => migrations,
     validateOffReport: () => Array.from({ length: 8 }, (_, index) => "off " + String(index)),
-    restart: () => Promise.resolve({ restartBrowserExit: 0 }),
+    products: () => {
+      calls.push(["PRODUCT4-PARENT-BINDING"]);
+      return Promise.resolve({
+        afterSeedStopped: () => Promise.resolve(),
+        afterReadback: () => Promise.resolve(),
+        afterRestartStopped: () => Promise.resolve(),
+      });
+    },
+    restart: (context) => {
+      expect(context.sqliteProducts).toBeDefined();
+      return Promise.resolve({ restartBrowserExit: 0 });
+    },
     emit(line) {
       emitted.push(line);
     },
@@ -383,6 +394,10 @@ describe("selected sqlite driver body", () => {
       expect(receipt.cleanup_errors).toEqual([]);
       expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
       expect(receipt.actual_browser_tests).toBe(flow === "off" ? 8 : 1);
+      expect(fixture.calls.filter((args) => args[0] === "PRODUCT4-PARENT-BINDING").length).toBe(
+        flow === "on" ? 1 : 0,
+      );
+      expect(statSync(join(fixture.run, "normal-server.log")).mode & 0o777).toBe(0o600);
       const restoreCalls = fixture.calls.filter((args) => args.includes(restoreSpec));
       expect(restoreCalls.length).toBe(flow === "on" ? 1 : 0);
       if (flow === "on") {
