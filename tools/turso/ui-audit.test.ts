@@ -14,8 +14,8 @@ import {
   startupBlockers,
   type Audit,
 } from "./ui-audit.ts";
-import { UiError, type Record_ } from "./ui-common.ts";
-import { parseJson } from "../selected-backend-ci/io.ts";
+import { UiError, get, record, type Record_ } from "./ui-common.ts";
+import { parseJson, digest } from "../selected-backend-ci/io.ts";
 import { clone, must, parsed } from "./ui-fakes.ts";
 
 const number = (n: number | string) => ["integer", String(n)];
@@ -943,6 +943,7 @@ test("SQLite seeded readback state preserves every byte and only admits one nati
     sqlitePreparation: {
       workspace: "a".repeat(32),
       document: "b".repeat(32),
+      original: { dataset: before, checks: { clockMicros: "20" } },
       prepared,
       state: { original, current, after: structuredClone(current) },
     },
@@ -982,4 +983,225 @@ test("SQLite seeded readback state preserves every byte and only admits one nati
   expect(() => selectedReadbackState(before, missing, audit)).toThrow();
   const remote = { ...after, backend: "libsql-remote" };
   expect(() => selectedReadbackState(before, remote, audit)).toThrow();
+});
+
+function sqlitePreparedRecords() {
+  const id = (digit: string) => digit.repeat(32),
+    h = (value: unknown) => digest(JSON.stringify(value));
+  const prep = id("1"),
+    reader = id("2"),
+    newActors = [id("3"), id("4"), id("5")],
+    workspace = id("6"),
+    oldWorkspace = id("7"),
+    document = id("8"),
+    sessions = [id("c"), id("d")];
+  const refs = (
+    workspaces: string[] = [],
+    actors: string[] = [],
+    self: string | null = null,
+  ): Record_ => ({ workspaces, actors, events: [], self, consumer: null });
+  const originalState = [
+    ["blob", oldWorkspace],
+    ["blob", document],
+    ["blob", "00ff"],
+    number(1),
+    ["null"],
+    number(10),
+    number(10),
+    number(7),
+    number(2),
+    number(2),
+  ];
+  const state = structuredClone(originalState);
+  state[6] = number(30);
+  state[7] = number(8);
+  const oldFence = [
+    ["blob", oldWorkspace],
+    ["blob", document],
+    ["blob", id("a")],
+    number(1),
+    number(10),
+  ];
+  const fence = [
+    ["blob", oldWorkspace],
+    ["blob", document],
+    ["blob", id("b")],
+    number(2),
+    number(50),
+  ];
+  const userHashes = [h("original-preparation-user"), h("original-readback-user")];
+  const fingerprints: Record<string, Record<string, number>> = {
+    users: { [userHashes[0] as string]: 1, [userHashes[1] as string]: 1 },
+    documents: { [h("original-unrelated-document")]: 1 },
+    tasks: {},
+    workspaces: { [h("original-workspace")]: 1 },
+    sessions: {},
+    events: {},
+    document_states: { [h(originalState)]: 1 },
+    collab_room_fences: { [h(oldFence)]: 1 },
+  };
+  const allocations: Record<string, Record<string, Record_>> = Object.fromEntries(
+    Object.keys(fingerprints).map((table) => [table, {}]),
+  );
+  allocations.users = {
+    [userHashes[0] as string]: refs([], [], prep),
+    [userHashes[1] as string]: refs([], [], reader),
+  };
+  const operations: Record<string, unknown[]> = {
+    users: [
+      ["blob", prep],
+      ["blob", reader],
+    ].map((value, index) => [
+      value,
+      ["text", index === 0 ? "original-prep" : "original-reader"],
+      ["null"],
+    ]),
+    workspaces: [
+      [
+        ["blob", oldWorkspace],
+        ["text", "original"],
+        ["text", "team"],
+      ],
+    ],
+    events: [],
+    event_sequence: [[number(1), number(0)]],
+    collab_fence_counter: [[number(1), number(2)]],
+    collab_room_fences: [oldFence],
+    task_collab_room_fences: [],
+  };
+  const before: Record_ = {
+    backend: "sqlite",
+    schemaCurrent: true,
+    schemaSha256: "f".repeat(64),
+    lineage: "fvoci-sqlite-060",
+    ledger: [],
+    fingerprints,
+    allocations,
+    operations,
+  };
+  const prepared = structuredClone(before),
+    prints = record(prepared, "fingerprints"),
+    allocated = record(prepared, "allocations"),
+    ops = record(prepared, "operations");
+  for (const [index, actor] of newActors.entries()) {
+    const hash = h(["new-user", actor]);
+    record(prints, "users")[hash] = 1;
+    record(allocated, "users")[hash] = refs([], [], actor);
+    (ops.users as unknown[]).push([["blob", actor], ["text", "new-" + String(index)], ["null"]]);
+  }
+  record(prints, "workspaces")[h("new-workspace")] = 1;
+  record(allocated, "workspaces")[h("new-workspace")] = refs([], [], workspace);
+  (ops.workspaces as unknown[]).push([
+    ["blob", workspace],
+    ["text", namespace],
+    ["text", "team"],
+  ]);
+  for (const [index, actor] of [prep, reader].entries()) {
+    const session = sessions[index] as string,
+      hash = h(["session", actor]);
+    record(prints, "sessions")[hash] = 1;
+    record(allocated, "sessions")[hash] = refs([], [actor], session);
+    const event = h(["login", actor]),
+      seq = index + 1;
+    record(prints, "events")[event] = 1;
+    record(allocated, "events")[event] = {
+      ...refs([], [actor], event.slice(0, 32)),
+      eventWitness: { class: "actor-login", sequence: number(seq), target: actor },
+    };
+    (ops.events as unknown[]).push([number(seq), ["null"], ["blob", actor]]);
+  }
+  const event = h("workspace-created");
+  record(prints, "events")[event] = 1;
+  record(allocated, "events")[event] = {
+    ...refs([workspace], [prep], event.slice(0, 32)),
+    eventWitness: null,
+  };
+  (ops.events as unknown[]).push([number(3), ["blob", workspace], ["blob", prep]]);
+  ops.event_sequence = [[number(1), number(3)]];
+  ops.collab_fence_counter = [[number(1), number(3)]];
+  prints.document_states = { [h(state)]: 1 };
+  record(allocated, "document_states")[h(state)] = refs([oldWorkspace]);
+  prints.collab_room_fences = { [h(fence)]: 1 };
+  record(allocated, "collab_room_fences")[h(fence)] = refs([oldWorkspace]);
+  ops.collab_room_fences = [fence];
+  const original = { dataset: before, checks: { clockMicros: "20", outbox: [] } },
+    current = { dataset: prepared, checks: { clockMicros: "40", eventHead: "3", outbox: [] } };
+  const audit: Audit = {
+    namespaces: [namespace],
+    actors: Object.fromEntries(newActors.map((actor, index) => [actor, "new-" + String(index)])),
+    workspaces: { [workspace]: namespace },
+    documents: {},
+    servers: [],
+    targetSha256: "e".repeat(64),
+    serverStarts: 1,
+    observedFences: [fence],
+    sqlitePreparation: {
+      preparationActor: {
+        id: prep,
+        email: "original-prep",
+        rowFingerprint: userHashes[0] as string,
+        sessionId: sessions[0] as string,
+      },
+      readbackActor: {
+        id: reader,
+        email: "original-reader",
+        rowFingerprint: userHashes[1] as string,
+        sessionId: sessions[1] as string,
+      },
+      workspace: oldWorkspace,
+      document,
+      original,
+      prepared: current,
+      state: { original: originalState, current: state, after: structuredClone(state) },
+    },
+    serial: {
+      before: original,
+      after: current,
+      policy: { revisionKeep: 200, revisionSnapshotIntervalHours: 24 },
+      expectedBackend: "sqlite",
+    },
+  };
+  return { before, prepared, audit, reader, workspace, h, refs };
+}
+
+test("prepared-only original document or actor mutation cannot be hidden by final restoration", async () => {
+  const { assertSqlitePreparedPreserved } = await import("./ui-audit.ts");
+  const valid = sqlitePreparedRecords();
+  expect(() => { assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit); },
+  ).not.toThrow();
+  for (const table of ["documents", "users"]) {
+    const changed = sqlitePreparedRecords(),
+      prints = record(changed.prepared, "fingerprints", table);
+    const original = Object.keys(record(changed.before, "fingerprints", table))[0] as string;
+    Reflect.deleteProperty(prints, original);
+    prints["9".repeat(64)] = 1;
+    expect(() => { assertSqlitePreparedPreserved(changed.before, changed.prepared, changed.audit); },
+    ).toThrow("UI_PREEXISTING_ROW_CHANGED");
+    // A restored final observation cannot erase that observed prepared failure.
+    expect(() => { assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit); },
+    ).not.toThrow();
+  }
+});
+
+test("readback actor non-login namespace events refuse in prepared and final even with valid login/session", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  const f = sqlitePreparedRecords(),
+    hash = f.h("foreign-readback-event");
+  record(f.prepared, "fingerprints", "events")[hash] = 1;
+  record(f.prepared, "allocations", "events")[hash] = {
+    ...f.refs([f.workspace], [f.reader], hash.slice(0, 32)),
+    eventWitness: null,
+  };
+  (get(f.prepared, "operations", "events") as unknown[]).push([
+    number(4),
+    ["blob", f.workspace],
+    ["blob", f.reader],
+  ]);
+  record(f.prepared, "operations").event_sequence = [[number(1), number(4)]];
+  expect(() => { assertSqlitePreparedPreserved(f.before, f.prepared, f.audit); }).toThrow(
+    "UI_SQLITE_PREPARATION_EFFECT_REFUSED",
+  );
+  expect(() => allocatedRows(f.before, f.prepared, f.audit)).toThrow(
+    "UI_SQLITE_PREPARATION_EFFECT_REFUSED",
+  );
 });

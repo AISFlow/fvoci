@@ -1191,6 +1191,7 @@ export async function productCallbacks(
         input: JSON.stringify({ container: state.name, inode: state.databaseInode, input }),
         cwd: root,
         log: nativeLog,
+        waitOnInterrupt: true,
       },
     );
     assert.ok(result.returncode === 0 && Buffer.byteLength(result.stdout) < 64 * 1024 * 1024);
@@ -1365,6 +1366,7 @@ export async function productCallbacks(
         readbackActor: originalActor(String(get(server.seed, "freshActorId"))),
         workspace: auditModule.uuidHex(get(server.seed, "workspaceId")),
         document: auditModule.uuidHex(get(server.seed, "document", "id")),
+        original,
         prepared: current,
         state: {
           original: list(
@@ -1375,6 +1377,58 @@ export async function productCallbacks(
           after: [],
         },
       };
+      const seedWorkspace = String(get(server.seed, "workspaceId")),
+        seedId = String(get(server.seed, "document", "id"));
+      const seedNative = await native(
+        "observe",
+        { workspaceId: seedWorkspace, documentIds: [seedId] },
+        "current-seed",
+      );
+      const seedRow = get(seedNative, "rows", seedId),
+        oldSeed = get(originalSeed, "rows", seedId);
+      for (const key of [
+        "state",
+        "cutoff",
+        "tail",
+        "content",
+        "text",
+        "version",
+        "updates",
+        "receipts",
+        "revisions",
+      ])
+        assert.ok(
+          deepEquals(get(oldSeed, key), get(seedRow, key), true),
+          "original wiki native bytes/receipts changed",
+        );
+      assert.ok(
+        deepEquals(get(seedRow, "stateColumns"), [
+          "workspace_id",
+          "document_id",
+          "state",
+          "encoding",
+          "compacted_at",
+          "created_at",
+          "updated_at",
+          "writer_generation",
+          "snapshot_cutoff_seq",
+          "tail_seq",
+        ]),
+      );
+      audit.sqlitePreparation.state.current = list(seedRow, "stateRow");
+      audit.observedFences.push(...(list(seedRow, "roomFences") as unknown[][]));
+      auditModule.assertSqlitePreparedPreserved(original.dataset, current.dataset, audit);
+      assert.ok(storageOriginal !== undefined);
+      const storagePrepared = seam.treeHashes(state.storage);
+      for (const [path, hash] of Object.entries(storageOriginal))
+        assert.ok(
+          storagePrepared[path] === hash,
+          "original storage bytes changed during preparation",
+        );
+      privateText(
+        join(directory, "prepared-storage.private.json"),
+        JSON.stringify(storagePrepared),
+      );
       const binding: import("../../../apps/web/e2e-pending/selected-final-contract.ts").FinalBinding =
         {
           schema: 1,
@@ -1480,46 +1534,6 @@ export async function productCallbacks(
         if (!documents.has(write.workspaceId)) documents.set(write.workspaceId, new Set());
         documents.get(write.workspaceId)?.add(write.documentId);
       }
-      const seedWorkspace = String(get(server.seed, "workspaceId")),
-        seedId = String(get(server.seed, "document", "id"));
-      const seedNative = await native(
-        "observe",
-        { workspaceId: seedWorkspace, documentIds: [seedId] },
-        "current-seed",
-      );
-      const seedRow = get(seedNative, "rows", seedId),
-        oldSeed = get(originalSeed, "rows", seedId);
-      for (const key of [
-        "state",
-        "cutoff",
-        "tail",
-        "content",
-        "text",
-        "version",
-        "updates",
-        "receipts",
-        "revisions",
-      ])
-        assert.ok(
-          deepEquals(get(oldSeed, key), get(seedRow, key), true),
-          "original wiki native bytes/receipts changed",
-        );
-      assert.ok(
-        deepEquals(get(seedRow, "stateColumns"), [
-          "workspace_id",
-          "document_id",
-          "state",
-          "encoding",
-          "compacted_at",
-          "created_at",
-          "updated_at",
-          "writer_generation",
-          "snapshot_cutoff_seq",
-          "tail_seq",
-        ]),
-      );
-      audit.sqlitePreparation.state.current = list(seedRow, "stateRow");
-      audit.observedFences.push(...(list(seedRow, "roomFences") as unknown[][]));
       for (const [workspaceId, ids] of documents) {
         const observed = await native(
           "observe",

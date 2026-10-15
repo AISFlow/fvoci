@@ -602,8 +602,13 @@ export const openStatReader = (path: string) => openSync(path, statOpenFlags());
 export const openGoHolder = (path: string) => openSync(path, goOpenFlags());
 
 /** select(2) on the stat FIFO until readable or the budget ends; one bounded read. */
-export async function readStatOnce(fd: number, deadline: number): Promise<string> {
+export async function readStatOnce(
+  fd: number,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<string> {
   for (;;) {
+    signal?.throwIfAborted();
     budgetRemain(deadline);
     if (readable(fd)) break;
     await pause(20);
@@ -825,12 +830,14 @@ export async function releaseAttached(
   deadline: number,
   grant: unknown,
   proc: DaemonProc = linuxProc,
+  signal?: AbortSignal,
 ): Promise<[Bound, number]> {
+  signal?.throwIfAborted();
   const statFd = openStatReader(join(directory, STAT_FIFO_NAME));
   let goFd: number | null = null;
   try {
     goFd = openGoHolder(join(directory, GO_FIFO_NAME));
-    const statText = await readStatOnce(statFd, deadline);
+    const statText = await readStatOnce(statFd, deadline, signal);
     const sample = await samplePausedDaemon(
       scope,
       containerId,
@@ -840,6 +847,7 @@ export async function releaseAttached(
       grant,
       proc,
     );
+    signal?.throwIfAborted();
     writeGoOnce(goFd);
     return [sample, goFd];
   } catch (error) {
@@ -1178,6 +1186,29 @@ export async function publishContainer(
   }
 }
 
+/** Interrupt only the wait; the existing fixture owner still settles its
+ * output and performs its container/FD/FIFO cleanup before returning failure. */
+async function interruptibleFixtureOutput(
+  output: Promise<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal === undefined) return output;
+  signal.throwIfAborted();
+  let stop: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    stop = () => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new UiError("UI_PARENT_INTERRUPT"));
+    };
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  try {
+    return await Promise.race([output, aborted]);
+  } finally {
+    if (stop !== undefined) signal.removeEventListener("abort", stop);
+  }
+}
+
 export async function localFixture(
   scope: Scope,
   manifest: Pick<Manifest, "binaries">,
@@ -1186,7 +1217,10 @@ export async function localFixture(
   input?: Record_,
   proc: DaemonProc = linuxProc,
   publish: typeof publishContainer = publishContainer,
+  signal?: AbortSignal,
+  pending?: { output?: Promise<Uint8Array> },
 ): Promise<Record_> {
+  signal?.throwIfAborted();
   // One directory per call: a consumer runs the same mode more than once.
   const directory = join(scope.io.root(), "local-fixture-" + mode + "-" + token(6));
   mkdirSync(directory, 0o700);
@@ -1204,7 +1238,9 @@ export async function localFixture(
     original: unknown = null,
     value: Record_ | undefined;
   const receiptErrors: string[] = [];
+  let output: Promise<Uint8Array> | undefined;
   try {
+    signal?.throwIfAborted();
     require(creation.qualification === BLOCKED &&
       creation.liveDaemon === ONE_SHOT_LIVE &&
       creation.cgroupCaps === "not-observed", "UI_DAEMON_OBSERVATION_UNSUPPORTED");
@@ -1222,10 +1258,13 @@ export async function localFixture(
       deadline,
       grant,
       proc,
+      signal,
     );
     goFd = fd;
     const payload = fixtureInput(input);
-    const stdout = await communicate(child, payload, budgetRemain(deadline));
+    output = communicate(child, payload, budgetRemain(deadline));
+    if (pending !== undefined) pending.output = output;
+    const stdout = await interruptibleFixtureOutput(output, signal);
     const state = await readDaemonExit(scope, containerId, 10);
     require(stdout.length < 64 * 1024 * 1024, "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
     const parsed = parsePlain(stdout);
@@ -1256,6 +1295,15 @@ export async function localFixture(
     original = error;
   }
   const errors = await cleanupOwned(scope, containerId, child, directory, [goFd]);
+  // Stopping the owned native process closes its output. Await the same
+  // pending communication as well; no abandoned reader/timer survives.
+  if (output !== undefined && (pending === undefined || original === null)) {
+    try {
+      await output;
+    } catch {
+      /* The original wait error stays first. */
+    }
+  }
   errors.push(...receiptErrors);
   reportCleanup(scope, original, errors);
   if (original !== null) throw original as Error;
@@ -1478,7 +1526,12 @@ export async function localServerStart(
 
 /** Narrow selected-parent observer entry. Its own existing process scope has
  * no preexisting server child; the selected parent keeps normal server ownership. */
-export async function selectedSqliteObserver(mode: string, request: Record_): Promise<Record_> {
+export async function selectedSqliteObserver(
+  mode: string,
+  request: Record_,
+  signal?: AbortSignal,
+): Promise<Record_> {
+  signal?.throwIfAborted();
   require(["baseline", "observe", "serial-observe"].includes(mode) &&
     deepEquals(Object.keys(request).sort(), [
       "container",
@@ -1539,73 +1592,92 @@ export async function selectedSqliteObserver(mode: string, request: Record_): Pr
       },
     },
   });
-  const value = await withProcesses(async (owned) => {
-    // Derive the actual runtime from the already owned normal container, never
-    // from a source-labelled literal or a fabricated Turso runtime lease.
-    const observed = parsePlain(await docker.client(owned, ["docker", "inspect", container], 10));
-    const config = record(observed, 0, "Config"),
-      host = record(observed, 0, "HostConfig");
-    const imageId = get(observed, 0, "Image");
-    require(config.Image === finalFixtureImage &&
-      get(config, "Labels", "fvoci.owner") === current.grant.owner &&
-      get(config, "Labels", "fvoci.test-run") === "v060-current-normal-vue-sqlite" &&
-      get(observed, 0, "State", "Running") === true &&
-      host.NetworkMode === "host" &&
-      typeof imageId === "string" &&
-      /^sha256:[a-f0-9]{64}$/.test(imageId), "UI_SQLITE_OBSERVER_PARENT_REFUSED");
-    for (const [source, destination] of [
-      [database, "/fvoci/database"],
-      [storage, "/fvoci/storage"],
-    ]) {
-      const mounts = get(observed, 0, "Mounts");
-      require(Array.isArray(mounts) &&
-        mounts.filter(
-          (mount) =>
-            isRecord(mount) &&
-            mount.Type === "bind" &&
-            mount.Source === source &&
-            mount.Destination === destination &&
-            mount.RW === true,
-        ).length === 1, "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+  signal?.throwIfAborted();
+  const pending: { output?: Promise<Uint8Array> } = {};
+  let value: Record_;
+  try {
+    value = await withProcesses(async (owned) => {
+      signal?.throwIfAborted();
+      // Derive the actual runtime from the already owned normal container, never
+      // from a source-labelled literal or a fabricated Turso runtime lease.
+      const observed = parsePlain(await docker.client(owned, ["docker", "inspect", container], 10));
+      const config = record(observed, 0, "Config"),
+        host = record(observed, 0, "HostConfig");
+      const imageId = get(observed, 0, "Image");
+      require(config.Image === finalFixtureImage &&
+        get(config, "Labels", "fvoci.owner") === current.grant.owner &&
+        get(config, "Labels", "fvoci.test-run") === "v060-current-normal-vue-sqlite" &&
+        get(observed, 0, "State", "Running") === true &&
+        host.NetworkMode === "host" &&
+        typeof imageId === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(imageId), "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+      for (const [source, destination] of [
+        [database, "/fvoci/database"],
+        [storage, "/fvoci/storage"],
+      ]) {
+        const mounts = get(observed, 0, "Mounts");
+        require(Array.isArray(mounts) &&
+          mounts.filter(
+            (mount) =>
+              isRecord(mount) &&
+              mount.Type === "bind" &&
+              mount.Source === source &&
+              mount.Destination === destination &&
+              mount.RW === true,
+          ).length === 1, "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+      }
+      let grant: Record_;
+      if (executionMode() === "orca-local") {
+        // This is the existing selected allocation, not a LocalLease or a new purpose.
+        const local: unknown = localAllocation("run");
+        require(isRecord(local) &&
+          isRecord(local.canonicalRuntime) &&
+          local.canonicalRuntime.imageId === imageId &&
+          local.canonicalRuntime.networkAuthorized === true &&
+          readShellProof(local.canonicalRuntime) ===
+            QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+        grant = { canonicalRuntime: local.canonicalRuntime };
+      } else {
+        grant = { finalRuntime: { reference: finalFixtureImage, imageId, uid: uid(), gid: gid() } };
+      }
+      target();
+      const result = await localFixture(
+        owned,
+        { binaries },
+        mode,
+        {
+          E2E_DATABASE_BACKEND: "sqlite",
+          FVOCI_DATABASE_BACKEND: "sqlite",
+          FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+          FVOCI_E2E_SQLITE_RUN_ROOT: database,
+          FVOCI_E2E_SQLITE_PATH: file,
+          FVOCI_STORAGE_DIR: storage,
+        },
+        input,
+        linuxProc,
+        (scope, output, env, manifest, binary, command, kind) =>
+          publishContainer(scope, output, env, manifest, binary, command, kind, () => grant),
+        signal,
+        pending,
+      );
+      require(result.connectionClose === "confirmed" &&
+        (mode === "serial-observe" ? get(result, "dataset", "backend") : result.backend) ===
+          "sqlite", "UI_SQLITE_OBSERVER_NATIVE_REFUSED");
+      target();
+      return result;
+    }, scope);
+  } finally {
+    // The existing Scope owner has closed its resources before this actual
+    // communication settles; no additional kill/timeout fallback is introduced.
+    if (pending.output !== undefined) {
+      try {
+        await pending.output;
+      } catch {
+        /* Preserve the original failure. */
+      }
     }
-    let grant: Record_;
-    if (executionMode() === "orca-local") {
-      // This is the existing selected allocation, not a LocalLease or a new purpose.
-      const local: unknown = localAllocation("run");
-      require(isRecord(local) &&
-        isRecord(local.canonicalRuntime) &&
-        local.canonicalRuntime.imageId === imageId &&
-        local.canonicalRuntime.networkAuthorized === true &&
-        readShellProof(local.canonicalRuntime) ===
-          QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
-      grant = { canonicalRuntime: local.canonicalRuntime };
-    } else {
-      grant = { finalRuntime: { reference: finalFixtureImage, imageId, uid: uid(), gid: gid() } };
-    }
-    target();
-    const result = await localFixture(
-      owned,
-      { binaries },
-      mode,
-      {
-        E2E_DATABASE_BACKEND: "sqlite",
-        FVOCI_DATABASE_BACKEND: "sqlite",
-        FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
-        FVOCI_E2E_SQLITE_RUN_ROOT: database,
-        FVOCI_E2E_SQLITE_PATH: file,
-        FVOCI_STORAGE_DIR: storage,
-      },
-      input,
-      linuxProc,
-      (scope, output, env, manifest, binary, command, kind) =>
-        publishContainer(scope, output, env, manifest, binary, command, kind, () => grant),
-    );
-    require(result.connectionClose === "confirmed" &&
-      (mode === "serial-observe" ? get(result, "dataset", "backend") : result.backend) ===
-        "sqlite", "UI_SQLITE_OBSERVER_NATIVE_REFUSED");
-    target();
-    return result;
-  }, scope);
+  }
+  signal?.throwIfAborted();
   require(deepEquals(
     await loadCurrent("sqlite", sqliteDriver),
     current,
@@ -1616,6 +1688,11 @@ export async function selectedSqliteObserver(mode: string, request: Record_): Pr
 }
 
 if (import.meta.main) {
+  const interrupt = new AbortController();
+  const onInterrupt = () => {
+    interrupt.abort(new UiError("UI_PARENT_INTERRUPT"));
+  };
+  process.on("SIGINT", onInterrupt);
   try {
     const [entry, mode, extra] = process.argv.slice(2);
     require(entry === "--selected-sqlite-observe" &&
@@ -1630,9 +1707,11 @@ if (import.meta.main) {
     }
     const request = parsePlain(Buffer.concat(chunks));
     require(isRecord(request), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
-    console.log(JSON.stringify(await selectedSqliteObserver(mode, request)));
+    console.log(JSON.stringify(await selectedSqliteObserver(mode, request, interrupt.signal)));
   } catch (error) {
     console.error(failureCode(error));
     process.exitCode = 1;
+  } finally {
+    process.off("SIGINT", onInterrupt);
   }
 }

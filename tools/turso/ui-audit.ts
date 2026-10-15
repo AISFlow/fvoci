@@ -140,6 +140,7 @@ export interface Audit {
     readbackActor: { id: string; email: string; rowFingerprint: string; sessionId: string };
     workspace: string;
     document: string;
+    original: SerialObservation;
     prepared: SerialObservation;
     state: { original: unknown[]; current: unknown[]; after: unknown[] };
   };
@@ -678,10 +679,10 @@ function witnessedEventOperation(
     people.length === 1 &&
     people[0] === target &&
     (Object.hasOwn(audit.actors, target) ||
-      (audit.serial?.expectedBackend === "sqlite" &&
+      (audit.sqlitePreparation !== undefined &&
         [
-          audit.sqlitePreparation?.preparationActor.id,
-          audit.sqlitePreparation?.readbackActor.id,
+          audit.sqlitePreparation.preparationActor.id,
+          audit.sqlitePreparation.readbackActor.id,
         ].includes(target)))
   )
     return [sequence, ["null"], ["blob", target]];
@@ -721,10 +722,48 @@ function witnessedEventOperation(
   return null;
 }
 
+/** Only the bootstrap actor may produce the named new-namespace public
+ * preparation effects. The readback actor has only one login and session. */
+export function selectedOriginalActorEffect(
+  table: string,
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  actor: { id: string; sessionId: string },
+  bootstrap: boolean,
+  audit: Audit,
+): boolean {
+  const selected = audit.sqlitePreparation;
+  if (
+    selected === undefined ||
+    !same(get(refs, "actors"), [actor.id]) ||
+    get(selected.prepared.dataset, "fingerprints", table, sha) !== count
+  )
+    return false;
+  if (table === "sessions")
+    return same(get(refs, "workspaces"), []) && get(refs, "self") === actor.sessionId;
+  const login =
+    table === "events" &&
+    isRecord(refs) &&
+    isRecord(refs.eventWitness) &&
+    refs.eventWitness.class === "actor-login" &&
+    refs.eventWitness.target === actor.id &&
+    same(get(refs, "workspaces"), []);
+  if (login) return true;
+  return (
+    bootstrap &&
+    ["memberships", "invitations", "audit_log", "events"].includes(table) &&
+    list(refs, "workspaces").length === 1 &&
+    Object.hasOwn(audit.workspaces, String(get(refs, "workspaces", 0))) &&
+    (table !== "events" || get(refs, "eventWitness") === null)
+  );
+}
+
 export function allocatedRows(
   before: unknown,
   after: unknown,
   audit: Audit,
+  phase: "prepared" | "after" = "after",
 ): [Set<string>, Set<string>, ProjectionTargets] {
   const oldUsers = ids(list(before, "operations", "users"));
   const oldSpaces = ids(list(before, "operations", "workspaces"));
@@ -767,7 +806,7 @@ export function allocatedRows(
   const actors = new Set(Object.keys(audit.actors));
   const selected = audit.sqlitePreparation;
   if (selected !== undefined) {
-    require(audit.serial?.expectedBackend === "sqlite" &&
+    require((phase === "prepared" || audit.serial?.expectedBackend === "sqlite") &&
       get(before, "backend") === "sqlite" &&
       get(after, "backend") === "sqlite" &&
       get(selected.prepared.dataset, "backend") === "sqlite" &&
@@ -889,7 +928,8 @@ export function allocatedRows(
   for (const [table, hashes] of Object.entries(record(after, "fingerprints"))) {
     if (AUDITED_COUNTERS.has(table)) continue;
     // serialProgress binds every current outbox column and both full row maps.
-    if (audit.serial !== undefined && table === "outbox_consumers") continue;
+    if ((phase === "prepared" || audit.serial !== undefined) && table === "outbox_consumers")
+      continue;
     if (table === "instance_config" && vapidInitialization(before, after)) continue;
     const previous = record(before, "fingerprints", table);
     for (const [sha, count] of Object.entries(record(hashes))) {
@@ -902,28 +942,21 @@ export function allocatedRows(
       if (selected !== undefined) {
         for (const actor of [selected.preparationActor, selected.readbackActor]) {
           if (!list(refs, "actors").includes(actor.id)) continue;
-          const bootstrap = actor === selected.preparationActor;
-          require([
-            "sessions",
-            "events",
-            ...(bootstrap ? ["memberships", "invitations", "audit_log"] : []),
-          ].includes(table) &&
-            get(selected.prepared.dataset, "fingerprints", table, sha) === count &&
-            (table === "sessions" ||
-              (isRecord(refs) &&
-                isRecord(refs.eventWitness) &&
-                refs.eventWitness.class === "actor-login") ||
-              (list(refs, "workspaces").length === 1 &&
-                Object.hasOwn(
-                  audit.workspaces,
-                  String(get(refs, "workspaces", 0)),
-                ))), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
+          require(selectedOriginalActorEffect(
+            table,
+            sha,
+            count,
+            refs,
+            actor,
+            actor === selected.preparationActor,
+            audit,
+          ), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
         }
       }
       if (
         selected !== undefined &&
         table === "document_states" &&
-        rowHash(selected.state.after) === sha &&
+        rowHash(phase === "prepared" ? selected.state.current : selected.state.after) === sha &&
         count === 1
       )
         continue;
@@ -1324,13 +1357,15 @@ export function auditMaintenance(before: unknown[], after: unknown[], audit: Aud
   });
 }
 
-export function auditCounters(before: unknown, after: unknown, audit: Audit): void {
+function auditEventAndFenceCounters(
+  before: unknown,
+  after: unknown,
+  audit: Audit,
+  phase: "prepared" | "after" = "after",
+): void {
   const b = record(before, "operations"),
     a = record(after, "operations");
-  require(get(before, "startupHazards") === 0 &&
-    get(after, "startupHazards") === 0 &&
-    get(after, "liveOutboxLeases") === 0, "UI_FOREIGN_OR_UNRELEASED_OWNER");
-  const [workspaces, actors, targets] = allocatedRows(before, after, audit);
+  const [workspaces, actors, targets] = allocatedRows(before, after, audit, phase);
   const first = singleton(get(b, "event_sequence")),
     last = singleton(get(a, "event_sequence"));
   require(first <= last && last <= first + 10000n, "UI_EVENT_COUNTER_RESET");
@@ -1384,11 +1419,22 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   let complete = fences.size === Number(lastFence - firstFence);
   for (let n = firstFence; complete && n < lastFence; n++) complete = fences.has(n);
   require(complete, "UI_FENCE_COUNTER_UNOBSERVED");
+}
+
+export function auditCounters(before: unknown, after: unknown, audit: Audit): void {
+  const b = record(before, "operations"),
+    a = record(after, "operations");
+  require(get(before, "startupHazards") === 0 &&
+    get(after, "startupHazards") === 0 &&
+    get(after, "liveOutboxLeases") === 0, "UI_FOREIGN_OR_UNRELEASED_OWNER");
+  auditEventAndFenceCounters(before, after, audit);
   auditMaintenance(list(b, "maintenance_job_claims"), list(a, "maintenance_job_claims"), audit);
   if (audit.serial !== undefined) {
     serialProgress(before, after, audit);
     return;
   }
+  const first = singleton(get(b, "event_sequence")),
+    last = singleton(get(a, "event_sequence"));
   require(same(get(b, "outbox_consumers"), []), "UI_PREEXISTING_RELAY_REFUSED");
   const consumers = list(a, "outbox_consumers");
   const names = consumers.map((row) => canonical(get(row, 0))).sort();
@@ -1409,10 +1455,16 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
 
 /** Full typed seeded row, with only its actual one-claim generation/time
  * transition admitted; every complete hash remains in its native primary. */
-export function selectedReadbackState(before: unknown, after: unknown, audit: Audit): string {
+export function selectedReadbackState(
+  before: unknown,
+  after: unknown,
+  audit: Audit,
+  phase: "prepared" | "after" = "after",
+): string {
   const selected = audit.sqlitePreparation;
   require(selected !== undefined &&
-    audit.serial?.expectedBackend === "sqlite" &&
+    (phase === "prepared" || audit.serial?.expectedBackend === "sqlite") &&
+    same(before, selected.original.dataset) &&
     get(before, "backend") === "sqlite" &&
     get(after, "backend") === "sqlite" &&
     get(selected.prepared.dataset, "backend") === "sqlite", "UI_SQLITE_READBACK_STATE_REFUSED");
@@ -1420,25 +1472,33 @@ export function selectedReadbackState(before: unknown, after: unknown, audit: Au
   const state = selected.state;
   require(state.original.length === 10 &&
     state.current.length === 10 &&
-    state.after.length === 10 &&
+    (phase === "prepared" || state.after.length === 10) &&
     same(state.original[0], ["blob", selected.workspace]) &&
     same(state.original[1], ["blob", selected.document]) &&
-    same(state.current, state.after) &&
+    (phase === "prepared" || same(state.current, state.after)) &&
     state.original.every(
       (value, index) => index === 6 || index === 7 || same(value, state.current[index]),
     ) &&
     integer(state.current[7]) === integer(state.original[7]) + 1n &&
-    integer(state.current[6]) >= decimal(audit.serial.before.checks.clockMicros) &&
+    integer(state.current[6]) >= decimal(selected.original.checks.clockMicros) &&
     integer(state.current[6]) <= decimal(selected.prepared.checks.clockMicros) &&
     get(before, "fingerprints", table, rowHash(state.original)) === 1 &&
     get(selected.prepared.dataset, "fingerprints", table, rowHash(state.current)) === 1 &&
-    get(after, "fingerprints", table, rowHash(state.after)) ===
-      1, "UI_SQLITE_READBACK_STATE_REFUSED");
+    get(
+      after,
+      "fingerprints",
+      table,
+      rowHash(phase === "prepared" ? state.current : state.after),
+    ) === 1, "UI_SQLITE_READBACK_STATE_REFUSED");
   return rowHash(state.original);
 }
 
-export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
-  if (audit?.serial !== undefined) serialProgress(before, after, audit);
+function preservedPrimaryRows(
+  before: unknown,
+  after: unknown,
+  audit: Audit | undefined,
+  phase: "prepared" | "after" = "after",
+): void {
   require(same(get(before, "ledger"), get(after, "ledger")) &&
     same(get(before, "schemaSha256"), get(after, "schemaSha256")) &&
     same(get(before, "lineage"), get(after, "lineage")), "UI_CURRENT_LEDGER_CHANGED");
@@ -1447,7 +1507,8 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
   require(same(Object.keys(old).sort(), Object.keys(current).sort()), "UI_CURRENT_TABLES_CHANGED");
   for (const [table, rows] of Object.entries(old)) {
     if (audit !== undefined && AUDITED_COUNTERS.has(table)) continue;
-    if (audit?.serial !== undefined && table === "outbox_consumers") continue;
+    if ((phase === "prepared" || audit?.serial !== undefined) && table === "outbox_consumers")
+      continue;
     if (audit !== undefined && table === "instance_config" && vapidInitialization(before, after))
       continue;
     const now = record(current, table);
@@ -1462,7 +1523,7 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
         : [];
     let relatedHash: string | undefined;
     if (selected !== undefined && table === "document_states") {
-      relatedHash = selectedReadbackState(before, after, audit as Audit);
+      relatedHash = selectedReadbackState(before, after, audit as Audit, phase);
     }
     if (selected !== undefined && table === "collab_room_fences") {
       require(related.length === 1, "UI_SQLITE_READBACK_FENCE_REFUSED");
@@ -1478,13 +1539,50 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
         final.length === 1 &&
         same(list(prepared[0]).slice(0, 4), list(final[0]).slice(0, 4)) &&
         integer(get(prepared[0], 3)) > integer(original[3]) &&
-        integer(get(final[0], 4)) <=
-          decimal(audit?.serial?.after.checks.clockMicros), "UI_SQLITE_READBACK_FENCE_REFUSED");
+        (phase === "prepared" ||
+          integer(get(final[0], 4)) <=
+            decimal(audit?.serial?.after.checks.clockMicros)), "UI_SQLITE_READBACK_FENCE_REFUSED");
     }
     for (const [sha, count] of Object.entries(record(rows)))
       if (sha !== relatedHash)
         require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
   }
+}
+
+/** Live prepared owners are not a final-quiescence claim. All original typed
+ * business rows and both exact original actors must already be preserved here. */
+export function assertSqlitePreparedPreserved(
+  before: unknown,
+  prepared: unknown,
+  audit: Audit,
+): void {
+  const selected = audit.sqlitePreparation;
+  require(selected !== undefined &&
+    same(before, selected.original.dataset) &&
+    same(prepared, selected.prepared.dataset) &&
+    get(prepared, "backend") === "sqlite" &&
+    get(prepared, "schemaCurrent") === true, "UI_SQLITE_PREPARATION_SNAPSHOT_REFUSED");
+  preservedPrimaryRows(before, prepared, audit, "prepared");
+  auditEventAndFenceCounters(before, prepared, audit, "prepared");
+  const prior = list(selected.original.checks, "outbox"),
+    current = list(selected.prepared.checks, "outbox");
+  require(same(
+    prior.map((row) => get(row, "consumer")).sort(),
+    current.map((row) => get(row, "consumer")).sort(),
+  ), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  for (const row of prior) {
+    const now = current.find((candidate) => get(candidate, "consumer") === get(row, "consumer"));
+    require(get(now, "immutableSha256") === get(row, "immutableSha256") &&
+      decimal(get(now, "lastSeq")) >= decimal(get(row, "lastSeq")) &&
+      decimal(get(now, "lastSeq")) <= decimal(selected.prepared.checks.eventHead) &&
+      decimal(get(now, "updatedAtMicros")) >=
+        decimal(get(row, "updatedAtMicros")), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  }
+}
+
+export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
+  if (audit?.serial !== undefined) serialProgress(before, after, audit);
+  preservedPrimaryRows(before, after, audit);
   if (audit !== undefined) auditCounters(before, after, audit);
 }
 
