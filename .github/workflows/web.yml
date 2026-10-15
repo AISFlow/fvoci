@@ -88,27 +88,64 @@ jobs:
           [[ "$RUNNER_ARCH" == X64 && "$(uname -m)" == x86_64 && "$(id -u):$(id -g)" == 1001:1001 ]]
           bun tools/ci/ci-base-image.ts inputs
           bun test tools/ci/ci-base-image.test.ts
-          client="$(readlink -f "$(command -v docker)")"
-          [[ -f "$client" && ! -L "$client" && "$(stat -c %u "$client")" == 0 ]]
-          test -z "$(find "$client" -perm /022 -print)"
           work="$(mktemp -d "$RUNNER_TEMP/fvoci-web-builder-work.XXXXXX")"
           packet="$RUNNER_TEMP/fvoci-web-builder"
-          mkdir -m 0700 "$packet"
-          install -m 0755 "$client" "$packet/docker-client"
-          readelf -h "$packet/docker-client" | grep -Fq 'Advanced Micro Devices X86-64'
-          if readelf -lW "$packet/docker-client" | grep -q INTERP; then exit 1; fi
-          if readelf -dW "$packet/docker-client" | grep -q NEEDED; then exit 1; fi
           builder="fvoci-web-builder-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
           ref="fvoci-web-builder:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
+          packet_owned=false
+          builder_owned=false
+          image_owned=false
           cleanup() {
             code=$?
-            if ! docker buildx rm "$builder" >/dev/null 2>&1; then if [[ "$code" == 0 ]]; then code=1; fi; fi
-            if ! docker image rm "$ref" >/dev/null 2>&1; then if [[ "$code" == 0 ]]; then code=1; fi; fi
-            rm -rf "$work" "$DOCKER_CONFIG"
+            if [[ "$builder_owned" == true ]]; then
+              if ! docker buildx rm "$builder" >/dev/null 2>&1; then
+                echo 'Web builder cleanup unconfirmed' >&2
+                if [[ "$code" == 0 ]]; then code=1; fi
+              fi
+            fi
+            if [[ "$image_owned" == true ]]; then
+              if images="$(docker image ls --filter "reference=$ref" --format '{{.ID}}')"; then
+                if [[ -n "$images" ]]; then
+                  if [[ "$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$GITHUB_SHA" ]] && docker image rm "$ref" >/dev/null 2>&1; then :; else
+                    echo 'Web builder image cleanup unconfirmed' >&2
+                    if [[ "$code" == 0 ]]; then code=1; fi
+                  fi
+                fi
+              else
+                echo 'Web builder image state unavailable' >&2
+                if [[ "$code" == 0 ]]; then code=1; fi
+              fi
+            fi
+            if ! rm -rf "$work" "$DOCKER_CONFIG"; then
+              echo 'Web builder temporary cleanup unconfirmed' >&2
+              if [[ "$code" == 0 ]]; then code=1; fi
+            fi
+            if [[ "$code" != 0 && "$packet_owned" == true ]]; then
+              if ! rm -rf "$packet"; then echo 'Web builder packet cleanup unconfirmed' >&2; fi
+            fi
             exit "$code"
           }
           trap cleanup EXIT
+          mkdir -m 0700 "$packet"
+          packet_owned=true
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 180 --max-filesize 268435456 \
+            --output "$work/docker-29.9.0.tgz" https://download.docker.com/linux/static/stable/x86_64/docker-29.9.0.tgz
+          printf '%s  %s\n' '33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4' "$work/docker-29.9.0.tgz" | sha256sum --check --strict --quiet -
+          member="$(tar --list --verbose --numeric-owner --full-time --file "$work/docker-29.9.0.tgz" docker/docker)"
+          [[ "$member" == -*' docker/docker' && "$member" != *$'\n'* ]]
+          tar --extract --to-stdout --no-recursion --occurrence=1 --file "$work/docker-29.9.0.tgz" docker/docker > "$packet/docker-client"
+          printf '%s  %s\n' 'a1ce7baaa61f45f51b1e3c0148f60f884df14096620f2755bfd53e8cc8bbbf77' "$packet/docker-client" | sha256sum --check --strict --quiet -
+          [[ -f "$packet/docker-client" && ! -L "$packet/docker-client" && "$(stat -c %u "$packet/docker-client")" == 1001 ]]
+          chmod 0755 "$packet/docker-client"
+          readelf -h "$packet/docker-client" | grep -Fq 'Advanced Micro Devices X86-64'
+          segments="$(readelf -lW "$packet/docker-client")"
+          dynamic="$(readelf -dW "$packet/docker-client")"
+          [[ "$segments" != *INTERP* && "$dynamic" != *NEEDED* ]]
+          [[ "$("$packet/docker-client" --version)" == "Docker version 29.9.0,"* ]]
+          test -z "$(docker image ls --filter "reference=$ref" --format '{{.ID}}')"
+          image_owned=true
           docker buildx create --name "$builder" --driver docker-container --use
+          builder_owned=true
           docker buildx inspect --bootstrap
           docker buildx build --platform linux/amd64 --file docker/ci-base/Dockerfile --target ci-web \
             --label "org.opencontainers.image.source=https://github.com/AISFlow/fvoci" \
@@ -137,7 +174,8 @@ jobs:
             grep -vE "  usr/share/(doc|man)/" /var/lib/dpkg/info/ca-certificates.md5sums | (cd / && md5sum --check --strict -)
             test -z "$(find /usr/local/share/ca-certificates -type f -print -quit)"
             test -s /etc/ssl/certs/ca-certificates.crt
-            test -f "$LIBCLANG_PATH/libclang.so"
+            test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
+          test -f "$LIBCLANG_PATH/libclang.so"
             browser=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -path "*/chrome-linux*/chrome" -print -quit)
             test -n "$browser"
             "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank
@@ -222,6 +260,7 @@ jobs:
           bun tools/ci/ci-base-image.ts web-admit "$RUNNER_TEMP/fvoci-web-builder" "$BUILDER_RECEIPT" "$BUILDER_IMAGE"
           ref="fvoci-web-builder:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
           test -z "$(docker image ls --filter "reference=$ref" --format '{{.ID}}')"
+          printf 'image_owned=true\n' >> "$GITHUB_OUTPUT"
           docker load --input "$RUNNER_TEMP/fvoci-web-builder/image.tar"
           printf 'image_loaded=true\n' >> "$GITHUB_OUTPUT"
           docker image inspect "$BUILDER_IMAGE" --format '{{json .}}' > "$RUNNER_TEMP/fvoci-web-builder-loaded.json"
@@ -230,6 +269,7 @@ jobs:
           state="$RUNNER_TEMP/fvoci-web-builder-state"
           mkdir -m 0700 "$state"
           mkdir -m 0755 "$state/cargo" "$state/rustup"
+          mkdir -m 0700 "$state/browser"
           docker_gid="$(stat -c %g /var/run/docker.sock)"
           [[ "$docker_gid" =~ ^[1-9][0-9]*$ ]]
           printf 'docker_gid=%s\n' "$docker_gid" >> "$GITHUB_OUTPUT"
@@ -237,7 +277,10 @@ jobs:
             --label "fvoci.web.run=$GITHUB_RUN_ID" --label "fvoci.web.attempt=$GITHUB_RUN_ATTEMPT" --label "fvoci.web.source=$GITHUB_SHA" \
             --mount "type=bind,source=$state/cargo,target=/home/runner/.cargo" \
             --mount "type=bind,source=$state/rustup,target=/home/runner/.rustup" \
-            --env HOME=/home/runner --env CARGO_HOME=/home/runner/.cargo --env RUSTUP_HOME=/home/runner/.rustup \
+            --mount "type=bind,source=$state/browser,target=$state/browser" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" --workdir "$GITHUB_WORKSPACE" \
+            --env "PLAYWRIGHT_BROWSERS_PATH=$state/browser" \
+            --env TINI_KILL_PROCESS_GROUP=1 --env HOME=/home/runner --env CARGO_HOME=/home/runner/.cargo --env RUSTUP_HOME=/home/runner/.rustup \
             --env PATH=/home/runner/.cargo/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin \
             "$BUILDER_IMAGE" bash --noprofile --norc -e -o pipefail -c '
               test "$(id -u):$(id -g)" = 1001:1001
@@ -251,6 +294,23 @@ jobs:
               rustup component remove rustfmt --toolchain 1.99.0
               test "$(rustc --version | cut -d" " -f2)" = 1.99.0
               diff -u <(printf "%s\n" cargo-x86_64-unknown-linux-gnu clippy-x86_64-unknown-linux-gnu rust-std-x86_64-unknown-linux-gnu rustc-x86_64-unknown-linux-gnu | sort) <(rustup component list --installed --toolchain 1.99.0 | sort)
+              bun - <<"BUN"
+          import { deepEquals } from "bun";
+          import { strict as assert } from "node:assert";
+          import { cpSync, lstatSync, readdirSync, statSync } from "node:fs";
+          import { join } from "node:path";
+          import { browserInventory } from "./tools/selected-backend-ci/admission.ts";
+          const baked = "/opt/playwright", cache = process.env.PLAYWRIGHT_BROWSERS_PATH;
+          assert.ok(cache && !lstatSync(cache).isSymbolicLink());
+          const owner = statSync(cache);
+          assert.ok(owner.uid === 1001 && owner.gid === 1001 && (owner.mode & 0o777) === 0o700);
+          assert.equal(statSync(baked).uid, 0);
+          assert.equal(readdirSync(cache).length, 0);
+          const before = browserInventory(baked, undefined, true);
+          for (const name of readdirSync(baked)) cpSync(join(baked, name), join(cache, name), { recursive: true, preserveTimestamps: true, force: false, errorOnExist: true });
+          assert.ok(deepEquals(browserInventory(baked, undefined, true), before));
+          assert.ok(deepEquals(browserInventory(cache, [1001, 1001], true), { ...before, ".": { directory: true, mode: 0o700 } }));
+          BUN
             '
       - shell: &web_builder_shell >-
           docker run
@@ -259,6 +319,7 @@ jobs:
           --name fvoci-web-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
           --network host
           --ipc host
+          --pid host
           --user 1001:1001
           --group-add ${{ steps.builder.outputs.docker_gid }}
           --label fvoci.web.run=${{ github.run_id }}
@@ -276,7 +337,8 @@ jobs:
           --env RUSTUP_HOME=/home/runner/.rustup
           --env RUSTUP_TOOLCHAIN=1.99.0
           --env PATH=/home/runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-          --env PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+          --env PLAYWRIGHT_BROWSERS_PATH=${{ runner.temp }}/fvoci-web-builder-state/browser
+          --env TINI_KILL_PROCESS_GROUP=1
           --env CI
           --env GITHUB_ACTIONS
           --env GITHUB_SHA
@@ -302,6 +364,9 @@ jobs:
           --env SQLITE3_INCLUDE_DIR
           --env SQLITE3_NO_PKG_CONFIG
           --env SQLITE3_STATIC
+          --env PRODUCER_RESULT
+          --env PRODUCER_ARTIFACT
+          --env PRODUCER_DIGEST
           --env FVOCI_WEB_BUILD_PHASE
           --env FVOCI_E2E_PENDING
           --env FVOCI_COLLAB_LANE
@@ -326,6 +391,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -417,7 +483,7 @@ jobs:
         name: Retire this job owned Web builder
         if: always()
         env:
-          BUILDER_LOADED: ${{ steps.builder.outputs.image_loaded }}
+          BUILDER_OWNED: ${{ steps.builder.outputs.image_owned }}
           BUILDER_IMAGE: "${{ needs.web-builder.outputs.image_id }}"
         run: |
           set -euo pipefail
@@ -434,7 +500,7 @@ jobs:
           fi
           test -z "$(docker container ls -aq --filter "name=^$name$")"
           ref="fvoci-web-builder:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64"
-          if [[ "$BUILDER_LOADED" == true && -n "$(docker image ls --filter "reference=$ref" --format '{{.ID}}')" ]]; then
+          if [[ "$BUILDER_OWNED" == true && -n "$(docker image ls --filter "reference=$ref" --format '{{.ID}}')" ]]; then
             [[ "$(docker image inspect "$ref" --format '{{.Id}}')" == "$BUILDER_IMAGE" ]]
             docker image rm "$ref"
           fi
@@ -478,6 +544,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -547,6 +614,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -577,7 +645,11 @@ jobs:
         run: |
           cd apps/web
           test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
-          test -d "$PLAYWRIGHT_BROWSERS_PATH"
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Build and qualify ordinary browser outputs without DB credentials
         id: prepare
         shell: *web_builder_shell
@@ -669,6 +741,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -686,7 +759,11 @@ jobs:
         run: |
           cd apps/web
           test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
-          test -d "$PLAYWRIGHT_BROWSERS_PATH"
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact browser producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.workspace-browser-build.result }}
@@ -800,6 +877,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -904,6 +982,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1027,6 +1106,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1081,7 +1161,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-build-step-15 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-15 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Qualify current selected native outputs (no browser or DB)
         id: prepare
         env:
@@ -1182,6 +1268,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1203,7 +1290,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-install-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1252,7 +1345,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Publish the qualified install receipt
         id: publish-install
@@ -1339,6 +1431,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1360,7 +1453,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1416,7 +1515,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -1495,6 +1593,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1516,7 +1615,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1572,7 +1677,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -1651,6 +1755,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1672,7 +1777,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-postgres-off-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1728,7 +1839,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -1807,6 +1917,7 @@ jobs:
           set -euo pipefail
           test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
           test "$(bun --version)" = 1.4.3
+          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
           test -f "$LIBCLANG_PATH/libclang.so"
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1828,7 +1939,13 @@ jobs:
           fvoci_timing_started=$SECONDS
           printf 'ci-step stage=collaboration-sqlite-off-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
-          bun --bun x --no-install playwright install --with-deps chromium
+          cd apps/web
+          test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0'
+          chromium="$(bun -e 'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
+          case "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac
+          test -x "$chromium"
+          libraries="$(ldd "$chromium")"
+          [[ "$libraries" != *'not found'* ]]
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1884,7 +2001,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''

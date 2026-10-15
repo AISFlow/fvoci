@@ -63,6 +63,7 @@ export const WEB_BUILDER_SHELL = [
   "--name fvoci-web-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}",
   "--network host",
   "--ipc host",
+  "--pid host",
   "--user 1001:1001",
   "--group-add ${{ steps.builder.outputs.docker_gid }}",
   "--label fvoci.web.run=${{ github.run_id }}",
@@ -80,7 +81,8 @@ export const WEB_BUILDER_SHELL = [
   "--env RUSTUP_HOME=/home/runner/.rustup",
   "--env RUSTUP_TOOLCHAIN=1.99.0",
   "--env PATH=/home/runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
-  "--env PLAYWRIGHT_BROWSERS_PATH=/opt/playwright",
+  "--env PLAYWRIGHT_BROWSERS_PATH=${{ runner.temp }}/fvoci-web-builder-state/browser",
+  "--env TINI_KILL_PROCESS_GROUP=1",
   "--env CI",
   "--env GITHUB_ACTIONS",
   "--env GITHUB_SHA",
@@ -106,6 +108,9 @@ export const WEB_BUILDER_SHELL = [
   "--env SQLITE3_INCLUDE_DIR",
   "--env SQLITE3_NO_PKG_CONFIG",
   "--env SQLITE3_STATIC",
+  "--env PRODUCER_RESULT",
+  "--env PRODUCER_ARTIFACT",
+  "--env PRODUCER_DIGEST",
   "--env FVOCI_WEB_BUILD_PHASE",
   "--env FVOCI_E2E_PENDING",
   "--env FVOCI_COLLAB_LANE",
@@ -114,6 +119,8 @@ export const WEB_BUILDER_SHELL = [
   "--noprofile",
   '--norc -e -o pipefail "{0}"',
 ].join(" ");
+export const WEB_BAKED_CHROMIUM_RUN =
+  'cd apps/web\ntest "$(bun --bun x --no-install playwright --version)" = \'Version 1.64.0\'\nchromium="$(bun -e \'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())\')"\ncase "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac\ntest -x "$chromium"\nlibraries="$(ldd "$chromium")"\n[[ "$libraries" != *\'not found\'* ]]\n';
 const WEB_BUILDER_DOWNLOAD: Mapping = {
   name: "Download this run exact scanned Web builder",
   uses: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
@@ -123,11 +130,11 @@ const WEB_BUILDER_DOWNLOAD: Mapping = {
     path: "${{ runner.temp }}/fvoci-web-builder",
   },
 };
-const WEB_BUILDER_ADMIT_SHA256 = "a1f81e0dcb23a7240d132d3c1735fe1b8384738c8caa0a9baad3cbc2a59d84ee";
+const WEB_BUILDER_ADMIT_SHA256 = "89c32947d331760ef8e841a9e63d91e6ab2c222f74c568009df3b061bd50f381";
 const WEB_BUILDER_RETIRE_SHA256 =
-  "7f1083345c76a3ec6da6faaa34be28537695956ebf30ced31176183f566e192a";
+  "804363947c93c842c3d2a69d7845e3c65e7bb5a7a987ea2122747e8e2ddeee18";
 const WEB_BUILDER_PRODUCER_SHA256 =
-  "760e62674b5fdc8d614c4a37c3cc9ed9be683ef2951e27c22900f661888130cc";
+  "cf766e459d0a23240d02f96674afd95db343cafd84d53bbaaed162e5908b3f43";
 function isWebBuilderDownload(step: Mapping): boolean {
   return pyEq(step, WEB_BUILDER_DOWNLOAD);
 }
@@ -636,7 +643,7 @@ export const WEB_SQLITE_JOBS = [
 ];
 // The same complete host preparation precedes every Web SQLite/cache identity.
 const WEB_SQLITE_RUN =
-  'set -euo pipefail\ntest "$(rustc --version | cut -d\' \' -f2)" = 1.99.0\ntest "$(bun --version)" = 1.4.3\ntest -f "$LIBCLANG_PATH/libclang.so"\nmkdir "$RUNNER_TEMP/fvoci-sqlite"\ndpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\nbash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n';
+  'set -euo pipefail\ntest "$(rustc --version | cut -d\' \' -f2)" = 1.99.0\ntest "$(bun --version)" = 1.4.3\ntest "$(dpkg-query -W -f=\'${Version}\' libclang-18-dev)" = 1:18.1.8-20ubuntu8\ntest -f "$LIBCLANG_PATH/libclang.so"\nmkdir "$RUNNER_TEMP/fvoci-sqlite"\ndpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\nbash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n';
 const SQLITE_HASH_RUN_SHA256 = "940de49368cfbd4955078f899e8f46c3233b63519845764e3e7696a2087189af";
 const SQLITE_HASH_CONDITION = "${{ always() && steps.sqlite.outcome == 'success' }}";
 const SQLITE_HASH_UPLOAD_CONDITION =
@@ -751,7 +758,7 @@ export function verifyWebBuilderJobs(jobs: Mapping): string[] {
       !pyEq(Object.keys(retire).sort(), ["env", "if", "name", "run"]) ||
       get(retire, "if") !== "always()" ||
       !pyEq(get(retire, "env"), {
-        BUILDER_LOADED: "${{ steps.builder.outputs.image_loaded }}",
+        BUILDER_OWNED: "${{ steps.builder.outputs.image_owned }}",
         BUILDER_IMAGE: "${{ needs.web-builder.outputs.image_id }}",
       }) ||
       digest(retire) !== WEB_BUILDER_RETIRE_SHA256 ||
@@ -759,6 +766,32 @@ export function verifyWebBuilderJobs(jobs: Mapping): string[] {
     )
       errors.push(
         `web: ${name} must admit/load this run builder before use and retire only its own resources`,
+      );
+    const browsers = steps.filter(
+      (step) => get(step, "name") === "Prepare Chromium and system libraries",
+    );
+    const expectsBrowser = ![
+      "web-checks",
+      "web-native-checks",
+      "collaboration-main-build",
+      "collaboration-test-build",
+    ].includes(name);
+    if (
+      browsers.length !== (expectsBrowser ? 1 : 0) ||
+      browsers.some(
+        (step) =>
+          !pyEq(step, {
+            name: "Prepare Chromium and system libraries",
+            shell: WEB_BUILDER_SHELL,
+            run:
+              (TIMED_RUSTUP_JOBS.includes(name)
+                ? timingPreamble(name, steps.indexOf(step) + 1)
+                : "") + WEB_BAKED_CHROMIUM_RUN,
+          }),
+      )
+    )
+      errors.push(
+        `web: ${name} must verify pinned baked Chromium and actual system libraries without installation`,
       );
     const hostNames = new Set([
       "Admit and load exact Web builder",
@@ -775,6 +808,8 @@ export function verifyWebBuilderJobs(jobs: Mapping): string[] {
           errors.push(
             `web: ${name} must execute every build/input/browser call in the exact fixed userspace`,
           );
+        if (!host && /(?:^|\s)(?:export\s+)?PLAYWRIGHT_BROWSERS_PATH\s*=/.test(stepRun(step)))
+          errors.push(`web: ${name} cannot override its owned source-bound browser cache`);
         if (!host && admit && steps.indexOf(step) <= steps.indexOf(admit))
           errors.push(`web: ${name} cannot execute builder calls before admission`);
       }

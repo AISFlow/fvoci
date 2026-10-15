@@ -10,6 +10,7 @@ import {
   verifyMetadata,
   verifyWorkflow,
   verifyWebBuilderReceipt,
+  WEB_DOCKER_CLIENT,
   admitWebBuilder,
   type WebBuilderContext,
 } from "./ci-base-image";
@@ -164,7 +165,15 @@ const webContext: WebBuilderContext = {
   attempt: "1",
   architecture: "amd64",
   recipe_sha256: "c".repeat(64),
+  docker_client_sha256: new Bun.CryptoHasher("sha256")
+    .update("producer static client fixture")
+    .digest("hex"),
 };
+const webClientReceipt = Object.fromEntries(
+  Object.entries(WEB_DOCKER_CLIENT)
+    .filter(([key]) => key !== "client_sha256")
+    .map(([key, value]) => ["docker_" + key, value]),
+);
 const hash = (value: string | Uint8Array) =>
   new Bun.CryptoHasher("sha256").update(value).digest("hex");
 async function refuses(work: Promise<unknown>, message: string) {
@@ -183,10 +192,11 @@ test("Web builder receipt refuses source, repository, run, attempt, architecture
   const receipt = {
     schema: 1,
     ...webContext,
+    ...webClientReceipt,
     image_id: "sha256:" + "d".repeat(64),
     archive_sha256: "e".repeat(64),
     inspection_sha256: "f".repeat(64),
-    docker_client_sha256: "0".repeat(64),
+    docker_client_sha256: webContext.docker_client_sha256,
   };
   expect(verifyWebBuilderReceipt(receipt, webContext)).toEqual(receipt);
   for (const [key, wrong] of Object.entries({
@@ -204,6 +214,24 @@ test("Web builder receipt refuses source, repository, run, attempt, architecture
     expect(() => verifyWebBuilderReceipt({ ...receipt, [key]: wrong }, webContext)).toThrow();
   }
   expect(() => verifyWebBuilderReceipt({ ...receipt, ignored: true }, webContext)).toThrow();
+});
+
+test("Web client receipt refuses changed observed archive, version and immutable upstream source", () => {
+  const receipt = {
+    schema: 1,
+    ...webContext,
+    ...webClientReceipt,
+    image_id: "sha256:" + "d".repeat(64),
+    archive_sha256: "e".repeat(64),
+    inspection_sha256: "f".repeat(64),
+  };
+  for (const key of Object.keys(webClientReceipt))
+    expect(() => verifyWebBuilderReceipt({ ...receipt, [key]: "wrong" }, webContext)).toThrow(
+      "upstream provenance",
+    );
+  expect(() =>
+    verifyWebBuilderReceipt({ ...receipt, docker_client_sha256: "0".repeat(64) }, webContext),
+  ).toThrow("source/run/attempt/architecture mismatch");
 });
 
 test("Web builder admission binds complete archive, inspection and client bytes before use", async () => {
@@ -232,6 +260,7 @@ test("Web builder admission binds complete archive, inspection and client bytes 
   const receipt = {
     schema: 1,
     ...webContext,
+    ...webClientReceipt,
     image_id: imageId,
     archive_sha256: hash(needBytes("image.tar")),
     inspection_sha256: hash(needBytes("image.json")),

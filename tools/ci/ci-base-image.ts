@@ -437,6 +437,15 @@ export async function scanImage(path: string, inspection: string, arch: string, 
   return imageId;
 }
 
+// Observed once from the official TLS distribution selected by immutable
+// docker-library/docker source below. A published upstream checksum is missing.
+export const WEB_DOCKER_CLIENT = {
+  version: "29.9.0",
+  source: "623f4fd9a5abae2e72bda5c5d983bf9ff04a5a62",
+  archive_sha256: "33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4",
+  client_sha256: "a1ce7baaa61f45f51b1e3c0148f60f884df14096620f2755bfd53e8cc8bbbf77",
+} as const;
+
 export type WebBuilderContext = {
   repository: string;
   source: string;
@@ -445,6 +454,7 @@ export type WebBuilderContext = {
   attempt: string;
   architecture: string;
   recipe_sha256: string;
+  docker_client_sha256: string;
 };
 const webReceiptKeys = [
   "schema",
@@ -459,6 +469,9 @@ const webReceiptKeys = [
   "archive_sha256",
   "inspection_sha256",
   "docker_client_sha256",
+  "docker_version",
+  "docker_source",
+  "docker_archive_sha256",
 ].sort();
 
 export function verifyWebBuilderReceipt(value: unknown, context: WebBuilderContext) {
@@ -467,6 +480,10 @@ export function verifyWebBuilderReceipt(value: unknown, context: WebBuilderConte
     "Web builder receipt shape mismatch",
   );
   check(value.schema === 1, "Web builder receipt schema mismatch");
+  for (const [key, expected] of Object.entries(WEB_DOCKER_CLIENT).filter(
+    ([key]) => key !== "client_sha256",
+  ))
+    check(value["docker_" + key] === expected, "Web static client upstream provenance mismatch");
   check(
     /^[0-9a-f]{40}$/.test(context.source) &&
       /^[0-9a-f]{40}$/.test(context.tree) &&
@@ -474,7 +491,8 @@ export function verifyWebBuilderReceipt(value: unknown, context: WebBuilderConte
       /^[1-9][0-9]*$/.test(context.attempt) &&
       context.repository.toLowerCase() === "aisflow/fvoci" &&
       context.architecture === "amd64" &&
-      /^[0-9a-f]{64}$/.test(context.recipe_sha256),
+      /^[0-9a-f]{64}$/.test(context.recipe_sha256) &&
+      /^[0-9a-f]{64}$/.test(context.docker_client_sha256),
     "Web builder current context invalid",
   );
   for (const [key, expected] of Object.entries(context))
@@ -533,6 +551,7 @@ async function webBuilderContext(): Promise<WebBuilderContext> {
     attempt: process.env.GITHUB_RUN_ATTEMPT ?? "",
     architecture: "amd64",
     recipe_sha256: await webFileHash("docker/ci-base/Dockerfile", 1024 * 1024),
+    docker_client_sha256: WEB_DOCKER_CLIENT.client_sha256,
   };
 }
 
@@ -576,7 +595,17 @@ async function exportWebBuilder(directory: string, output: string) {
     "amd64",
     context.source,
   );
-  const receipt = { schema: 1, ...context, ...files, image_id: imageId };
+  const receipt = {
+    schema: 1,
+    ...context,
+    ...files,
+    image_id: imageId,
+    ...Object.fromEntries(
+      Object.entries(WEB_DOCKER_CLIENT)
+        .filter(([key]) => key !== "client_sha256")
+        .map(([key, value]) => ["docker_" + key, value]),
+    ),
+  };
   verifyWebBuilderReceipt(receipt, context);
   await Bun.write(join(directory, "receipt.json"), JSON.stringify(receipt) + "\n");
   const digest = await webFileHash(join(directory, "receipt.json"), 16 * 1024);
@@ -706,6 +735,12 @@ if (import.meta.main) {
   try {
     switch (command) {
       case "inputs": {
+        check(
+          (await text("docker/ci-base/Dockerfile"))
+            .split("\n")
+            .includes("      libclang-18-dev=1:18.1.8-20ubuntu8 \\"),
+          "current Clang pin must be a real recipe argument",
+        );
         const rust = Bun.TOML.parse(await text("rust-toolchain.toml"));
         check(
           at(rust, "toolchain", "channel") === "1.99.0" &&

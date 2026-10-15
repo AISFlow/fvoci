@@ -49,6 +49,7 @@ const contracts = {
   },
   web: {
     "web-static": "select_web_static",
+    "web-builder": "select_web_builder",
     "web-checks": "select_web_checks",
     "web-native-checks": "select_web_checks",
     "workspace-browser-build": "select_workspace_browser_shard",
@@ -628,8 +629,12 @@ const artifactMutations: Mutation[] = [
   {
     name: "wrong producer artifact ID",
     mutate: (w) => {
-      const s = actionSteps(job(w, "workspace-browser-shard"), "actions/download-artifact")[0];
-      assert.ok(s);
+      const s = oneStep(
+        job(w, "workspace-browser-shard"),
+        (step) =>
+          step.with?.["artifact-ids"] ===
+          "${{ needs.workspace-browser-build.outputs.artifact_id }}",
+      );
       s.with = { "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}" };
     },
     error: "workspace-browser-build",

@@ -133,10 +133,16 @@ test("the same-run builder refuses publication, substituted userspace and host e
     ["web-export", "summary"],
     ["--platform linux/amd64", "--platform linux/arm64"],
     ["revision=$GITHUB_SHA", "revision=old"],
-    ["grep -q NEEDED", "grep -q NEVER"],
-    ["grep -q INTERP", "grep -q NEVER"],
+    ["*NEEDED*", "*NEVER*"],
+    ["*INTERP*", "*NEVER*"],
     ["test -s /etc/ssl/certs/ca-certificates.crt", ":"],
     ["--dump-dom about:blank", "--version"],
+    [
+      "33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+    ],
+    ["--to-stdout --no-recursion --occurrence=1", "--directory /tmp"],
+    ["Docker version 29.9.0,", "Docker version 29.8.0,"],
   ] as const) {
     const bad = clone(jobs),
       build = stepWith(bad, "web-builder", byId("builder"));
@@ -158,6 +164,12 @@ test("the same-run builder refuses publication, substituted userspace and host e
       ["web-loaded", "summary"],
       ["= 1.29.1", "= 1.28.0"],
       ["rustup component remove rustfmt", "echo ignored"],
+      [
+        "cpSync(join(baked, name), join(cache, name)",
+        "cpSync(join(baked, name), join(baked, name)",
+      ],
+      ["browserInventory(cache, [1001, 1001], true)", "browserInventory(cache, undefined, true)"],
+      ["deepEquals(browserInventory(baked, undefined, true), before)", "true"],
     ] as const) {
       const bad = clone(jobs),
         admit = stepWith(bad, name, byId("builder"));
@@ -167,6 +179,15 @@ test("the same-run builder refuses publication, substituted userspace and host e
     }
     for (const [before, after] of [
       ["--network host", "--network bridge"],
+      ["--pid host", "--pid private"],
+      ["--env TINI_KILL_PROCESS_GROUP=1", ""],
+      [
+        "PLAYWRIGHT_BROWSERS_PATH=${{ runner.temp }}/fvoci-web-builder-state/browser",
+        "PLAYWRIGHT_BROWSERS_PATH=/opt/playwright",
+      ],
+      ["--env PRODUCER_RESULT", ""],
+      ["--env PRODUCER_ARTIFACT", ""],
+      ["--env PRODUCER_DIGEST", ""],
       ["--user 1001:1001", "--user 1000:1000"],
       ["--env SQLITE3_NO_PKG_CONFIG", ""],
       ["/usr/local/bin/docker,readonly", "/usr/bin/docker"],
@@ -183,6 +204,51 @@ test("the same-run builder refuses publication, substituted userspace and host e
     const host = clone(jobs);
     delete stepWith(host, name, byId("sqlite"))["shell"];
     expect(verifyWebBuilderJobs(host).join("\n")).toContain("exact fixed userspace");
+  }
+});
+
+test("actual browser consumers forward every explicit step input and refuse live dependency installation", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of WEB_SQLITE_JOBS) {
+    for (const step of steps(jobs, name)) {
+      if (typeof step["run"] !== "string" || typeof step["shell"] !== "string") continue;
+      const env = step["env"];
+      if (isMapping(env))
+        for (const key of Object.keys(env)) expect(step["shell"]).toContain("--env " + key);
+    }
+    const wrongCache = clone(jobs);
+    const sqlite = stepWith(wrongCache, name, byId("sqlite"));
+    sqlite["run"] = runOf(sqlite) + "\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/playwright\n";
+    expect(verifyWebBuilderJobs(wrongCache).join("\n")).toContain(
+      "cannot override its owned source-bound browser cache",
+    );
+    const preparations = steps(jobs, name).filter(
+      (step) => step["name"] === "Prepare Chromium and system libraries",
+    );
+    for (const prep of preparations) {
+      expect(runOf(prep)).toContain("Version 1.64.0");
+      expect(runOf(prep)).toContain("chromium.executablePath()");
+      expect(runOf(prep)).toContain('ldd "$chromium"');
+      for (const [before, after] of [
+        ["Version 1.64.0", "Version 1.63.0"],
+        ['ldd "$chromium"', "echo guessed"],
+        ["test -x", "# test -x"],
+      ] as const) {
+        const bad = clone(jobs);
+        const mutated = stepWith(
+          bad,
+          name,
+          (step) => step["name"] === "Prepare Chromium and system libraries",
+        );
+        mutated["run"] = runOf(mutated).replace(before, after);
+        expect(verifyWebBuilderJobs(bad).join("\n")).toContain("verify pinned baked Chromium");
+      }
+      const bad = clone(jobs);
+      stepWith(bad, name, (step) => step["name"] === "Prepare Chromium and system libraries")[
+        "run"
+      ] = "bun --bun x --no-install playwright install --with-deps chromium\n";
+      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("verify pinned baked Chromium");
+    }
   }
 });
 
