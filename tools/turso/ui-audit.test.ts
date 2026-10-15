@@ -1002,7 +1002,7 @@ test("SQLite seeded readback state preserves every byte and only admits one nati
 });
 
 test("SQLite readback full-row seal admits only its two exact hashes and exact old reader references", () => {
-  const tables = ["document_collab_op_receipts", "document_collab_updates"];
+  const tables = ["document_collab_op_receipts", "document_collab_updates", "events", "audit_log"];
   const rows = Object.fromEntries(
     tables.map((table) => [
       table,
@@ -1013,13 +1013,23 @@ test("SQLite readback full-row seal admits only its two exact hashes and exact o
     ]),
   );
   const before = { fingerprints: Object.fromEntries(tables.map((table) => [table, {}])) };
-  const after = { fingerprints: rows };
+  const eventHashes = Object.keys(rows.events ?? {});
+  const eventOperations = Object.fromEntries(
+    eventHashes.map((hash, index) => [
+      hash,
+      [number(index + 1), ["blob", "a".repeat(32)], ["blob", "b".repeat(32)]],
+    ]),
+  );
+  const eventIds = Object.fromEntries(
+    eventHashes.map((hash, index) => [hash, String(index + 1).repeat(32)]),
+  );
+  const after = { fingerprints: rows, operations: { events: Object.values(eventOperations) } };
   const audit = {
     sqlitePreparation: {
       workspace: "a".repeat(32),
       readbackActor: { id: "b".repeat(32) },
       prepared: { dataset: structuredClone(after) },
-      readback: { count: 2, rows: structuredClone(rows) },
+      readback: { count: 2, rows: structuredClone(rows), eventOperations, eventIds },
     },
   } as unknown as Audit;
   const table = tables[0] as string,
@@ -1110,6 +1120,9 @@ function sqlitePreparedRecords() {
     workspaces: { [h("original-workspace")]: 1 },
     sessions: {},
     events: {},
+    invitations: {},
+    notifications: {},
+    memberships: {},
     document_states: { [h(originalState)]: 1 },
     collab_room_fences: { [h(oldFence)]: 1 },
     maintenance_job_claims: {},
@@ -1427,4 +1440,434 @@ test("readback actor non-login namespace events refuse in prepared and final eve
   expect(() => allocatedRows(f.before, f.prepared, f.audit)).toThrow(
     "UI_SQLITE_PREPARATION_EFFECT_REFUSED",
   );
+});
+
+test("SQLite invitation login is bound to one exact prepared new-actor row in both phases", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  const fixture = () => {
+    const f = sqlitePreparedRecords(),
+      actor = Object.keys(f.audit.actors)[0] as string,
+      sha = f.h("invitation-login"),
+      refs = {
+        ...f.refs([], [actor], "e".repeat(32)),
+        actors: [actor],
+        workspaces: [] as string[],
+        eventWitness: { class: "actor-invitation-login", sequence: number(4), target: actor },
+      };
+    record(f.prepared, "fingerprints", "events")[sha] = 1;
+    record(f.prepared, "allocations", "events")[sha] = refs;
+    (get(f.prepared, "operations", "events") as unknown[]).push([
+      number(4),
+      ["null"],
+      ["blob", actor],
+    ]);
+    record(f.prepared, "operations").event_sequence = [[number(1), number(4)]];
+    return { ...f, sha, refs };
+  };
+  const check = (f: ReturnType<typeof fixture>, phase: "prepared" | "after") => {
+    if (phase === "prepared") assertSqlitePreparedPreserved(f.before, f.prepared, f.audit);
+    else allocatedRows(f.before, f.prepared, f.audit, phase);
+  };
+  for (const phase of ["prepared", "after"] as const) {
+    expect(() => {
+      check(fixture(), phase);
+    }).not.toThrow();
+    for (const mutate of [
+      (f: ReturnType<typeof fixture>) => {
+        f.refs.eventWitness.target = f.reader;
+      },
+      (f: ReturnType<typeof fixture>) => {
+        f.refs.actors = [f.reader];
+      },
+      (f: ReturnType<typeof fixture>) => {
+        f.refs.workspaces = [f.workspace];
+      },
+      (f: ReturnType<typeof fixture>) => {
+        record(f.prepared, "fingerprints", "events")[f.sha] = 2;
+      },
+      (f: ReturnType<typeof fixture>) => {
+        f.audit.sqlitePreparation = undefined;
+      },
+      (f: ReturnType<typeof fixture>) => {
+        record(must(f.audit.sqlitePreparation).prepared.dataset).backend = "libsql-remote";
+      },
+    ]) {
+      const f = fixture();
+      mutate(f);
+      expect(() => {
+        check(f, phase);
+      }).toThrow();
+    }
+    const f = fixture(),
+      after = structuredClone(f.prepared);
+    (record(after, "allocations", "events")[f.sha] as Record_).eventWitness = {
+      ...f.refs.eventWitness,
+      sequence: number(5),
+    };
+    expect(() => allocatedRows(f.before, after, f.audit, phase)).toThrow("UI_FOREIGN_EVENT");
+  }
+});
+
+test("same sealed readback publication rows explain allocation and event counters without admitting other old-reader effects", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  const fixture = (product = false) => {
+    const f = sqlitePreparedRecords(),
+      selected = must(f.audit.sqlitePreparation),
+      rows: Record<string, Record<string, number>> = {},
+      eventOperations: Record<string, unknown[]> = {},
+      eventIds: Record<string, string> = {},
+      actors: Record<string, string> = {};
+    const workspace = product ? f.workspace : selected.workspace,
+      actor = product ? (Object.keys(f.audit.actors)[0] as string) : f.reader;
+    for (const table of product
+      ? ["events", "audit_log"]
+      : ["document_collab_updates", "document_collab_op_receipts", "events", "audit_log"]) {
+      rows[table] = {};
+      if (!Object.hasOwn(record(f.before, "fingerprints"), table))
+        record(f.before, "fingerprints")[table] = {};
+      if (!Object.hasOwn(record(f.before, "allocations"), table))
+        record(f.before, "allocations")[table] = {};
+      if (!Object.hasOwn(record(f.prepared, "fingerprints"), table))
+        record(f.prepared, "fingerprints")[table] = {};
+      if (!Object.hasOwn(record(f.prepared, "allocations"), table))
+        record(f.prepared, "allocations")[table] = {};
+      for (let i = 0; i < 2; i++) {
+        const hash = f.h([table, i]),
+          id = String(i + 8).repeat(32),
+          operation = [number(i + 4), ["blob", workspace], ["blob", actor]];
+        actors[hash] = actor;
+        rows[table][hash] = 1;
+        record(f.prepared, "fingerprints", table)[hash] = 1;
+        record(f.prepared, "allocations", table)[hash] = {
+          ...f.refs(
+            [workspace],
+            table === "document_collab_updates" ? [] : [actor],
+            table === "events" ? id : null,
+          ),
+          ...(table === "events" ? { eventWitness: null } : {}),
+        };
+        if (table === "events") {
+          eventOperations[hash] = operation;
+          eventIds[hash] = id;
+          (get(f.prepared, "operations", "events") as unknown[]).push(operation);
+        }
+      }
+    }
+    if (product) {
+      const document = "e".repeat(32),
+        hash = f.h("product document");
+      f.audit.documents = { [document]: workspace };
+      record(f.prepared, "fingerprints", "documents")[hash] = 1;
+      record(f.prepared, "allocations", "documents")[hash] = f.refs([workspace], [actor], document);
+      selected.products = [
+        { count: 2, rows, eventOperations, eventIds, actors, workspace, document },
+      ];
+    } else {
+      selected.readback = { count: 2, rows, eventOperations, eventIds };
+      selected.state.current[9] = number(4);
+      selected.state.after = structuredClone(selected.state.current);
+      record(f.prepared, "fingerprints").document_states = { [f.h(selected.state.current)]: 1 };
+      record(f.prepared, "allocations", "document_states")[f.h(selected.state.current)] = f.refs([
+        selected.workspace,
+      ]);
+    }
+    record(f.prepared, "operations").event_sequence = [[number(1), number(5)]];
+    return f;
+  };
+  for (const product of [false, true])
+    for (const phase of ["prepared", "after"] as const) {
+      const valid = fixture(product);
+      expect(() => {
+        if (phase === "prepared")
+          assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit);
+        else allocatedRows(valid.before, valid.prepared, valid.audit, phase);
+      }).not.toThrow();
+      for (const mutate of [
+        (f: ReturnType<typeof fixture>) => {
+          const s = must(f.audit.sqlitePreparation);
+          must(s.readback ?? s.products?.[0]).eventOperations = {};
+        },
+        (f: ReturnType<typeof fixture>) => {
+          const s = must(f.audit.sqlitePreparation);
+          must(s.readback ?? s.products?.[0]).rows.audit_log = {};
+        },
+        (f: ReturnType<typeof fixture>) => {
+          const s = must(f.audit.sqlitePreparation);
+          const hash = Object.keys(
+            must(s.readback ?? s.products?.[0]).rows.events ?? {},
+          )[0] as string;
+          (record(f.prepared, "allocations", "events")[hash] as Record_).self = "e".repeat(32);
+        },
+        (f: ReturnType<typeof fixture>) => {
+          const s = must(f.audit.sqlitePreparation);
+          const hash = Object.keys(
+            must(s.readback ?? s.products?.[0]).rows.audit_log ?? {},
+          )[0] as string;
+          (record(f.prepared, "allocations", "audit_log")[hash] as Record_).actors = [
+            s.preparationActor.id,
+          ];
+        },
+        (f: ReturnType<typeof fixture>) => {
+          const s = must(f.audit.sqlitePreparation);
+          const hash = f.h("unmatched old-reader event");
+          record(f.prepared, "fingerprints", "events")[hash] = 1;
+          record(f.prepared, "allocations", "events")[hash] = {
+            ...f.refs([s.workspace], [f.reader], "e".repeat(32)),
+            eventWitness: null,
+          };
+        },
+      ]) {
+        const f = fixture(product);
+        mutate(f);
+        expect(() => allocatedRows(f.before, f.prepared, f.audit, phase)).toThrow();
+      }
+    }
+});
+
+function preparationNotificationRecords(index: number, late = false) {
+  const f = sqlitePreparedRecords(),
+    selected = must(f.audit.sqlitePreparation),
+    ids = Object.keys(f.audit.actors),
+    performer = ids[index] as string,
+    recipient = index === 0 ? selected.preparationActor.id : (ids[0] as string),
+    target = "a".repeat(31) + String(index),
+    eventId = "b".repeat(31) + String(index),
+    eventHash = f.h(["accepted event", index]),
+    invitationHash = f.h(["accepted invitation", index]),
+    columns = [
+      "id",
+      "workspace_id",
+      "user_id",
+      "event_id",
+      "verb",
+      "actor_user_id",
+      "target_type",
+      "target_id",
+      "payload",
+      "read_at",
+      "archived_at",
+      "created_at",
+    ];
+  const uuid = (id: string) =>
+    [id.slice(0, 8), id.slice(8, 12), id.slice(12, 16), id.slice(16, 20), id.slice(20)].join("-");
+  selected.prepared.checks.memberships = [selected.preparationActor.id, ...ids].map((id) => {
+    const role = id === selected.preparationActor.id || id === ids[0] ? "owner" : "member",
+      hash = f.h(["membership", id]);
+    record(f.prepared, "fingerprints", "memberships")[hash] = 1;
+    record(f.prepared, "allocations", "memberships")[hash] = f.refs([f.workspace], [id]);
+    return { workspaceId: uuid(f.workspace), userId: uuid(id), role, rowFingerprint: hash };
+  });
+  record(f.prepared, "fingerprints", "invitations")[invitationHash] = 1;
+  record(f.prepared, "allocations", "invitations")[invitationHash] = {
+    ...f.refs([f.workspace], [recipient]),
+    invitation: {
+      id: target,
+      workspace: f.workspace,
+      inviter: recipient,
+      email: f.audit.actors[performer],
+      role: index === 0 ? "owner" : "member",
+      acceptedAt: number(30),
+      expiresAt: number(1000),
+    },
+  };
+  record(f.prepared, "fingerprints", "events")[eventHash] = 1;
+  record(f.prepared, "allocations", "events")[eventHash] = {
+    ...f.refs([f.workspace], [performer], eventId),
+    eventWitness: {
+      class: "workspace-invitation-accepted",
+      sequence: number(4),
+      workspace: f.workspace,
+      actor: performer,
+      target,
+      email: f.audit.actors[performer],
+      createdAt: number(30),
+    },
+  };
+  (get(f.prepared, "operations", "events") as unknown[]).push([
+    number(4),
+    ["blob", f.workspace],
+    ["blob", performer],
+  ]);
+  record(f.prepared, "operations").event_sequence = [[number(1), number(4)]];
+  const cells: unknown[][] = [
+    ["blob", "9".repeat(31) + String(index)],
+    ["blob", f.workspace],
+    ["blob", recipient],
+    ["blob", eventId],
+    ["text", "invitation.accepted"],
+    ["blob", performer],
+    ["text", "invitation"],
+    ["blob", target],
+    ["text", "{}"],
+    ["null"],
+    ["null"],
+    number(35),
+  ];
+  const sha = f.h(cells),
+    notification = {
+      ...f.refs([f.workspace], [recipient, performer]),
+      events: [eventId],
+      notification: { columns, cells, sha256: sha },
+    };
+  const insert = (dataset: Record_) => {
+    record(dataset, "fingerprints", "notifications")[sha] = 1;
+    record(dataset, "allocations", "notifications")[sha] = structuredClone(notification);
+  };
+  if (!late) insert(f.prepared);
+  const after = structuredClone(f.prepared);
+  if (late) insert(after);
+  must(f.audit.serial).after = {
+    ...selected.prepared,
+    dataset: after,
+    checks: { ...selected.prepared.checks, clockMicros: "45" },
+  };
+  return { ...f, after, sha, eventHash, invitationHash, recipient, performer, index };
+}
+
+test("preparation notifications bind all three actual invitation role pairs in prepared/final and late-final delivery", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  for (const index of [0, 1, 2]) {
+    const f = preparationNotificationRecords(index);
+    expect(() => {
+      assertSqlitePreparedPreserved(f.before, f.prepared, f.audit);
+    }).not.toThrow();
+    expect(() => allocatedRows(f.before, f.after, f.audit)).not.toThrow();
+    const late = preparationNotificationRecords(index, true);
+    expect(() => {
+      assertSqlitePreparedPreserved(late.before, late.prepared, late.audit);
+    }).not.toThrow();
+    expect(() => allocatedRows(late.before, late.after, late.audit)).not.toThrow();
+    const missing = structuredClone(f.after);
+    record(missing, "fingerprints").notifications = {};
+    record(missing, "allocations").notifications = {};
+    expect(() => allocatedRows(f.before, missing, f.audit)).toThrow(
+      "UI_SQLITE_PREPARATION_NOTIFICATION_CHANGED",
+    );
+  }
+});
+
+test("preparation notification role/source/typed-row changes refuse even when forged row hashes agree", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  for (const phase of ["prepared", "after"] as const) {
+    for (const change of [
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[2] = ["blob", f.reader];
+      },
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[5] = ["blob", must(f.audit.sqlitePreparation).preparationActor.id];
+      },
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[1] = ["blob", must(f.audit.sqlitePreparation).workspace];
+      },
+      (cells: unknown[][]) => {
+        cells[3] = ["blob", "e".repeat(32)];
+      },
+      (cells: unknown[][]) => {
+        cells[7] = ["blob", "e".repeat(32)];
+      },
+      (cells: unknown[][]) => {
+        cells[4] = ["text", "comment.created"];
+      },
+      (cells: unknown[][]) => {
+        cells[6] = ["text", "user"];
+      },
+      (cells: unknown[][]) => {
+        cells[8] = ["text", '{"unexpected":true}'];
+      },
+      (cells: unknown[][]) => {
+        cells[9] = number(35);
+      },
+      (cells: unknown[][]) => {
+        cells[10] = number(35);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = number(29);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = number(1045);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = ["text", "35"];
+      },
+      (cells: unknown[][]) => {
+        cells[0] = ["blob", "0".repeat(32)];
+      },
+    ]) {
+      const f = preparationNotificationRecords(0, phase === "after"),
+        dataset = phase === "prepared" ? f.prepared : f.after,
+        refs = record(dataset, "allocations", "notifications", f.sha),
+        row = record(refs, "notification"),
+        cells = get(row, "cells") as unknown[][];
+      change(cells, f);
+      const hash = f.h(cells);
+      row.sha256 = hash;
+      Reflect.deleteProperty(record(dataset, "fingerprints", "notifications"), f.sha);
+      Reflect.deleteProperty(record(dataset, "allocations", "notifications"), f.sha);
+      record(dataset, "fingerprints", "notifications")[hash] = 1;
+      record(dataset, "allocations", "notifications")[hash] = refs;
+      expect(() => {
+        if (phase === "prepared") assertSqlitePreparedPreserved(f.before, dataset, f.audit);
+        else allocatedRows(f.before, dataset, f.audit);
+      }).toThrow();
+    }
+    for (const mutate of [
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        record(d, "fingerprints", "notifications")[f.sha] = 2;
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        record(d, "allocations", "notifications", f.sha).actors = [f.performer, f.recipient];
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "events", f.eventHash).eventWitness = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "fingerprints").events = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "fingerprints").invitations = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").inviter =
+          f.reader;
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").role =
+          "admin";
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").email =
+          "foreign";
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(
+          f.prepared,
+          "allocations",
+          "invitations",
+          f.invitationHash,
+          "invitation",
+        ).acceptedAt = number(19);
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").expiresAt =
+          number(30);
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        const refs = structuredClone(record(d, "allocations", "notifications", f.sha)),
+          row = record(refs, "notification");
+        (get(row, "cells") as unknown[][])[0] = ["blob", "8".repeat(32)];
+        const hash = f.h(row.cells);
+        row.sha256 = hash;
+        record(d, "allocations", "notifications")[hash] = refs;
+        record(d, "fingerprints", "notifications")[hash] = 1;
+      },
+    ]) {
+      const f = preparationNotificationRecords(0, phase === "after"),
+        dataset = phase === "prepared" ? f.prepared : f.after;
+      mutate(f, dataset);
+      expect(() => {
+        if (phase === "prepared") assertSqlitePreparedPreserved(f.before, dataset, f.audit);
+        else allocatedRows(f.before, dataset, f.audit);
+      }).toThrow();
+    }
+  }
 });

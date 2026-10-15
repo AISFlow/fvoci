@@ -493,7 +493,105 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
     )
 }
 
-fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
+// The selected SQLite preparation accepts an invitation before the separate
+// password login. Keep this fallback out of the shared/remote witness contract.
+fn sqlite_invitation_login_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let actor = match cell("actor_user_id")? {
+        Cell::Blob(actor) if actor.len() == 16 => Uuid::from_slice(actor).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0)
+        || !matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.login")
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("workspace_id")?, Cell::Null)
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "user")
+        || !matches!(cell("target_id")?, Cell::Blob(target) if target == actor.as_bytes())
+        || cell("payload")?.value()? != json!({"userId":actor.to_string(),"method":"invitation"})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"actor-invitation-login","sequence":exact(cell("seq")?.clone()),
+        "target":hex::encode(actor.as_bytes())}),
+    )
+}
+
+fn sqlite_invitation_accepted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    if !matches!(cell("verb")?, Cell::Text(verb) if verb == "invitation.accepted") {
+        return Ok(Value::Null);
+    }
+    let ids = ["workspace_id", "actor_user_id", "target_id"].map(|name| match cell(name)? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused()),
+        _ => Err(refused()),
+    });
+    let [Ok(workspace), Ok(actor), Ok(target)] = ids else {
+        return Ok(Value::Null);
+    };
+    let payload = cell("payload")?.value()?;
+    let Some(email) = payload.get("email").and_then(Value::as_str) else {
+        return Ok(Value::Null);
+    };
+    if !matches!(cell("seq")?, Cell::Integer(seq) if *seq > 0)
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "invitation")
+        || !matches!(cell("created_at")?, Cell::Integer(time) if *time >= 0)
+        || payload
+            != json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":email})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"workspace-invitation-accepted","sequence":exact(cell("seq")?.clone()),
+        "workspace":hex::encode(workspace.as_bytes()),"actor":hex::encode(actor.as_bytes()),
+        "target":hex::encode(target.as_bytes()),"email":email,"createdAt":exact(cell("created_at")?.clone())}),
+    )
+}
+
+// Public invitation fields only. The complete primary hash still binds the
+// token and every other column without exporting credential material.
+fn sqlite_invitation_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let id = |name: &str| match cell(name)? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Ok(hex::encode(bytes)),
+        _ => Err(refused()),
+    };
+    if !matches!(cell("accepted_at")?, Cell::Integer(_) | Cell::Null)
+        || !matches!(cell("expires_at")?, Cell::Integer(_))
+    {
+        return Err(refused());
+    }
+    Ok(json!({"id":id("id")?,
+        "workspace":id("workspace_id")?,
+        "inviter":id("invited_by")?,
+        "email":cell("email")?.string()?,"role":cell("role")?.string()?,
+        "acceptedAt":exact(cell("accepted_at")?.clone()),"expiresAt":exact(cell("expires_at")?.clone())}))
+}
+
+fn row_allocation(
+    table: &str,
+    row: &FamilyRow,
+    selected_sqlite: bool,
+) -> Result<Value, sqlx::Error> {
     let columns = column_names(row)?;
     let mut workspaces = Vec::new();
     let mut actors = Vec::new();
@@ -503,7 +601,9 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let mut event_columns = Vec::new();
     for (i, name) in columns.into_iter().enumerate() {
         let cell = row.cell(i)?;
-        if table == "events" {
+        if table == "events"
+            || (selected_sqlite && matches!(table, "notifications" | "invitations"))
+        {
             event_columns.push((name.to_string(), cell.clone()));
         }
         let destination = match name {
@@ -542,6 +642,19 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let mut allocation = json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer});
     if table == "events" {
         allocation["eventWitness"] = event_witness(&event_columns)?;
+        if selected_sqlite && allocation["eventWitness"].is_null() {
+            allocation["eventWitness"] = sqlite_invitation_login_witness(&event_columns)?;
+            if allocation["eventWitness"].is_null() {
+                allocation["eventWitness"] = sqlite_invitation_accepted_witness(&event_columns)?;
+            }
+        }
+    }
+    if selected_sqlite && table == "invitations" {
+        allocation["invitation"] = sqlite_invitation_fields(&event_columns)?;
+    }
+    if selected_sqlite && table == "notifications" {
+        allocation["notification"] = json!({"columns":event_columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
+            "cells":event_columns.iter().map(|(_,cell)| exact(cell.clone())).collect::<Vec<_>>(),"sha256":row_hash(row)?});
     }
     Ok(allocation)
 }
@@ -962,7 +1075,7 @@ async fn capture_primary_read(
                     instance_config.push(instance_config_witness(&hash, &columns)?);
                 }
                 phase = "row-allocation";
-                owners.insert(hash.clone(), row_allocation(name, row)?);
+                owners.insert(hash.clone(), row_allocation(name, row, backend == "sqlite")?);
                 *hashes.entry(hash).or_default() += 1;
             }
             fingerprints.insert(*name, hashes);
@@ -1997,6 +2110,8 @@ async fn observe_native_read(
                 for (table, sql) in [
                     ("document_collab_updates", "SELECT * FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
                     ("document_collab_op_receipts", "SELECT * FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                    ("events", "SELECT * FROM events WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY seq LIMIT 10001"),
+                    ("audit_log", "SELECT * FROM audit_log WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY created_at,id LIMIT 10001"),
                 ] {
                     let native = f.query(sql, &args).await?;
                     if native.len() > 10000 { return Err(refused()) }
@@ -2163,6 +2278,135 @@ mod tests {
                 .unwrap(),
             ),
         ]
+    }
+
+    #[test]
+    fn sqlite_invitation_witness_binds_exact_local_producer_without_changing_shared_witness() {
+        let actor = Uuid::from_u128(1);
+        let mut original = auth_event("auth.login");
+        original
+            .iter_mut()
+            .find(|(name, _)| name == "payload")
+            .unwrap()
+            .1 = Cell::json(&json!({"userId":actor.to_string(),"method":"invitation"})).unwrap();
+        assert_eq!(event_witness(&original).unwrap(), Value::Null);
+        assert_eq!(
+            sqlite_invitation_login_witness(&original).unwrap(),
+            json!({"class":"actor-invitation-login","sequence":["integer","7"],"target":hex::encode(actor.as_bytes())})
+        );
+        for (name, value) in [
+            ("seq", Cell::Integer(0)),
+            ("seq", Cell::text("7")),
+            ("verb", Cell::text("auth.logout")),
+            ("channel", Cell::text("system")),
+            ("workspace_id", Cell::uuid(actor)),
+            ("actor_user_id", Cell::Null),
+            ("actor_user_id", Cell::Blob(vec![1; 15])),
+            ("target_type", Cell::text("document")),
+            ("target_id", Cell::uuid(Uuid::from_u128(2))),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"password"})).unwrap(),
+            ),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"invitation","extra":true}))
+                    .unwrap(),
+            ),
+        ] {
+            let mut columns = original.clone();
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_invitation_login_witness(&columns).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+        for name in [
+            "seq",
+            "verb",
+            "channel",
+            "workspace_id",
+            "actor_user_id",
+            "target_type",
+            "target_id",
+            "payload",
+        ] {
+            let mut columns = original.clone();
+            columns.retain(|(column, _)| column != name);
+            assert!(
+                sqlite_invitation_login_witness(&columns).is_err(),
+                "missing {name}"
+            );
+        }
+        let workspace = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let accepted = vec![
+            ("seq".into(), Cell::Integer(8)),
+            ("verb".into(), Cell::text("invitation.accepted")),
+            ("channel".into(), Cell::text("web")),
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("actor_user_id".into(), Cell::uuid(actor)),
+            ("target_id".into(), Cell::uuid(target)),
+            ("target_type".into(), Cell::text("invitation")),
+            ("payload".into(), Cell::json(&json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":"owner@example.invalid"})).unwrap()),
+            ("created_at".into(), Cell::Integer(30)),
+        ];
+        assert_eq!(event_witness(&accepted).unwrap(), Value::Null);
+        assert_eq!(
+            sqlite_invitation_accepted_witness(&accepted).unwrap(),
+            json!({
+            "class":"workspace-invitation-accepted","sequence":["integer","8"],
+            "workspace":hex::encode(workspace.as_bytes()),"actor":hex::encode(actor.as_bytes()),
+            "target":hex::encode(target.as_bytes()),"email":"owner@example.invalid","createdAt":["integer","30"]})
+        );
+        for (name, value) in [
+            ("seq", Cell::Integer(0)), ("channel", Cell::text("system")),
+            ("target_type", Cell::text("user")), ("workspace_id", Cell::Null),
+            ("actor_user_id", Cell::Null), ("target_id", Cell::Blob(vec![1;15])),
+            ("created_at", Cell::text("30")),
+            ("payload", Cell::json(&json!({})).unwrap()),
+            ("payload", Cell::json(&json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":"owner@example.invalid","extra":true})).unwrap()),
+        ] {
+            let mut columns = accepted.clone();
+            columns.iter_mut().find(|(column,_)| column == name).unwrap().1 = value;
+            assert_eq!(sqlite_invitation_accepted_witness(&columns).unwrap(), Value::Null, "{name}");
+        }
+        let invitation = vec![
+            ("id".into(), Cell::uuid(target)),
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("invited_by".into(), Cell::uuid(Uuid::from_u128(4))),
+            ("email".into(), Cell::text("owner@example.invalid")),
+            ("role".into(), Cell::text("owner")),
+            ("accepted_at".into(), Cell::Integer(30)),
+            ("expires_at".into(), Cell::Integer(1000)),
+            ("token_hash".into(), Cell::text("PRIVATE_INVITATION_CANARY")),
+        ];
+        let public = sqlite_invitation_fields(&invitation).unwrap();
+        assert_eq!(public.as_object().unwrap().len(), 7);
+        assert_eq!(public["id"], hex::encode(target.as_bytes()));
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("PRIVATE_INVITATION_CANARY"));
+        for name in [
+            "id",
+            "workspace_id",
+            "invited_by",
+            "accepted_at",
+            "expires_at",
+        ] {
+            let mut columns = invitation.clone();
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = Cell::text("wrong storage class");
+            assert!(sqlite_invitation_fields(&columns).is_err(), "{name}");
+        }
     }
 
     #[test]

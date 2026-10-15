@@ -43,6 +43,7 @@ import {
   summary,
   readSelectedSqlitePacket,
   sqliteReadbackAppendWitness,
+  sqliteAppendPublicationWitness,
 } from "./sqlite.ts";
 import type { Seam, State } from "./sqlite.ts";
 
@@ -90,6 +91,29 @@ function readbackAppendFixture() {
       "actor_user_id",
       "created_at",
     ],
+    events: [
+      "id",
+      "seq",
+      "workspace_id",
+      "actor_user_id",
+      "verb",
+      "target_type",
+      "target_id",
+      "payload",
+      "channel",
+      "created_at",
+    ],
+    audit_log: [
+      "id",
+      "actor_user_id",
+      "workspace_id",
+      "verb",
+      "target_type",
+      "target_id",
+      "payload",
+      "ip",
+      "created_at",
+    ],
   };
   const updates: unknown[] = [],
     receipts: unknown[] = [],
@@ -97,6 +121,8 @@ function readbackAppendFixture() {
   const appendRows: Record<string, unknown[]> = {
     document_collab_updates: [],
     document_collab_op_receipts: [],
+    events: [],
+    audit_log: [],
   };
   for (let seq = 1; seq <= 3; seq++) {
     const op = uuid(seq + 3),
@@ -114,6 +140,7 @@ function readbackAppendFixture() {
         empty: false,
         applied: true,
       });
+    const payload = ["text", JSON.stringify({ documentId, opId: op, seq, writerGeneration: 2 })];
     const cells = {
       document_collab_updates: [
         blob(workspaceId),
@@ -133,6 +160,29 @@ function readbackAppendFixture() {
         blob(actorId),
         integer(seq === 1 ? 10 : 30),
       ],
+      events: [
+        blob(uuid(10 + seq)),
+        integer(100 + seq),
+        blob(workspaceId),
+        blob(actorId),
+        ["text", "document.collab_update_appended"],
+        ["text", "document"],
+        blob(documentId),
+        payload,
+        ["text", "web"],
+        integer(seq === 1 ? 10 : 30),
+      ],
+      audit_log: [
+        blob(uuid(20 + seq)),
+        blob(actorId),
+        blob(workspaceId),
+        ["text", "document.collab_update_appended"],
+        ["text", "document"],
+        blob(documentId),
+        payload,
+        ["null"],
+        integer(seq === 1 ? 10 : 30),
+      ],
     };
     for (const table of Object.keys(columns) as (keyof typeof columns)[])
       appendRows[table]?.push({
@@ -142,6 +192,7 @@ function readbackAppendFixture() {
       });
   }
   const current = {
+    writer_generation: 2,
     state: "ff80",
     cutoff: 0,
     tail: 3,
@@ -160,6 +211,11 @@ function readbackAppendFixture() {
   for (const table of Object.keys(appendRows))
     original.appendRows[table] = original.appendRows[table]?.slice(0, 1) ?? [];
   const dataset = (value: typeof current) => ({
+    operations: {
+      events: (value.appendRows.events ?? []).map((row) =>
+        (row as { cells: unknown[] }).cells.slice(1, 4),
+      ),
+    },
     fingerprints: Object.fromEntries(
       Object.entries(value.appendRows).map(([table, rows]) => [
         table,
@@ -184,7 +240,10 @@ test("SQLite readback admits only two wire/ACK-matched full typed native appends
   const input = readbackAppendFixture();
   const seal = await sqliteReadbackAppendWitness(input);
   expect(seal.count).toBe(2);
-  expect(Object.values(seal.rows).map((rows) => Object.keys(rows).length)).toEqual([2, 2]);
+  expect(Object.values(seal.rows).map((rows) => Object.keys(rows).length)).toEqual([2, 2, 2, 2]);
+  expect(Object.keys(seal.eventOperations).sort()).toEqual(
+    Object.keys(seal.rows.events ?? {}).sort(),
+  );
   const changes: ((f: ReturnType<typeof readbackAppendFixture>) => void)[] = [
     (f) => {
       f.current.state = "ff81";
@@ -258,6 +317,133 @@ test("SQLite readback admits only two wire/ACK-matched full typed native appends
     const wrong = readbackAppendFixture();
     change(wrong);
     expect(await rejection(sqliteReadbackAppendWitness(wrong))).toBeInstanceOf(Error);
+  }
+});
+
+test("SQLite readback refuses altered complete publication rows even when their forged native fingerprints agree", async () => {
+  for (const table of ["events", "audit_log"] as const) {
+    const event = table === "events",
+      offset = event ? 1 : 0;
+    const mutations: ((cells: unknown[][], f: ReturnType<typeof readbackAppendFixture>) => void)[] =
+      [
+        (cells) => {
+          cells[0] = ["blob", "0".repeat(32)];
+        },
+        (cells, f) => {
+          cells[2] = ["blob", f.documentId.replaceAll("-", "")];
+        },
+        (cells, f) => {
+          cells[event ? 3 : 1] = ["blob", f.workspaceId.replaceAll("-", "")];
+        },
+        (cells) => {
+          cells[3 + offset] = ["text", "document.updated"];
+        },
+        (cells) => {
+          cells[4 + offset] = ["text", "task"];
+        },
+        (cells, f) => {
+          cells[5 + offset] = ["blob", f.actorId.replaceAll("-", "")];
+        },
+        (cells) => {
+          const p = JSON.parse(String(cells[6 + offset]?.[1])) as Record<string, unknown>;
+          p.writerGeneration = 3;
+          cells[6 + offset] = ["text", JSON.stringify(p)];
+        },
+        (cells) => {
+          const p = JSON.parse(String(cells[6 + offset]?.[1])) as Record<string, unknown>;
+          p.opId = "00000000-0000-4000-8000-000000000099";
+          cells[6 + offset] = ["text", JSON.stringify(p)];
+        },
+        (cells) => {
+          const p = JSON.parse(String(cells[6 + offset]?.[1])) as Record<string, unknown>;
+          p.seq = 99;
+          cells[6 + offset] = ["text", JSON.stringify(p)];
+        },
+        (cells) => {
+          cells[cells.length - 1] = ["integer", "41"];
+        },
+        (cells) => {
+          cells[cells.length - 1] = ["text", "30"];
+        },
+        (cells) => {
+          cells[event ? 8 : 7] = event ? ["text", "system"] : ["integer", "7"];
+        },
+      ];
+    if (event)
+      mutations.push((cells) => {
+        cells[1] = ["integer", "0"];
+      });
+    for (const mutate of mutations) {
+      const f = readbackAppendFixture(),
+        row = f.current.appendRows[table]?.[1] as { cells: unknown[][]; sha256: string };
+      const old = row.sha256;
+      mutate(row.cells, f);
+      row.sha256 = createHash("sha256").update(JSON.stringify(row.cells)).digest("hex");
+      Reflect.deleteProperty(f.prepared.fingerprints[table] ?? {}, old);
+      (f.prepared.fingerprints[table] as Record<string, number>)[row.sha256] = 1;
+      f.prepared.operations.events = (f.current.appendRows.events ?? []).map((value) =>
+        (value as { cells: unknown[] }).cells.slice(1, 4),
+      );
+      expect(await rejection(sqliteReadbackAppendWitness(f))).toBeInstanceOf(Error);
+    }
+    for (const extra of [false, true]) {
+      const f = readbackAppendFixture();
+      if (extra) f.current.appendRows[table]?.push(structuredClone(f.current.appendRows[table][1]));
+      else f.current.appendRows[table]?.shift();
+      expect(await rejection(sqliteReadbackAppendWitness(f))).toBeInstanceOf(Error);
+    }
+  }
+});
+
+test("PRODUCT4 uses the same publication contract for every native receipt, including compacted operations", () => {
+  const fixture = () => {
+    const f = readbackAppendFixture();
+    // A product target is new. Compaction may remove its updates, but every
+    // acknowledged receipt still requires its original event and audit row.
+    f.current.appendRows.document_collab_updates = [];
+    return {
+      ...f,
+      original: { appendRows: { events: [], audit_log: [] } },
+      before: { fingerprints: { events: {}, audit_log: {} } },
+      receipts: f.current.receipts as {
+        seq: number;
+        op: string;
+        len: number;
+        sha: string;
+        actor: string;
+      }[],
+      clocks: ["0", "40"] as [string, string],
+    };
+  };
+  const valid = fixture(),
+    seal = sqliteAppendPublicationWitness(valid);
+  expect(seal.count).toBe(3);
+  expect(Object.values(seal.rows).map((rows) => Object.keys(rows).length)).toEqual([3, 3]);
+  expect(Object.keys(seal.eventOperations)).toHaveLength(3);
+  for (const table of ["events", "audit_log"] as const)
+    for (const extra of [false, true]) {
+      const f = fixture();
+      if (extra) f.current.appendRows[table]?.push(structuredClone(f.current.appendRows[table][0]));
+      else f.current.appendRows[table]?.pop();
+      expect(() => sqliteAppendPublicationWitness(f)).toThrow();
+    }
+  for (const mutate of [
+    (f: ReturnType<typeof fixture>) => {
+      f.receipts.pop();
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.receipts[1] = structuredClone(f.receipts[0] as (typeof f.receipts)[number]);
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.current.writer_generation = 3;
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.prepared.fingerprints.audit_log = {};
+    },
+  ]) {
+    const f = fixture();
+    mutate(f);
+    expect(() => sqliteAppendPublicationWitness(f)).toThrow();
   }
 });
 

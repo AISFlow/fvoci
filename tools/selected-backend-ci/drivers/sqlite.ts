@@ -248,7 +248,162 @@ export async function sqliteReadbackAppendWitness(input: {
     }
     assert.ok(Object.keys(rows[table]).length === 2);
   }
-  return Promise.resolve({ count: 2 as const, rows });
+  const publications = sqliteAppendPublicationWitness({ ...input, receipts });
+  return Promise.resolve({
+    ...publications,
+    count: 2 as const,
+    rows: { ...rows, ...publications.rows },
+  });
+}
+
+/** The same complete native publication contract serves readback and PRODUCT4. */
+export function sqliteAppendPublicationWitness(input: {
+  original: unknown;
+  current: unknown;
+  before: unknown;
+  prepared: unknown;
+  workspaceId: string;
+  documentId: string;
+  receipts: SelectedNativeReceipt[];
+  clocks: [string, string];
+}) {
+  const rows: Record<string, Record<string, number>> = {};
+  const actors: Record<string, string> = {};
+  const { original, current, receipts } = input;
+  const { integer, uuidHex } = auditModule;
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  assert.ok(receipts.length <= 10000);
+  const eventOperations: Record<string, unknown[]> = {};
+  const eventIds: Record<string, string> = {};
+  const generation = get(current, "writer_generation");
+  assert.ok(Number.isSafeInteger(generation) && Number(generation) > 0);
+  const publicationIds = new Set<string>(),
+    eventSequences = new Set<string>();
+  for (const [table, columns] of [
+    [
+      "events",
+      [
+        "id",
+        "seq",
+        "workspace_id",
+        "actor_user_id",
+        "verb",
+        "target_type",
+        "target_id",
+        "payload",
+        "channel",
+        "created_at",
+      ],
+    ],
+    [
+      "audit_log",
+      [
+        "id",
+        "actor_user_id",
+        "workspace_id",
+        "verb",
+        "target_type",
+        "target_id",
+        "payload",
+        "ip",
+        "created_at",
+      ],
+    ],
+  ] as const) {
+    const old = list(original, "appendRows", table),
+      now = list(current, "appendRows", table);
+    assert.ok(
+      now.length === old.length + receipts.length &&
+        deepEquals(now.slice(0, old.length), old, true),
+    );
+    rows[table] = {};
+    const matched = new Set<string>();
+    for (const [index, row] of now.entries()) {
+      const cells = list(row, "cells"),
+        sha = get(row, "sha256");
+      assert.ok(
+        deepEquals(get(row, "columns"), columns, true) &&
+          cells.length === columns.length &&
+          sha === hash(cells),
+      );
+      assert.ok(get(input.prepared, "fingerprints", table, sha) === 1);
+      if (index < old.length) {
+        assert.ok(get(input.before, "fingerprints", table, sha) === 1);
+        continue;
+      }
+      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), sha));
+      const event = table === "events",
+        offset = event ? 1 : 0;
+      const id = get(cells, 0, 1);
+      assert.ok(
+        deepEquals(cells[0], ["blob", id], true) &&
+          typeof id === "string" &&
+          /^[a-f0-9]{32}$/.test(id) &&
+          !/^0+$/.test(id) &&
+          !publicationIds.has(id),
+      );
+      publicationIds.add(id);
+      assert.ok(deepEquals(cells[2], ["blob", uuidHex(input.workspaceId)], true));
+      assert.ok(
+        deepEquals(cells[3 + offset], ["text", "document.collab_update_appended"], true) &&
+          deepEquals(cells[4 + offset], ["text", "document"], true) &&
+          deepEquals(cells[5 + offset], ["blob", uuidHex(input.documentId)], true),
+      );
+      const matches = receipts.filter(
+        (receipt) =>
+          deepEquals(cells[event ? 3 : 1], ["blob", uuidHex(receipt.actor)], true) &&
+          deepEquals(
+            cells[6 + offset],
+            [
+              "text",
+              JSON.stringify({
+                documentId: input.documentId,
+                opId: receipt.op,
+                seq: receipt.seq,
+                writerGeneration: generation,
+              }),
+            ],
+            true,
+          ),
+      );
+      assert.ok(matches.length === 1 && matches[0] !== undefined && !matched.has(matches[0].op));
+      matched.add(matches[0].op);
+      actors[sha] = uuidHex(matches[0].actor);
+      const time = integer(cells.at(-1));
+      assert.ok(
+        time >= integer(["integer", input.clocks[0]]) &&
+          time <= integer(["integer", input.clocks[1]]),
+      );
+      if (event) {
+        assert.ok(deepEquals(cells[8], ["text", "web"], true));
+        const sequence = integer(cells[1]);
+        assert.ok(sequence > 0n && !eventSequences.has(sequence.toString()));
+        eventSequences.add(sequence.toString());
+        const operation = cells.slice(1, 4);
+        assert.ok(
+          list(input.prepared, "operations", "events").filter((value) =>
+            deepEquals(value, operation, true),
+          ).length === 1,
+        );
+        eventOperations[sha] = operation;
+        eventIds[sha] = id;
+      } else {
+        assert.ok(
+          deepEquals(cells[7], ["null"], true) ||
+            (Array.isArray(cells[7]) &&
+              cells[7].length === 2 &&
+              cells[7][0] === "text" &&
+              typeof cells[7][1] === "string"),
+        );
+      }
+      assert.ok(!Object.hasOwn(rows[table], sha));
+      rows[table][sha] = 1;
+    }
+    assert.ok(
+      matched.size === receipts.length && Object.keys(rows[table]).length === receipts.length,
+    );
+  }
+  return { count: receipts.length, rows, eventOperations, eventIds, actors };
 }
 
 /** Read only the separate, completed observer packet, never its mixed log. */
@@ -1425,6 +1580,7 @@ export async function productCallbacks(
   }[] = [];
   const writes: SelectedSyncWrite[] = [];
   let productPassed = false;
+  let productReadbacks: unknown[] = [];
   return Promise.resolve({
     async afterSeedStopped(rows, seed) {
       const retired = await auditModule.selectedRoomRetirement(manifest, oldOrigin, target, rows);
@@ -1702,7 +1858,7 @@ export async function productCallbacks(
         titles,
         "sqlite",
       );
-      const expected = cases.map((item) => {
+      productReadbacks = cases.map((item) => {
         const wire = auditModule.attachment([item], "selected-final-writes.json"),
           readback = auditModule.attachment([item], "selected-final-native-readback.json");
         for (const evidence of [wire, readback])
@@ -1718,44 +1874,6 @@ export async function productCallbacks(
         }
         return readback;
       });
-      const documents = new Map<string, Set<string>>();
-      for (const row of expected) {
-        const workspace = String(get(row, "workspaceId")),
-          document = String(get(row, "targetId"));
-        auditModule.uuidHex(workspace);
-        auditModule.uuidHex(document);
-        if (!documents.has(workspace)) documents.set(workspace, new Set());
-        documents.get(workspace)?.add(document);
-      }
-      for (const write of writes) {
-        if (!documents.has(write.workspaceId)) documents.set(write.workspaceId, new Set());
-        documents.get(write.workspaceId)?.add(write.documentId);
-      }
-      for (const [workspaceId, ids] of documents) {
-        const observed = await native(
-          "observe",
-          { workspaceId, documentIds: [...ids] },
-          "current-products-" + token(4),
-        );
-        for (const documentId of ids) {
-          const row = get(observed, "rows", documentId);
-          if (audit.documents !== undefined)
-            audit.documents[auditModule.uuidHex(documentId)] = auditModule.uuidHex(workspaceId);
-          audit.observedFences.push(...(list(row, "roomFences") as unknown[][]));
-          targets.push({
-            workspaceId,
-            documentId,
-            receipts: list(row, "receipts") as (typeof targets)[number]["receipts"],
-          });
-          for (const readback of expected.filter(
-            (row) => get(row, "workspaceId") === workspaceId && get(row, "targetId") === documentId,
-          ))
-            assert.ok(
-              deepEquals(get(row, "content"), get(readback, "content"), true) &&
-                get(row, "text") === get(readback, "text"),
-            );
-        }
-      }
       productPassed = true;
       state.receipt.sqlite_products_browser = {
         exit: 0,
@@ -1831,6 +1949,69 @@ export async function productCallbacks(
           "original wiki native bytes/receipts changed after retirement",
         );
       audit.sqlitePreparation.state.after = list(finalRow, "stateRow");
+      audit.sqlitePreparation.products = [];
+      const documents = new Map<string, Set<string>>();
+      for (const row of productReadbacks) {
+        const workspace = String(get(row, "workspaceId")),
+          document = String(get(row, "targetId"));
+        auditModule.uuidHex(workspace);
+        auditModule.uuidHex(document);
+        if (!documents.has(workspace)) documents.set(workspace, new Set());
+        documents.get(workspace)?.add(document);
+      }
+      for (const write of writes) {
+        if (!documents.has(write.workspaceId)) documents.set(write.workspaceId, new Set());
+        documents.get(write.workspaceId)?.add(write.documentId);
+      }
+      for (const [workspaceId, ids] of documents) {
+        const observed = await native(
+          "observe",
+          { workspaceId, documentIds: [...ids] },
+          "after-products-" + token(4),
+        );
+        for (const documentId of ids) {
+          const row = get(observed, "rows", documentId);
+          if (audit.documents !== undefined)
+            audit.documents[auditModule.uuidHex(documentId)] = auditModule.uuidHex(workspaceId);
+          audit.observedFences.push(...(list(row, "roomFences") as unknown[][]));
+          const receipts = list(row, "receipts") as SelectedNativeReceipt[];
+          assertSelectedSuccessfulWrites(receipts, writes, workspaceId, documentId);
+          assert.ok(
+            !Object.values(record(original.dataset, "allocations", "documents")).some(
+              (refs) => get(refs, "self") === auditModule.uuidHex(documentId),
+            ),
+            "PRODUCT4 target was preexisting",
+          );
+          const publications = sqliteAppendPublicationWitness({
+            original: { appendRows: { events: [], audit_log: [] } },
+            current: row,
+            before: original.dataset,
+            prepared: after.dataset,
+            workspaceId,
+            documentId,
+            receipts,
+            clocks: [String(current.checks.clockMicros), String(after.checks.clockMicros)],
+          });
+          audit.sqlitePreparation.products.push({
+            ...publications,
+            workspace: auditModule.uuidHex(workspaceId),
+            document: auditModule.uuidHex(documentId),
+          });
+          targets.push({
+            workspaceId,
+            documentId,
+            receipts: list(row, "receipts") as (typeof targets)[number]["receipts"],
+          });
+          for (const readback of productReadbacks.filter(
+            (row) => get(row, "workspaceId") === workspaceId && get(row, "targetId") === documentId,
+          ))
+            assert.ok(
+              deepEquals(get(row, "content"), get(readback, "content"), true) &&
+                get(row, "text") === get(readback, "text"),
+            );
+        }
+      }
+
       auditModule.auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
       const storageAfter = seam.treeHashes(state.storage);
       for (const [path, hash] of Object.entries(storageOriginal))

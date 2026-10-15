@@ -137,6 +137,14 @@ const truthy = (value: unknown) =>
 const subset = (items: unknown[], set: Set<string>) =>
   items.every((item) => typeof item === "string" && set.has(item));
 
+type SqliteAppendWitness = {
+  count: number;
+  rows: Record<string, Record<string, number>>;
+  eventOperations?: Record<string, unknown[]>;
+  eventIds?: Record<string, string>;
+  actors?: Record<string, string>;
+};
+
 export interface Audit {
   namespaces: string[];
   /** Exact original actors used by the existing SQLite public preparation and
@@ -151,7 +159,8 @@ export interface Audit {
     prepared: SerialObservation;
     maintenance?: { server: Record_; leaseMicros: string };
     /** Parent-derived wire/ACK/native full-row witness, never a browser grant. */
-    readback?: { count: number; rows: Record<string, Record<string, number>> };
+    readback?: SqliteAppendWitness;
+    products?: (SqliteAppendWitness & { workspace: string; document: string })[];
     state: { original: unknown[]; current: unknown[]; after: unknown[] };
   };
   actors: Record<string, string>;
@@ -646,6 +655,8 @@ function witnessedEventOperation(
   audit: Audit,
   workspaces: Set<string>,
   targets: ProjectionTargets,
+  sha: string,
+  count: unknown,
 ): unknown[] | null {
   if (!isRecord(refs) || !isRecord(refs.eventWitness)) return null;
   const witness = refs.eventWitness;
@@ -682,6 +693,23 @@ function witnessedEventOperation(
   if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
   const sequence = witness.sequence;
   if (integer(sequence) <= 0n) return null;
+  if (witness.class === "actor-invitation-login") {
+    const selected = audit.sqlitePreparation;
+    return count === 1 &&
+      selected !== undefined &&
+      get(selected.original.dataset, "backend") === "sqlite" &&
+      get(selected.prepared.dataset, "backend") === "sqlite" &&
+      same(Object.keys(witness).sort(), ["class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      same(people, [target]) &&
+      Object.hasOwn(audit.actors, target) &&
+      target !== selected.preparationActor.id &&
+      target !== selected.readbackActor.id &&
+      get(selected.prepared.dataset, "fingerprints", "events", sha) === 1 &&
+      same(get(selected.prepared.dataset, "allocations", "events", sha), refs)
+      ? [sequence, ["null"], ["blob", target]]
+      : null;
+  }
   if (
     witness.class === "actor-login" &&
     spaces.length === 0 &&
@@ -731,6 +759,205 @@ function witnessedEventOperation(
   return null;
 }
 
+function preparationNotification(
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  audit: Audit,
+  after: unknown,
+  phase: "prepared" | "after",
+): boolean {
+  const selected = audit.sqlitePreparation;
+  if (!selected || !isRecord(refs) || !isRecord(refs.notification)) return false;
+  const row = refs.notification,
+    cells = list(row, "cells");
+  if (
+    !same(get(row, "columns"), [
+      "id",
+      "workspace_id",
+      "user_id",
+      "event_id",
+      "verb",
+      "actor_user_id",
+      "target_type",
+      "target_id",
+      "payload",
+      "read_at",
+      "archived_at",
+      "created_at",
+    ]) ||
+    cells.length !== 12 ||
+    count !== 1 ||
+    get(row, "sha256") !== sha ||
+    rowHash(cells) !== sha ||
+    Object.hasOwn(record(selected.original.dataset, "fingerprints", "notifications"), sha) ||
+    get(after, "fingerprints", "notifications", sha) !== 1 ||
+    !same(get(after, "allocations", "notifications", sha), refs)
+  )
+    return false;
+  for (const index of [0, 1, 2, 3, 5, 7])
+    if (
+      !same(cells[index], ["blob", get(cells, index, 1)]) ||
+      !/^[a-f0-9]{32}$/.test(text(cells, index, 1)) ||
+      /^0+$/.test(text(cells, index, 1))
+    )
+      return false;
+  const workspace = text(cells, 1, 1),
+    recipient = text(cells, 2, 1),
+    eventId = text(cells, 3, 1),
+    performer = text(cells, 5, 1),
+    target = text(cells, 7, 1);
+  if (
+    (recipient !== selected.preparationActor.id && !Object.hasOwn(audit.actors, recipient)) ||
+    !Object.hasOwn(audit.actors, performer) ||
+    recipient === performer ||
+    !Object.hasOwn(audit.workspaces, workspace) ||
+    !same(get(refs, "actors"), [recipient, performer]) ||
+    !same(get(refs, "workspaces"), [workspace]) ||
+    !same(get(refs, "events"), [eventId]) ||
+    !same(cells[4], ["text", "invitation.accepted"]) ||
+    !same(cells[6], ["text", "invitation"]) ||
+    !same(cells[8], ["text", "{}"]) ||
+    !same(cells[9], ["null"]) ||
+    !same(cells[10], ["null"])
+  )
+    return false;
+  const sourceEvents = Object.entries(
+    record(selected.prepared.dataset, "allocations", "events"),
+  ).filter(([, event]) => get(event, "self") === eventId);
+  if (sourceEvents.length !== 1 || sourceEvents[0] === undefined) return false;
+  const [eventHash, event] = sourceEvents[0],
+    witness = get(event, "eventWitness");
+  if (
+    !isRecord(witness) ||
+    !same(Object.keys(witness).sort(), [
+      "actor",
+      "class",
+      "createdAt",
+      "email",
+      "sequence",
+      "target",
+      "workspace",
+    ]) ||
+    witness.class !== "workspace-invitation-accepted" ||
+    witness.actor !== performer ||
+    witness.workspace !== workspace ||
+    witness.target !== target ||
+    witness.email !== audit.actors[performer] ||
+    !same(get(event, "actors"), [performer]) ||
+    !same(get(event, "workspaces"), [workspace]) ||
+    Object.hasOwn(record(selected.original.dataset, "fingerprints", "events"), eventHash) ||
+    get(selected.prepared.dataset, "fingerprints", "events", eventHash) !== 1 ||
+    get(after, "fingerprints", "events", eventHash) !== 1 ||
+    !same(get(after, "allocations", "events", eventHash), event)
+  )
+    return false;
+  const invitations = Object.entries(
+    record(selected.prepared.dataset, "allocations", "invitations"),
+  ).filter(
+    ([, invitation]) =>
+      isRecord(invitation) &&
+      isRecord(invitation.invitation) &&
+      invitation.invitation.id === target,
+  );
+  if (invitations.length !== 1 || invitations[0] === undefined) return false;
+  const [invitationHash, invitation] = invitations[0],
+    fields = get(invitation, "invitation");
+  if (
+    !isRecord(fields) ||
+    !same(Object.keys(fields).sort(), [
+      "acceptedAt",
+      "email",
+      "expiresAt",
+      "id",
+      "inviter",
+      "role",
+      "workspace",
+    ]) ||
+    fields.workspace !== workspace ||
+    fields.inviter !== recipient ||
+    fields.email !== audit.actors[performer] ||
+    fields.role !== (recipient === selected.preparationActor.id ? "owner" : "member") ||
+    !same(get(invitation, "actors"), [recipient]) ||
+    !same(get(invitation, "workspaces"), [workspace]) ||
+    Object.hasOwn(
+      record(selected.original.dataset, "fingerprints", "invitations"),
+      invitationHash,
+    ) ||
+    get(selected.prepared.dataset, "fingerprints", "invitations", invitationHash) !== 1 ||
+    get(after, "fingerprints", "invitations", invitationHash) !== 1 ||
+    !same(get(after, "allocations", "invitations", invitationHash), invitation)
+  )
+    return false;
+  const memberships = list(selected.prepared.checks, "memberships");
+  const role = (id: string, expected: unknown) =>
+    memberships.filter(
+      (member) =>
+        uuidHex(get(member, "workspaceId")) === workspace &&
+        uuidHex(get(member, "userId")) === id &&
+        get(member, "role") === expected &&
+        get(
+          selected.prepared.dataset,
+          "fingerprints",
+          "memberships",
+          text(member, "rowFingerprint"),
+        ) === 1,
+    ).length === 1;
+  if (!role(recipient, "owner") || !role(performer, fields.role)) return false;
+  const originalClock = decimal(selected.original.checks.clockMicros),
+    preparedClock = decimal(selected.prepared.checks.clockMicros);
+  const observedChecks =
+    phase === "prepared" ? selected.prepared.checks : audit.serial?.after.checks;
+  if (observedChecks === undefined) return false;
+  const accepted = integer(fields.acceptedAt),
+    eventTime = integer(witness.createdAt),
+    created = integer(cells[11]),
+    sequence = integer(witness.sequence);
+  if (
+    accepted < originalClock ||
+    accepted > preparedClock + 999n ||
+    accepted > eventTime + 999n ||
+    accepted >= integer(fields.expiresAt) ||
+    eventTime < originalClock ||
+    eventTime > preparedClock + 999n ||
+    created < eventTime ||
+    created > decimal(get(observedChecks, "clockMicros")) + 999n ||
+    sequence <= singleton(get(selected.original.dataset, "operations", "event_sequence")) ||
+    sequence > singleton(get(selected.prepared.dataset, "operations", "event_sequence")) ||
+    list(after, "operations", "events").filter((operation) =>
+      same(operation, [witness.sequence, ["blob", workspace], ["blob", performer]]),
+    ).length !== 1
+  )
+    return false;
+  const matching = (dataset: unknown) =>
+    Object.entries(record(dataset, "allocations", "notifications")).filter(
+      ([, candidate]) =>
+        isRecord(candidate) &&
+        isRecord(candidate.notification) &&
+        Array.isArray(candidate.notification.cells) &&
+        same(candidate.notification.cells[2], cells[2]) &&
+        same(candidate.notification.cells[3], cells[3]),
+    );
+  const preparedNotes = matching(selected.prepared.dataset),
+    currentNotes = matching(after);
+  if (
+    currentNotes.length !== 1 ||
+    (preparedNotes.length === 0
+      ? phase !== "after"
+      : preparedNotes.length !== 1 ||
+        preparedNotes[0]?.[0] !== sha ||
+        get(selected.prepared.dataset, "fingerprints", "notifications", sha) !== 1)
+  )
+    return false;
+  return !Object.values(record(selected.original.dataset, "allocations", "notifications")).some(
+    (old) =>
+      isRecord(old) &&
+      isRecord(old.notification) &&
+      Array.isArray(old.notification.cells) &&
+      same(old.notification.cells[0], cells[0]),
+  );
+}
+
 /** Only the bootstrap actor may produce the named new-namespace public
  * preparation effects. The readback actor has only one login and session. */
 export function selectedOriginalActorEffect(
@@ -741,8 +968,17 @@ export function selectedOriginalActorEffect(
   actor: { id: string; sessionId: string },
   bootstrap: boolean,
   audit: Audit,
+  after?: unknown,
+  phase: "prepared" | "after" = "prepared",
 ): boolean {
   const selected = audit.sqlitePreparation;
+  if (table === "notifications" && selected !== undefined)
+    return (
+      bootstrap &&
+      actor.id === selected.preparationActor.id &&
+      get(refs, "notification", "cells", 2, 1) === actor.id &&
+      preparationNotification(sha, count, refs, audit, after ?? selected.prepared.dataset, phase)
+    );
   if (
     selected === undefined ||
     !same(get(refs, "actors"), [actor.id]) ||
@@ -921,16 +1157,65 @@ export function allocatedRows(
     }
   }
   const events = new Set<string>();
+  if (selected !== undefined && phase === "after")
+    for (const [sha, refs] of Object.entries(
+      record(selected.prepared.dataset, "allocations", "notifications"),
+    ))
+      if (
+        isRecord(refs) &&
+        isRecord(refs.notification) &&
+        Array.isArray(refs.notification.cells) &&
+        same(refs.notification.cells[4], ["text", "invitation.accepted"])
+      )
+        require(Object.hasOwn(record(after, "fingerprints", "notifications"), sha) &&
+          get(after, "fingerprints", "notifications", sha) === 1 &&
+          same(
+            get(after, "allocations", "notifications", sha),
+            refs,
+          ), "UI_SQLITE_PREPARATION_NOTIFICATION_CHANGED");
+  for (const seal of [selected?.readback, ...(selected?.products ?? [])]) {
+    if (seal === undefined) continue;
+    for (const [table, hashes] of Object.entries(seal.rows))
+      for (const [sha, count] of Object.entries(hashes))
+        require(selectedReadbackAppendEffect(
+          before,
+          after,
+          table,
+          sha,
+          count,
+          get(after, "allocations", table, sha),
+          audit,
+        ), "UI_SQLITE_READBACK_APPEND_REFUSED");
+  }
   const beforeEvents = record(before, "fingerprints", "events");
   for (const [sha, refs] of Object.entries(record(after, "allocations", "events"))) {
     if (!Object.hasOwn(beforeEvents, sha)) {
       const spaces = list(refs, "workspaces"),
         people = list(refs, "actors");
-      require((spaces.length > 0 &&
-        subset(spaces, workspaces) &&
-        people.length > 0 &&
-        subset(people, actors)) ||
-        witnessedEventOperation(refs, audit, workspaces, targets) !== null, "UI_FOREIGN_EVENT");
+      require(selectedReadbackAppendEffect(
+        before,
+        after,
+        "events",
+        sha,
+        get(after, "fingerprints", "events", sha),
+        refs,
+        audit,
+      ) ||
+        ((!isRecord(refs) ||
+          !isRecord(refs.eventWitness) ||
+          refs.eventWitness.class !== "actor-invitation-login") &&
+          spaces.length > 0 &&
+          subset(spaces, workspaces) &&
+          people.length > 0 &&
+          subset(people, actors)) ||
+        witnessedEventOperation(
+          refs,
+          audit,
+          workspaces,
+          targets,
+          sha,
+          get(after, "fingerprints", "events", sha),
+        ) !== null, "UI_FOREIGN_EVENT");
       events.add(get(refs, "self") as string);
     }
   }
@@ -949,6 +1234,34 @@ export function allocatedRows(
       }
       const refs = get(after, "allocations", table, sha);
       if (selectedReadbackAppendEffect(before, after, table, sha, count, refs, audit)) continue;
+      const preparedInvitationNotice =
+        selected !== undefined &&
+        table === "notifications" &&
+        Object.values(record(selected.prepared.dataset, "allocations", "events")).some(
+          (event) =>
+            isRecord(event) &&
+            isRecord(event.eventWitness) &&
+            event.eventWitness.class === "workspace-invitation-accepted" &&
+            list(refs, "events").includes(event.self),
+        );
+      if (
+        selected !== undefined &&
+        table === "notifications" &&
+        (phase === "prepared" ||
+          preparedInvitationNotice ||
+          (isRecord(refs) &&
+            isRecord(refs.notification) &&
+            Array.isArray(refs.notification.cells) &&
+            same(refs.notification.cells[4], ["text", "invitation.accepted"])))
+      )
+        require(preparationNotification(
+          sha,
+          count,
+          refs,
+          audit,
+          after,
+          phase,
+        ), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
       if (selected !== undefined) {
         for (const actor of [selected.preparationActor, selected.readbackActor]) {
           if (!list(refs, "actors").includes(actor.id)) continue;
@@ -960,6 +1273,8 @@ export function allocatedRows(
             actor,
             actor === selected.preparationActor,
             audit,
+            after,
+            phase,
           ), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
         }
       }
@@ -1512,8 +1827,29 @@ function auditEventAndFenceCounters(
   const witnessed = new Set(
     Object.entries(record(after, "allocations", "events"))
       .filter(([hash]) => !Object.hasOwn(record(before, "fingerprints", "events"), hash))
-      .flatMap(([, refs]) => {
-        const row = witnessedEventOperation(refs, audit, workspaces, targets);
+      .flatMap(([hash, refs]) => {
+        const row = selectedReadbackAppendEffect(
+          before,
+          after,
+          "events",
+          hash,
+          get(after, "fingerprints", "events", hash),
+          refs,
+          audit,
+        )
+          ? (audit.sqlitePreparation?.readback?.eventOperations?.[hash] ??
+            audit.sqlitePreparation?.products?.find((seal) =>
+              Object.hasOwn(seal.rows.events ?? {}, hash),
+            )?.eventOperations?.[hash] ??
+            null)
+          : witnessedEventOperation(
+              refs,
+              audit,
+              workspaces,
+              targets,
+              hash,
+              get(after, "fingerprints", "events", hash),
+            );
         return row === null ? [] : [canonical(row)];
       }),
   );
@@ -1641,38 +1977,77 @@ export function selectedReadbackAppendEffect(
   refs: unknown,
   audit: Audit,
 ): boolean {
-  const selected = audit.sqlitePreparation,
-    seal = selected?.readback;
-  if (
-    !selected ||
-    !seal ||
-    !Object.hasOwn(seal.rows, table) ||
-    !Object.hasOwn(seal.rows[table] ?? {}, sha)
-  )
-    return false;
-  require(seal.count === 2 &&
-    same(Object.keys(seal.rows).sort(), [
-      "document_collab_op_receipts",
-      "document_collab_updates",
-    ]) &&
+  const selected = audit.sqlitePreparation;
+  const readback = selected?.readback;
+  const product = selected?.products?.find((seal) => Object.hasOwn(seal.rows[table] ?? {}, sha));
+  const seal = readback && Object.hasOwn(readback.rows[table] ?? {}, sha) ? readback : product;
+  if (!selected || !seal) return false;
+  const originalReader = seal === readback;
+  const workspace = originalReader ? selected.workspace : product?.workspace;
+  const prepared = originalReader ? selected.prepared.dataset : audit.serial?.after.dataset;
+  const expectedActor = originalReader ? selected.readbackActor.id : seal.actors?.[sha];
+  require(Number.isSafeInteger(seal.count) &&
+    seal.count >= 0 &&
+    seal.count <= 10000 &&
+    (originalReader
+      ? seal.count === 2
+      : product !== undefined &&
+        audit.serial?.expectedBackend === "sqlite" &&
+        audit.documents?.[product.document] === workspace) &&
+    same(
+      Object.keys(seal.rows).sort(),
+      originalReader
+        ? ["audit_log", "document_collab_op_receipts", "document_collab_updates", "events"]
+        : ["audit_log", "events"],
+    ) &&
     Object.entries(seal.rows).every(
       ([name, hashes]) =>
-        Object.keys(hashes).length === 2 &&
+        Object.keys(hashes).length === seal.count &&
         Object.entries(hashes).every(
           ([hash, n]) =>
             /^[a-f0-9]{64}$/.test(hash) &&
             n === 1 &&
             !Object.hasOwn(record(before, "fingerprints", name), hash) &&
-            get(selected.prepared.dataset, "fingerprints", name, hash) === 1 &&
+            get(prepared, "fingerprints", name, hash) === 1 &&
             get(after, "fingerprints", name, hash) === 1,
         ),
     ) &&
-    count === 1 &&
-    same(get(refs, "workspaces"), [selected.workspace]) &&
     same(
-      get(refs, "actors"),
-      table === "document_collab_updates" ? [] : [selected.readbackActor.id],
-    ), "UI_SQLITE_READBACK_APPEND_REFUSED");
+      Object.keys(seal.eventOperations ?? {}).sort(),
+      Object.keys(seal.rows.events ?? {}).sort(),
+    ) &&
+    same(Object.keys(seal.eventIds ?? {}).sort(), Object.keys(seal.rows.events ?? {}).sort()) &&
+    (originalReader ||
+      same(
+        Object.keys(seal.actors ?? {}).sort(),
+        Object.values(seal.rows)
+          .flatMap((hashes) => Object.keys(hashes))
+          .sort(),
+      )) &&
+    Object.entries(seal.eventOperations ?? {}).every(
+      ([hash, operation]) =>
+        operation.length === 3 &&
+        integer(operation[0]) > 0n &&
+        same(operation[1], ["blob", workspace]) &&
+        same(operation[2], [
+          "blob",
+          originalReader ? selected.readbackActor.id : seal.actors?.[hash],
+        ]) &&
+        (originalReader || Object.hasOwn(audit.actors, seal.actors?.[hash] ?? "")) &&
+        /^[a-f0-9]{32}$/.test(seal.eventIds?.[hash] ?? "") &&
+        list(prepared, "operations", "events").filter((row) => same(row, operation)).length === 1 &&
+        list(after, "operations", "events").filter((row) => same(row, operation)).length === 1,
+    ) &&
+    new Set(Object.values(seal.eventIds ?? {})).size === seal.count &&
+    new Set(Object.values(seal.eventOperations ?? {}).map((row) => canonical(row[0]))).size ===
+      seal.count &&
+    count === 1 &&
+    same(get(refs, "workspaces"), [workspace]) &&
+    same(get(refs, "actors"), table === "document_collab_updates" ? [] : [expectedActor]) &&
+    (originalReader || Object.hasOwn(audit.actors, expectedActor ?? "")) &&
+    (table !== "events" ||
+      (get(refs, "self") === seal.eventIds?.[sha] &&
+        get(refs, "eventWitness") === null)), "UI_SQLITE_READBACK_APPEND_REFUSED");
   return true;
 }
 
