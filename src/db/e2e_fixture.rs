@@ -816,6 +816,8 @@ async fn capture_primary(
         let mut allocations = BTreeMap::new();
         let mut instance_config = Vec::new();
         let mut serial_users = Vec::new();
+        let mut serial_memberships = Vec::new();
+        let mut serial_workspaces = BTreeSet::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             phase = "preservation-read";
@@ -828,17 +830,22 @@ async fn capture_primary(
             for row in &rows {
                 phase = "row-hash";
                 let hash = row_hash(row)?;
-                if *name == "users" && policy.is_some() {
-                    phase = "serial-user-witness";
+                if matches!(*name, "users" | "memberships" | "workspaces") && policy.is_some() {
+                    phase = "serial-actor-witness";
                     let FamilyRow::Remote(remote) = row else { return Err(refused()) };
                     let mut columns = Vec::new();
                     for i in 0..remote.column_count() {
                         let column = remote.column_name(i).ok_or_else(refused)?;
-                        if matches!(column, "id" | "email") {
+                        if matches!(column, "id" | "email" | "workspace_id" | "user_id" | "role") {
                             columns.push((column.to_string(), row.cell(i as usize)?));
                         }
                     }
-                    serial_users.push(serial_user_witness(&columns, &hash)?);
+                    match *name {
+                        "users" => serial_users.push(serial_user_witness(&columns, &hash)?),
+                        "memberships" => serial_memberships.push(serial_membership_witness(&columns, &hash)?),
+                        "workspaces" => { serial_workspaces.insert(serial_column(&columns, "id")?.id()?); }
+                        _ => return Err(refused()),
+                    }
                 }
                 if *name == "instance_config" {
                     let FamilyRow::Remote(remote) = row else { return Err(refused()) };
@@ -888,7 +895,10 @@ async fn capture_primary(
             "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?});
         phase = "serial-observation";
         let checks = match policy {
-            Some(policy) => Some(serial_checks(f, policy, serial_users).await?),
+            Some(policy) => {
+                join_serial_memberships(&serial_users, &serial_workspaces, &serial_memberships)?;
+                Some(serial_checks(f, policy, serial_users, serial_memberships).await?)
+            },
             None => None,
         };
         Ok(PrimaryCapture { dataset, checks })
@@ -922,6 +932,7 @@ struct SerialChecks {
     policy_sha256: String,
     policy_binding: &'static str,
     users: Vec<SerialUser>,
+    memberships: Vec<SerialMembership>,
     event_head: String,
     relay_completion: RelayCompletion,
     outbox: Vec<RelayObservation>,
@@ -939,17 +950,57 @@ struct SerialUser {
     row_fingerprint: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialMembership {
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    row_fingerprint: String,
+}
+
+fn serial_column<'a>(columns: &'a [(String, Cell)], name: &str) -> Result<&'a Cell, sqlx::Error> {
+    columns
+        .iter()
+        .find(|(column, _)| column == name)
+        .map(|(_, cell)| cell)
+        .ok_or_else(refused)
+}
+
+fn serial_membership_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialMembership, sqlx::Error> {
+    Ok(SerialMembership {
+        workspace_id: serial_column(columns, "workspace_id")?.id()?,
+        user_id: serial_column(columns, "user_id")?.id()?,
+        role: serial_column(columns, "role")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
+}
+
+fn join_serial_memberships(
+    users: &[SerialUser],
+    workspaces: &BTreeSet<Uuid>,
+    memberships: &[SerialMembership],
+) -> Result<(), sqlx::Error> {
+    let users = users.iter().map(|user| user.id).collect::<BTreeSet<_>>();
+    let mut keys = BTreeSet::new();
+    for membership in memberships {
+        if !users.contains(&membership.user_id)
+            || !workspaces.contains(&membership.workspace_id)
+            || !keys.insert((membership.workspace_id, membership.user_id))
+        {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
 fn serial_user_witness(
     columns: &[(String, Cell)],
     fingerprint: &str,
 ) -> Result<SerialUser, sqlx::Error> {
-    let cell = |name: &str| {
-        columns
-            .iter()
-            .find(|(column, _)| column == name)
-            .map(|(_, cell)| cell)
-            .ok_or_else(refused)
-    };
     if fingerprint.len() != 64
         || !fingerprint
             .bytes()
@@ -958,8 +1009,8 @@ fn serial_user_witness(
         return Err(refused());
     }
     Ok(SerialUser {
-        id: cell("id")?.id()?,
-        email: cell("email")?.string()?,
+        id: serial_column(columns, "id")?.id()?,
+        email: serial_column(columns, "email")?.string()?,
         row_fingerprint: fingerprint.to_string(),
     })
 }
@@ -1150,6 +1201,7 @@ async fn serial_checks(
     f: &mut FamilyTx,
     policy: SerialPolicy,
     mut users: Vec<SerialUser>,
+    mut memberships: Vec<SerialMembership>,
 ) -> Result<SerialChecks, sqlx::Error> {
     use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
     let clock = f
@@ -1294,6 +1346,7 @@ async fn serial_checks(
     )?);
     let policy_bytes = serde_json::to_vec(&policy).map_err(|_| refused())?;
     users.sort_unstable_by_key(|user| user.id);
+    memberships.sort_unstable_by_key(|membership| (membership.workspace_id, membership.user_id));
     Ok(SerialChecks {
         schema: 1,
         clock_micros: now.to_string(),
@@ -1303,6 +1356,7 @@ async fn serial_checks(
         policy_sha256: hex::encode(Sha256::digest(policy_bytes)),
         policy_binding: "required-from-sealed-server",
         users,
+        memberships,
         event_head: head_seq.to_string(),
         relay_completion: relay_completion(head_seq, &outbox),
         outbox,
@@ -1316,6 +1370,58 @@ async fn serial_checks(
 #[cfg(test)]
 mod serial_tests {
     use super::*;
+
+    #[test]
+    fn serial_membership_requires_actual_user_workspace_and_unique_native_key() {
+        let user = Uuid::from_u128(7);
+        let workspace = Uuid::from_u128(8);
+        let columns = vec![
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("user_id".into(), Cell::uuid(user)),
+            ("role".into(), Cell::text("admin")),
+        ];
+        let users = vec![SerialUser {
+            id: user,
+            email: "native@example.invalid".into(),
+            row_fingerprint: "a".repeat(64),
+        }];
+        let membership = serial_membership_witness(&columns, &"b".repeat(64)).unwrap();
+        assert_eq!(membership.role, "admin");
+        assert_eq!(membership.row_fingerprint, "b".repeat(64));
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_ok());
+        assert!(join_serial_memberships(
+            &[],
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([Uuid::nil()]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        let duplicate = serial_membership_witness(&columns, &"c".repeat(64)).unwrap();
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            &[membership, duplicate]
+        )
+        .is_err());
+        for missing in ["workspace_id", "user_id", "role"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_membership_witness(&absent, &"b".repeat(64)).is_err());
+        }
+        let mut wrong = columns;
+        wrong[2].1 = Cell::Null;
+        assert!(serial_membership_witness(&wrong, &"b".repeat(64)).is_err());
+    }
 
     #[test]
     fn serial_user_witness_preserves_actual_identity_and_refuses_missing_or_wrong_types() {
