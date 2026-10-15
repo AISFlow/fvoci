@@ -1120,6 +1120,9 @@ function sqlitePreparedRecords() {
     workspaces: { [h("original-workspace")]: 1 },
     sessions: {},
     events: {},
+    invitations: {},
+    notifications: {},
+    memberships: {},
     document_states: { [h(originalState)]: 1 },
     collab_room_fences: { [h(oldFence)]: 1 },
     maintenance_job_claims: {},
@@ -1619,4 +1622,252 @@ test("same sealed readback publication rows explain allocation and event counter
         expect(() => allocatedRows(f.before, f.prepared, f.audit, phase)).toThrow();
       }
     }
+});
+
+function preparationNotificationRecords(index: number, late = false) {
+  const f = sqlitePreparedRecords(),
+    selected = must(f.audit.sqlitePreparation),
+    ids = Object.keys(f.audit.actors),
+    performer = ids[index] as string,
+    recipient = index === 0 ? selected.preparationActor.id : (ids[0] as string),
+    target = "a".repeat(31) + String(index),
+    eventId = "b".repeat(31) + String(index),
+    eventHash = f.h(["accepted event", index]),
+    invitationHash = f.h(["accepted invitation", index]),
+    columns = [
+      "id",
+      "workspace_id",
+      "user_id",
+      "event_id",
+      "verb",
+      "actor_user_id",
+      "target_type",
+      "target_id",
+      "payload",
+      "read_at",
+      "archived_at",
+      "created_at",
+    ];
+  const uuid = (id: string) =>
+    [id.slice(0, 8), id.slice(8, 12), id.slice(12, 16), id.slice(16, 20), id.slice(20)].join("-");
+  selected.prepared.checks.memberships = [selected.preparationActor.id, ...ids].map((id) => {
+    const role = id === selected.preparationActor.id || id === ids[0] ? "owner" : "member",
+      hash = f.h(["membership", id]);
+    record(f.prepared, "fingerprints", "memberships")[hash] = 1;
+    record(f.prepared, "allocations", "memberships")[hash] = f.refs([f.workspace], [id]);
+    return { workspaceId: uuid(f.workspace), userId: uuid(id), role, rowFingerprint: hash };
+  });
+  record(f.prepared, "fingerprints", "invitations")[invitationHash] = 1;
+  record(f.prepared, "allocations", "invitations")[invitationHash] = {
+    ...f.refs([f.workspace], [recipient]),
+    invitation: {
+      id: target,
+      workspace: f.workspace,
+      inviter: recipient,
+      email: f.audit.actors[performer],
+      role: index === 0 ? "owner" : "member",
+      acceptedAt: number(30),
+      expiresAt: number(1000),
+    },
+  };
+  record(f.prepared, "fingerprints", "events")[eventHash] = 1;
+  record(f.prepared, "allocations", "events")[eventHash] = {
+    ...f.refs([f.workspace], [performer], eventId),
+    eventWitness: {
+      class: "workspace-invitation-accepted",
+      sequence: number(4),
+      workspace: f.workspace,
+      actor: performer,
+      target,
+      email: f.audit.actors[performer],
+      createdAt: number(30),
+    },
+  };
+  (get(f.prepared, "operations", "events") as unknown[]).push([
+    number(4),
+    ["blob", f.workspace],
+    ["blob", performer],
+  ]);
+  record(f.prepared, "operations").event_sequence = [[number(1), number(4)]];
+  const cells: unknown[][] = [
+    ["blob", "9".repeat(31) + String(index)],
+    ["blob", f.workspace],
+    ["blob", recipient],
+    ["blob", eventId],
+    ["text", "invitation.accepted"],
+    ["blob", performer],
+    ["text", "invitation"],
+    ["blob", target],
+    ["text", "{}"],
+    ["null"],
+    ["null"],
+    number(35),
+  ];
+  const sha = f.h(cells),
+    notification = {
+      ...f.refs([f.workspace], [recipient, performer]),
+      events: [eventId],
+      notification: { columns, cells, sha256: sha },
+    };
+  const insert = (dataset: Record_) => {
+    record(dataset, "fingerprints", "notifications")[sha] = 1;
+    record(dataset, "allocations", "notifications")[sha] = structuredClone(notification);
+  };
+  if (!late) insert(f.prepared);
+  const after = structuredClone(f.prepared);
+  if (late) insert(after);
+  must(f.audit.serial).after = {
+    ...selected.prepared,
+    dataset: after,
+    checks: { ...selected.prepared.checks, clockMicros: "45" },
+  };
+  return { ...f, after, sha, eventHash, invitationHash, recipient, performer, index };
+}
+
+test("preparation notifications bind all three actual invitation role pairs in prepared/final and late-final delivery", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  for (const index of [0, 1, 2]) {
+    const f = preparationNotificationRecords(index);
+    expect(() => {
+      assertSqlitePreparedPreserved(f.before, f.prepared, f.audit);
+    }).not.toThrow();
+    expect(() => allocatedRows(f.before, f.after, f.audit)).not.toThrow();
+    const late = preparationNotificationRecords(index, true);
+    expect(() => {
+      assertSqlitePreparedPreserved(late.before, late.prepared, late.audit);
+    }).not.toThrow();
+    expect(() => allocatedRows(late.before, late.after, late.audit)).not.toThrow();
+    const missing = structuredClone(f.after);
+    record(missing, "fingerprints").notifications = {};
+    record(missing, "allocations").notifications = {};
+    expect(() => allocatedRows(f.before, missing, f.audit)).toThrow(
+      "UI_SQLITE_PREPARATION_NOTIFICATION_CHANGED",
+    );
+  }
+});
+
+test("preparation notification role/source/typed-row changes refuse even when forged row hashes agree", async () => {
+  const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
+  for (const phase of ["prepared", "after"] as const) {
+    for (const change of [
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[2] = ["blob", f.reader];
+      },
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[5] = ["blob", must(f.audit.sqlitePreparation).preparationActor.id];
+      },
+      (cells: unknown[][], f: ReturnType<typeof preparationNotificationRecords>) => {
+        cells[1] = ["blob", must(f.audit.sqlitePreparation).workspace];
+      },
+      (cells: unknown[][]) => {
+        cells[3] = ["blob", "e".repeat(32)];
+      },
+      (cells: unknown[][]) => {
+        cells[7] = ["blob", "e".repeat(32)];
+      },
+      (cells: unknown[][]) => {
+        cells[4] = ["text", "comment.created"];
+      },
+      (cells: unknown[][]) => {
+        cells[6] = ["text", "user"];
+      },
+      (cells: unknown[][]) => {
+        cells[8] = ["text", '{"unexpected":true}'];
+      },
+      (cells: unknown[][]) => {
+        cells[9] = number(35);
+      },
+      (cells: unknown[][]) => {
+        cells[10] = number(35);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = number(29);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = number(1045);
+      },
+      (cells: unknown[][]) => {
+        cells[11] = ["text", "35"];
+      },
+      (cells: unknown[][]) => {
+        cells[0] = ["blob", "0".repeat(32)];
+      },
+    ]) {
+      const f = preparationNotificationRecords(0, phase === "after"),
+        dataset = phase === "prepared" ? f.prepared : f.after,
+        refs = record(dataset, "allocations", "notifications", f.sha),
+        row = record(refs, "notification"),
+        cells = get(row, "cells") as unknown[][];
+      change(cells, f);
+      const hash = f.h(cells);
+      row.sha256 = hash;
+      Reflect.deleteProperty(record(dataset, "fingerprints", "notifications"), f.sha);
+      Reflect.deleteProperty(record(dataset, "allocations", "notifications"), f.sha);
+      record(dataset, "fingerprints", "notifications")[hash] = 1;
+      record(dataset, "allocations", "notifications")[hash] = refs;
+      expect(() => {
+        if (phase === "prepared") assertSqlitePreparedPreserved(f.before, dataset, f.audit);
+        else allocatedRows(f.before, dataset, f.audit);
+      }).toThrow();
+    }
+    for (const mutate of [
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        record(d, "fingerprints", "notifications")[f.sha] = 2;
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        record(d, "allocations", "notifications", f.sha).actors = [f.performer, f.recipient];
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "events", f.eventHash).eventWitness = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "fingerprints").events = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "fingerprints").invitations = {};
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").inviter =
+          f.reader;
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").role =
+          "admin";
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").email =
+          "foreign";
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(
+          f.prepared,
+          "allocations",
+          "invitations",
+          f.invitationHash,
+          "invitation",
+        ).acceptedAt = number(19);
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>) => {
+        record(f.prepared, "allocations", "invitations", f.invitationHash, "invitation").expiresAt =
+          number(30);
+      },
+      (f: ReturnType<typeof preparationNotificationRecords>, d: Record_) => {
+        const refs = structuredClone(record(d, "allocations", "notifications", f.sha)),
+          row = record(refs, "notification");
+        (get(row, "cells") as unknown[][])[0] = ["blob", "8".repeat(32)];
+        const hash = f.h(row.cells);
+        row.sha256 = hash;
+        record(d, "allocations", "notifications")[hash] = refs;
+        record(d, "fingerprints", "notifications")[hash] = 1;
+      },
+    ]) {
+      const f = preparationNotificationRecords(0, phase === "after"),
+        dataset = phase === "prepared" ? f.prepared : f.after;
+      mutate(f, dataset);
+      expect(() => {
+        if (phase === "prepared") assertSqlitePreparedPreserved(f.before, dataset, f.audit);
+        else allocatedRows(f.before, dataset, f.audit);
+      }).toThrow();
+    }
+  }
 });
