@@ -2,6 +2,7 @@
 // actor fixture starts here; all mutations below use real product UI/API.
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
+import { walkTiptap } from "../../../packages/editor/src/extract";
 import { expect, test } from "@playwright/test";
 import type { components } from "../src/generated/api";
 import { expectDocumentBoundaries } from "../e2e/document-boundary-oracle";
@@ -178,6 +179,13 @@ if (binding.suite === "products") {
     await saveOn(owner);
     expect(await storedAttachmentDownloadBytes(owner.page)).toEqual(bytes);
     const beforeGrant = await editorShape(owner.page);
+    const references: unknown[] = [];
+    walkTiptap(beforeGrant.document, (node) => {
+      if (node.type === "embed") references.push(node.attrs);
+    });
+    expect(references).toContainEqual(
+      expect.objectContaining({ entity: "document", ref: reference.id }),
+    );
     expect(attachmentNodes(beforeGrant)).toHaveLength(1);
     const attachment = attachmentNodes(beforeGrant)[0];
     if (!attachment) throw new Error("SELECTED_FINAL_ATTACHMENT_MISSING");
