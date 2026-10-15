@@ -219,8 +219,10 @@ if (binding.suite === "products") {
     expect(grant.status()).toBe(201);
     await mount(member, target, "on");
     await expectConverged(owner.page, member.page);
-    await member.page.locator(".fvoci-editor .ProseMirror").click();
-    await member.page.keyboard.press("Control+End");
+    const memberEditor = member.page.locator(".fvoci-editor .ProseMirror");
+    await memberEditor.locator(":scope > p").last().click();
+    await member.page.keyboard.press("End");
+    await expect(memberEditor).toBeFocused();
     await member.page.keyboard.type(" 동료 입력");
     await expectTokens(owner.page, ["동료 입력"]);
     await saveOn(member);
