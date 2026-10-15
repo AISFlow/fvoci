@@ -151,13 +151,14 @@ export async function documentObservation(
 
 export async function activeRoom(
   page: Page,
-): Promise<{ connections: number; closedCodes: number[] }> {
-  const actual = { connections: 0, closedCodes: [] as number[] };
+): Promise<{ connections: number; closedCodes: (number | undefined)[] }> {
+  const actual = { connections: 0, closedCodes: [] as (number | undefined)[] };
   await page.routeWebSocket("**/collab", (socket) => {
     const server = socket.connectToServer();
     actual.connections++;
     server.onClose(async (code, reason) => {
-      if (code === undefined) throw new Error("Server close code is missing");
+      // Navigation may close without a code. Preserve that observation; only
+      // an actual 1008 can satisfy the caller's session-revocation assertion.
       actual.closedCodes.push(code);
       await socket.close({ code, reason });
     });
