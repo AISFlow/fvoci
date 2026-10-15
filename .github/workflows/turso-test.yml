@@ -6,25 +6,25 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore and main-only ui-auth require both destructive gates; others NOT IMPLEMENTED
+        description: Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore, main-only ui-auth and main-only ui-final require both destructive gates; others NOT IMPLEMENTED
         type: choice
         default: connection
         # prettier-ignore
-        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth]
+        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth, ui-final]
       destructive:
         description: Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)
         type: boolean
         default: false
       ui_source_sha:
-        description: ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore and ui-auth only)
+        description: ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore, ui-auth and ui-final only)
         type: string
         default: ""
       ui_baseline_sha256:
-        description: ROOT verified just-observed current dataset digest (ui-ack, restore and ui-auth only)
+        description: ROOT verified just-observed current dataset digest (ui-ack, restore, ui-auth and ui-final only)
         type: string
         default: ""
       ui_target_sha256:
-        description: ROOT verified just-observed primary target digest (ui-ack, restore and ui-auth only)
+        description: ROOT verified just-observed primary target digest (ui-ack, restore, ui-auth and ui-final only)
         type: string
         default: ""
 
@@ -61,7 +61,7 @@ jobs:
 
   turso-connection:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore' && github.event.inputs.phase != 'ui-auth' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore' && github.event.inputs.phase != 'ui-auth' && github.event.inputs.phase != 'ui-final' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -109,12 +109,13 @@ jobs:
 
   turso-ui:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main')) && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-final' && github.ref == 'refs/heads/main')) && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
       FVOCI_BUILD_SHA: ${{ github.sha }}
+      FVOCI_TURSO_UI_FINAL: ${{ github.event.inputs.phase == 'ui-final' && '1' || '0' }}
       LIBCLANG_PATH: /usr/lib/llvm-18/lib
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
@@ -150,7 +151,11 @@ jobs:
         run: |
           set -euo pipefail
           bun install --frozen-lockfile
-          bun --bun x playwright install --with-deps chromium
+          if [ "$FVOCI_TURSO_UI_FINAL" = 1 ]; then
+            bun --bun x playwright install --with-deps chromium firefox webkit
+          else
+            bun --bun x playwright install --with-deps chromium
+          fi
           bun --no-env-file tools/turso/ui.ts --record-before
           bun --bun run --cwd apps/web build
       - name: Credential-free current native UI cohort and freeze

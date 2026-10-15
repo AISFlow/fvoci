@@ -6,6 +6,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { jsonInteger } from "../selected-backend-ci/io.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
+import { digest } from "../selected-backend-ci/io.ts";
 import {
   canonical,
   decodeUtf8,
@@ -16,6 +17,7 @@ import {
   require,
   text,
   type Record_,
+  valueDigest,
 } from "./ui-common.ts";
 
 export const ON = "workspace-wiki-selected-backend.spec.ts";
@@ -120,6 +122,292 @@ export interface Audit {
   observedFences: unknown[][];
   /** Members of dedicated auth allocations; only they may revoke sessions. */
   authActors?: string[];
+  /** Exact phase actors and parent-held native snapshots, never browser claims. */
+  keycloak?: { actors: string[]; beforeUnlink: SerialObservation[] };
+  /** Private observations collected by the final caller, never CLI proof input. */
+  serial?: {
+    before: SerialObservation;
+    after: SerialObservation;
+    policy: SerialPolicy;
+    keycloakGroups?: 1 | 2 | 3;
+  };
+}
+
+export interface SerialPolicy {
+  revisionKeep: number;
+  revisionSnapshotIntervalHours: number;
+}
+export interface SerialObservation {
+  dataset: Record_;
+  checks: Record_;
+}
+
+/** Native SQL clock resolution is milliseconds; compare without JS rounding. */
+export function assertNativeClock(
+  observation: SerialObservation,
+  before: bigint,
+  after: bigint,
+): void {
+  const clock = decimal(observation.checks.clockMicros);
+  require(before > 0n &&
+    after >= before &&
+    clock >= before - 999n &&
+    clock <= after + 999n, "UI_FINAL_NATIVE_CLOCK_RELATION_REQUIRED");
+}
+
+const SERIAL_BACKGROUND = [
+  "magic-expiry",
+  "mfa-expiry",
+  "oidc-expiry",
+  "ics-expiry",
+  "github-install-expiry",
+  "withdrawn-users",
+  "deleted-workspaces",
+  "trashed-documents",
+  "unfinished-uploads",
+  "object-cleanup",
+  "imports",
+  "deferred-import-events",
+  "outbox-failures",
+  "push-deliveries",
+  "pending-webhooks",
+  "enabled-digests",
+  "notification-read-retention",
+  "notification-archived-retention",
+  "processed-retention",
+  "unknown-processed-consumer",
+  "webhook-retention",
+  "github-retention",
+  "maintenance-owners",
+  "document-room-owners",
+  "task-room-owners",
+  "automatic-revision-retention",
+];
+const decimal = (value: unknown): bigint => integer(["integer", value]);
+const rowHash = (cells: unknown) => digest(JSON.stringify(cells));
+const fingerprints = (rows: unknown[]) => {
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    const hash = rowHash(row);
+    result[hash] = (result[hash] ?? 0) + 1;
+  }
+  return result;
+};
+
+/** Match all current counter columns to their complete native row hashes. */
+function serialCounterRows(dataset: Record_): void {
+  for (const table of AUDITED_COUNTERS) {
+    const rows = list(dataset, "operations", table);
+    require(same(
+      record(dataset, "fingerprints", table),
+      fingerprints(rows),
+    ), "UI_SERIAL_COUNTER_FINGERPRINT_CHANGED");
+  }
+}
+
+/** The initial read may have no registered relays; later reads require all five. */
+export function validateSerialObservation(
+  value: unknown,
+  policy: SerialPolicy,
+  initial = false,
+): SerialObservation {
+  const dataset = record(value, "dataset"),
+    checks = record(value, "checks");
+  require(dataset.schema === 1 &&
+    dataset.backend === "libsql-remote" &&
+    dataset.schemaCurrent === true &&
+    dataset.lineage === "fvoci-sqlite-060" &&
+    list(dataset, "ledger").length === 12 &&
+    dataset.startupHazards === 0 &&
+    dataset.liveOutboxLeases === 0, "UI_SERIAL_CURRENT_SCHEMA_REQUIRED");
+  let total = 0;
+  const tables = record(dataset, "fingerprints");
+  require(same(
+    Object.keys(tables).sort(),
+    Object.keys(record(dataset, "allocations")).sort(),
+  ), "UI_SERIAL_TABLE_WITNESS_MISSING");
+  for (const [table, hashes] of Object.entries(tables)) {
+    let count = 0;
+    for (const [hash, multiplicity] of Object.entries(record(hashes))) {
+      require(/^[a-f0-9]{64}$/.test(hash) &&
+        typeof multiplicity === "number" &&
+        Number.isSafeInteger(multiplicity) &&
+        multiplicity > 0 &&
+        Object.hasOwn(
+          record(dataset, "allocations", table),
+          hash,
+        ), "UI_SERIAL_ROW_WITNESS_REFUSED");
+      count += multiplicity;
+    }
+    require(count <= 10000 &&
+      same(
+        Object.keys(record(hashes)).sort(),
+        Object.keys(record(dataset, "allocations", table)).sort(),
+      ), "UI_SERIAL_ROW_CAP_REFUSED");
+    total += count;
+  }
+  require(total <= 100000 && dataset.rows === total, "UI_SERIAL_ROW_CAP_REFUSED");
+  require(checks.schema === 1 &&
+    checks.policyBinding === "required-from-sealed-server" &&
+    same(checks.policy, policy) &&
+    checks.policySha256 ===
+      rowHash({
+        revisionKeep: policy.revisionKeep,
+        revisionSnapshotIntervalHours: policy.revisionSnapshotIntervalHours,
+      }) &&
+    Number.isSafeInteger(policy.revisionKeep) &&
+    policy.revisionKeep > 0 &&
+    policy.revisionKeep <= 4294967295 &&
+    Number.isSafeInteger(policy.revisionSnapshotIntervalHours) &&
+    policy.revisionSnapshotIntervalHours >= 0 &&
+    policy.revisionSnapshotIntervalHours <= 4294967295, "UI_SERIAL_SERVER_POLICY_REQUIRED");
+  const clock = decimal(checks.clockMicros),
+    end = decimal(checks.horizonEndMicros);
+  require(clock > 0n &&
+    decimal(checks.coverageMicros) === 2400000000n &&
+    end - clock === 2400000000n, "UI_SERIAL_CLOCK_HORIZON_REQUIRED");
+  serialCounterRows(dataset);
+  const head = decimal(checks.eventHead);
+  const events = list(dataset, "operations", "events");
+  require(head === singleton(get(dataset, "operations", "event_sequence")) &&
+    head === (events.length ? integer(get(events.at(-1), 0)) : 0n), "UI_SERIAL_EVENT_HEAD_CHANGED");
+  const facts = list(checks, "background");
+  require(same(
+    facts.map((fact) => get(fact, "kind")).sort(),
+    [...SERIAL_BACKGROUND].sort(),
+  ), "UI_SERIAL_BACKGROUND_COVERAGE_MISSING");
+  for (const fact of facts)
+    require(get(fact, "eligibility") === "clear" &&
+      get(fact, "now") === 0 &&
+      get(fact, "throughHorizon") === 0 &&
+      [
+        "eligible",
+        "pending",
+        "owner",
+        "unknown",
+        "conservative-blocker",
+        "eligible-conditional-on-policy",
+      ].includes(text(fact, "interpretation")), "UI_SERIAL_BACKGROUND_WORK_REFUSED");
+  for (const candidate of list(checks, "revisionCandidates"))
+    require(get(candidate, "dueNow") === false &&
+      get(candidate, "dueThroughHorizon") === false, "UI_SERIAL_REVISION_DUE");
+  for (const row of list(checks, "automaticRevisionRanks"))
+    require(list(row).length === 7 &&
+      integer(get(row, 6)) <= BigInt(policy.revisionKeep), "UI_SERIAL_REVISION_RETENTION_DUE");
+  const owners = record(checks, "owners");
+  require(same(
+    Object.keys(owners).sort(),
+    ["maintenance_job_claims", "collab_room_fences", "task_collab_room_fences"].sort(),
+  ), "UI_SERIAL_OWNER_COVERAGE_MISSING");
+  for (const [table, rows] of Object.entries(owners))
+    require(same(rows, get(dataset, "operations", table)), "UI_SERIAL_OWNER_ROWS_CHANGED");
+  for (const row of list(owners, "maintenance_job_claims"))
+    require(same(get(row, 1), ["null"]) && same(get(row, 3), ["null"]), "UI_SERIAL_OWNER_REMAINS");
+  require(list(owners, "collab_room_fences").length === 0 &&
+    list(owners, "task_collab_room_fences").length === 0, "UI_SERIAL_OWNER_REMAINS");
+  const relays = list(checks, "outbox");
+  if (initial && relays.length === 0) {
+    require(head === 0n &&
+      startupBlockers(dataset).length === 0 &&
+      checks.relayCompletion === "unknown-registry" &&
+      same(get(dataset, "operations", "outbox_consumers"), []) &&
+      same(
+        get(dataset, "fingerprints", "outbox_consumers"),
+        {},
+      ), "UI_SERIAL_INITIAL_RELAY_REFUSED");
+  } else {
+    require(checks.relayCompletion === "complete" &&
+      same(
+        relays.map((relay) => text(relay, "consumer")).sort(),
+        [...RELAYS].sort(),
+      ), "UI_SERIAL_RELAY_REGISTRY_CHANGED");
+    const rows = relays.map((value) => {
+      const relay = record(value);
+      const name = text(relay, "consumer"),
+        seq = text(relay, "lastSeq"),
+        updated = text(relay, "updatedAtMicros");
+      const row = [["text", name], ["integer", seq], ["null"], ["null"], ["integer", updated]];
+      require(decimal(seq) === head &&
+        relay.leaseOwner === null &&
+        relay.leaseUntilMicros === null &&
+        decimal(updated) <= clock &&
+        relay.immutableSha256 === rowHash([["text", name]]) &&
+        relay.rowSha256 === rowHash(row), "UI_SERIAL_RELAY_FINISH_UNCONFIRMED");
+      return row;
+    });
+    require(same(record(dataset, "fingerprints", "outbox_consumers"), fingerprints(rows)) &&
+      same(
+        list(dataset, "operations", "outbox_consumers"),
+        rows.map((row) => row.slice(0, 4)),
+      ), "UI_SERIAL_RELAY_FINGERPRINT_CHANGED");
+  }
+  for (const [field, table] of [
+    ["users", "users"],
+    ["memberships", "memberships"],
+  ] as const) {
+    const rows = list(checks, field);
+    const hashes = Object.fromEntries(rows.map((row) => [text(row, "rowFingerprint"), 1]));
+    require(rows.length === Object.keys(hashes).length &&
+      same(hashes, record(dataset, "fingerprints", table)), "UI_SERIAL_ACTOR_FINGERPRINT_CHANGED");
+  }
+  const users = list(checks, "users");
+  require(new Set(users.map((row) => text(row, "id"))).size === users.length &&
+    users.length ===
+      list(dataset, "operations", "users").length, "UI_SERIAL_ACTOR_IDENTITY_CHANGED");
+  for (const user of users) {
+    const id = uuidHex(get(user, "id")),
+      email = text(user, "email");
+    require(list(dataset, "operations", "users").filter(
+      (row) => same(get(row, 0), ["blob", id]) && same(get(row, 1), ["text", email]),
+    ).length === 1, "UI_SERIAL_ACTOR_IDENTITY_CHANGED");
+  }
+  const memberships = list(checks, "memberships");
+  require(new Set(
+    memberships.map((row) => canonical([get(row, "workspaceId"), get(row, "userId")])),
+  ).size === memberships.length, "UI_SERIAL_MEMBERSHIP_IDENTITY_CHANGED");
+  for (const membership of memberships) {
+    const workspace = uuidHex(get(membership, "workspaceId")),
+      user = uuidHex(get(membership, "userId"));
+    const allocation = record(
+      dataset,
+      "allocations",
+      "memberships",
+      text(membership, "rowFingerprint"),
+    );
+    require(users.some((row) => uuidHex(get(row, "id")) === user) &&
+      list(dataset, "operations", "workspaces").some((row) =>
+        same(get(row, 0), ["blob", workspace]),
+      ) &&
+      same(get(allocation, "workspaces"), [workspace]) &&
+      same(get(allocation, "actors"), [user]) &&
+      ["owner", "admin", "member", "guest"].includes(
+        text(membership, "role"),
+      ), "UI_SERIAL_MEMBERSHIP_IDENTITY_CHANGED");
+  }
+  return { dataset, checks };
+}
+
+function serialProgress(before: unknown, after: unknown, audit: Audit): void {
+  const serial = audit.serial;
+  require(serial !== undefined, "UI_SERIAL_OBSERVATION_REQUIRED");
+  validateSerialObservation(
+    serial.before,
+    serial.policy,
+    list(serial.before.checks, "outbox").length === 0,
+  );
+  validateSerialObservation(serial.after, serial.policy);
+  require(valueDigest(before) === valueDigest(serial.before.dataset) &&
+    valueDigest(after) === valueDigest(serial.after.dataset), "UI_SERIAL_DATASET_CHANGED");
+  require(decimal(serial.after.checks.clockMicros) >=
+    decimal(serial.before.checks.clockMicros), "UI_SERIAL_CLOCK_REVERSED");
+  for (const old of list(serial.before.checks, "outbox")) {
+    const fresh = list(serial.after.checks, "outbox").find(
+      (row) => get(row, "consumer") === get(old, "consumer"),
+    );
+    require(get(fresh, "immutableSha256") === get(old, "immutableSha256") &&
+      decimal(get(fresh, "updatedAtMicros")) >=
+        decimal(get(old, "updatedAtMicros")), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  }
 }
 
 export function startupBlockers(baseline: unknown): string[] {
@@ -191,6 +479,8 @@ const setEquals = (a: Set<unknown>, b: Set<unknown>) =>
 type ProjectionTargets = {
   documents: Map<string, string>;
   tasks: Map<string, string>;
+  identityLinks: Map<string, string>;
+  removedIdentityLinks: Set<string>;
 };
 function witnessedEventOperation(
   refs: unknown,
@@ -221,7 +511,10 @@ function witnessedEventOperation(
       spaces.length === 0 &&
       people.length === 1 &&
       people[0] === subject &&
-      (audit.authActors ?? []).includes(subject) &&
+      ((audit.authActors ?? []).includes(subject) ||
+        (audit.serial?.keycloakGroups !== undefined &&
+          witness.class === "actor-logout" &&
+          (audit.keycloak?.actors ?? []).includes(subject))) &&
       Object.hasOwn(audit.actors, subject)
       ? [witness.sequence, ["null"], ["blob", subject]]
       : null;
@@ -238,6 +531,29 @@ function witnessedEventOperation(
     Object.hasOwn(audit.actors, target)
   )
     return [sequence, ["null"], ["blob", target]];
+  if (audit.serial?.keycloakGroups !== undefined && audit.keycloak !== undefined) {
+    if (
+      witness.class === "actor-oidc-login" &&
+      same(Object.keys(witness).sort(), ["class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      same(people, [target]) &&
+      audit.keycloak.actors.includes(target) &&
+      Object.hasOwn(audit.actors, target)
+    )
+      return [sequence, ["null"], ["blob", target]];
+    if (
+      (witness.class === "actor-identity-linked" || witness.class === "actor-identity-unlinked") &&
+      same(Object.keys(witness).sort(), ["actor", "class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      typeof witness.actor === "string" &&
+      same(people, [witness.actor]) &&
+      audit.keycloak.actors.includes(witness.actor) &&
+      Object.hasOwn(audit.actors, witness.actor) &&
+      targets.identityLinks.get(target) === witness.actor &&
+      (witness.class === "actor-identity-linked" || targets.removedIdentityLinks.has(target))
+    )
+      return [sequence, ["null"], ["blob", witness.actor]];
+  }
   if (
     (witness.class === "document-projection" || witness.class === "task-projection") &&
     spaces.length === 1 &&
@@ -298,7 +614,42 @@ export function allocatedRows(
   const targets: ProjectionTargets = {
     documents: new Map(Object.entries(audit.documents ?? {})),
     tasks: new Map(),
+    identityLinks: new Map(),
+    removedIdentityLinks: new Set(),
   };
+  if (audit.keycloak !== undefined) {
+    require(audit.serial?.keycloakGroups !== undefined, "UI_KEYCLOAK_SERIAL_CONTEXT_REQUIRED");
+    const oldLinks = record(before, "allocations", "identity_links");
+    const oldIds = new Set(Object.values(oldLinks).map((row) => get(row, "self")));
+    const snapshots = [after, ...audit.keycloak.beforeUnlink.map((snapshot) => snapshot.dataset)];
+    const finalIds = new Set(
+      Object.values(record(after, "allocations", "identity_links")).map((row) => get(row, "self")),
+    );
+    for (const snapshot of snapshots) {
+      require(same(get(before, "ledger"), get(snapshot, "ledger")) &&
+        same(
+          get(before, "schemaSha256"),
+          get(snapshot, "schemaSha256"),
+        ), "UI_CURRENT_LEDGER_CHANGED");
+      for (const [hash, row] of Object.entries(record(snapshot, "allocations", "identity_links"))) {
+        if (Object.hasOwn(oldLinks, hash)) continue;
+        const id = get(row, "self"),
+          people = list(row, "actors");
+        require(typeof id === "string" &&
+          /^[a-f0-9]{32}$/.test(id) &&
+          !oldIds.has(id) &&
+          get(snapshot, "fingerprints", "identity_links", hash) === 1 &&
+          people.length === 1 &&
+          typeof people[0] === "string" &&
+          actors.has(people[0]) &&
+          audit.keycloak.actors.includes(people[0]), "UI_KEYCLOAK_LINK_ALLOCATION_REFUSED");
+        const previous = targets.identityLinks.get(id);
+        require(previous === undefined || previous === people[0], "UI_KEYCLOAK_LINK_ACTOR_CHANGED");
+        targets.identityLinks.set(id, people[0]);
+        if (snapshot !== after && !finalIds.has(id)) targets.removedIdentityLinks.add(id);
+      }
+    }
+  }
   // A projection exception needs either the ON browser/native seed or a new
   // complete native resource row created by this run's allocated actor in its
   // allocated team/personal workspace. A preexisting or foreign resource is
@@ -340,6 +691,8 @@ export function allocatedRows(
   }
   for (const [table, hashes] of Object.entries(record(after, "fingerprints"))) {
     if (AUDITED_COUNTERS.has(table)) continue;
+    // serialProgress binds every current outbox column and both full row maps.
+    if (audit.serial !== undefined && table === "outbox_consumers") continue;
     if (table === "instance_config" && vapidInitialization(before, after)) continue;
     const previous = record(before, "fingerprints", table);
     for (const [sha, count] of Object.entries(record(hashes))) {
@@ -426,8 +779,12 @@ export function auditMaintenance(before: unknown[], after: unknown[], audit: Aud
       keys,
     ), "UI_MAINTENANCE_KEYS_CHANGED");
   const current = new Map(before.map((row) => [integer(get(row, 0)), integer(get(row, 2))]));
+  const keycloakGroups = audit.serial?.keycloakGroups;
   require(audit.servers.length === audit.serverStarts &&
-    [1, 2, 3].includes(audit.serverStarts), "UI_START_COUNT_REFUSED");
+    (keycloakGroups === undefined
+      ? [1, 2, 3].includes(audit.serverStarts)
+      : [1, 2, 3].includes(keycloakGroups) &&
+        audit.serverStarts === 3 + keycloakGroups), "UI_START_COUNT_REFUSED");
   const identitiesSeen = new Set<string>(),
     ownersSeen = new Set<unknown>();
   for (const server of audit.servers) {
@@ -530,6 +887,10 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   for (let n = firstFence; complete && n < lastFence; n++) complete = fences.has(n);
   require(complete, "UI_FENCE_COUNTER_UNOBSERVED");
   auditMaintenance(list(b, "maintenance_job_claims"), list(a, "maintenance_job_claims"), audit);
+  if (audit.serial !== undefined) {
+    serialProgress(before, after, audit);
+    return;
+  }
   require(same(get(b, "outbox_consumers"), []), "UI_PREEXISTING_RELAY_REFUSED");
   const consumers = list(a, "outbox_consumers");
   const names = consumers.map((row) => canonical(get(row, 0))).sort();
@@ -549,6 +910,7 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
 }
 
 export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
+  if (audit?.serial !== undefined) serialProgress(before, after, audit);
   require(same(get(before, "ledger"), get(after, "ledger")) &&
     same(get(before, "schemaSha256"), get(after, "schemaSha256")) &&
     same(get(before, "lineage"), get(after, "lineage")), "UI_CURRENT_LEDGER_CHANGED");
@@ -557,6 +919,7 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
   require(same(Object.keys(old).sort(), Object.keys(current).sort()), "UI_CURRENT_TABLES_CHANGED");
   for (const [table, rows] of Object.entries(old)) {
     if (audit !== undefined && AUDITED_COUNTERS.has(table)) continue;
+    if (audit?.serial !== undefined && table === "outbox_consumers") continue;
     if (audit !== undefined && table === "instance_config" && vapidInitialization(before, after))
       continue;
     const now = record(current, table);
@@ -564,6 +927,39 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
       require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
   }
   if (audit !== undefined) auditCounters(before, after, audit);
+}
+
+/** Eager prepared actors belong to the one Keycloak phase. Each completed group
+ * must preserve all preceding business rows AND explain the entire phase's
+ * operational progress using the actual cumulative server and actor witnesses. */
+export function assertSerialGroupPreserved(
+  origin: SerialObservation,
+  previous: SerialObservation,
+  after: SerialObservation,
+  audit: Audit,
+  policy: SerialPolicy,
+  completedGroups: 1 | 2 | 3,
+): void {
+  audit.serial = { before: origin, after, policy, keycloakGroups: completedGroups };
+  assertPreserved(origin.dataset, after.dataset, audit);
+  serialProgress(previous.dataset, after.dataset, {
+    ...audit,
+    serial: { before: previous, after, policy },
+  });
+  require(same(get(previous.dataset, "ledger"), get(after.dataset, "ledger")) &&
+    same(get(previous.dataset, "schemaSha256"), get(after.dataset, "schemaSha256")) &&
+    same(
+      Object.keys(record(previous.dataset, "fingerprints")).sort(),
+      Object.keys(record(after.dataset, "fingerprints")).sort(),
+    ), "UI_CURRENT_LEDGER_CHANGED");
+  for (const [table, rows] of Object.entries(record(previous.dataset, "fingerprints"))) {
+    // All current columns of these globals were checked above, with exact
+    // cumulative maintenance/event/fence receipts. No business row is exempt.
+    if (AUDITED_COUNTERS.has(table) || table === "outbox_consumers") continue;
+    for (const [hash, count] of Object.entries(record(rows)))
+      require(get(after.dataset, "fingerprints", table, hash) ===
+        count, "UI_PREEXISTING_ROW_CHANGED");
+  }
 }
 
 export type Case = [string, Record_];

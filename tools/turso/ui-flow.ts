@@ -30,6 +30,10 @@ import {
   startupBlockers,
   uuidHex,
   type Audit,
+  type SerialObservation,
+  type SerialPolicy,
+  validateSerialObservation,
+  assertNativeClock,
 } from "./ui-audit.ts";
 import {
   AUTH_SPEC,
@@ -78,6 +82,7 @@ const RESTART_TITLE =
 
 /** The steps the consumer composes; tests replace individual steps. */
 export interface FlowSteps {
+  serial?: SerialExecution;
   fixture: typeof fixture;
   start: typeof start;
   stop: typeof stop;
@@ -89,6 +94,60 @@ export interface FlowSteps {
   root: () => string;
   token: (bytes: number) => string;
   output: Output;
+}
+
+/** A single final phase's actual private native observations and operation audit. */
+export interface SerialExecution {
+  before: SerialObservation;
+  policy: SerialPolicy;
+  accepted?: { observation: SerialObservation; audit: Audit };
+}
+
+export function admitSerialBaseline(baseline: Record_, serial?: SerialExecution): void {
+  if (serial === undefined) {
+    require(startupBlockers(baseline).length === 0, "UI_EXISTING_BACKGROUND_WORK_REFUSED");
+    return;
+  }
+  validateSerialObservation(
+    serial.before,
+    serial.policy,
+    list(serial.before.checks, "outbox").length === 0,
+  );
+  require(deepEquals(baseline, serial.before.dataset, true), "UI_SERIAL_PREDECESSOR_CHANGED");
+}
+
+/** Re-read the entire primary after normal shutdown; never trust a callback's verdict. */
+export async function auditFinalPhase(
+  scope: Scope,
+  manifest: Manifest,
+  baseline: Record_,
+  final: Record_,
+  audit: Audit,
+  environment: Record<string, string>,
+  steps: FlowSteps,
+): Promise<void> {
+  const serial = steps.serial;
+  if (serial === undefined) {
+    assertPreserved(baseline, final, audit);
+    return;
+  }
+  require(scope.closure() &&
+    scope.allocations.every(
+      (allocation) => !allocation.forced,
+    ), "UI_SERIAL_NORMAL_CLOSURE_REQUIRED");
+  require(environment.REVISION_KEEP === String(serial.policy.revisionKeep) &&
+    environment.REVISION_SNAPSHOT_INTERVAL_HOURS ===
+      String(serial.policy.revisionSnapshotIntervalHours), "UI_FINAL_SERVER_POLICY_CHANGED");
+  const beforeClock = BigInt(Date.now()) * 1000n;
+  const observed = validateSerialObservation(
+    await steps.fixture(scope, manifest, "serial-observe", environment, { ...serial.policy }),
+    serial.policy,
+  );
+  assertNativeClock(observed, beforeClock, BigInt(Date.now()) * 1000n);
+  require(deepEquals(final, observed.dataset, true), "UI_SERIAL_AFTER_CHANGED");
+  audit.serial = { before: serial.before, after: observed, policy: serial.policy };
+  assertPreserved(baseline, final, audit);
+  serial.accepted = { observation: observed, audit };
 }
 export const allocationIdentity = (server: ServerHandle) =>
   server.maintenanceIdentity ?? identity(server.child.pid);
@@ -256,7 +315,7 @@ export async function executeUi(
   steps: FlowSteps = defaultSteps,
 ): Promise<Receipt> {
   const source = manifest.sourceInputs;
-  require(startupBlockers(baseline).length === 0, "UI_EXISTING_BACKGROUND_WORK_REFUSED");
+  admitSerialBaseline(baseline, steps.serial);
   const audit: Audit = {
     namespaces: [],
     actors: {},
@@ -507,7 +566,7 @@ export async function executeUi(
     });
     receipt.preservation = { result: "observed", afterSha256: valueDigest(final) };
     require(auditErrors.length === 0, "UI_OWNERSHIP_AUDIT_FAILED");
-    assertPreserved(baseline, final, audit);
+    await auditFinalPhase(scope, manifest, baseline, final, audit, lastEnvironment, steps);
     receipt.preservation.result = "PASS";
   } catch (error) {
     receipt.preservation.result = receipt.preservation.afterSha256 ? "FAIL" : "NOTRUN";
@@ -687,7 +746,7 @@ export async function executeAuth(
       sourceEntry.identity.startTicks ===
         localSource.sourceIdentity.startTicks, "UI_LOCAL_SOURCE_REFUSED");
   const source = manifest.sourceInputs;
-  require(startupBlockers(baseline).length === 0, "UI_EXISTING_BACKGROUND_WORK_REFUSED");
+  admitSerialBaseline(baseline, steps.serial);
   const audit: Audit = {
     namespaces: [],
     actors: {},
@@ -899,7 +958,7 @@ export async function executeAuth(
     });
     receipt.preservation = { result: "observed", afterSha256: valueDigest(final) };
     require(auditErrors.length === 0, "UI_OWNERSHIP_AUDIT_FAILED");
-    assertPreserved(baseline, final, audit);
+    await auditFinalPhase(scope, manifest, baseline, final, audit, lastEnvironment, steps);
     receipt.preservation.result = "PASS";
   } catch (error) {
     receipt.preservation.result = receipt.preservation.afterSha256 ? "FAIL" : "NOTRUN";
@@ -1059,6 +1118,10 @@ export async function consumeIn(
 
 /** The guard's entry: one owned process scope around the whole consumer. */
 export async function consume(phase: string, inputs: Record<string, unknown>): Promise<void> {
+  if (phase === "ui-final") {
+    await (await import("./ui-final.ts")).consumeFinal(inputs);
+    return;
+  }
   await withProcesses((scope) => consumeIn(scope, phase, inputs));
 }
 

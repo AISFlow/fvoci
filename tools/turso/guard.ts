@@ -247,7 +247,7 @@ export async function runPrimary(
 }
 
 export type UiConsume = (
-  phase: "ui-baseline" | "ui-ack" | "restore" | "ui-auth",
+  phase: "ui-baseline" | "ui-ack" | "restore" | "ui-auth" | "ui-final",
   inputs: Inputs,
 ) => Promise<void>;
 
@@ -259,7 +259,7 @@ async function loadUiConsume(): Promise<UiConsume> {
 }
 
 export async function runUi(
-  phase: "ui-baseline" | "ui-ack" | "restore" | "ui-auth",
+  phase: "ui-baseline" | "ui-ack" | "restore" | "ui-auth" | "ui-final",
   checkoutSha: string,
   inputs: Inputs,
   env: Env,
@@ -331,7 +331,8 @@ export async function main(
       action.phase === "ui-baseline" ||
       action.phase === "ui-ack" ||
       action.phase === "restore" ||
-      action.phase === "ui-auth"
+      action.phase === "ui-auth" ||
+      action.phase === "ui-final"
     ) {
       await runUi(action.phase, sha, inputs, env, effects.uiConsume);
     } else {

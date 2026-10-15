@@ -6,13 +6,11 @@ import { join } from "node:path";
 import * as Y from "yjs";
 import { root as checkout, digest } from "../selected-backend-ci/io.ts";
 import {
-  assertPreserved,
   attachment,
   nativeReceiptsRetained,
   rememberActor,
   reportCases,
   RESTORE,
-  startupBlockers,
   uuidHex,
   type Audit,
 } from "./ui-audit.ts";
@@ -28,7 +26,7 @@ import {
   valueDigest,
   type Record_,
 } from "./ui-common.ts";
-import { defaultSteps, type FlowSteps } from "./ui-flow.ts";
+import { admitSerialBaseline, auditFinalPhase, defaultSteps, type FlowSteps } from "./ui-flow.ts";
 import type { Started } from "./ui-native.ts";
 import type { Scope } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
@@ -211,7 +209,7 @@ export async function executeRestore(
   local?: { heavy: string; sourceAllocation: number },
 ): Promise<RestoreReceipt> {
   requireRestoreRegistration();
-  require(startupBlockers(baseline).length === 0, "UI_EXISTING_BACKGROUND_WORK_REFUSED");
+  admitSerialBaseline(baseline, steps.serial);
   const namespace = "tui-" + steps.token(10);
   const directory = join(steps.root(), "restore");
   mkdirSync(directory, 0o700);
@@ -474,7 +472,7 @@ export async function executeRestore(
     });
     receipt.preservation = { result: "observed", afterSha256: valueDigest(final) };
     require(receipt.auditErrors.length === 0, "UI_OWNERSHIP_AUDIT_FAILED");
-    assertPreserved(baseline, final, audit);
+    await auditFinalPhase(scope, manifest, baseline, final, audit, sourceEnv, steps);
     receipt.preservation.result = "PASS";
     if (sourceAfter) {
       require(deepEquals(sourceAfter, final, true), "RESTORE_SOURCE_CHANGED_BY_DESTINATION");

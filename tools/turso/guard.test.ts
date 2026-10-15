@@ -824,7 +824,7 @@ describe("UI consumer handoff", () => {
     expect(loaded).toBe(0);
   });
 
-  test.each(["ui-ack", "restore", "ui-auth"] as const)(
+  test.each(["ui-ack", "restore", "ui-auth", "ui-final"] as const)(
     "%s binds both observed digests; UiError codes pass through, other errors do not",
     async (phase) => {
       const env = { ...uiEnv, FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" };

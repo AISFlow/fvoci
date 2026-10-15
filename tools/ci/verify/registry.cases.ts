@@ -28,7 +28,7 @@ function within(start: string, end: string | null, edit: Edit): Edit {
 
 const GATED = ["rust", "web", "install", "documents", "collab-engine"] as const;
 const PHASES =
-  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth]";
+  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth, ui-final]";
 const TARGET_INIT = `          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
 const UNIT =
   "      - name: Credential-free frozen diagnostic unit (exactly one test)\n" +
@@ -606,7 +606,7 @@ function caseList(): MutationCase[] {
       "runtime needs successful trusted admission",
     ],
     [
-      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore and main-only ui-auth require both destructive gates; others NOT IMPLEMENTED",
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore, main-only ui-auth and main-only ui-final require both destructive gates; others NOT IMPLEMENTED",
       "All phases implemented",
       "fixed phase inputs",
     ],
@@ -738,6 +738,11 @@ function caseList(): MutationCase[] {
       "github.event.inputs.phase == 'ui-auth'",
     ],
     ["github.event.inputs.phase == 'ui-auth'", "github.event.inputs.phase != 'ui-auth'"],
+    [
+      "(github.event.inputs.phase == 'ui-final' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'ui-final'",
+    ],
+    ["chromium firefox webkit", "chromium"],
   ];
   ui.forEach(([old, replacement], index) => {
     add(
@@ -971,6 +976,7 @@ function caseList(): MutationCase[] {
     [PHASES, PHASES.replace("reset", "reset, reset")],
     [PHASES, PHASES.replace("reset", "reset, unapproved-phase")],
     [PHASES, PHASES.replace(", ui-auth", "")],
+    [PHASES, PHASES.replace(", ui-final", "")],
   ];
   inputs.forEach(([old, replacement], index) => {
     add(

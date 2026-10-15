@@ -45,6 +45,32 @@ export function denied(code: string, run: () => unknown): void {
 }
 
 describe("dispatch admission", () => {
+  test("ui-final requires exact main, both gates and all reviewed bindings", () => {
+    const final: Inputs = {
+      phase: "ui-final",
+      destructive: true,
+      ui_source_sha: A,
+      ui_baseline_sha256: "b".repeat(64),
+      ui_target_sha256: "c".repeat(64),
+    };
+    expect(decide("--consume", context, final, A)).toEqual({ kind: "consume", phase: "ui-final" });
+    expect(validateTarget(final, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets)).toBe(
+      "ui-final",
+    );
+    for (const ref of [REVIEWED_REF, UI_REVIEWED_REF, "refs/heads/topic"])
+      expect(() => decide("--consume", { ...context, ref }, final, A)).toThrow(AdmissionError);
+    denied("DESTRUCTIVE_NOT_ALLOWED", () => validateTarget(final, settings, secrets));
+    denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", () =>
+      decide("--consume", context, { ...final, destructive: false }, A),
+    );
+    for (const key of ["ui_source_sha", "ui_baseline_sha256", "ui_target_sha256"] as const) {
+      const missing = { ...final };
+      Reflect.deleteProperty(missing, key);
+      expect(() => {
+        validateUiInputs("ui-final", missing, A);
+      }).toThrow(AdmissionError);
+    }
+  });
   test("restore reaches its guarded UI consumer only on exact main source", () => {
     const restore: Inputs = {
       phase: "restore",
@@ -343,7 +369,7 @@ describe("target configuration", () => {
       expect(
         validateTarget(confirmed, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets),
       ).toBe(phase);
-      if (!["migration", "reset", "ui-ack", "restore", "ui-auth"].includes(phase))
+      if (!["migration", "reset", "ui-ack", "restore", "ui-auth", "ui-final"].includes(phase))
         denied("NOT_IMPLEMENTED", () => {
           requireImplemented(phase);
         });
