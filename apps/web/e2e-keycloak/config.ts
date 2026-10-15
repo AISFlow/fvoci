@@ -155,14 +155,15 @@ export function loadKcConfig(configPath: string | undefined): KcConfig | null {
   if (Object.hasOwn(config as object, "prepared")) {
     const c = config as KcConfig;
     validatePreparedInstance(c.prepared);
+    const p = c.prepared;
     if (
       c.prepared.binding.issuer !== c.issuer ||
       c.fvoci.ownerPassword !== c.prepared.actors.owner.password ||
       c.fvoci.memberPassword !== c.prepared.actors.member.password ||
       USER_KEYS.some(
         (key) =>
-          c.users[key].username !== c.prepared?.actors.users[key].username ||
-          c.users[key].email !== c.prepared?.actors.users[key].email,
+          c.users[key].username !== p.actors.users[key].username ||
+          c.users[key].email !== p.actors.users[key].email,
       )
     )
       throw new Error("Keycloak prepared instance config differs");

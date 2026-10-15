@@ -33,7 +33,7 @@ const mode = process.env.FVOCI_KC_E2E_MODE ?? "";
 const outDir = process.env.FVOCI_KC_E2E_OUT ?? "";
 const kc = loadKcConfig(configPath);
 const prepared = kc?.prepared;
-if (prepared && (prepared.binding.group !== mode || prepared.binding.issuer !== kc?.issuer))
+if (prepared && (prepared.binding.group !== mode || prepared.binding.issuer !== kc.issuer))
   throw new Error("Keycloak prepared instance group or issuer differs");
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:1";

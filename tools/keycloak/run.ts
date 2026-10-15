@@ -358,8 +358,7 @@ export function validatePreparedInputs(inputs: ConsumerInputs): void {
     inputs.workspaceSso === undefined, "Keycloak prepared source or target contract differs");
   const identities = new Set<string>();
   for (const mode of MODES) {
-    const actors = p.groups?.[mode];
-    require(actors !== undefined, "Keycloak prepared group allocation missing");
+    const actors: unknown = p.groups[mode];
     validatePreparedActors(actors);
     for (const identity of [
       actors.owner.id,

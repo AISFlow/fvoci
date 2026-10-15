@@ -35,6 +35,11 @@ function load(value: unknown) {
 }
 
 const valid = () => specConfig("http://127.0.0.1:1/realms/fvoci-e2e", ENV);
+function at<T>(items: T[], index = 0): T {
+  const value = items[index];
+  if (value === undefined) throw new Error("missing fixture");
+  return value;
+}
 const uuid = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 function actors(index = 1): PreparedActors {
   const prefix = `prepared-${String(index)}`;
@@ -175,7 +180,8 @@ describe("Keycloak spec config", () => {
   });
 
   test("prepared actor/issuer bindings and whole foreign rows survive config transport", () => {
-    expect(load(preparedConfig())()).toEqual(preparedConfig());
+    const actual: unknown = load(preparedConfig())();
+    expect(actual).toEqual(preparedConfig());
     for (const mutate of [
       (p: PreparedInstance) => {
         p.actors.owner.id = uuid(77);
@@ -193,7 +199,7 @@ describe("Keycloak spec config", () => {
         p.binding.group = "unknown" as PreparedInstance["binding"]["group"];
       },
       (p: PreparedInstance) => {
-        p.baseline.users.push({ ...p.baseline.users[0]! });
+        p.baseline.users.push({ ...at(p.baseline.users) });
       },
     ]) {
       const c = preparedConfig();
@@ -203,7 +209,9 @@ describe("Keycloak spec config", () => {
   });
 
   test("source/tree/missing native callback and cross-group identity errors fail before runtime", async () => {
-    expect(() => validatePreparedInputs(inputs())).not.toThrow();
+    expect(() => {
+      validatePreparedInputs(inputs());
+    }).not.toThrow();
     for (const mutate of [
       (p: NonNullable<ConsumerInputs["prepared"]>) => {
         p.source = "f".repeat(40);
@@ -218,25 +226,38 @@ describe("Keycloak spec config", () => {
         p.observe = undefined as unknown as typeof p.observe;
       },
       (p: NonNullable<ConsumerInputs["prepared"]>) => {
+        p.assertWholePrimary = undefined as unknown as typeof p.assertWholePrimary;
+      },
+      (p: NonNullable<ConsumerInputs["prepared"]>) => {
         p.groups.failures = p.groups.flows;
       },
     ]) {
       const c = inputs();
-      mutate(c.prepared!);
-      await expect(
-        consumeKeycloak(null as unknown as Parameters<typeof consumeKeycloak>[0], c),
-      ).rejects.toThrow("Keycloak prepared");
+      if (!c.prepared) throw new Error("missing fixture");
+      mutate(c.prepared);
+      let failure: unknown;
+      try {
+        await consumeKeycloak(null as unknown as Parameters<typeof consumeKeycloak>[0], c);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      if (failure instanceof Error) expect(failure.message).toContain("Keycloak prepared");
     }
   });
 
   test("the current prepared backend must match its admitted target, source, group and issuer", () => {
     const binding = prepared().binding;
-    expect(() => assertPreparedBinding(binding, structuredClone(binding))).not.toThrow();
-    expect(() => assertPreparedBinding(binding, undefined)).toThrow("Keycloak prepared");
+    expect(() => {
+      assertPreparedBinding(binding, structuredClone(binding));
+    }).not.toThrow();
+    expect(() => {
+      assertPreparedBinding(binding, undefined);
+    }).toThrow("Keycloak prepared");
     for (const key of ["source", "tree", "target", "group", "issuer"] as const) {
-      expect(() => assertPreparedBinding(binding, { ...binding, [key]: "foreign" })).toThrow(
-        "Keycloak prepared",
-      );
+      expect(() => {
+        assertPreparedBinding(binding, { ...binding, [key]: "foreign" });
+      }).toThrow("Keycloak prepared");
     }
   });
 
@@ -245,7 +266,9 @@ describe("Keycloak spec config", () => {
     const before: PreparedSnapshot = {
       binding: p.binding,
       ...p.baseline,
-      memberships: [],
+      memberships: [
+        { workspaceId: uuid(55), userId: uuid(99), role: "owner", rowFingerprint: "d".repeat(64) },
+      ],
       states: 0,
       wholePrimary: { allTables: "unfiltered" },
     };
@@ -267,7 +290,9 @@ describe("Keycloak spec config", () => {
       users: [...before.users, member],
       links: [...before.links, link],
     };
-    expect(() => assertPreparedDelta(before, after, delta)).not.toThrow();
+    expect(() => {
+      assertPreparedDelta(before, after, delta);
+    }).not.toThrow();
     for (const mutate of [
       (a: PreparedSnapshot) => {
         a.binding.target = "another-primary";
@@ -276,10 +301,10 @@ describe("Keycloak spec config", () => {
         a.binding.group = "failures";
       },
       (a: PreparedSnapshot) => {
-        a.users[1]!.rowFingerprint = "f".repeat(64);
+        at(a.users, 1).rowFingerprint = "f".repeat(64);
       },
       (a: PreparedSnapshot) => {
-        a.users[1]!.id = uuid(88);
+        at(a.users, 1).id = uuid(88);
       },
       (a: PreparedSnapshot) => {
         a.users.push({ ...member, id: uuid(9), email: "extra@example.com" });
@@ -288,17 +313,23 @@ describe("Keycloak spec config", () => {
         a.links.shift();
       },
       (a: PreparedSnapshot) => {
-        a.links[0]!.subject = uuid(66);
+        at(a.links).subject = uuid(66);
       },
       (a: PreparedSnapshot) => {
         a.states = 1;
       },
+      (a: PreparedSnapshot) => {
+        at(a.memberships).role = "member";
+      },
+      (a: PreparedSnapshot) => {
+        a.memberships = [];
+      },
     ]) {
       const changed = structuredClone(after);
       mutate(changed);
-      expect(() => assertPreparedDelta(before, changed, delta)).toThrow(
-        "Keycloak prepared global delta differs",
-      );
+      expect(() => {
+        assertPreparedDelta(before, changed, delta);
+      }).toThrow("Keycloak prepared global delta differs");
     }
   });
 

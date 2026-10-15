@@ -36,6 +36,7 @@ export function assertPreparedDelta(
     fail();
   for (const snapshot of [before, after]) {
     const rows = snapshot.users;
+    const whole: unknown = snapshot.wholePrimary;
     if (
       !Array.isArray(rows) ||
       rows.length > 10000 ||
@@ -50,9 +51,9 @@ export function assertPreparedDelta(
     )
       fail();
     if (
-      !snapshot.wholePrimary ||
-      typeof snapshot.wholePrimary !== "object" ||
-      Array.isArray(snapshot.wholePrimary) ||
+      whole === null ||
+      typeof whole !== "object" ||
+      Array.isArray(whole) ||
       !Array.isArray(snapshot.memberships) ||
       snapshot.memberships.length > 10000 ||
       new Set(snapshot.memberships.map((row) => `${row.workspaceId}/${row.userId}`)).size !==
