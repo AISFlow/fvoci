@@ -107,6 +107,7 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_REVISION_SWEEP_INTERVAL_SECS",
   "REVISION_KEEP",
   "REVISION_SNAPSHOT_INTERVAL_HOURS",
+  "METRICS_ALLOW_IPS",
   // The normal mailer relay of a dedicated auth allocation: an owned loopback
   // sink, no SMTP credential. The native fixture never receives it.
   "SMTP_HOST",
@@ -454,6 +455,9 @@ export function creationIdentity(
     get(inspect, "State", "Running") === false, "UI_DAEMON_PID_REFUSED");
   const image = canonicalImage(grant);
   require(config.Image === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  if (isRecord(grant) && grant.finalRuntime !== undefined)
+    require(get(inspect, "Image") === image &&
+      get(inspect, "Path") === QUALIFIED_SHELL, "UI_FINAL_RUNTIME_IMAGE_CHANGED");
   if (executionMode() === "orca-local") {
     require(get(inspect, "Image") === image &&
       get(inspect, "Path") === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");

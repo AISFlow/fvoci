@@ -34,6 +34,8 @@ import {
   type SerialPolicy,
   validateSerialObservation,
   assertNativeClock,
+  roomRetirement,
+  retainRoomHistory,
 } from "./ui-audit.ts";
 import {
   AUTH_SPEC,
@@ -144,6 +146,7 @@ export async function auditFinalPhase(
     serial.policy,
   );
   assertNativeClock(observed, beforeClock, BigInt(Date.now()) * 1000n);
+  retainRoomHistory(observed, serial.before, ...(audit.roomRetirements ?? []));
   require(deepEquals(final, observed.dataset, true), "UI_SERIAL_AFTER_CHANGED");
   audit.serial = { before: serial.before, after: observed, policy: serial.policy };
   assertPreserved(baseline, final, audit);
@@ -541,8 +544,18 @@ export async function executeUi(
       auditErrors.push(failureCode(error));
     }
   });
-  for (const [, directory, serverIdentity] of serverAllocations) {
+  for (const [server, directory, serverIdentity] of serverAllocations) {
     try {
+      if (steps.serial)
+        (audit.roomRetirements ??= []).push(
+          roomRetirement(
+            scope,
+            join(directory, "server.private.log"),
+            serverIdentity,
+            audit.targetSha256,
+            server.hostIdentity,
+          ),
+        );
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),
@@ -916,6 +929,15 @@ export async function executeAuth(
   const auditErrors: string[] = [];
   for (const [directory, serverIdentity] of serverAllocations) {
     try {
+      if (steps.serial)
+        (audit.roomRetirements ??= []).push(
+          roomRetirement(
+            scope,
+            join(directory, "server.private.log"),
+            serverIdentity,
+            audit.targetSha256,
+          ),
+        );
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),

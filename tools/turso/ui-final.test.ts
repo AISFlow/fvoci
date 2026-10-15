@@ -18,8 +18,11 @@ import {
   assertPreserved,
   type Audit,
   type SerialPolicy,
+  assertRoomClosure,
+  roomRetirement,
 } from "./ui-audit.ts";
 import { get, record, type Record_ } from "./ui-common.ts";
+import type { Scope } from "./ui-processes.ts";
 
 const policy: SerialPolicy = { revisionKeep: 200, revisionSnapshotIntervalHours: 24 };
 const n = (value: bigint | number) => ["integer", String(value)];
@@ -77,6 +80,9 @@ function observation(initial = false): Record_ {
     native.indexOf("async fn serial_checks("),
   );
   const kinds = [...fixed.matchAll(/\("([a-z-]+)",/g)].map((match) => match[1]);
+  const start = native.indexOf("async fn serial_checks(");
+  const rooms = native.slice(start, native.indexOf("let mut background", start));
+  kinds.push(...[...rooms.matchAll(/Some\("([a-z-]+)"\)/g)].map((match) => match[1]));
   kinds.push("automatic-revision-retention");
   expect(kinds).toHaveLength(26);
   return {
@@ -105,6 +111,7 @@ function observation(initial = false): Record_ {
       policy,
       policySha256: hash(policy),
       policyBinding: "required-from-sealed-server",
+      roomClosureBinding: "required-normal-release-and-parent-retirement",
       eventHead: "0",
       outbox,
       relayCompletion: initial ? "unknown-registry" : "complete",
@@ -176,6 +183,126 @@ function restartPair(): { before: Record_; after: Record_; audit: Audit } {
 }
 
 describe("final native serial admission", () => {
+  test("expired retained rooms require exact confirmed native release and parent retirement", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fvoci-final-room-"));
+    try {
+      const log = join(directory, "server.private.log"),
+        identity = { pid: 123, startTicks: "456" };
+      let retired = true;
+      const scope = {
+        closure: () => retired,
+        allocations: [],
+        entries: new Map([["123:456", { identity }]]),
+        retired: () => retired,
+      } as unknown as Scope;
+      const receipt = {
+        schema: 1,
+        kind: "document",
+        workspaceId:
+          "a".repeat(8) +
+          "-" +
+          "a".repeat(4) +
+          "-" +
+          "a".repeat(4) +
+          "-" +
+          "a".repeat(4) +
+          "-" +
+          "a".repeat(12),
+        targetId:
+          "b".repeat(8) +
+          "-" +
+          "b".repeat(4) +
+          "-" +
+          "b".repeat(4) +
+          "-" +
+          "b".repeat(4) +
+          "-" +
+          "b".repeat(12),
+        ownerSha256: digest(Buffer.from("c".repeat(32), "hex")),
+        fence: "1",
+        expiresAtMicros: "1000000",
+        pid: 123,
+        commit: "confirmed",
+      };
+      writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify(receipt) + "\n");
+      const witness = roomRetirement(scope, log, identity, "d".repeat(64));
+      const value = observation();
+      const rows = [
+        [
+          ["blob", "a".repeat(32)],
+          ["blob", "b".repeat(32)],
+          ["blob", "c".repeat(32)],
+          n(1),
+          n(1000000),
+        ],
+      ];
+      record(value, "dataset", "operations").collab_room_fences = rows;
+      record(value, "checks", "owners").collab_room_fences = rows;
+      record(value, "dataset", "fingerprints").collab_room_fences = { [hash(rows[0])]: 1 };
+      record(value, "dataset", "allocations").collab_room_fences = { [hash(rows[0])]: {} };
+      record(value, "dataset").rows = Number(get(value, "dataset", "rows")) + 1;
+      const observed = validateSerialObservation(value, policy);
+      expect(() => {
+        assertRoomClosure(observed, "d".repeat(64));
+      }).toThrow("UI_SERIAL_ROOM_RELEASE_UNWITNESSED");
+      observed.roomHistory = [witness];
+      expect(() => {
+        assertRoomClosure(observed, "d".repeat(64));
+      }).not.toThrow();
+      for (const field of [
+        "ownerSha256",
+        "fence",
+        "expiresAtMicros",
+        "targetId",
+        "workspaceId",
+        "pid",
+        "commit",
+      ]) {
+        const changed = structuredClone(observed);
+        Reflect.set(
+          record(get(changed, "roomHistory", 0, "receipts", 0)),
+          field,
+          field === "pid" ? 124 : field === "fence" || field === "expiresAtMicros" ? "2" : "wrong",
+        );
+        expect(() => {
+          assertRoomClosure(changed, "d".repeat(64));
+        }).toThrow();
+      }
+      expect(() => {
+        assertRoomClosure(observed, "e".repeat(64));
+      }).toThrow("UI_SERIAL_ROOM_HISTORY_REFUSED");
+      // Two real successful normal commits may release the same owner/fence.
+      writeFileSync(
+        log,
+        [{ ...receipt, expiresAtMicros: "999000" }, receipt]
+          .map((item) => "FVOCI_ROOM_RELEASE " + JSON.stringify(item))
+          .join("\n"),
+      );
+      observed.roomHistory = [roomRetirement(scope, log, identity, "d".repeat(64))];
+      expect(() => {
+        assertRoomClosure(observed, "d".repeat(64));
+      }).not.toThrow();
+      retired = false;
+      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+        "UI_SERIAL_ROOM_RETIREMENT_REQUIRED",
+      );
+      retired = true;
+      writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify({ ...receipt, pid: 124 }));
+      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+        "UI_SERIAL_ROOM_RECEIPT_REFUSED",
+      );
+      writeFileSync(log, "FVOCI_ROOM_RELEASE " + JSON.stringify({ ...receipt, extra: true }));
+      expect(() => roomRetirement(scope, log, identity, "d".repeat(64))).toThrow(
+        "UI_SERIAL_ROOM_RECEIPT_REFUSED",
+      );
+      record(value, "checks").roomClosureBinding = "expired-only";
+      expect(() => validateSerialObservation(value, policy)).toThrow(
+        "UI_SERIAL_ROOM_CLOSURE_BINDING_REQUIRED",
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   test("hosted image metadata and exact nonroot identity are bound without a local grant", () => {
     const item = {
       Id: "sha256:" + "a".repeat(64),

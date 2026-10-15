@@ -264,8 +264,10 @@ export function expectCanonicalContent(
     if (node.type === "emoji") emojis.push(node);
   });
   expect(emojis).toHaveLength(1);
-  expect(emojis[0].attrs?.name).toBe("grinning");
-  expect(emojiGlyph(emojis[0])).toBe("😀");
+  const emoji = emojis[0];
+  if (!emoji) throw Error("SELECTED_FINAL_EMOJI_MISSING");
+  expect(emoji.attrs?.name).toBe("grinning");
+  expect(emojiGlyph(emoji)).toBe("😀");
   const ids = documentNodeIds(content);
   expect(ids.length).toBeGreaterThan(0);
   for (const id of ids) expect(id).toMatch(UUID_RE);

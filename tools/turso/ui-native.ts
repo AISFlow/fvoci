@@ -296,6 +296,7 @@ export async function browser(
   const flow = environment.FVOCI_E2E_SELECTED_FLOW;
   const final =
     config === "selected-final-playwright.config.ts" && spec === "selected-final-acceptance.ts";
+  const equal = config === "equal-work-playwright.config.ts" && spec === "v060-equal-work.spec.ts";
   // The dedicated auth spec has its own config and exactly its three cases.
   require((config === "collab-playwright.config.ts" &&
     spec !== AUTH_SPEC &&
@@ -305,7 +306,10 @@ export async function browser(
       config === "auth-session-playwright.config.ts" &&
       grep === undefined &&
       (flow === "on" || flow === "off")) ||
-    final, "UI_BROWSER_CONFIG_REFUSED");
+    final ||
+    (equal &&
+      manifest.finalBrowsers !== undefined &&
+      environment.FVOCI_E2E_EQUAL_WORK_PREPARED === "1"), "UI_BROWSER_CONFIG_REFUSED");
   require(final
     ? engine !== undefined
     : engine === undefined, "UI_FINAL_BROWSER_SELECTION_REQUIRED");
@@ -322,6 +326,7 @@ export async function browser(
       environment.FVOCI_E2E_FINAL_BROWSER === engine, "UI_FINAL_BROWSER_SELECTION_CHANGED");
     finalBindingHash = sha(bindingPath);
   }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   const report = join(directory, "playwright.private.json");
   const env: Record<string, string> = {
     ...cleanEnv(),
@@ -334,7 +339,10 @@ export async function browser(
   Reflect.deleteProperty(env, "JEST_WORKER_ID");
   if (final && engine !== undefined) {
     env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers?.[engine].path ?? "";
+  } else if (manifest.finalBrowsers !== undefined) {
+    env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers.chromium.path;
   }
+  if (manifest.finalBrowsers !== undefined) env.FVOCI_TURSO_UI_FINAL = "1";
   require(!SECRET_BROWSER_KEYS.some((key) =>
     Object.hasOwn(env, key),
   ), "UI_BROWSER_SECRET_ENV_REFUSED");
@@ -446,6 +454,7 @@ export async function browser(
     require(sha(environment.FVOCI_E2E_FINAL_ACTOR_BINDING as string) ===
       finalBindingHash, "UI_FINAL_ACTOR_BINDING_CHANGED");
   }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   return JSON.parse(readFileSync(report, "utf8"));
 }
 

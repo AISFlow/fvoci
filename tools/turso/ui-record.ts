@@ -137,16 +137,31 @@ export function recheckFinalProcessObserver(
   source: SourceInputs,
   bunSha256: string,
 ): void {
+  const parent = "/var/lib/fvoci-keycloak-observer";
+  const run = finalRunIdentity(source);
+  require(observer.directory ===
+    join(
+      parent,
+      source.source + "-" + String(run.runId) + "-" + String(run.attempt),
+    ), "UI_FINAL_PROCESS_OBSERVER_CHANGED");
+  for (const path of ["/", "/var", "/var/lib", parent]) {
+    const ancestor = lstatSync(path);
+    require(ancestor.isDirectory() &&
+      !ancestor.isSymbolicLink() &&
+      ancestor.uid === 0 &&
+      ancestor.gid === 0 &&
+      (ancestor.mode & 0o022) === 0, "UI_FINAL_PROCESS_OBSERVER_CHANGED");
+  }
   const directory = lstatSync(observer.directory);
   require(directory.isDirectory() &&
     !directory.isSymbolicLink() &&
     directory.uid === 0 &&
     directory.gid === 0 &&
-    (directory.mode & 0o022) === 0, "UI_FINAL_PROCESS_OBSERVER_CHANGED");
-  for (const [name, reference] of [
-    ["bun", observer.bun],
-    ["process-witness.ts", observer.module],
-    ["bunfig.toml", observer.config],
+    (directory.mode & 0o777) === 0o755, "UI_FINAL_PROCESS_OBSERVER_CHANGED");
+  for (const [name, reference, mode] of [
+    ["bun", observer.bun, 0o555],
+    ["process-witness.ts", observer.module, 0o444],
+    ["bunfig.toml", observer.config, 0o444],
   ] as const) {
     const file = lstatSync(reference.path);
     require(reference.path === join(observer.directory, name) &&
@@ -155,7 +170,7 @@ export function recheckFinalProcessObserver(
       file.nlink === 1 &&
       file.uid === 0 &&
       file.gid === 0 &&
-      (file.mode & 0o022) === 0 &&
+      (file.mode & 0o777) === mode &&
       sha(reference.path) === reference.sha256, "UI_FINAL_PROCESS_OBSERVER_CHANGED");
   }
   require(observer.bun.sha256 === bunSha256 &&

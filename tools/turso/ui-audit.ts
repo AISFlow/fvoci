@@ -7,6 +7,7 @@ import { basename } from "node:path";
 import { jsonInteger } from "../selected-backend-ci/io.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
 import { digest } from "../selected-backend-ci/io.ts";
+import type { Scope } from "./ui-processes.ts";
 import {
   canonical,
   decodeUtf8,
@@ -120,6 +121,8 @@ export interface Audit {
   targetSha256: string;
   serverStarts: number;
   observedFences: unknown[][];
+  /** Final-only normal-server receipts collected directly by the parent. */
+  roomRetirements?: RoomRetirement[];
   /** Members of dedicated auth allocations; only they may revoke sessions. */
   authActors?: string[];
   /** Exact phase actors and parent-held native snapshots, never browser claims. */
@@ -140,6 +143,16 @@ export interface SerialPolicy {
 export interface SerialObservation {
   dataset: Record_;
   checks: Record_;
+  /** Parent-held history; native JSON and browser output cannot populate it. */
+  roomHistory?: RoomRetirement[];
+}
+
+export interface RoomRetirement {
+  identity: { pid: number; startTicks: string };
+  retiredIdentity: { pid: number; startTicks: string };
+  targetSha256: string;
+  logSha256: string;
+  receipts: Record_[];
 }
 
 /** Native SQL clock resolution is milliseconds; compare without JS rounding. */
@@ -287,6 +300,7 @@ export function validateSerialObservation(
         "unknown",
         "conservative-blocker",
         "eligible-conditional-on-policy",
+        "live-owner-overlaps-coverage",
       ].includes(text(fact, "interpretation")), "UI_SERIAL_BACKGROUND_WORK_REFUSED");
   for (const candidate of list(checks, "revisionCandidates"))
     require(get(candidate, "dueNow") === false &&
@@ -303,8 +317,25 @@ export function validateSerialObservation(
     require(same(rows, get(dataset, "operations", table)), "UI_SERIAL_OWNER_ROWS_CHANGED");
   for (const row of list(owners, "maintenance_job_claims"))
     require(same(get(row, 1), ["null"]) && same(get(row, 3), ["null"]), "UI_SERIAL_OWNER_REMAINS");
-  require(list(owners, "collab_room_fences").length === 0 &&
-    list(owners, "task_collab_room_fences").length === 0, "UI_SERIAL_OWNER_REMAINS");
+  require(checks.roomClosureBinding ===
+    "required-normal-release-and-parent-retirement", "UI_SERIAL_ROOM_CLOSURE_BINDING_REQUIRED");
+  for (const table of ["collab_room_fences", "task_collab_room_fences"]) {
+    const rows = list(owners, table);
+    require(same(
+      fingerprints(rows),
+      get(dataset, "fingerprints", table),
+    ), "UI_SERIAL_ROOM_FINGERPRINT_CHANGED");
+    for (const row of rows)
+      require(list(row).length === 5 &&
+        get(row, 0, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 0, 1)) &&
+        get(row, 1, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 1, 1)) &&
+        get(row, 2, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 2, 1)) &&
+        integer(get(row, 3)) > 0n &&
+        integer(get(row, 4)) <= clock, "UI_SERIAL_OWNER_REMAINS");
+  }
   const relays = list(checks, "outbox");
   if (initial && relays.length === 0) {
     require(head === 0n &&
@@ -396,6 +427,8 @@ function serialProgress(before: unknown, after: unknown, audit: Audit): void {
     list(serial.before.checks, "outbox").length === 0,
   );
   validateSerialObservation(serial.after, serial.policy);
+  assertRoomClosure(serial.before, audit.targetSha256);
+  assertRoomClosure(serial.after, audit.targetSha256);
   require(valueDigest(before) === valueDigest(serial.before.dataset) &&
     valueDigest(after) === valueDigest(serial.after.dataset), "UI_SERIAL_DATASET_CHANGED");
   require(decimal(serial.after.checks.clockMicros) >=
@@ -743,6 +776,118 @@ export function leadingObject(value: string): unknown {
 }
 
 const RECEIPT_KEYS = ["generation", "key", "outcome", "ownerSha256", "pid", "schema"];
+const ROOM_RECEIPT_KEYS = [
+  "commit",
+  "expiresAtMicros",
+  "fence",
+  "kind",
+  "ownerSha256",
+  "pid",
+  "schema",
+  "targetId",
+  "workspaceId",
+];
+const uuidFromHex = (hex: string) =>
+  hex.slice(0, 8) +
+  "-" +
+  hex.slice(8, 12) +
+  "-" +
+  hex.slice(12, 16) +
+  "-" +
+  hex.slice(16, 20) +
+  "-" +
+  hex.slice(20);
+
+/** Called only after actual normal stop and the parent's process observation. */
+export function roomRetirement(
+  scope: Scope,
+  logpath: string,
+  identity: { pid: number; startTicks: string },
+  targetSha256: string,
+  retiredIdentity = identity,
+): RoomRetirement {
+  require(scope.closure() &&
+    scope.allocations.every((allocation) => !allocation.forced) &&
+    scope.entries.has(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks) &&
+    scope.retired(retiredIdentity), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
+  require(statSync(logpath).size <= 32 * 1024 * 1024, "UI_SERVER_LOG_CAP_REFUSED");
+  const bytes = readFileSync(logpath),
+    receipts: Record_[] = [];
+  const marker = "FVOCI_ROOM_RELEASE ";
+  for (const line of pySplitlines(decodeUtf8(bytes))) {
+    const at = line.indexOf(marker);
+    if (at < 0) continue;
+    const item = leadingObject(line.slice(at + marker.length));
+    require(isRecord(item) &&
+      same(Object.keys(item).sort(), ROOM_RECEIPT_KEYS) &&
+      item.schema === 1 &&
+      item.commit === "confirmed" &&
+      item.pid === identity.pid &&
+      (item.kind === "document" || item.kind === "task") &&
+      typeof item.workspaceId === "string" &&
+      uuidHex(item.workspaceId).length === 32 &&
+      typeof item.targetId === "string" &&
+      uuidHex(item.targetId).length === 32 &&
+      /^[a-f0-9]{64}$/.test(text(item, "ownerSha256")) &&
+      decimal(item.fence) > 0n &&
+      decimal(item.expiresAtMicros) > 0n, "UI_SERIAL_ROOM_RECEIPT_REFUSED");
+    receipts.push(item);
+  }
+  require(receipts.length <= 10000 &&
+    /^[a-f0-9]{64}$/.test(targetSha256) &&
+    /^[0-9]+$/.test(identity.startTicks), "UI_SERIAL_ROOM_RECEIPT_REFUSED");
+  return { identity, retiredIdentity, targetSha256, logSha256: digest(bytes), receipts };
+}
+
+/** Expiry is necessary, but only a real confirmed release and retirement authorize it. */
+export function assertRoomClosure(observation: SerialObservation, target: string): void {
+  const history = observation.roomHistory ?? [];
+  const identities = new Set<string>();
+  for (const server of history) {
+    const key = JSON.stringify(server.identity);
+    require(!identities.has(key) &&
+      server.targetSha256 === target &&
+      /^[a-f0-9]{64}$/.test(server.logSha256) &&
+      server.identity.pid > 0 &&
+      /^[0-9]+$/.test(server.identity.startTicks) &&
+      server.retiredIdentity.pid > 0 &&
+      /^[0-9]+$/.test(server.retiredIdentity.startTicks), "UI_SERIAL_ROOM_HISTORY_REFUSED");
+    identities.add(key);
+  }
+  for (const [table, kind] of [
+    ["collab_room_fences", "document"],
+    ["task_collab_room_fences", "task"],
+  ])
+    for (const row of list(observation.checks, "owners", table as string)) {
+      const owner = digest(Buffer.from(text(row, 2, 1), "hex"));
+      const matches = history.flatMap((server) =>
+        server.receipts.filter(
+          (receipt) =>
+            receipt.schema === 1 &&
+            receipt.commit === "confirmed" &&
+            receipt.pid === server.identity.pid &&
+            receipt.kind === kind &&
+            receipt.workspaceId === uuidFromHex(text(row, 0, 1)) &&
+            receipt.targetId === uuidFromHex(text(row, 1, 1)) &&
+            receipt.ownerSha256 === owner &&
+            decimal(receipt.fence) === integer(get(row, 3)),
+        ),
+      );
+      require(matches.length > 0 &&
+        decimal(matches.at(-1)?.expiresAtMicros) ===
+          integer(get(row, 4)), "UI_SERIAL_ROOM_RELEASE_UNWITNESSED");
+    }
+}
+
+export function retainRoomHistory(
+  observation: SerialObservation,
+  previous: SerialObservation,
+  ...retirements: RoomRetirement[]
+): SerialObservation {
+  observation.roomHistory = [...(previous.roomHistory ?? []), ...retirements];
+  return observation;
+}
+
 export function maintenanceReceipts(
   logpath: string,
   serverIdentity: { pid: number; startTicks: string },

@@ -12,6 +12,7 @@ import {
   reportCases,
   RESTORE,
   uuidHex,
+  roomRetirement,
   type Audit,
 } from "./ui-audit.ts";
 import {
@@ -445,6 +446,16 @@ export async function executeRestore(
     }
     if (allocation.source) {
       try {
+        if (steps.serial)
+          (audit.roomRetirements ??= []).push(
+            roomRetirement(
+              scope,
+              join(allocation.directory, "server.private.log"),
+              allocation.identity,
+              audit.targetSha256,
+              allocation.started.server.hostIdentity,
+            ),
+          );
         audit.servers.push(
           steps.maintenanceReceipts(
             join(allocation.directory, "server.private.log"),

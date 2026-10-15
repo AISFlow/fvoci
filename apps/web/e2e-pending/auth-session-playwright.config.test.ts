@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const valid = {
   FVOCI_E2E_SELECTED_BACKEND: "sqlite",
@@ -25,13 +27,39 @@ function load(overrides: Record<string, string | undefined> = {}) {
       `
     const {default:c}=await import(${JSON.stringify(path)});
     console.log(JSON.stringify({match:c.testMatch,workers:c.workers,retries:c.retries,
-      metadata:c.metadata,trace:c.use.trace,screenshot:c.use.screenshot}));
+      metadata:c.metadata,trace:c.use.trace,screenshot:c.use.screenshot,launch:c.use.launchOptions}));
   `,
     ],
     { env, stdout: "pipe", stderr: "pipe" },
   );
   return { code: child.exitCode, output: child.stdout.toString() };
 }
+
+test("final auth consumes the parent sealed Chromium without changing standalone discovery", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fvoci-final-auth-config-"));
+  try {
+    const binary = join(directory, "chromium");
+    writeFileSync(binary, "metadata fixture");
+    const values = {
+      FVOCI_E2E_SELECTED_BACKEND: "libsql-remote",
+      FVOCI_E2E_FINAL_BROWSER_BIN: binary,
+      FVOCI_TURSO_UI_FINAL: "1",
+      FVOCI_LIBSQL_AUTH_TOKEN: "PRIVATE_UNIT_CANARY",
+    };
+    const result = load(values);
+    expect(result.code).toBe(0);
+    const config = JSON.parse(result.output) as {
+      launch: { executablePath: string; env: Record<string, string> };
+    };
+    expect(config.launch.executablePath).toBe(binary);
+    expect(config.launch.env).not.toHaveProperty("FVOCI_LIBSQL_AUTH_TOKEN");
+    expect(result.output).not.toContain("PRIVATE_UNIT_CANARY");
+    expect(load({ ...values, FVOCI_TURSO_UI_FINAL: undefined }).code).not.toBe(0);
+    expect(load({ ...values, FVOCI_E2E_SELECTED_BACKEND: "postgres" }).code).not.toBe(0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 for (const backend of ["postgres", "sqlite", "libsql-remote"]) {
   for (const flow of ["on", "off"]) {

@@ -39,7 +39,8 @@ export function exitedChild(
   stdout: string | Uint8Array = "",
   pid = 4242,
 ): Child {
-  const bytes = typeof stdout === "string" ? new TextEncoder().encode(stdout) : stdout;
+  const bytes =
+    typeof stdout === "string" ? new TextEncoder().encode(stdout) : Uint8Array.from(stdout);
   return {
     pid,
     exitCode: code,
