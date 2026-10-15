@@ -76,8 +76,10 @@ pub fn native_files(paths: &[&Path]) -> Result<Value, String> {
 }
 
 fn elf_dependencies(code: i64, output: &str) -> Result<Vec<String>, String> {
-    if code == 1
-        && (output.contains("statically linked") || output.contains("not a dynamic executable"))
+    // glibc's loader has no DT_NEEDED entries and reports this terminal trace
+    // with exit 0. Its bytes have already been recorded before reaching here.
+    if ((code == 0 || code == 1) && output.trim() == "statically linked")
+        || (code == 1 && output.trim() == "not a dynamic executable")
     {
         return Ok(Vec::new());
     }
@@ -288,6 +290,22 @@ mod tests {
         assert!(elf_dependencies(1, "not a dynamic executable")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn hashed_glibc_loader_terminal_trace_accepts_exit_zero_without_hiding_errors() {
+        assert!(elf_dependencies(0, "\tstatically linked\n")
+            .unwrap()
+            .is_empty());
+        for output in [
+            "libmissing.so => not found\nstatically linked",
+            "unknown\nstatically linked",
+            "not a dynamic executable",
+        ] {
+            assert!(elf_dependencies(0, output).is_err(), "{output}");
+        }
+        assert!(elf_dependencies(1, "unknown\nstatically linked").is_err());
+        assert!(elf_dependencies(2, "statically linked").is_err());
     }
 
     #[test]
