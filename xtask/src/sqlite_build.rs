@@ -35,7 +35,7 @@ options:
   --target TARGET
   --cc CC          single native compiler executable
   --ar AR          single archiver executable
-  --identity-only  authenticate inputs without compiling or exporting a usable prefix
+  --identity-only  authenticate native inputs without compiling SQLite or exporting a usable prefix
 ";
 
 // Required SQLx C APIs plus conservative libsqlite3-sys bundled defaults.
@@ -195,6 +195,19 @@ struct Runner {
 
 impl Runner {
     fn run(&mut self, argv: &[String], timeout: Duration, step: &str) -> Result<String, Failure> {
+        let (stdout, stderr) = self.output(argv, timeout, step)?;
+        if !stderr.is_empty() {
+            eprint!("{stderr}");
+        }
+        Ok(stdout)
+    }
+
+    fn output(
+        &mut self,
+        argv: &[String],
+        timeout: Duration,
+        step: &str,
+    ) -> Result<(String, String), Failure> {
         eprintln!("+ {}", shell::join(argv));
         let started = Instant::now();
         let mut command = Command::new(&argv[0]);
@@ -220,10 +233,7 @@ impl Runner {
         if status != 0 {
             return Err(format!("command exit {status}: {stdout}{stderr}"));
         }
-        if !stderr.is_empty() {
-            eprint!("{stderr}");
-        }
-        Ok(stdout)
+        Ok((stdout, stderr))
     }
 
     fn tool(&mut self, name: &str) -> Result<(PathBuf, Value), Failure> {
@@ -244,6 +254,169 @@ impl Runner {
         ))
     }
 
+    fn compiler_file(&mut self, cc: &str, name: &str) -> Result<PathBuf, Failure> {
+        let found = self.run(
+            &[cc.to_owned(), format!("-print-file-name={name}")],
+            INSPECTION_TIMEOUT,
+            &format!("compiler_file_{name}"),
+        )?;
+        let path = PathBuf::from(found.trim());
+        if path == Path::new(name) || !path.is_absolute() || !path.exists() {
+            return Err(format!(
+                "compiler did not resolve required native input: {name}"
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Preprocessing and the driver's dry-run describe the actual headers,
+    /// subprograms and CRT/link inputs without compiling a usable prefix.
+    fn native_inputs(
+        &mut self,
+        cc: &str,
+        ar: &str,
+        parent: &Path,
+        source: &[u8],
+        header: &[u8],
+    ) -> Result<Value, Failure> {
+        let stage = host::mkdtemp("sqlite-inputs-", parent).map_err(io)?;
+        let result = (|| {
+            fs::write(stage.join("sqlite3.c"), source).map_err(io)?;
+            fs::write(stage.join("sqlite3.h"), header).map_err(io)?;
+            fs::write(stage.join("smoke.c"), smoke_source()).map_err(io)?;
+            let mut paths = BTreeSet::from([PathBuf::from(cc), PathBuf::from(ar)]);
+            let mut libraries = BTreeSet::new();
+            let mut search = BTreeSet::new();
+            let include = self.compiler_file(cc, "include")?;
+            paths.insert(
+                include
+                    .parent()
+                    .ok_or("compiler resource directory missing")?
+                    .to_path_buf(),
+            );
+            for (name, flags) in [
+                ("sqlite3.c", FLAGS.to_vec()),
+                ("smoke.c", vec!["-std=c11", "-pthread"]),
+            ] {
+                let file = text(&stage.join(name));
+                let mut argv = vec![cc.to_owned()];
+                argv.extend(flags.iter().map(|s| (*s).to_owned()));
+                argv.extend([
+                    "-M".to_owned(),
+                    "-MT".to_owned(),
+                    "sqlite-native-inputs".to_owned(),
+                    file.clone(),
+                ]);
+                let deps = self.run(&argv, INSPECTION_TIMEOUT, &format!("headers_{name}"))?;
+                paths.extend(header_paths(&deps, &stage)?);
+                let mut argv = vec![cc.to_owned(), "-###".to_owned()];
+                argv.extend(flags.iter().map(|s| (*s).to_owned()));
+                if name == "sqlite3.c" {
+                    argv.push("-c".to_owned());
+                }
+                argv.extend([
+                    file,
+                    "-o".to_owned(),
+                    text(&stage.join("inspection-output")),
+                ]);
+                if name == "smoke.c" {
+                    argv.extend(LINK_FLAGS.iter().map(|s| (*s).to_owned()));
+                }
+                let (stdout, stderr) =
+                    self.output(&argv, INSPECTION_TIMEOUT, &format!("driver_{name}"))?;
+                let mut commands = 0;
+                for raw_line in stdout.lines().chain(stderr.lines()) {
+                    let line = raw_line.trim();
+                    if let Some(spec) = line
+                        .strip_prefix("Reading specs from ")
+                        .or_else(|| line.strip_prefix("Configuration file: "))
+                    {
+                        paths.insert(PathBuf::from(spec));
+                    }
+                    if !line.starts_with('/')
+                        && !line.starts_with('"')
+                        && !raw_line.starts_with(' ')
+                    {
+                        continue;
+                    }
+                    let words =
+                        shell::split_quoted(line).ok_or("malformed compiler dry-run command")?;
+                    let program = words.first().ok_or("empty compiler dry-run command")?;
+                    let found =
+                        host::which(program, Some(std::ffi::OsStr::new("/usr/bin:/bin")))
+                            .ok_or_else(|| format!("compiler subprogram unavailable: {program}"))?;
+                    paths.insert(found);
+                    commands += 1;
+                    for word in &words[1..] {
+                        if word.starts_with("-L") {
+                            search.insert(word.clone());
+                        }
+                        let path = Path::new(word);
+                        if path.is_absolute() && path.is_file() && !path.starts_with(&stage) {
+                            paths.insert(path.to_path_buf());
+                        }
+                        if let Some(library) = word.strip_prefix("-l") {
+                            if !library.is_empty() {
+                                let shared = format!("lib{library}.so");
+                                let found = self.run(
+                                    &[cc.to_owned(), format!("-print-file-name={shared}")],
+                                    INSPECTION_TIMEOUT,
+                                    &format!("link_library_{library}"),
+                                )?;
+                                let resolved = PathBuf::from(found.trim());
+                                let resolved = if resolved.is_absolute() && resolved.is_file() {
+                                    resolved
+                                } else {
+                                    self.compiler_file(cc, &format!("lib{library}.a"))?
+                                };
+                                libraries.insert(resolved);
+                            }
+                        }
+                    }
+                }
+                if commands == 0 {
+                    return Err("compiler dry-run did not identify native subprograms".to_owned());
+                }
+            }
+            if libraries.is_empty() {
+                return Err("compiler did not report native link libraries".to_owned());
+            }
+            let linker = self.run(
+                &[cc.to_owned(), "-print-prog-name=ld".to_owned()],
+                INSPECTION_TIMEOUT,
+                "native_linker",
+            )?;
+            let linker = host::which(linker.trim(), Some(std::ffi::OsStr::new("/usr/bin:/bin")))
+                .ok_or("native linker unavailable")?;
+            paths.insert(linker.clone());
+            // Let the system linker interpret its own scripts and report every
+            // input. This links only the reported libraries, without compiling
+            // SQLite or exporting a usable SQLite prefix.
+            let mut argv = vec![
+                text(&linker),
+                "--trace".to_owned(),
+                "--shared".to_owned(),
+                "--no-as-needed".to_owned(),
+                "-o".to_owned(),
+                text(&stage.join("link-inspection.so")),
+            ];
+            argv.extend(search);
+            argv.extend(libraries.iter().map(|p| text(p)));
+            let trace = self.run(&argv, INSPECTION_TIMEOUT, "native_link_inputs")?;
+            paths.extend(link_paths(&trace)?);
+            crate::sqlite::native_files(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())
+        })();
+        let cleanup = fs::remove_dir_all(&stage).map_err(io);
+        match (result, cleanup) {
+            (Err(cause), Err(cleanup)) => {
+                Err(format!("{cause}; native input scratch cleanup: {cleanup}"))
+            }
+            (Err(cause), _) => Err(cause),
+            (Ok(_), Err(cleanup)) => Err(cleanup),
+            (Ok(inputs), Ok(())) => Ok(inputs),
+        }
+    }
+
     fn smoke(&mut self, prefix: &Path) -> Result<String, Failure> {
         let directory = host::mkdtemp("smoke-run-", prefix).map_err(|e| e.to_string())?;
         let result = self.run(
@@ -259,6 +432,48 @@ impl Runner {
         cleanup.map_err(|e| e.to_string())?;
         Ok(proof)
     }
+}
+
+fn header_paths(output: &str, stage: &Path) -> Result<BTreeSet<PathBuf>, Failure> {
+    let flattened = output.replace("\\\n", " ");
+    let dependencies = flattened
+        .strip_prefix("sqlite-native-inputs:")
+        .ok_or("compiler header dependency target missing")?;
+    let words = shell::split_quoted(dependencies.trim())
+        .ok_or("malformed compiler header dependency output")?;
+    let mut paths = BTreeSet::new();
+    for word in words {
+        let path = PathBuf::from(word);
+        if !path.is_absolute() || !path.is_file() {
+            return Err("compiler header dependency is unresolved".to_owned());
+        }
+        if !path.starts_with(stage) {
+            paths.insert(path);
+        }
+    }
+    if paths.is_empty() {
+        return Err("compiler did not identify system headers".to_owned());
+    }
+    Ok(paths)
+}
+
+// GNU ld --trace prints one input path per line; interpretation of linker
+// scripts stays entirely with ld. Unknown/unresolved output is refused.
+fn link_paths(output: &str) -> Result<BTreeSet<PathBuf>, Failure> {
+    let paths = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect::<BTreeSet<_>>();
+    if paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !path.is_absolute() || !path.is_file())
+    {
+        return Err("native linker did not report concrete input paths".to_owned());
+    }
+    Ok(paths)
 }
 
 fn text(path: &Path) -> String {
@@ -420,7 +635,7 @@ fn build(parsed: &args::Parsed, runner: &mut Runner) -> Result<(), Failure> {
         );
     }
     let inputs = json!({
-        "schema": 1,
+        "schema": 2,
         "archive_sha256": ARCHIVE_HASH,
         "sqlite3_c_sha3_256": C_HASH,
         "header_sha256": sha256_hex(&header),
@@ -430,6 +645,7 @@ fn build(parsed: &args::Parsed, runner: &mut Runner) -> Result<(), Failure> {
         "compiler": cc_id,
         "archiver": ar_id,
         "compiler_target": compiler_target,
+        "native_files": runner.native_inputs(&cc, &ar, &parent, &c_source, &header)?,
         "target": rust_target,
         "host_arch": machine,
         "flags": FLAGS,
@@ -610,6 +826,43 @@ fn build_or_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_interrogation_preserves_escaped_paths_and_refuses_missing_inputs() {
+        let root = host::mkdtemp("sqlite-header-inputs-", &std::env::temp_dir()).unwrap();
+        let header = root.join("a header.h");
+        fs::write(&header, "header").unwrap();
+        let output = format!(
+            "sqlite-native-inputs: \\\n {}\n",
+            text(&header).replace(' ', "\\ ")
+        );
+        assert_eq!(
+            header_paths(&output, &root.join("stage")).unwrap(),
+            BTreeSet::from([header.clone()])
+        );
+        assert!(header_paths("foreign-target: /missing.h", &root).is_err());
+        fs::remove_file(&header).unwrap();
+        assert!(header_paths(&output, &root.join("stage")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_linker_trace_requires_resolved_file_paths() {
+        let root = host::mkdtemp("sqlite-link-inputs-", &std::env::temp_dir()).unwrap();
+        let script = root.join("libc.so");
+        let library = root.join("libc.so.6");
+        fs::write(&script, "opaque script bytes interpreted by ld").unwrap();
+        fs::write(&library, "fixture library bytes").unwrap();
+        assert_eq!(
+            link_paths(&format!("{}\n{}\n", text(&script), text(&library))).unwrap(),
+            BTreeSet::from([script, library.clone()])
+        );
+        assert!(link_paths("GROUP ( /some/file )").is_err());
+        assert!(link_paths("relative-file").is_err());
+        fs::remove_file(library).unwrap();
+        assert!(link_paths(&format!("{}/libc.so.6\n", text(&root))).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sha3_256_matches_fips_202_vectors() {

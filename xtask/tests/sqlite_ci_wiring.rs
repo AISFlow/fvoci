@@ -508,6 +508,60 @@ fn cache_identity_changes_with_clang_and_rust_toolchain() {
 }
 
 #[test]
+fn unrelated_package_inventory_is_diagnostic_not_native_authority() {
+    let _serial = serial();
+    let f = Fixture::new();
+    let inventory = f.parent.join("build-packages.txt");
+    fs::write(&inventory, "cloud-agent\t1\nchrome\t2\n").unwrap();
+    assert_eq!(f.invoke(&["--identity-only"]).code, 0);
+    let expected = f
+        .last_output_line()
+        .strip_prefix("cache_identity=")
+        .unwrap()
+        .to_owned();
+    fs::write(&inventory, "cloud-agent\t9\nchrome\t10\n").unwrap();
+    let outcome = f.invoke(&["--expected-cache-identity", &expected]);
+    assert_eq!(outcome.code, 0, "{}", outcome.stderr);
+    let inputs = fs::read_to_string(f.parent.join("consumer-inputs.json")).unwrap();
+    assert!(!inputs.contains("cloud-agent"));
+    assert!(!inputs.contains("\"packages\""));
+    // Same package inventory/version cannot authorize different actual SDK bytes.
+    fs::write(f.clang.join("resource-header.h"), "different header bytes").unwrap();
+    fs::write(&f.github_env, "").unwrap();
+    fs::write(&f.github_output, "").unwrap();
+    f.rejected(&f.invoke(&["--expected-cache-identity", &expected]));
+}
+
+#[test]
+fn libclang_sdk_directory_symlinks_bind_resolution_and_content() {
+    let _serial = serial();
+    let f = Fixture::new();
+    let sdk = f.root.join("sdk");
+    fs::create_dir(&sdk).unwrap();
+    fs::write(sdk.join("header.h"), "header one").unwrap();
+    std::os::unix::fs::symlink(&sdk, f.clang.join("include")).unwrap();
+    assert_eq!(f.invoke(&["--identity-only"]).code, 0);
+    let expected = f
+        .last_output_line()
+        .strip_prefix("cache_identity=")
+        .unwrap()
+        .to_owned();
+    fs::write(&f.github_output, "").unwrap();
+    fs::write(sdk.join("header.h"), "header two").unwrap();
+    f.rejected(&f.invoke(&["--expected-cache-identity", &expected]));
+    fs::write(sdk.join("header.h"), "header one").unwrap();
+    let other = f.root.join("other-sdk");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("header.h"), "header one").unwrap();
+    fs::remove_file(f.clang.join("include")).unwrap();
+    std::os::unix::fs::symlink(&other, f.clang.join("include")).unwrap();
+    f.rejected(&f.invoke(&["--expected-cache-identity", &expected]));
+    fs::remove_file(other.join("header.h")).unwrap();
+    fs::remove_dir(&other).unwrap();
+    f.rejected(&f.invoke(&[]));
+}
+
+#[test]
 fn cache_identity_tracks_bindgen_environment_without_disclosing_values() {
     let _serial = serial();
     let mut f = Fixture::new();

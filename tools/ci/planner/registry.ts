@@ -10,7 +10,6 @@ import { readUtf8 } from "./paths.ts";
 export const WORKFLOW_JOBS = {
   web: [
     "web-static",
-    "web-builder",
     "web-checks",
     "web-native-checks",
     "workspace-browser-build",

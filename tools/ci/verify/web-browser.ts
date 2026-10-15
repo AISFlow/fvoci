@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { rawBlockScalar } from "./raw-yaml.ts";
 import { get as safeGet } from "./load.ts";
 import { gatedWorkflowJobs } from "./registry.ts";
-import { readUtf8, type VerifyContext } from "./rust-shared.ts";
+import { HOST_APT_PREPARATION_RUN, readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
 export function webWorkflowJobs(ctx: VerifyContext): Mapping | null {
@@ -54,89 +54,6 @@ export function verifyWebBrowserBudget(ctx: VerifyContext): string[] {
   const raw =
     source === null ? null : rawJobScalar(source, "workspace-browser-shard", "timeout-minutes");
   return verifyWebBrowserBudgetJobs(jobs, raw);
-}
-
-export const WEB_BUILDER_SHELL = [
-  "docker run",
-  "--rm",
-  "--init",
-  "--name fvoci-web-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}",
-  "--network host",
-  "--ipc host",
-  "--pid host",
-  "--user 1001:1001",
-  "--group-add ${{ steps.builder.outputs.docker_gid }}",
-  "--label fvoci.web.run=${{ github.run_id }}",
-  "--label fvoci.web.attempt=${{ github.run_attempt }}",
-  "--label fvoci.web.source=${{ github.sha }}",
-  "--mount type=bind,source=${{ github.workspace }},target=${{ github.workspace }}",
-  "--mount type=bind,source=${{ runner.temp }},target=${{ runner.temp }}",
-  "--mount type=bind,source=${{ runner.temp }}/fvoci-web-builder-state/cargo,target=/home/runner/.cargo",
-  "--mount type=bind,source=${{ runner.temp }}/fvoci-web-builder-state/rustup,target=/home/runner/.rustup",
-  "--mount type=bind,source=${{ runner.temp }}/fvoci-web-builder/docker-client,target=/usr/local/bin/docker,readonly",
-  "--mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
-  "--workdir ${{ github.workspace }}",
-  "--env HOME=/home/runner",
-  "--env CARGO_HOME=/home/runner/.cargo",
-  "--env RUSTUP_HOME=/home/runner/.rustup",
-  "--env RUSTUP_TOOLCHAIN=1.99.0",
-  "--env PATH=/home/runner/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
-  "--env PLAYWRIGHT_BROWSERS_PATH=${{ runner.temp }}/fvoci-web-builder-state/browser",
-  "--env TINI_KILL_PROCESS_GROUP=1",
-  "--env CI",
-  "--env GITHUB_ACTIONS",
-  "--env GITHUB_SHA",
-  "--env GITHUB_REPOSITORY",
-  "--env GITHUB_RUN_ID",
-  "--env GITHUB_RUN_ATTEMPT",
-  "--env GITHUB_JOB",
-  "--env GITHUB_REF",
-  "--env RUNNER_TEMP",
-  "--env RUNNER_OS",
-  "--env RUNNER_ARCH",
-  "--env RUNNER_ENVIRONMENT",
-  "--env GITHUB_WORKSPACE",
-  "--env GITHUB_ENV",
-  "--env GITHUB_OUTPUT",
-  "--env GITHUB_STEP_SUMMARY",
-  "--env LIBCLANG_PATH",
-  "--env CARGO_BUILD_JOBS",
-  "--env CARGO_INCREMENTAL",
-  "--env CARGO_PROFILE_DEV_DEBUG",
-  "--env CARGO_PROFILE_TEST_DEBUG",
-  "--env SQLITE3_LIB_DIR",
-  "--env SQLITE3_INCLUDE_DIR",
-  "--env SQLITE3_NO_PKG_CONFIG",
-  "--env SQLITE3_STATIC",
-  "--env PRODUCER_RESULT",
-  "--env PRODUCER_ARTIFACT",
-  "--env PRODUCER_DIGEST",
-  "--env FVOCI_WEB_BUILD_PHASE",
-  "--env FVOCI_E2E_PENDING",
-  "--env FVOCI_COLLAB_LANE",
-  "--env FVOCI_WEB_BUILD_HANDOFF_SHA256",
-  "--env FVOCI_CLOSED_INSTALL_RECEIPT ${{ needs.web-builder.outputs.image_id }} bash",
-  "--noprofile",
-  '--norc -e -o pipefail "{0}"',
-].join(" ");
-export const WEB_BAKED_CHROMIUM_RUN =
-  'cd apps/web\ntest "$(bun --bun x --no-install playwright --version)" = \'Version 1.64.0\'\nchromium="$(bun -e \'import {chromium} from "@playwright/test"; process.stdout.write(chromium.executablePath())\')"\ncase "$chromium" in "$PLAYWRIGHT_BROWSERS_PATH"/*) ;; *) exit 1 ;; esac\ntest -x "$chromium"\nlibraries="$(ldd "$chromium")"\n[[ "$libraries" != *\'not found\'* ]]\n';
-const WEB_BUILDER_DOWNLOAD: Mapping = {
-  name: "Download this run exact scanned Web builder",
-  uses: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
-  with: {
-    "artifact-ids": "${{ needs.web-builder.outputs.artifact_id }}",
-    "merge-multiple": true,
-    path: "${{ runner.temp }}/fvoci-web-builder",
-  },
-};
-const WEB_BUILDER_ADMIT_SHA256 = "a52aaf334110712557fd06bdef6e24020c6065dda564e92919d0b9cda8acd3cc";
-const WEB_BUILDER_RETIRE_SHA256 =
-  "804363947c93c842c3d2a69d7845e3c65e7bb5a7a987ea2122747e8e2ddeee18";
-const WEB_BUILDER_PRODUCER_SHA256 =
-  "dc670da6d105b8fc03e7e2092fa8e2767f3942b001cb018d06a6602c3b549827";
-function isWebBuilderDownload(step: Mapping): boolean {
-  return pyEq(step, WEB_BUILDER_DOWNLOAD);
 }
 
 const CLOSED_INSTALL_RECEIPT =
@@ -259,9 +176,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     require(isMapping(job), `${name} must exist`);
     require(pyEq(
       safeGet(job, "needs"),
-      index === 0
-        ? ["ci-plan", "web-builder"]
-        : ["ci-plan", "collaboration-main-build", "web-builder"],
+      index === 0 ? "ci-plan" : ["ci-plan", "collaboration-main-build"],
     ), "ordered preparation dependencies");
     const steps = list(name);
     const compiles = steps.filter((step) => safeGet(step, "name") === "Compile native preparation");
@@ -269,7 +184,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     require(compiles.length === 1 &&
       compile !== undefined &&
       unmasked(compile) &&
-      pyEq(Object.keys(compile).sort(), ["name", "run", "shell"]) &&
+      pyEq(Object.keys(compile).sort(), ["name", "run"]) &&
       safeGet(compile, "run") ===
         "set -euo pipefail\n" +
           COLLABORATION_PREPARATION_RUNS[name], "complete unmasked compiler commands");
@@ -281,7 +196,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     require(packs.length === 1 &&
       pack !== undefined &&
       unmasked(pack) &&
-      pyEq(Object.keys(pack).sort(), ["id", "name", "run", "shell"]) &&
+      pyEq(Object.keys(pack).sort(), ["id", "name", "run"]) &&
       safeGet(pack, "id") === "native" &&
       steps.indexOf(pack) > steps.indexOf(compile as Mapping) &&
       safeGet(pack, "run") ===
@@ -331,9 +246,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
       sqliteAt >= 0 &&
       steps.indexOf(check) >
         sqliteAt, "producer must match this run's arch/SHA/attempt/SQLite identity after SQLite preparation");
-    const downloads = steps.filter(
-      (step) => usesPrefix(step, "actions/download-artifact@") && !isWebBuilderDownload(step),
-    );
+    const downloads = steps.filter((step) => usesPrefix(step, "actions/download-artifact@"));
     const download = downloads[0];
     require(downloads.length === 1 &&
       download !== undefined &&
@@ -375,7 +288,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
       .filter((step) => usesPrefix(step, "actions/cache"))
       .every((step) => {
         const path = safeGet(safeGet(step, "with"), "path");
-        return typeof path === "string" && path.trim() === CARGO_DOWNLOADS.trim();
+        return typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git";
       }), "no long-term native cache in normalized jobs");
   }
   return errors;
@@ -388,14 +301,14 @@ type Lane = {
   extraEnv: Record<string, string>;
   downloads: Mapping[];
 };
-const afterInstall = ["ci-plan", "collaboration-build", "collaboration-install-on", "web-builder"];
+const afterInstall = ["ci-plan", "collaboration-build", "collaboration-install-on"];
 const receiptEnv = { FVOCI_CLOSED_INSTALL_RECEIPT: CLOSED_INSTALL_RECEIPT };
 const bothDownloads = [PRODUCER_DOWNLOAD_WITH, RECEIPT_DOWNLOAD_WITH];
 export const WEB_COLLAB_LANES: readonly Lane[] = [
   {
     name: "collaboration-install-on",
     token: "install/on",
-    needs: ["ci-plan", "collaboration-build", "web-builder"],
+    needs: ["ci-plan", "collaboration-build"],
     extraEnv: {},
     downloads: [PRODUCER_DOWNLOAD_WITH],
   },
@@ -468,7 +381,6 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
   require(pyEq(get(producer, "needs"), [
     "ci-plan",
     ...COLLABORATION_PREPARATION_JOBS,
-    "web-builder",
   ]), "producer needs ci-plan and successful preparation");
   const lanes = WEB_COLLAB_LANES.map((lane) => ({ lane, job: jobOf(lane.name) }));
   for (const { lane, job } of lanes) {
@@ -536,9 +448,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
 
   for (const { lane } of lanes) {
     const steps = stepsByJob.get(lane.name) ?? [];
-    const downloads = steps.filter(
-      (step) => usesPrefix(step, "actions/download-artifact@") && !isWebBuilderDownload(step),
-    );
+    const downloads = steps.filter((step) => usesPrefix(step, "actions/download-artifact@"));
     const exact = lane.downloads.flatMap((expected) =>
       downloads
         .filter(
@@ -588,7 +498,6 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
     ...verifyWebHostInputsJobs(jobs),
-    ...verifyWebBuilderJobs(jobs),
   ];
 }
 
@@ -625,9 +534,8 @@ export const RUSTUP_METADATA_RUN =
   "  RUSTUP_AUTO_INSTALL=0 \\\n" +
   "  cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
   'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
-const CARGO_DOWNLOADS =
-  "${{ runner.temp }}/fvoci-web-builder-state/cargo/registry\n${{ runner.temp }}/fvoci-web-builder-state/cargo/git\n";
-const TOOLCHAIN_INSTALL = "test \"$(rustc --version | cut -d' ' -f2)\" = 1.99.0";
+const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
+const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
 const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
 const TIMED_RUSTUP_JOBS = [
   ...COLLABORATION_PREPARATION_JOBS,
@@ -642,9 +550,27 @@ export const WEB_SQLITE_JOBS = [
   ...TIMED_RUSTUP_JOBS,
 ];
 // The same complete host preparation precedes every Web SQLite/cache identity.
-const WEB_SQLITE_RUN =
-  'set -euo pipefail\ntest "$(rustc --version | cut -d\' \' -f2)" = 1.99.0\ntest "$(bun --version)" = 1.4.3\ntest "$(dpkg-query -W -f=\'${Version}\' libclang-18-dev)" = 1:18.1.8-20ubuntu8\ntest -f "$LIBCLANG_PATH/libclang.so"\nmkdir "$RUNNER_TEMP/fvoci-sqlite"\ndpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\nbash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \\\n  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"\n';
-const SQLITE_HASH_RUN_SHA256 = "940de49368cfbd4955078f899e8f46c3233b63519845764e3e7696a2087189af";
+const WEB_SQLITE_RUN = String.raw`set -euo pipefail
+# Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+case "$(dpkg --print-architecture)" in
+  amd64)
+    test -f /etc/apt/apt-mirrors.txt
+    grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+    grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+    test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+    ;;
+  arm64) ;;
+  *) exit 1 ;;
+esac
+${HOST_APT_PREPARATION_RUN}mkdir "$RUNNER_TEMP/fvoci-sqlite"
+dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+`;
+const SQLITE_HASH_RUN_SHA256 = "a4b8443336684c2b7b3222bfd9a05ce3bf3fde5ac07c96ca0dc16fbeadb7fe62";
 const SQLITE_HASH_CONDITION = "${{ always() && steps.sqlite.outcome == 'success' }}";
 const SQLITE_HASH_UPLOAD_CONDITION =
   "${{ always() && steps.sqlite_diagnostics.outputs.written == 'true' }}";
@@ -661,160 +587,6 @@ const SQLITE_HASH_UPLOAD: Mapping = {
 };
 function isSQLiteHashUpload(step: Mapping): boolean {
   return pyEq(step, SQLITE_HASH_UPLOAD);
-}
-
-export function verifyWebBuilderJobs(jobs: Mapping): string[] {
-  const errors: string[] = [];
-  const digest = (step: Mapping) => createHash("sha256").update(stepRun(step)).digest("hex");
-  const list = (job: unknown): Mapping[] => {
-    const value = isMapping(job) ? get(job, "steps") : undefined;
-    return Array.isArray(value) ? value.filter(isMapping) : [];
-  };
-  const producer = get(jobs, "web-builder");
-  const producerSteps = list(producer);
-  const build = producerSteps[2];
-  const publish = producerSteps[3];
-  if (
-    !isMapping(producer) ||
-    !pyEq(Object.keys(producer).sort(), [
-      "if",
-      "needs",
-      "outputs",
-      "runs-on",
-      "steps",
-      "timeout-minutes",
-    ]) ||
-    get(producer, "needs") !== "ci-plan" ||
-    get(producer, "if") !== "needs.ci-plan.outputs.select_web_builder == 'true'" ||
-    get(producer, "runs-on") !== "ubuntu-26.04" ||
-    get(producer, "timeout-minutes") !== 15 ||
-    !pyEq(get(producer, "outputs"), {
-      artifact_id: "${{ steps.publish_builder.outputs.artifact-id }}",
-      image_id: "${{ steps.builder.outputs.image_id }}",
-      receipt_sha256: "${{ steps.builder.outputs.receipt_sha256 }}",
-      archive_sha256: "${{ steps.builder.outputs.archive_sha256 }}",
-    }) ||
-    producerSteps.length !== 4 ||
-    !pyEq(producerSteps[0], {
-      uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-      with: { "persist-credentials": false },
-    }) ||
-    !pyEq(producerSteps[1], {
-      uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-      with: { "bun-version-file": ".bun-version" },
-    }) ||
-    !build ||
-    !pyEq(Object.keys(build).sort(), ["env", "id", "name", "run"]) ||
-    get(build, "id") !== "builder" ||
-    get(build, "name") !== "Build and scan this source Web userspace" ||
-    !pyEq(get(build, "env"), { DOCKER_CONFIG: "${{ runner.temp }}/fvoci-web-builder-docker" }) ||
-    digest(build) !== WEB_BUILDER_PRODUCER_SHA256 ||
-    !publish ||
-    !pyEq(publish, {
-      name: "Publish this run scanned Web builder",
-      id: "publish_builder",
-      uses: UPLOAD_PIN,
-      with: {
-        name: "web-builder-${{ github.run_attempt }}",
-        path: "${{ runner.temp }}/fvoci-web-builder/image.tar\n${{ runner.temp }}/fvoci-web-builder/image.json\n${{ runner.temp }}/fvoci-web-builder/docker-client\n${{ runner.temp }}/fvoci-web-builder/receipt.json",
-        "compression-level": 0,
-        "if-no-files-found": "error",
-        "retention-days": 1,
-      },
-    })
-  )
-    errors.push(
-      "web: builder requires one source-scanned native image/static client, read-only provenance and unchanged budget",
-    );
-  for (const name of WEB_SQLITE_JOBS) {
-    const job = get(jobs, name),
-      steps = list(job);
-    const needs = isMapping(job) ? get(job, "needs") : undefined;
-    const downloads = steps.filter(isWebBuilderDownload);
-    const admits = steps.filter((step) => get(step, "id") === "builder");
-    const admit = admits[0];
-    const retires = steps.filter(
-      (step) => get(step, "name") === "Retire this job owned Web builder",
-    );
-    const retire = retires[0];
-    if (
-      !Array.isArray(needs) ||
-      needs.filter((value) => value === "web-builder").length !== 1 ||
-      downloads.length !== 1 ||
-      admits.length !== 1 ||
-      !admit ||
-      !pyEq(Object.keys(admit).sort(), ["env", "id", "name", "run"]) ||
-      get(admit, "name") !== "Admit and load exact Web builder" ||
-      !pyEq(get(admit, "env"), {
-        BUILDER_RESULT: "${{ needs.web-builder.result }}",
-        BUILDER_ARTIFACT: "${{ needs.web-builder.outputs.artifact_id }}",
-        BUILDER_RECEIPT: "${{ needs.web-builder.outputs.receipt_sha256 }}",
-        BUILDER_IMAGE: "${{ needs.web-builder.outputs.image_id }}",
-      }) ||
-      digest(admit) !== WEB_BUILDER_ADMIT_SHA256 ||
-      steps.indexOf(admit) !== steps.indexOf(downloads[0] as Mapping) + 1 ||
-      retires.length !== 1 ||
-      !retire ||
-      !pyEq(Object.keys(retire).sort(), ["env", "if", "name", "run"]) ||
-      get(retire, "if") !== "always()" ||
-      !pyEq(get(retire, "env"), {
-        BUILDER_OWNED: "${{ steps.builder.outputs.image_owned }}",
-        BUILDER_IMAGE: "${{ needs.web-builder.outputs.image_id }}",
-      }) ||
-      digest(retire) !== WEB_BUILDER_RETIRE_SHA256 ||
-      steps.at(-2) !== retire
-    )
-      errors.push(
-        `web: ${name} must admit/load this run builder before use and retire only its own resources`,
-      );
-    const browsers = steps.filter(
-      (step) => get(step, "name") === "Prepare Chromium and system libraries",
-    );
-    const expectsBrowser = ![
-      "web-checks",
-      "web-native-checks",
-      "collaboration-main-build",
-      "collaboration-test-build",
-    ].includes(name);
-    if (
-      browsers.length !== (expectsBrowser ? 1 : 0) ||
-      browsers.some(
-        (step) =>
-          !pyEq(step, {
-            name: "Prepare Chromium and system libraries",
-            shell: WEB_BUILDER_SHELL,
-            run:
-              (TIMED_RUSTUP_JOBS.includes(name)
-                ? timingPreamble(name, steps.indexOf(step) + 1)
-                : "") + WEB_BAKED_CHROMIUM_RUN,
-          }),
-      )
-    )
-      errors.push(
-        `web: ${name} must verify pinned baked Chromium and actual system libraries without installation`,
-      );
-    const hostNames = new Set([
-      "Admit and load exact Web builder",
-      "Retire this job owned Web builder",
-      "Record SQLite input hashes",
-      "Require exact current native preparation",
-      "Restore current native preparation",
-      "Normalize tracked source mtimes for native cache reuse",
-    ]);
-    for (const step of steps)
-      if (has(step, "run")) {
-        const host = hostNames.has(String(get(step, "name")));
-        if (host ? has(step, "shell") : get(step, "shell") !== WEB_BUILDER_SHELL)
-          errors.push(
-            `web: ${name} must execute every build/input/browser call in the exact fixed userspace`,
-          );
-        if (!host && /(?:^|\s)(?:export\s+)?PLAYWRIGHT_BROWSERS_PATH\s*=/.test(stepRun(step)))
-          errors.push(`web: ${name} cannot override its owned source-bound browser cache`);
-        if (!host && admit && steps.indexOf(step) <= steps.indexOf(admit))
-          errors.push(`web: ${name} cannot execute builder calls before admission`);
-      }
-  }
-  return errors;
 }
 
 export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
@@ -835,7 +607,6 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
         id: "sqlite",
         env: { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" },
         run: preamble + WEB_SQLITE_RUN,
-        shell: WEB_BUILDER_SHELL,
       })
     )
       errors.push(
@@ -910,8 +681,7 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
     pinned.add(step);
     const preamble = TIMED_RUSTUP_JOBS.includes(name) ? timingPreamble(name, index + 1) : "";
     if (
-      !pyEq(Object.keys(step).sort(), ["name", "run", "shell"]) ||
-      get(step, "shell") !== WEB_BUILDER_SHELL ||
+      !pyEq(Object.keys(step).sort(), ["name", "run"]) ||
       stepRun(step) !== preamble + RUSTUP_METADATA_RUN
     ) {
       errors.push(
