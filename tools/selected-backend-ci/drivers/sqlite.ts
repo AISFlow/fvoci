@@ -80,6 +80,21 @@ import {
   type Row,
 } from "./common.ts";
 import { AUTH_SPEC, authEventRows } from "../../turso/ui-auth-session.ts";
+import * as auditModule from "../../turso/ui-audit.ts";
+import {
+  get,
+  list,
+  record,
+  requestPublic,
+  inviteFinalActor,
+  token,
+} from "../../turso/ui-common.ts";
+import {
+  assertSelectedSuccessfulWrites,
+  type SelectedNativeReceipt,
+  type SelectedSyncWrite,
+} from "../../turso/ui-selected-native-policy.ts";
+
 import {
   authBrowserEnvironment,
   authConfig,
@@ -115,10 +130,7 @@ export async function sqliteReadbackAppendWitness(input: {
   writes: unknown;
   clocks: [string, string];
 }) {
-  const { integer, uuidHex } = await import("../../turso/ui-audit.ts");
-  const { get, list, record } = await import("../../turso/ui-common.ts");
-  const { assertSelectedSuccessfulWrites } =
-    await import("../../../apps/web/e2e-pending/selected-final-native.ts");
+  const { integer, uuidHex } = auditModule;
   const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
   const original = input.original,
     current = input.current;
@@ -139,11 +151,9 @@ export async function sqliteReadbackAppendWitness(input: {
     added[key] = delta;
     assert.ok(delta.every((row, i) => get(row, "seq") === Number(oldTail) + i + 1));
   }
-  const receipts =
-    added.receipts as import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedNativeReceipt[];
+  const receipts = added.receipts as SelectedNativeReceipt[];
   assert.ok(Array.isArray(input.writes) && input.writes.length <= 10000);
-  const writes =
-    input.writes as import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedSyncWrite[];
+  const writes = input.writes as SelectedSyncWrite[];
   assert.ok(
     writes.every(
       (w) =>
@@ -238,7 +248,7 @@ export async function sqliteReadbackAppendWitness(input: {
     }
     assert.ok(Object.keys(rows[table]).length === 2);
   }
-  return { count: 2 as const, rows };
+  return Promise.resolve({ count: 2 as const, rows });
 }
 
 /** Read only the separate, completed observer packet, never its mixed log. */
@@ -1251,11 +1261,6 @@ export async function productCallbacks(
   state: State,
   seam: Seam,
 ): Promise<NonNullable<RestartContext["sqliteProducts"]>> {
-  const auditModule = await import("../../turso/ui-audit.ts");
-  const { requestPublic, inviteFinalActor, get, list, record, token } =
-    await import("../../turso/ui-common.ts");
-  const { auditSelectedFinalNative } =
-    await import("../../../apps/web/e2e-pending/selected-final-native.ts");
   assert.ok(
     state.flow === "on" &&
       state.current.manifest.purpose === undefined &&
@@ -1416,12 +1421,11 @@ export async function productCallbacks(
   const targets: {
     workspaceId: string;
     documentId: string;
-    receipts: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedNativeReceipt[];
+    receipts: SelectedNativeReceipt[];
   }[] = [];
-  const writes: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedSyncWrite[] =
-    [];
+  const writes: SelectedSyncWrite[] = [];
   let productPassed = false;
-  return {
+  return Promise.resolve({
     async afterSeedStopped(rows, seed) {
       const retired = await auditModule.selectedRoomRetirement(manifest, oldOrigin, target, rows);
       original = await serial("original", true);
@@ -1827,7 +1831,7 @@ export async function productCallbacks(
           "original wiki native bytes/receipts changed after retirement",
         );
       audit.sqlitePreparation.state.after = list(finalRow, "stateRow");
-      await auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
+      auditModule.auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
       const storageAfter = seam.treeHashes(state.storage);
       for (const [path, hash] of Object.entries(storageOriginal))
         assert.ok(storageAfter[path] === hash, "original storage bytes changed");
@@ -1840,7 +1844,7 @@ export async function productCallbacks(
         audit_sha256: sha(join(directory, "audit.private.json")),
       };
     },
-  };
+  });
 }
 
 export const sqliteSeam: Seam = {

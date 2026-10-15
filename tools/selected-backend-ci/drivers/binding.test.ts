@@ -217,7 +217,7 @@ describe("SQLite ON PRODUCT4 report", () => {
     },
   };
   test("exact current metadata and four unchanged cases are required", async () => {
-    const { PRODUCT_TITLES } =
+    const { PRODUCT_TITLES, assertFinalMetadata } =
       await import("../../../apps/web/e2e-pending/selected-final-contract.ts");
     const report = () => ({
       config: {
@@ -251,6 +251,28 @@ describe("SQLite ON PRODUCT4 report", () => {
     expect(
       validateProductReport(parseJson(JSON.stringify(report())), binding, "d".repeat(64)),
     ).toEqual([...PRODUCT_TITLES]);
+    // The parent matches public policy values without initializing the browser
+    // SDK. Every metadata field must retain the maintained Zod adapter's guard.
+    const checkMetadata = (metadata: unknown) => {
+      const value = report();
+      return validateProductReport(
+        parseJson(JSON.stringify({ ...value, config: { ...value.config, metadata } })),
+        binding,
+        "d".repeat(64),
+      );
+    };
+    const extended = { ...report().config.metadata, unrelated: true };
+    assertFinalMetadata(extended, "d".repeat(64), binding);
+    expect(checkMetadata(extended)).toEqual([...PRODUCT_TITLES]);
+    for (const key of Object.keys(report().config.metadata)) {
+      for (const fault of ["missing", "wrong-value", "wrong-type"]) {
+        const metadata = structuredClone(report().config.metadata) as Record<string, unknown>;
+        if (fault === "missing") Reflect.deleteProperty(metadata, key);
+        else metadata[key] = fault === "wrong-type" ? 1 : key === "titles" ? ["wrong"] : "wrong";
+        expect(() => assertFinalMetadata(metadata, "d".repeat(64), binding)).toThrow();
+        expect(() => checkMetadata(metadata)).toThrow();
+      }
+    }
     const changes: ((value: ReturnType<typeof report>) => void)[] = [
       (r) => {
         r.config.metadata.selectedBackend = "libsql-remote";

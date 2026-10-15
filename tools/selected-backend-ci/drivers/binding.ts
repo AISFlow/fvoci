@@ -22,11 +22,11 @@ import type {
 import { command, hex40, inputCheck, lines, readText, treeHashes } from "./common.ts";
 import { restartHelper, validateAllocation, type RestartBinding } from "./restart.ts";
 import {
-  assertFinalMetadata,
+  selectedMetadata,
   FINAL_SPEC,
   PRODUCT_TITLES,
-  type FinalBinding,
-} from "../../../apps/web/e2e-pending/selected-final-contract.ts";
+} from "../../turso/ui-selected-native-policy.ts";
+import type { FinalBinding } from "../../../apps/web/e2e-pending/selected-final-contract.ts";
 
 export const bindingModule = import.meta.path;
 // The feature list cargo emits for the engine stage: crates/collab-engine
@@ -173,7 +173,12 @@ export function validateProductReport(
     suites: OffSuite[];
   };
   assert.ok(jsonInteger(r.config, "workers") && r.config.workers === 1 && deepEquals(r.errors, []));
-  assertFinalMetadata(r.config.metadata, bindingSha256, binding);
+  const metadata = r.config.metadata;
+  assert.ok(typeof metadata === "object" && metadata !== null && !Array.isArray(metadata));
+  for (const [key, value] of Object.entries(selectedMetadata(bindingSha256, binding)))
+    assert.ok(
+      Object.hasOwn(metadata, key) && deepEquals((metadata as Record<string, unknown>)[key], value),
+    );
   assert.ok(r.stats.expected === 4);
   assert.ok(["unexpected", "flaky", "skipped"].every((key) => r.stats[key] === 0));
   const titles: string[] = [];

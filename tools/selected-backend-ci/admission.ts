@@ -150,6 +150,9 @@ export const registeredModules = [
   "tools/turso/ui-auth-session.ts",
   "tools/turso/ui-audit.ts",
   "tools/turso/ui-common.ts",
+  "tools/turso/ui-processes.ts",
+  "tools/turso/ui-selected-native-policy.ts",
+  "apps/web/e2e-pending/collab-wire.ts",
   "tools/web-e2e/compat.ts",
   "tools/web-e2e/smtp-sink.ts",
   "apps/web/e2e-pending/auth-session-contract.ts",
@@ -166,6 +169,8 @@ const consumerCommonModules = [
   "tools/turso/ui-processes.ts",
   "tools/turso/ui-server.ts",
   "tools/turso/ui-start-diagnostic.ts",
+  "tools/turso/ui-selected-native-policy.ts",
+  "apps/web/e2e-pending/collab-wire.ts",
 ] as const;
 
 export const tursoUiModules = Object.freeze([
@@ -194,7 +199,6 @@ export const tursoUiModules = Object.freeze([
   "apps/web/e2e-pending/collab-helpers.ts",
   "apps/web/e2e-pending/collab-attachment-oracle.ts",
   "apps/web/e2e-pending/collab-restart.ts",
-  "apps/web/e2e-pending/collab-wire.ts",
   "apps/web/e2e/helpers.ts",
   // The dedicated auth allocations of --local-auth.
   "tools/turso/ui-auth-session.ts",

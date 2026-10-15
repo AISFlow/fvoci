@@ -24,7 +24,12 @@ import {
   type Child as SelectedChild,
   type Row,
 } from "../selected-backend-ci/drivers/common.ts";
-import { FINAL_SPEC } from "../../apps/web/e2e-pending/selected-final-contract.ts";
+import {
+  FINAL_SPEC,
+  assertSelectedTargetWrites,
+  type SelectedNativeReceipt,
+  type SelectedSyncWrite,
+} from "./ui-selected-native-policy.ts";
 import type { Manifest } from "./ui-record.ts";
 import {
   canonical,
@@ -37,7 +42,9 @@ import {
   text,
   type Record_,
   valueDigest,
+  uuidHex,
 } from "./ui-common.ts";
+export { uuidHex } from "./ui-common.ts";
 
 export const ON = "workspace-wiki-selected-backend.spec.ts";
 export const OFF = "workspace-off-selected-backend.spec.ts";
@@ -592,17 +599,16 @@ export function singleton(rows: unknown): bigint {
   return integer((rows[0] as unknown[])[1]);
 }
 
-const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export function uuidHex(value: unknown): string {
-  require(typeof value === "string", "UI_ALLOCATION_ID_REFUSED");
-  // Any accepted UUID spelling that is not the canonical lowercase form is refused.
-  const bare = value
-    .replaceAll("urn:", "")
-    .replaceAll("uuid:", "")
-    .replace(/^\{+|\}+$/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(bare.replaceAll("-", ""))) throw new TypeError("not a UUID");
-  require(canonicalUuid.test(value), "UI_ALLOCATION_ID_REFUSED");
-  return value.replaceAll("-", "");
+/** Existing whole-primary preservation runs before the shared wire policy. */
+export function auditSelectedFinalNative(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  audit: Audit,
+  targets: { workspaceId: string; documentId: string; receipts: SelectedNativeReceipt[] }[],
+  writes: SelectedSyncWrite[],
+): void {
+  assertPreserved(before, after, audit);
+  assertSelectedTargetWrites(targets, writes);
 }
 
 export function rememberActor(audit: Audit, actor: unknown, namespace: string): void {
