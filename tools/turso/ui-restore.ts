@@ -250,7 +250,7 @@ export async function executeRestore(
     directory: string;
     source: boolean;
     stopped: boolean;
-    identity: { pid: number; startTicks: string };
+    identity?: { pid: number; startTicks: string };
   }[] = [];
   const begin = async (
     name: string,
@@ -261,15 +261,16 @@ export async function executeRestore(
     const path = join(directory, name);
     mkdirSync(path, 0o700);
     const started = await steps.start(scope, manifest, env, path, setup);
-    const allocation = {
+    const allocation: (typeof running)[number] = {
       started,
       directory: path,
       source,
       stopped: false,
-      identity: steps.serverIdentity(started.server),
     };
+    // Register process and FD ownership before the fallible identity lookup.
     running.push(allocation);
     if (source) audit.serverStarts += 1;
+    allocation.identity = steps.serverIdentity(started.server);
     return allocation;
   };
   const stop = async (allocation: (typeof running)[number]) => {
@@ -439,7 +440,7 @@ export async function executeRestore(
         receipt.cleanupErrors.push("RESTORE_SERVER_FORCE_RETIRE_FAILED");
       }
       try {
-        closeSync(allocation.started.log);
+        if (!steps.serial || !allocation.source) closeSync(allocation.started.log);
       } catch {
         receipt.cleanupErrors.push("RESTORE_SERVER_LOG_CLOSE_FAILED");
       }
@@ -452,6 +453,7 @@ export async function executeRestore(
             roomRetirement(scope, manifest, allocation.started.roomLog, audit.targetSha256),
           );
         }
+        require(allocation.identity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
         audit.servers.push(
           steps.maintenanceReceipts(
             join(allocation.directory, "server.private.log"),

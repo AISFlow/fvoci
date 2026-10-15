@@ -227,17 +227,19 @@ export async function start(
     return localServerStart(scope, manifest, environment, directory, expectedSetup);
   const logpath = join(directory, "server.private.log");
   const log = openSync(logpath, "wx", 0o600);
-  fchmodSync(log, 0o600);
-  const launch = get(manifest, "binaries", "fvoci-migrate", "path") as string;
-  const child = scope.spawn([launch, "--start"], "server", {
-    env: environment,
-    stdin: "ignore",
-    stdout: log,
-    stderr: log,
-  });
-  const started = clock();
-  const deadline = started + SERVER_BUDGET;
+  let child: ReturnType<Scope["spawn"]> | undefined;
+  let started: number | undefined, deadline: number | undefined;
   try {
+    fchmodSync(log, 0o600);
+    const launch = get(manifest, "binaries", "fvoci-migrate", "path") as string;
+    child = scope.spawn([launch, "--start"], "server", {
+      env: environment,
+      stdin: "ignore",
+      stdout: log,
+      stderr: log,
+    });
+    started = clock();
+    deadline = started + SERVER_BUDGET;
     const base = await awaitListening(logpath, child, deadline, clock);
     const observed = identity(child.pid);
     require(observed.comm === "fvoci-server" &&
@@ -266,12 +268,15 @@ export async function start(
     return running;
   } catch (original) {
     const diagnostic =
-      failureCode(original) === "UI_SERVER_START_FAILED"
+      failureCode(original) === "UI_SERVER_START_FAILED" &&
+      child !== undefined &&
+      started !== undefined &&
+      deadline !== undefined
         ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock)
         : null;
     const cleanup: string[] = [];
     try {
-      await scope.finish(child, true);
+      if (child !== undefined) await scope.finish(child, true);
     } catch (error) {
       cleanup.push(failureCode(error));
     }

@@ -23,7 +23,19 @@ import {
 import { image as fixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import { containerArgv } from "./ui-container.ts";
 import { digest } from "../selected-backend-ci/io.ts";
-import { admitSerialBaseline, type SerialExecution } from "./ui-flow.ts";
+import {
+  admitSerialBaseline,
+  executeUi,
+  executeAuth,
+  type AuthSteps,
+  type SerialExecution,
+} from "./ui-flow.ts";
+import { executeRestore } from "./ui-restore.ts";
+import { registeredTitles } from "./ui-native.ts";
+import { write } from "../selected-backend-ci/io.ts";
+import { Captured, exitedChild, failureOf, fakeScope } from "./ui-fakes.ts";
+import { UiError } from "./ui-common.ts";
+import type { Manifest } from "./ui-record.ts";
 import {
   BACKGROUND_TABLES,
   validateSerialObservation,
@@ -33,10 +45,21 @@ import {
   assertRoomClosure,
   roomRetirement,
   captureRoomLog,
+  ON,
 } from "./ui-audit.ts";
 import { get, record, type Record_ } from "./ui-common.ts";
-import { preparedKeycloakAppEnvironment } from "./ui-final.ts";
-import type { Scope, Child } from "./ui-processes.ts";
+import {
+  preparedKeycloakAppEnvironment,
+  executeEqualCase,
+  executeSelectedStage,
+  prepareKeycloakOwners,
+} from "./ui-final.ts";
+import type { Scope, Child, UiProcesses } from "./ui-processes.ts";
+import * as processes from "./ui-processes.ts";
+import * as nativeSteps from "./ui-native.ts";
+import * as containerSteps from "./ui-container.ts";
+import * as flowSteps from "./ui-flow.ts";
+import * as buildSteps from "./ui-record.ts";
 
 const policy: SerialPolicy = { revisionKeep: 200, revisionSnapshotIntervalHours: 24 };
 const n = (value: bigint | number) => ["integer", String(value)];
@@ -704,3 +727,295 @@ describe("final native serial admission", () => {
     }
   });
 });
+
+// Real file descriptors; all process, SMTP and browser steps below are synthetic.
+test.each(
+  (["selected", "restart", "auth", "restore"] as const).flatMap((consumer) =>
+    [false, true].map((cleanupFailure) => [consumer, cleanupFailure] as const),
+  ),
+)(
+  "FD ownership survives identity failure in %s with cleanup failure=%s",
+  async (consumer, cleanupFailure) => {
+    const directory = mkdtempSync(join(tmpdir(), "fvoci-identity-fd-"));
+    const runnerTemp = process.env.RUNNER_TEMP;
+    process.env.RUNNER_TEMP = directory;
+    const native = observation(true);
+    record(native, "dataset").setupNeeded = true;
+    const baseline = validateSerialObservation(native, policy, true);
+    const manifest = {
+      sourceInputs: { source: "a".repeat(40), tree: "b".repeat(40), files: {} },
+      binaries: { "collab-engine": { path: "/never-executed" } },
+    } as unknown as Manifest;
+    const descriptors: number[] = [];
+    const stopped: number[] = [];
+    const document = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    const seed = {
+      selected: "libsql-remote",
+      creatorId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      workspaceId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      firstAck: "first",
+      finalAck: "final",
+      document: { id: document },
+      persisted: { contentJson: { text: "saved" } },
+      persistedText: "saved",
+    };
+    let identities = 0,
+      sinkStops = 0;
+    const scope = fakeScope().scope;
+    const steps: AuthSteps = {
+      serial: { before: baseline, policy },
+      fixture: (_scope, _manifest, mode) =>
+        Promise.resolve(
+          mode === "observe"
+            ? {
+                rows: {
+                  [document]: {
+                    roomFences: [],
+                    receipts: [{ op: "first" }, { op: "final" }],
+                    content: seed.persisted.contentJson,
+                    text: seed.persistedText,
+                  },
+                },
+              }
+            : baseline.dataset,
+        ),
+      start: (_scope, _manifest, _env, path) => {
+        const log = openSync(join(path, "server.private.log"), "wx", 0o600);
+        descriptors.push(log);
+        return Promise.resolve({
+          server: { child: exitedChild(0, "", descriptors.length) },
+          base: "http://127.0.0.1:12345",
+          log,
+        });
+      },
+      stop: (_scope, server) => {
+        stopped.push(server.child.pid);
+        expect(fs.fstatSync(descriptors[server.child.pid - 1] as number).isFile()).toBe(true);
+        if (cleanupFailure && (consumer !== "restart" || server.child.pid === 2))
+          return Promise.reject(new UiError("UI_SERVER_CLOSURE_FAILED"));
+        return Promise.resolve({
+          serverExit: 0,
+          portClosed: true,
+          recordedIdentitiesRetired: true,
+        });
+      },
+      serverIdentity: (server) => {
+        identities++;
+        if (consumer !== "restart" || identities === 2) throw new UiError("UI_IDENTITY_FAULT");
+        return { pid: server.child.pid, startTicks: "1" };
+      },
+      browser: () =>
+        Promise.resolve({
+          config: { workers: 1, metadata: { selectedBackend: "libsql-remote" } },
+          errors: [],
+          stats: { expected: 1, unexpected: 0, flaky: 0, skipped: 0 },
+          suites: [
+            {
+              specs: [
+                {
+                  file: ON,
+                  title: registeredTitles(ON, "on")[0],
+                  ok: true,
+                  tests: [
+                    {
+                      expectedStatus: "passed",
+                      results: [
+                        {
+                          status: "passed",
+                          retry: 0,
+                          errors: [],
+                          attachments: [
+                            {
+                              name: "selected-vue-native-readback.json",
+                              contentType: "application/json",
+                              body: Buffer.from(JSON.stringify(seed)).toString("base64"),
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      maintenanceReceipts: () => {
+        throw new UiError("UI_AUDIT_FAULT");
+      },
+      currentBuild: () => manifest,
+      write,
+      root: () => directory,
+      token: (bytes) => "a".repeat(bytes * 2),
+      output: new Captured(),
+      smtp: () => Promise.resolve({ child: exitedChild(0), port: "12346", capture: "synthetic" }),
+      stopSmtp: () => {
+        sinkStops++;
+        return Promise.resolve();
+      },
+    };
+    writeFileSync(join(directory, "current-build.json"), "synthetic pinned metadata");
+    try {
+      const run =
+        consumer === "auth" ? executeAuth : consumer === "restore" ? executeRestore : executeUi;
+      expect(
+        await failureOf(
+          run(
+            scope,
+            manifest,
+            baseline.dataset,
+            { FVOCI_LIBSQL_URL: "libsql://invented.invalid" },
+            steps,
+          ),
+        ),
+      ).toBe("UI_IDENTITY_FAULT");
+      expect(descriptors).toHaveLength(consumer === "restart" ? 2 : 1);
+      for (const fd of descriptors)
+        expect(() => fs.fstatSync(fd)).toThrow(expect.objectContaining({ code: "EBADF" }));
+      expect(stopped).toEqual(consumer === "restart" ? [1, 2] : [1]);
+      expect(sinkStops).toBe(consumer === "auth" ? 1 : 0);
+      const receipt = JSON.parse(
+        readFileSync(
+          join(
+            directory,
+            consumer === "restore"
+              ? "restore/restore-result.private.json"
+              : consumer === "auth"
+                ? "auth-result.private.json"
+                : "ui-result.private.json",
+          ),
+          "utf8",
+        ),
+      ) as Record_;
+      expect(receipt.originalFailure).toBe("UI_IDENTITY_FAULT");
+      expect(JSON.stringify(receipt.cleanupErrors)).not.toContain("LOG_CLOSE_FAILED");
+      expect(receipt.cleanupErrors).toEqual(cleanupFailure ? ["UI_SERVER_CLOSURE_FAILED"] : []);
+    } finally {
+      for (const fd of descriptors) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      }
+      rmSync(directory, { recursive: true, force: true });
+      if (runnerTemp === undefined) delete process.env.RUNNER_TEMP;
+      else process.env.RUNNER_TEMP = runnerTemp;
+    }
+  },
+);
+
+test.each(["selected", "equal", "prepared"] as const)(
+  "FD ownership covers final %s identity failure and failed stop",
+  async (consumer) => {
+    const directory = mkdtempSync(join(tmpdir(), "fvoci-final-identity-fd-"));
+    const runnerTemp = process.env.RUNNER_TEMP;
+    process.env.RUNNER_TEMP = directory;
+    const manifest = {
+      sourceInputs: { source: "a".repeat(40), tree: "b".repeat(40), files: {} },
+      binaries: { "collab-engine": { path: "/never-executed", sha256: "a".repeat(64) } },
+      finalRuntime: { imageId: "synthetic" },
+      finalBrowsers: { chromium: {} },
+      bun: { path: "/never-executed", sha256: "a".repeat(64) },
+    } as unknown as Manifest;
+    const environment = {
+      FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+      REVISION_KEEP: "200",
+      REVISION_SNAPSHOT_INTERVAL_HOURS: "24",
+    };
+    const identityFailure = new UiError("UI_IDENTITY_FAULT");
+    const scope = fakeScope().scope;
+    let fd: number | undefined,
+      stops = 0;
+    const mocks = [
+      spyOn(Date, "now").mockReturnValue(1000),
+      spyOn(buildSteps, "currentBuild").mockReturnValue(manifest),
+      spyOn(processes, "withProcesses").mockImplementation(async (body) =>
+        body(scope as UiProcesses),
+      ),
+      spyOn(nativeSteps, "fixture").mockImplementation((_scope, _manifest, mode, env) =>
+        Promise.resolve(
+          mode === "serial-observe"
+            ? observation()
+            : {
+                namespace: env.FVOCI_E2E_TURSO_NAMESPACE,
+                userId:
+                  mode === "member"
+                    ? "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+                    : "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                workspaceId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                email: String(env.FVOCI_E2E_TURSO_NAMESPACE) + "-" + mode + "@example.invalid",
+                commit: "confirmed",
+                freshPrimaryReadback: true,
+                lifecycleDrain: "confirmed",
+                leases: 0,
+              },
+        ),
+      ),
+      spyOn(nativeSteps, "start").mockImplementation((_scope, _manifest, _env, path) => {
+        fd = openSync(join(path, "server.private.log"), "wx", 0o600);
+        return Promise.resolve({
+          server: { child: exitedChild(0) },
+          base: "http://127.0.0.1:12345",
+          log: fd,
+        });
+      }),
+      spyOn(containerSteps, "hostedFinalServerStart").mockImplementation(
+        (_scope, _manifest, _env, path) => {
+          fd = openSync(join(path, "server.private.log"), "wx", 0o600);
+          return Promise.resolve({
+            server: { child: exitedChild(0) },
+            base: "http://127.0.0.1:12345",
+            log: fd,
+          });
+        },
+      ),
+      spyOn(flowSteps, "allocationIdentity").mockImplementation(() => {
+        throw identityFailure;
+      }),
+      spyOn(nativeSteps, "stop").mockImplementation(() => {
+        stops++;
+        throw new UiError("UI_CLEANUP_FAULT");
+      }),
+    ];
+    try {
+      const before = validateSerialObservation(observation(), policy);
+      const run =
+        consumer === "equal"
+          ? executeEqualCase(manifest, environment, policy, before, "on")
+          : consumer === "selected"
+            ? executeSelectedStage(
+                manifest,
+                environment,
+                policy,
+                before,
+                "products",
+                "chromium",
+                "on",
+              )
+            : prepareKeycloakOwners(manifest, environment, policy, before);
+      const caught = await run.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(caught).toBe(identityFailure);
+      expect(fd).toBeNumber();
+      expect(() => fs.fstatSync(fd as number)).toThrow(expect.objectContaining({ code: "EBADF" }));
+      expect(stops).toBe(1);
+      expect(scope.io.output).toBeInstanceOf(Captured);
+      expect((scope.io.output as Captured).stderr.join("\n")).toContain("UI_CLEANUP_FAULT");
+    } finally {
+      for (const mock of mocks.reverse()) mock.mockRestore();
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      }
+      rmSync(directory, { recursive: true, force: true });
+      if (runnerTemp === undefined) delete process.env.RUNNER_TEMP;
+      else process.env.RUNNER_TEMP = runnerTemp;
+    }
+  },
+);
