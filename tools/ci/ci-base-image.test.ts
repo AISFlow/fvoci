@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, mkdir, symlink, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,6 +10,8 @@ import {
   verifyMetadata,
   verifyWorkflow,
   verifyWebBuilderReceipt,
+  verifyLoadedWebImage,
+  type WebImageIdentity,
   WEB_DOCKER_CLIENT,
   admitWebBuilder,
   type WebBuilderContext,
@@ -188,12 +190,162 @@ async function refuses(work: Promise<unknown>, message: string) {
   throw new Error("unexpected Web builder acceptance");
 }
 
+const exampleWebIdentity: WebImageIdentity = {
+  image_id_kind: "legacy-config",
+  image_id: "sha256:" + "d".repeat(64),
+  image_config_digest: "sha256:" + "d".repeat(64),
+  image_manifest_digest: "sha256:" + "b".repeat(64),
+  image_manifest_media_type: "application/vnd.oci.image.manifest.v1+json",
+  image_manifest_size: 321,
+};
+async function webImageFixture(kind: WebImageIdentity["image_id_kind"]) {
+  const config = {
+    architecture: "amd64",
+    os: "linux",
+    config: {
+      ...info().Config,
+      Labels: { ...info().Config.Labels, "org.opencontainers.image.revision": webContext.source },
+    },
+  };
+  const configDigest = "sha256:" + hash(JSON.stringify(config));
+  const metadata: ReturnType<typeof info> & {
+    Id: string;
+    Descriptor?: { mediaType: string; digest: string; size: number };
+  } = { ...info(), Id: configDigest, Config: config.config };
+  let manifestFacts: { mediaType: string; digest: string; size: number } | undefined;
+  await saved([{ "etc/public": "complete Web layer" }], config, metadata, "tar", (manifest) => {
+    const encoded = JSON.stringify(manifest);
+    manifestFacts = {
+      mediaType: manifest.mediaType,
+      digest: "sha256:" + hash(encoded),
+      size: Buffer.byteLength(encoded),
+    };
+    if (kind === "native-manifest") {
+      metadata.Id = manifestFacts.digest;
+      metadata.Descriptor = manifestFacts;
+    }
+  });
+  const descriptor = need(manifestFacts);
+  const identity: WebImageIdentity = {
+    image_id_kind: kind,
+    image_id: metadata.Id,
+    image_config_digest: configDigest,
+    image_manifest_digest: descriptor.digest,
+    image_manifest_media_type: descriptor.mediaType,
+    image_manifest_size: descriptor.size,
+  };
+  return { identity, metadata };
+}
+
+test("Web native descriptor image ID is distinct from its independently hashed config", async () => {
+  const { identity } = await webImageFixture("native-manifest");
+  expect(identity.image_id).not.toBe(identity.image_config_digest);
+  expect(
+    await scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64", webContext.source),
+  ).toEqual(identity);
+});
+
+test("Web native identity rejects forged, malformed, index and mixed descriptor profiles", async () => {
+  const { identity, metadata } = await webImageFixture("native-manifest");
+  const descriptor = need(metadata.Descriptor);
+  for (const patch of [
+    { Id: identity.image_config_digest },
+    { Descriptor: { ...descriptor, digest: "sha256:" + "0".repeat(64) } },
+    { Descriptor: { ...descriptor, size: descriptor.size + 1 } },
+    { Descriptor: { ...descriptor, mediaType: "application/vnd.oci.image.index.v1+json" } },
+    { Descriptor: null },
+    { Descriptor: [] },
+  ]) {
+    await writeFile(join(root, "info.json"), JSON.stringify({ ...metadata, ...patch }));
+    await refuses(
+      scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64", webContext.source),
+      "native identity mismatch",
+    );
+  }
+  const noDescriptor = { ...metadata };
+  delete noDescriptor.Descriptor;
+  await writeFile(join(root, "info.json"), JSON.stringify(noDescriptor));
+  await refuses(
+    scanImage(join(root, "image.tar"), join(root, "info.json"), "amd64", webContext.source),
+    "native identity mismatch",
+  );
+});
+
+test("actual loaded inspection must keep the sealed identity profile, both hashes and current source", async () => {
+  for (const kind of ["legacy-config", "native-manifest"] as const) {
+    const { identity, metadata } = await webImageFixture(kind);
+    verifyLoadedWebImage(metadata, identity, webContext.source);
+    for (const patch of [
+      { Id: "sha256:" + "0".repeat(64) },
+      { Architecture: "arm64" },
+      {
+        Config: {
+          ...metadata.Config,
+          Labels: {
+            ...metadata.Config.Labels,
+            "org.opencontainers.image.revision": "0".repeat(40),
+          },
+        },
+      },
+    ])
+      expect(() => {
+        verifyLoadedWebImage({ ...metadata, ...patch }, identity, webContext.source);
+      }).toThrow();
+    expect(() => {
+      verifyLoadedWebImage(metadata, { ...identity, image_id_kind: "unknown" }, webContext.source);
+    }).toThrow();
+    if (kind === "native-manifest") {
+      const legacy = { ...metadata, Id: identity.image_config_digest };
+      delete legacy.Descriptor;
+      expect(() => {
+        verifyLoadedWebImage(legacy, identity, webContext.source);
+      }).toThrow("loaded image/source mismatch");
+    } else {
+      const native = {
+        ...metadata,
+        Id: identity.image_manifest_digest,
+        Descriptor: {
+          digest: identity.image_manifest_digest,
+          mediaType: identity.image_manifest_media_type,
+          size: identity.image_manifest_size,
+        },
+      };
+      expect(() => {
+        verifyLoadedWebImage(native, identity, webContext.source);
+      }).toThrow("loaded image/source mismatch");
+    }
+  }
+});
+
+test("identity refusal diagnostics retain bounded hashes without raw malformed values", async () => {
+  const { identity, metadata } = await webImageFixture("native-manifest");
+  const canary = "FVOCI_IMAGE_ID_PRIVATE_DIAGNOSTIC_CANARY";
+  const lines: string[] = [];
+  const write = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+    lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    return true;
+  });
+  try {
+    expect(() => {
+      verifyLoadedWebImage({ ...metadata, Id: canary }, identity, webContext.source);
+    }).toThrow("native identity mismatch");
+  } finally {
+    write.mockRestore();
+  }
+  expect(lines).toHaveLength(1);
+  const diagnostic = lines.join("");
+  expect(diagnostic).not.toContain(canary);
+  expect(diagnostic).toContain('"field_count":11');
+  expect(diagnostic.length).toBeLessThan(2400);
+  expect(diagnostic.match(/"sha256":"[0-9a-f]{64}"/g)).toHaveLength(11);
+});
+
 test("Web builder receipt refuses source, repository, run, attempt, architecture and recipe replay", () => {
   const receipt = {
-    schema: 1,
+    schema: 2,
     ...webContext,
     ...webClientReceipt,
-    image_id: "sha256:" + "d".repeat(64),
+    ...exampleWebIdentity,
     archive_sha256: "e".repeat(64),
     inspection_sha256: "f".repeat(64),
     docker_client_sha256: webContext.docker_client_sha256,
@@ -207,7 +359,7 @@ test("Web builder receipt refuses source, repository, run, attempt, architecture
     attempt: "2",
     architecture: "arm64",
     recipe_sha256: "3".repeat(64),
-    schema: 2,
+    schema: 1,
     archive_sha256: "invalid",
     image_id: "mutable:latest",
   })) {
@@ -218,10 +370,10 @@ test("Web builder receipt refuses source, repository, run, attempt, architecture
 
 test("Web client receipt refuses changed observed archive, version and immutable upstream source", () => {
   const receipt = {
-    schema: 1,
+    schema: 2,
     ...webContext,
     ...webClientReceipt,
-    image_id: "sha256:" + "d".repeat(64),
+    ...exampleWebIdentity,
     archive_sha256: "e".repeat(64),
     inspection_sha256: "f".repeat(64),
   };
@@ -234,54 +386,59 @@ test("Web client receipt refuses changed observed archive, version and immutable
   ).toThrow("source/run/attempt/architecture mismatch");
 });
 
-test("Web builder admission binds complete archive, inspection and client bytes before use", async () => {
-  const labels = {
-    ...info().Config.Labels,
-    "org.opencontainers.image.revision": webContext.source,
-  };
-  const config = {
-    architecture: "amd64",
-    os: "linux",
-    config: { ...info().Config, Labels: labels },
-  };
-  const imageId = "sha256:" + hash(JSON.stringify(config));
-  const metadata = { ...info(), Id: imageId, Config: config.config };
-  await saved([{ "etc/public": "complete layer" }], config, metadata);
-  await rename(join(root, "info.json"), join(root, "image.json"));
-  await writeFile(join(root, "docker-client"), "producer static client fixture");
-  const originals = new Map<string, Uint8Array>();
-  for (const name of ["image.tar", "image.json", "docker-client"])
-    originals.set(name, await Bun.file(join(root, name)).bytes());
-  const needBytes = (name: string) => {
-    const bytes = originals.get(name);
-    if (!bytes) throw new Error("missing fixture file");
-    return bytes;
-  };
-  const receipt = {
-    schema: 1,
-    ...webContext,
-    ...webClientReceipt,
-    image_id: imageId,
-    archive_sha256: hash(needBytes("image.tar")),
-    inspection_sha256: hash(needBytes("image.json")),
-    docker_client_sha256: hash(needBytes("docker-client")),
-  };
-  const encoded = JSON.stringify(receipt) + "\n";
-  await writeFile(join(root, "receipt.json"), encoded);
-  await admitWebBuilder(root, hash(encoded), imageId, webContext);
-  for (const name of originals.keys()) {
-    await writeFile(join(root, name), concat(needBytes(name), new Uint8Array([0])));
-    await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "digest mismatch");
-    await writeFile(join(root, name), needBytes(name));
-  }
-  await refuses(admitWebBuilder(root, "0".repeat(64), imageId, webContext), "receipt digest");
-  await refuses(
-    admitWebBuilder(root, hash(encoded), "sha256:" + "0".repeat(64), webContext),
-    "expected image",
-  );
-  await writeFile(join(root, "unexpected"), "not admitted");
-  await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "unexpected files");
-});
+test.each(["legacy-config", "native-manifest"] as const)(
+  "Web %s admission binds every archive, config, manifest, inspection and client byte",
+  async (kind) => {
+    const { identity } = await webImageFixture(kind);
+    const imageId = identity.image_id;
+    await rename(join(root, "info.json"), join(root, "image.json"));
+    await writeFile(join(root, "docker-client"), "producer static client fixture");
+    const originals = new Map<string, Uint8Array>();
+    for (const name of ["image.tar", "image.json", "docker-client"])
+      originals.set(name, await Bun.file(join(root, name)).bytes());
+    const needBytes = (name: string) => {
+      const bytes = originals.get(name);
+      if (!bytes) throw new Error("missing fixture file");
+      return bytes;
+    };
+    const receipt = {
+      schema: 2,
+      ...webContext,
+      ...webClientReceipt,
+      ...identity,
+      archive_sha256: hash(needBytes("image.tar")),
+      inspection_sha256: hash(needBytes("image.json")),
+      docker_client_sha256: hash(needBytes("docker-client")),
+    };
+    const encoded = JSON.stringify(receipt) + "\n";
+    await writeFile(join(root, "receipt.json"), encoded);
+    await admitWebBuilder(root, hash(encoded), imageId, webContext);
+    for (const patch of [
+      { image_config_digest: "sha256:" + "0".repeat(64) },
+      { image_manifest_digest: "sha256:" + "0".repeat(64) },
+      { image_manifest_size: identity.image_manifest_size + 1 },
+      { image_id_kind: kind === "legacy-config" ? "native-manifest" : "legacy-config" },
+    ]) {
+      const forged = JSON.stringify({ ...receipt, ...patch }) + "\n";
+      await writeFile(join(root, "receipt.json"), forged);
+      const failure = await rejection(admitWebBuilder(root, hash(forged), imageId, webContext));
+      expect(failure).toBeInstanceOf(Error);
+    }
+    await writeFile(join(root, "receipt.json"), encoded);
+    for (const name of originals.keys()) {
+      await writeFile(join(root, name), concat(needBytes(name), new Uint8Array([0])));
+      await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "digest mismatch");
+      await writeFile(join(root, name), needBytes(name));
+    }
+    await refuses(admitWebBuilder(root, "0".repeat(64), imageId, webContext), "receipt digest");
+    await refuses(
+      admitWebBuilder(root, hash(encoded), "sha256:" + "0".repeat(64), webContext),
+      "expected image",
+    );
+    await writeFile(join(root, "unexpected"), "not admitted");
+    await refuses(admitWebBuilder(root, hash(encoded), imageId, webContext), "unexpected files");
+  },
+);
 
 test("Web scan binds actual archived config source and ID rather than trusting supplied inspection", async () => {
   const labels = { ...info().Config.Labels, "org.opencontainers.image.revision": "0".repeat(40) };

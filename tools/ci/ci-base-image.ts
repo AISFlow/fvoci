@@ -278,6 +278,158 @@ export function verifyMetadata(info: unknown, architecture: string) {
   checkText(JSON.stringify(info));
 }
 
+export type WebImageIdentity = {
+  image_id_kind: "legacy-config" | "native-manifest";
+  image_id: string;
+  image_config_digest: string;
+  image_manifest_digest: string;
+  image_manifest_media_type: string;
+  image_manifest_size: number;
+};
+const webImageIdentityKeys = [
+  "image_id_kind",
+  "image_id",
+  "image_config_digest",
+  "image_manifest_digest",
+  "image_manifest_media_type",
+  "image_manifest_size",
+];
+function readWebImageIdentity(value: unknown): WebImageIdentity {
+  check(isObject(value), "Web builder image identity missing");
+  const {
+    image_id_kind,
+    image_id,
+    image_config_digest,
+    image_manifest_digest,
+    image_manifest_media_type,
+    image_manifest_size,
+  } = value;
+  check(
+    image_id_kind === "legacy-config" || image_id_kind === "native-manifest",
+    "Web builder identity kind invalid",
+  );
+  check(
+    typeof image_id === "string" &&
+      sha256Digest.test(image_id) &&
+      typeof image_config_digest === "string" &&
+      sha256Digest.test(image_config_digest) &&
+      typeof image_manifest_digest === "string" &&
+      sha256Digest.test(image_manifest_digest),
+    "Web builder identity digest invalid",
+  );
+  check(
+    typeof image_manifest_media_type === "string" &&
+      manifestMediaTypes.includes(image_manifest_media_type) &&
+      typeof image_manifest_size === "number" &&
+      Number.isSafeInteger(image_manifest_size) &&
+      image_manifest_size > 0,
+    "Web builder manifest descriptor invalid",
+  );
+  check(
+    image_id === (image_id_kind === "legacy-config" ? image_config_digest : image_manifest_digest),
+    "Web builder identity kind/ID mismatch",
+  );
+  return {
+    image_id_kind,
+    image_id,
+    image_config_digest,
+    image_manifest_digest,
+    image_manifest_media_type,
+    image_manifest_size,
+  };
+}
+function webIdentityEvidence(
+  info: unknown,
+  manifest: { digest: string; mediaType: string; size: number },
+  config: string,
+  source?: string,
+  archivedSource?: unknown,
+) {
+  // Fixed labels and SHA256(value) only; diagnostics never replace the refusal.
+  try {
+    const fields: [string, unknown][] = [
+      ["inspected_id", at(info, "Id")],
+      ["native_descriptor_digest", at(info, "Descriptor", "digest")],
+      ["native_descriptor_media_type", at(info, "Descriptor", "mediaType")],
+      ["native_descriptor_size", at(info, "Descriptor", "size")],
+      ["archive_manifest_digest", manifest.digest],
+      ["archive_manifest_media_type", manifest.mediaType],
+      ["archive_manifest_size", manifest.size],
+      ["archive_config_digest", config],
+      ["expected_source", source],
+      ["inspected_source", at(info, "Config", "Labels", "org.opencontainers.image.revision")],
+      ["archived_source", archivedSource],
+    ];
+    process.stderr.write(
+      JSON.stringify({
+        web_builder_identity_hashes: 1,
+        field_count: fields.length,
+        fields: Object.fromEntries(
+          fields.map(([key, value]) => [
+            key,
+            {
+              type: value === undefined ? "missing" : typeof value,
+              sha256: new Bun.CryptoHasher("sha256")
+                .update(value === undefined ? "<missing>" : JSON.stringify(value))
+                .digest("hex"),
+            },
+          ]),
+        ),
+      }) + "\n",
+    );
+  } catch {
+    /* The original policy failure remains authoritative. */
+  }
+}
+function qualifiedWebImageIdentity(
+  info: unknown,
+  manifest: { digest: string; mediaType: string; size: number },
+  config: string,
+  source?: string,
+  archivedSource?: unknown,
+): WebImageIdentity {
+  const id = at(info, "Id");
+  const legacy = isObject(info) && !Object.hasOwn(info, "Descriptor") && id === config;
+  const native =
+    isObject(at(info, "Descriptor")) &&
+    id === manifest.digest &&
+    at(info, "Descriptor", "digest") === manifest.digest &&
+    at(info, "Descriptor", "mediaType") === manifest.mediaType &&
+    at(info, "Descriptor", "size") === manifest.size;
+  if (!legacy && !native) webIdentityEvidence(info, manifest, config, source, archivedSource);
+  check(typeof id === "string" && (legacy || native), "Web builder native identity mismatch");
+  return {
+    image_id_kind: legacy ? "legacy-config" : "native-manifest",
+    image_id: id,
+    image_config_digest: config,
+    image_manifest_digest: manifest.digest,
+    image_manifest_media_type: manifest.mediaType,
+    image_manifest_size: manifest.size,
+  };
+}
+export function verifyLoadedWebImage(info: unknown, expected: unknown, source: string) {
+  const identity = readWebImageIdentity(expected);
+  verifyMetadata(info, "amd64");
+  const manifest = {
+    digest: identity.image_manifest_digest,
+    mediaType: identity.image_manifest_media_type,
+    size: identity.image_manifest_size,
+  };
+  const actual = qualifiedWebImageIdentity(info, manifest, identity.image_config_digest, source);
+  const same =
+    Bun.deepEquals(actual, identity) &&
+    at(info, "Config", "Labels", "org.opencontainers.image.revision") === source;
+  if (!same) webIdentityEvidence(info, manifest, identity.image_config_digest, source);
+  check(same, "Web builder loaded image/source mismatch");
+}
+
+export function scanImage(path: string, inspection: string, arch: string): Promise<string>;
+export function scanImage(
+  path: string,
+  inspection: string,
+  arch: string,
+  revision: string,
+): Promise<WebImageIdentity>;
 export async function scanImage(path: string, inspection: string, arch: string, revision?: string) {
   const info = await json(inspection);
   verifyMetadata(info, arch);
@@ -355,8 +507,9 @@ export async function scanImage(path: string, inspection: string, arch: string, 
   );
   const config = await descriptorBytes(at(manifest, "config"));
   const configuration = parseMetadata(config);
-  const imageId = at(manifest, "config", "digest");
-  check(typeof imageId === "string", "saved image config digest missing");
+  const configDigest = at(manifest, "config", "digest");
+  check(typeof configDigest === "string", "saved image config digest missing");
+  let webIdentity: WebImageIdentity | undefined;
   if (revision !== undefined) {
     verifyMetadata(
       {
@@ -366,12 +519,32 @@ export async function scanImage(path: string, inspection: string, arch: string, 
       },
       arch,
     );
+    const digest = at(manifestDescriptor, "digest"),
+      mediaType = at(manifestDescriptor, "mediaType"),
+      size = at(manifestDescriptor, "size");
     check(
-      at(info, "Id") === imageId &&
-        at(info, "Config", "Labels", "org.opencontainers.image.revision") === revision &&
-        at(configuration, "config", "Labels", "org.opencontainers.image.revision") === revision,
-      "Web builder config/source mismatch",
+      typeof digest === "string" && typeof mediaType === "string" && typeof size === "number",
+      "Web builder manifest descriptor missing",
     );
+    const descriptor = { digest, mediaType, size };
+    const archivedSource = at(
+      configuration,
+      "config",
+      "Labels",
+      "org.opencontainers.image.revision",
+    );
+    webIdentity = qualifiedWebImageIdentity(
+      info,
+      descriptor,
+      configDigest,
+      revision,
+      archivedSource,
+    );
+    const sameSource =
+      at(info, "Config", "Labels", "org.opencontainers.image.revision") === revision &&
+      archivedSource === revision;
+    if (!sameSource) webIdentityEvidence(info, descriptor, configDigest, revision, archivedSource);
+    check(sameSource, "Web builder config/source mismatch");
   }
   checkText(utf8.decode(config));
   // Include lower layers: deleting a credential later does not remove it.
@@ -434,7 +607,7 @@ export async function scanImage(path: string, inspection: string, arch: string, 
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
-  return imageId;
+  return webIdentity ?? configDigest;
 }
 
 // Observed once from the official TLS distribution selected by immutable
@@ -465,7 +638,7 @@ const webReceiptKeys = [
   "attempt",
   "architecture",
   "recipe_sha256",
-  "image_id",
+  ...webImageIdentityKeys,
   "archive_sha256",
   "inspection_sha256",
   "docker_client_sha256",
@@ -479,7 +652,8 @@ export function verifyWebBuilderReceipt(value: unknown, context: WebBuilderConte
     isObject(value) && Bun.deepEquals(Object.keys(value).sort(), webReceiptKeys),
     "Web builder receipt shape mismatch",
   );
-  check(value.schema === 1, "Web builder receipt schema mismatch");
+  check(value.schema === 2, "Web builder receipt schema mismatch");
+  readWebImageIdentity(value);
   for (const [key, expected] of Object.entries(WEB_DOCKER_CLIENT).filter(
     ([key]) => key !== "client_sha256",
   ))
@@ -589,17 +763,17 @@ async function exportWebBuilder(directory: string, output: string) {
   );
   const context = await webBuilderContext();
   const files = await webBuilderFiles(directory);
-  const imageId = await scanImage(
+  const identity = await scanImage(
     join(directory, "image.tar"),
     join(directory, "image.json"),
     "amd64",
     context.source,
   );
   const receipt = {
-    schema: 1,
+    schema: 2,
     ...context,
     ...files,
-    image_id: imageId,
+    ...identity,
     ...Object.fromEntries(
       Object.entries(WEB_DOCKER_CLIENT)
         .filter(([key]) => key !== "client_sha256")
@@ -612,7 +786,7 @@ async function exportWebBuilder(directory: string, output: string) {
   const handle = await import("node:fs/promises");
   await handle.appendFile(
     output,
-    `image_id=${imageId}\nreceipt_sha256=${digest}\narchive_sha256=${files.archive_sha256}\n`,
+    `image_id=${identity.image_id}\nreceipt_sha256=${digest}\narchive_sha256=${files.archive_sha256}\n`,
   );
 }
 
@@ -634,13 +808,14 @@ export async function admitWebBuilder(
   const receipt = await webBuilderReceipt(directory, expectedReceipt, expectedImage, context);
   for (const [key, digest] of Object.entries(await webBuilderFiles(directory)))
     check(receipt[key] === digest, "Web builder archive/client/inspection digest mismatch");
+  const scanned = await scanImage(
+    join(directory, "image.tar"),
+    join(directory, "image.json"),
+    "amd64",
+    String(receipt.source),
+  );
   check(
-    (await scanImage(
-      join(directory, "image.tar"),
-      join(directory, "image.json"),
-      "amd64",
-      String(receipt.source),
-    )) === expectedImage,
+    scanned.image_id === expectedImage && Bun.deepEquals(scanned, readWebImageIdentity(receipt)),
     "Web builder scanned image mismatch",
   );
 }
@@ -659,12 +834,7 @@ async function loadedWebBuilder(
   );
   await webFileHash(inspection, 1024 ** 2);
   const info = await json(inspection);
-  verifyMetadata(info, "amd64");
-  check(
-    at(info, "Id") === expectedImage &&
-      at(info, "Config", "Labels", "org.opencontainers.image.revision") === receipt.source,
-    "Web builder loaded image/source mismatch",
-  );
+  verifyLoadedWebImage(info, receipt, String(receipt.source));
 }
 
 export function buildSummary(log: string, info?: unknown) {
