@@ -10,6 +10,7 @@ import {
   type TestInfo,
 } from "@playwright/test";
 import type { components } from "../src/generated/api";
+import { extractText } from "../../../packages/editor/src/extract";
 import { waitForCapturedMail } from "../e2e/helpers";
 import {
   admin,
@@ -106,7 +107,7 @@ async function mount(page: Page, target: AuthTarget): Promise<void> {
   await expect(page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]')).toBeVisible();
 }
 
-async function saveOwner(text: string, target: AuthTarget): Promise<void> {
+async function saveOwner(browser: Browser, text: string, target: AuthTarget) {
   const editor = owner.page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]');
   await editor.fill(text);
   if (flow === "on") {
@@ -130,6 +131,21 @@ async function saveOwner(text: string, target: AuthTarget): Promise<void> {
       "true",
     );
   }
+  // Read through a new healthy client after the matching ACK. The existing
+  // observation also compares the full native document with the HTTP body.
+  const readback = await documentObservation(browser, base, owner, target, flow);
+  expect(readback.targetId).toBe(target.id);
+  const body = readback.body as Schema["BodyResponse"];
+  const actualText = extractText(body.contentJson);
+  expect(actualText).toBe(text);
+  return {
+    targetId: readback.targetId,
+    body,
+    ids: readback.ids,
+    nativeV1: readback.nativeV1,
+    expectedText: text,
+    actualText,
+  };
 }
 
 async function persistOwner(): Promise<void> {
@@ -241,12 +257,13 @@ test(AUTH_CASES[0], async ({ browser }, info) => {
   await live(owner);
   const after = await documentObservation(browser, base, owner, target, flow);
   assertAuthNoEffect(before, after);
-  await saveOwner("healthy owner after logout refusal", target);
+  const healthyReadback = await saveOwner(browser, "healthy owner after logout refusal", target);
   await witness(info, {
     targetId: target.id,
     workspaceId: target.workspaceId,
     before,
     after,
+    healthyReadback,
     refusal,
     closed: roomA.closedCodes,
     retainedSession: b.user.sessionId,
@@ -309,12 +326,17 @@ test(AUTH_CASES[1], async ({ browser }, info) => {
   expect(a.user.sessionId).not.toBe(b.user.sessionId);
   const after = await documentObservation(browser, base, owner, target, flow);
   assertAuthNoEffect(before, after);
-  await saveOwner("healthy owner after password-change refusal", target);
+  const healthyReadback = await saveOwner(
+    browser,
+    "healthy owner after password-change refusal",
+    target,
+  );
   await witness(info, {
     targetId: target.id,
     workspaceId: target.workspaceId,
     before,
     after,
+    healthyReadback,
     refusal,
     wrongCurrentStatus: 400,
     oldPasswordStatus: 401,
@@ -402,12 +424,13 @@ test(AUTH_CASES[2], async ({ browser }, info) => {
   await passwordLogin(reset, changedPassword, 401);
   await passwordLogin(reset, resetPassword, 200);
   expect((await currentSession(reset)).userId).toBe(a.user.userId);
-  await saveOwner("healthy owner after reset refusal", target);
+  const healthyReadback = await saveOwner(browser, "healthy owner after reset refusal", target);
   await witness(info, {
     targetId: target.id,
     workspaceId: target.workspaceId,
     before,
     after,
+    healthyReadback,
     refusal,
     tamperedStatus: 400,
     spentStatus: 400,
