@@ -363,7 +363,14 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
 /// `streaming_signal_status()` and its outer service wrapper cleans up.
 pub fn run_owned_streaming(command: &mut Command, logs: [File; 2]) -> Result<Finished, RunError> {
     STREAMING.store(1, Ordering::SeqCst);
-    owned(command, None, Some(logs))
+    let result = owned(command, None, Some(logs));
+    // Once cleanup finishes, a new interrupt must terminate us rather than
+    // leave an unobserved cancellation behind a caller's final status check.
+    // Hold delivery through the transition, including the spawn-error path.
+    let held = hold_interrupts();
+    STREAMING.store(0, Ordering::SeqCst);
+    release_interrupts(held);
+    result
 }
 
 fn owned(

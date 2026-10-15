@@ -953,6 +953,124 @@ fn assert_meili_cleanup(root: &Path, started: bool) {
     );
 }
 
+// A separate native libtest process exercises the real library boundary and
+// signal handler without injecting a hook or flag into the production runner.
+#[test]
+#[ignore = "signal fixture selected by collaboration_late_interrupt_never_acknowledges_success"]
+fn collaboration_late_interrupt_fixture() {
+    use std::os::unix::process::ExitStatusExt;
+    use xtask::process::run_owned_streaming;
+
+    let stage = std::env::var("LATE_SIGNAL_STAGE").unwrap();
+    let code = match stage.as_str() {
+        "after-verdict" => xtask::rust_binaries::main(
+            [
+                "collaboration",
+                "--directory",
+                "handoff",
+                "--sqlite-identity",
+                &"b".repeat(64),
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        ),
+        "after-reap" | "spawn-error" => {
+            let path = if stage == "spawn-error" {
+                "missing-executable"
+            } else {
+                "target/db-tests/debug/deps/task_collab_integration"
+            };
+            match run_owned_streaming(
+                &mut Command::new(path),
+                [
+                    fs::File::create("late.stdout.log").unwrap(),
+                    fs::File::create("late.stderr.log").unwrap(),
+                ],
+            ) {
+                Ok(done) => done
+                    .status
+                    .code()
+                    .unwrap_or_else(|| 128 + done.status.signal().unwrap()),
+                Err(_) => 1,
+            }
+        }
+        _ => panic!("unknown fixture stage"),
+    };
+    // The direct child has been reaped and all captured streams reached EOF
+    // before delivery, rather than racing a child exit with a fixed delay.
+    assert_eq!(
+        unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    let signal: i32 = std::env::var("LATE_SIGNAL").unwrap().parse().unwrap();
+    if signal != 0 {
+        assert_eq!(unsafe { libc::raise(signal) }, 0);
+    }
+    std::process::exit(code);
+}
+
+#[test]
+fn collaboration_late_interrupt_never_acknowledges_success() {
+    let _serial = serial();
+    let (root, _) = collaboration_workspace();
+    for (stage, mode, normal) in [
+        ("after-reap", "pass", 0),
+        ("spawn-error", "pass", 1),
+        ("after-verdict", "pass", 0),
+        ("after-verdict", "fail-first", 101),
+    ] {
+        for (signal, expected) in [(0, normal), (libc::SIGINT, 130), (libc::SIGTERM, 143)] {
+            let _ = fs::remove_file(root.join("ran.log"));
+            let _ = fs::remove_file(root.join("docker-calls"));
+            let template = collaboration_command(&root, mode, false);
+            let mut command = Command::new("bash");
+            command
+                .arg(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("scripts/start-test-meili.sh"),
+                )
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "collaboration_late_interrupt_fixture",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .current_dir(&root)
+                .envs(
+                    template
+                        .get_envs()
+                        .filter_map(|(key, value)| value.map(|value| (key, value))),
+                )
+                .env_remove("FVOCI_MEILI_URL")
+                .env_remove("FVOCI_TEST_MEILI_CONTAINER")
+                .env("LATE_SIGNAL_STAGE", stage)
+                .env("LATE_SIGNAL", signal.to_string())
+                .stdin(Stdio::null());
+            let out = command.output().unwrap();
+            assert_meili_cleanup(&root, true);
+            if stage == "after-verdict" {
+                assert_suite_shape(&root);
+            }
+            assert_eq!(
+                out.status.code(),
+                Some(expected),
+                "{stage}/{mode}/{signal}: {out:?}"
+            );
+            assert!(!root.join("cargo-used").exists());
+            eprintln!("late-signal stage={stage} mode={mode} signal={signal} exit={expected} cleanup=complete");
+        }
+    }
+}
+
 #[test]
 fn collaboration_preserves_groups_failures_admission_and_owned_service() {
     let _serial = serial();

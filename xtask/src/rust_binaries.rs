@@ -566,6 +566,9 @@ fn run_collaboration(manifest: &Value, root: &Path, logs: &Path) -> Result<i32, 
         }
     }
     let admission = verify_native_admission(&admission_stdout);
+    if let Some(code) = streaming_signal_status() {
+        return Ok(code);
+    }
     if status != 0 {
         return Ok(status);
     }
