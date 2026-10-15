@@ -11,6 +11,7 @@ import {
   PRODUCT_TITLES,
   readFinalBinding,
   validateFinalBinding,
+  assertFinalMetadata,
 } from "./selected-final-contract";
 
 const namespace = "tui-0123456789abcdef0123";
@@ -18,6 +19,75 @@ const actor = (name: string, index: number) => ({
   userId: `00000000-0000-4000-8000-00000000000${String(index)}`,
   email: `${namespace}-${name}@example.invalid`,
   password: "test-only-password",
+});
+
+test("frozen metadata rejects changed actor hash or a different valid browser before actor preparation", () => {
+  const binding = validateFinalBinding(value, env);
+  const digest = "a".repeat(64);
+  const metadata = {
+    actorBindingSha256: digest,
+    source: binding.source,
+    tree: binding.tree,
+    selectedBackend: binding.backend,
+    selectedFlow: binding.flow,
+    browser: binding.browser,
+    suite: binding.suite,
+    titles: [...PRODUCT_TITLES],
+  };
+  assertFinalMetadata(metadata, digest, binding);
+  for (const wrong of [
+    { actorBindingSha256: "b".repeat(64) },
+    { browser: "webkit" },
+    { source: "c".repeat(40) },
+    { titles: PRODUCT_TITLES.slice(1) },
+  ])
+    expect(() => {
+      assertFinalMetadata({ ...metadata, ...wrong }, digest, binding);
+    }).toThrow();
+  expect(() =>
+    validateFinalBinding(
+      { ...value, suite: "boundary", browser: "firefox" },
+      { ...env, FVOCI_E2E_FINAL_SUITE: "boundary", FVOCI_E2E_FINAL_BROWSER: "webkit" },
+    ),
+  ).toThrow();
+});
+
+function preparationOrder(source: string): void {
+  const ast = ts.createSourceFile("selected.ts", source, ts.ScriptTarget.Latest, true);
+  const hook = ast.statements.find(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      ts.isCallExpression(statement.expression) &&
+      statement.expression.expression.getText(ast) === "test.beforeAll",
+  );
+  if (!hook || !ts.isExpressionStatement(hook) || !ts.isCallExpression(hook.expression))
+    throw Error("missing preparation");
+  const body = hook.expression.arguments[0];
+  if (!body || !ts.isArrowFunction(body) || !ts.isBlock(body.body))
+    throw Error("missing preparation");
+  const guard = body.body.statements.findIndex(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      ts.isCallExpression(statement.expression) &&
+      statement.expression.expression.getText(ast) === "assertFinalMetadata",
+  );
+  const actors = body.body.statements.findIndex(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      ts.isBinaryExpression(statement.expression) &&
+      ts.isNewExpression(statement.expression.right) &&
+      statement.expression.right.expression.getText(ast) === "SelectedActors",
+  );
+  if (guard < 0 || actors < 0 || guard >= actors)
+    throw Error("actor preparation before metadata guard");
+}
+
+test("beforeAll binds the frozen metadata before any actor can authenticate", () => {
+  const source = readFileSync(join(import.meta.dir, "selected-final-acceptance.ts"), "utf8");
+  preparationOrder(source);
+  expect(() => {
+    preparationOrder(source.replaceAll("assertFinalMetadata(", "missingGuard("));
+  }).toThrow();
 });
 const value = {
   schema: 1,

@@ -20,7 +20,12 @@ import {
   waitConnected,
 } from "./collab-helpers";
 import { UUID_RE } from "./collab-wire";
-import { PRODUCT_TITLES, boundaryTitle, readFinalBinding } from "./selected-final-contract";
+import {
+  PRODUCT_TITLES,
+  boundaryTitle,
+  readFinalBinding,
+  assertFinalMetadata,
+} from "./selected-final-contract";
 import {
   SelectedActors,
   body,
@@ -37,7 +42,10 @@ const { binding, sha256 } = readFinalBinding();
 let actors: SelectedActors;
 test.describe.configure({ mode: "serial" });
 
-test.beforeAll(async ({ browser, baseURL }) => {
+test.beforeAll(async ({ browser, baseURL }, info) => {
+  assertFinalMetadata(info.config.metadata, sha256, binding);
+  expect(readFinalBinding().sha256).toBe(sha256);
+  expect(browser.browserType().name()).toBe(binding.browser);
   if (!baseURL) throw new Error("SELECTED_FINAL_ALLOCATION_REQUIRED");
   actors = new SelectedActors(browser, baseURL, binding);
   try {
@@ -50,13 +58,7 @@ test.beforeAll(async ({ browser, baseURL }) => {
 test.beforeEach(({ browserName }, info) => {
   expect(browserName).toBe(binding.browser);
   expect(info.config.workers).toBe(1);
-  expect(info.config.metadata).toMatchObject({
-    actorBindingSha256: sha256,
-    source: binding.source,
-    tree: binding.tree,
-    selectedFlow: binding.flow,
-    selectedBackend: binding.backend,
-  });
+  assertFinalMetadata(info.config.metadata, sha256, binding);
   expect(readFinalBinding().sha256).toBe(sha256);
 });
 test.afterEach(async ({ browser }, info) => {

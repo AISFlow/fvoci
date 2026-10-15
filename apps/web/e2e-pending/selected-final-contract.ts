@@ -93,6 +93,27 @@ export function assertFinalInventory(actual: string[], binding: FinalBinding): v
   if (JSON.stringify(actual) !== JSON.stringify(finalTitles(binding))) refuse();
 }
 
+export function assertFinalMetadata(
+  metadata: unknown,
+  sha256: string,
+  binding: FinalBinding,
+): void {
+  const result = z
+    .object({
+      actorBindingSha256: z.literal(sha256),
+      source: z.literal(binding.source),
+      tree: z.literal(binding.tree),
+      selectedBackend: z.literal(binding.backend),
+      selectedFlow: z.literal(binding.flow),
+      browser: z.literal(binding.browser),
+      suite: z.literal(binding.suite),
+      titles: z.array(z.string()),
+    })
+    .safeParse(metadata);
+  if (!result.success) refuse();
+  assertFinalInventory(result.data.titles, binding);
+}
+
 export function readFinalBinding(env: Env = process.env) {
   try {
     const path = env.FVOCI_E2E_FINAL_ACTOR_BINDING;
