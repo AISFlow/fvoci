@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { rawBlockScalar } from "./raw-yaml.ts";
 import { get as safeGet } from "./load.ts";
 import { gatedWorkflowJobs } from "./registry.ts";
-import { readUtf8, type VerifyContext } from "./rust-shared.ts";
+import { HOST_APT_PREPARATION_RUN, readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
 export function webWorkflowJobs(ctx: VerifyContext): Mapping | null {
@@ -565,11 +565,7 @@ case "$(dpkg --print-architecture)" in
   arm64) ;;
   *) exit 1 ;;
 esac
-printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-mkdir "$RUNNER_TEMP/fvoci-sqlite"
+${HOST_APT_PREPARATION_RUN}mkdir "$RUNNER_TEMP/fvoci-sqlite"
 dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
 bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
   --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"

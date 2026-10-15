@@ -9,7 +9,7 @@ import {
   steps,
   str,
 } from "./rust-common.ts";
-import { RUST_XTASK } from "./rust-shared.ts";
+import { HOST_APT_PREPARATION_RUN, RUST_XTASK } from "./rust-shared.ts";
 
 export const SQLITE_PREFIX_PATH =
   "${{ runner.temp }}/fvoci-sqlite/${{ steps.sqlite.outputs.target }}";
@@ -31,6 +31,7 @@ export const SQLITE_PREFIX_JOBS = [
   "collaboration",
 ];
 const SQLITE_PREFIX_SAVER = "postgres-build";
+const HOST_ALIGNED_JOBS = new Set(["postgres-build", "postgres", "collaboration"]);
 
 export function sqlitePrefixCacheSteps(saver = false): Mapping[] {
   const list: Mapping[] = [
@@ -98,6 +99,20 @@ export function sqlitePrefixCacheErrors(jobs: Mapping): string[] {
         `rust: ${name} SQLite prefix cache must retain exact preflight/restore/verify and producer-only save`,
       );
       continue;
+    }
+    if (
+      HOST_ALIGNED_JOBS.has(name) &&
+      !str(only, "run").endsWith(
+        HOST_APT_PREPARATION_RUN +
+          'mkdir "$RUNNER_TEMP/fvoci-sqlite"\n' +
+          SQLITE_PACKAGES +
+          "\n" +
+          SQLITE_PREFLIGHT,
+      )
+    ) {
+      errors.push(
+        `rust: ${name} native handoff host packages must be aligned before SQLite capture`,
+      );
     }
     const order = `rust: ${name} SQLite prefix verification must precede save and all consumers`;
     const positions = [indexOfSame(list, only), ...expected.map((step) => indexOfSame(list, step))];

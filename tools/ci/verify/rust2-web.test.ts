@@ -28,6 +28,7 @@ import {
   WEB_SQLITE_JOBS,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
+import { SQLITE_PACKAGES, verifySqlitePrefixCache } from "./rust-sqlite.ts";
 
 const clone = <T>(value: T): T => structuredClone(value);
 const steps = (jobs: Mapping, job: string) => (jobs[job] as Mapping)["steps"] as Mapping[];
@@ -91,6 +92,45 @@ test("every Web SQLite caller upgrades complete host inputs before capture witho
     expect(verifyWebHostInputsJobs(reordered).join("\n")).toContain(
       "complete unmasked host preparation",
     );
+  }
+});
+
+test("Rust native handoff callers align host inputs before existing qualified SQLite capture", () => {
+  const jobs = realJobs("rust.yml");
+  expect(verifySqlitePrefixCache(jobs)).toEqual([]);
+  for (const name of ["postgres-build", "postgres", "collaboration"]) {
+    for (const [before, after] of [
+      ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
+      ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
+      ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
+      ["--with-new-pkgs", ""],
+      ["--no-remove", ""],
+      [" linux-libc-dev", ""],
+      [" libcrypt-dev", ""],
+      ["libclang-18-dev=1:18.1.8-20ubuntu8", "libclang-18-dev"],
+    ] as const) {
+      const bad = clone(jobs);
+      const prep = stepWith(bad, name, byId("sqlite"));
+      expect(runOf(prep)).toContain(before);
+      prep["run"] = runOf(prep).replace(before, after);
+      expect(verifySqlitePrefixCache(bad).join("\n")).toContain(
+        "host packages must be aligned before SQLite capture",
+      );
+    }
+    const reordered = clone(jobs);
+    const prep = stepWith(reordered, name, byId("sqlite"));
+    prep["run"] = runOf(prep)
+      .replace(SQLITE_PACKAGES + "\n", "")
+      .replace(
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+        SQLITE_PACKAGES + "\n" + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+      );
+    expect(verifySqlitePrefixCache(reordered).join("\n")).toContain(
+      "host packages must be aligned before SQLite capture",
+    );
+    const masked = clone(jobs);
+    stepWith(masked, name, byId("sqlite"))["continue-on-error"] = true;
+    expect(verifySqlitePrefixCache(masked).join("\n")).toContain("exact preflight/restore/verify");
   }
 });
 
