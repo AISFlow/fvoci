@@ -332,6 +332,40 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
         Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
         _ => return Ok(Value::Null),
     };
+    // Instance generic OIDC link/unlink producers use a link target, not a
+    // user target. Retain both actual IDs without exporting their email.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked" || verb == "identity.unlinked")
+    {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Text(kind), Cell::Blob(actor))
+                if channel == "web" && kind == "identity_link" && actor.len() == 16 =>
+            {
+                Uuid::from_slice(actor).map_err(|_| refused())?
+            }
+            _ => return Ok(Value::Null),
+        };
+        let Some(email) = payload
+            .get("email")
+            .filter(|email| email.is_null() || email.is_string())
+        else {
+            return Ok(Value::Null);
+        };
+        if payload != json!({"userId":actor.to_string(),"provider":"generic","email":email}) {
+            return Ok(Value::Null);
+        }
+        let class = if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked") {
+            "actor-identity-linked"
+        } else {
+            "actor-identity-unlinked"
+        };
+        return Ok(json!({"class":class,"sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor.as_bytes()),"target":hex::encode(target.as_bytes())}));
+    }
     let class = match (
         cell("verb")?,
         cell("channel")?,
@@ -352,6 +386,20 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             && payload == json!({"userId":target.to_string(),"method":"password"}) =>
         {
             "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if verb == "auth.login"
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string(),"method":"oidc:generic"}) =>
+        {
+            "actor-oidc-login"
         }
         (
             Cell::Text(verb),
@@ -1925,6 +1973,185 @@ mod tests {
                 .unwrap()
                 .1 = Cell::uuid(workspace);
             assert_eq!(event_witness(&wrong).unwrap(), Value::Null);
+        }
+    }
+
+    fn keycloak_event(verb: &str, email: Value) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let identity = verb != "auth.login";
+        let mut columns = auth_event(verb);
+        for (name, value) in [
+            ("seq", Cell::Integer(9_007_199_254_740_993)),
+            (
+                "target_id",
+                Cell::uuid(if identity { Uuid::from_u128(3) } else { actor }),
+            ),
+            (
+                "target_type",
+                Cell::text(if identity { "identity_link" } else { "user" }),
+            ),
+            (
+                "payload",
+                Cell::json(&if identity {
+                    json!({"userId":actor.to_string(),"provider":"generic","email":email})
+                } else {
+                    json!({"userId":actor.to_string(),"method":"oidc:generic"})
+                })
+                .unwrap(),
+            ),
+        ] {
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+        }
+        columns
+    }
+
+    #[test]
+    fn keycloak_login_witness_matches_exact_generic_session_producer() {
+        assert_eq!(
+            event_witness(&keycloak_event("auth.login", Value::Null)).unwrap(),
+            json!({"class":"actor-oidc-login","sequence":["integer","9007199254740993"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())})
+        );
+    }
+
+    #[test]
+    fn keycloak_identity_witness_matches_global_link_and_unlink_without_private_values() {
+        for (verb, class) in [
+            ("identity.linked", "actor-identity-linked"),
+            ("identity.unlinked", "actor-identity-unlinked"),
+        ] {
+            for email in [Value::Null, json!("PRIVATE_EVENT_EMAIL_CANARY")] {
+                let witness = event_witness(&keycloak_event(verb, email)).unwrap();
+                assert_eq!(
+                    witness,
+                    json!({"class":class,
+                    "sequence":["integer","9007199254740993"],
+                    "actor":hex::encode(Uuid::from_u128(1).as_bytes()),
+                    "target":hex::encode(Uuid::from_u128(3).as_bytes())})
+                );
+                for private in [
+                    "PRIVATE_", "email", "provider", "payload", "issuer", "token",
+                ] {
+                    assert!(!witness.to_string().contains(private), "{verb} {private}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keycloak_witness_refuses_unrecognized_or_mismatched_producer_fields() {
+        let actor = Uuid::from_u128(1);
+        let wrong = Uuid::from_u128(2);
+        for verb in ["auth.login", "identity.linked", "identity.unlinked"] {
+            let identity = verb != "auth.login";
+            let original = keycloak_event(verb, Value::Null);
+            for (name, value) in [
+                ("verb", Cell::text("identity.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1; 15])),
+                ("actor_user_id", Cell::uuid(wrong)),
+                ("target_id", Cell::Null),
+                ("target_id", Cell::Blob(vec![1; 15])),
+                ("target_id", Cell::text(actor.to_string())),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == name)
+                    .unwrap()
+                    .1 = value;
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} {name}"
+                );
+            }
+            for payload in if identity {
+                vec![
+                    json!({"userId":wrong.to_string(),"provider":"generic","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"google","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"generic"}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":7}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":null,"extra":"PRIVATE_CANARY"}),
+                ]
+            } else {
+                vec![
+                    json!({"userId":wrong.to_string(),"method":"oidc:generic"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:google"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic:unknown"}),
+                    json!({"userId":actor.to_string(),"method":null}),
+                    json!({"userId":actor.to_string()}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic","extra":"PRIVATE_CANARY"}),
+                ]
+            } {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "payload")
+                    .unwrap()
+                    .1 = Cell::json(&payload).unwrap();
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} payload"
+                );
+            }
+            for name in [
+                "seq",
+                "verb",
+                "channel",
+                "workspace_id",
+                "actor_user_id",
+                "target_id",
+                "target_type",
+                "payload",
+            ] {
+                let mut columns = original.clone();
+                columns.retain(|(column, _)| column != name);
+                assert!(event_witness(&columns).is_err(), "{verb} missing {name}");
+            }
+            if !identity {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "target_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "login target differs from actor"
+                );
+            }
+        }
+        // Invitation events already carry both allocation dimensions. They
+        // must not gain a redundant global-event exception.
+        for verb in ["invitation.created", "invitation.accepted"] {
+            let mut columns = auth_event(verb);
+            for (name, value) in [
+                ("workspace_id", Cell::uuid(wrong)),
+                ("target_id", Cell::uuid(Uuid::from_u128(3))),
+                ("target_type", Cell::text("invitation")),
+                ("payload", Cell::json(&if verb == "invitation.created" {
+                    json!({"workspaceId":wrong.to_string(),"email":"PRIVATE_CANARY","invitationId":Uuid::from_u128(3).to_string()})
+                } else {
+                    json!({"workspaceId":wrong.to_string(),"userId":actor.to_string(),"email":"PRIVATE_CANARY"})
+                }).unwrap()),
+            ] {
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+            }
+            assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb}");
         }
     }
 
