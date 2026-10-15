@@ -174,8 +174,8 @@ jobs:
             grep -vE "  usr/share/(doc|man)/" /var/lib/dpkg/info/ca-certificates.md5sums | (cd / && md5sum --check --strict -)
             test -z "$(find /usr/local/share/ca-certificates -type f -print -quit)"
             test -s /etc/ssl/certs/ca-certificates.crt
-            test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8
-          test -f "$LIBCLANG_PATH/libclang.so"
+            test "$(dpkg-query -W -f="\${Version}" libclang-18-dev)" = 1:18.1.8-20ubuntu8
+            test -f "$LIBCLANG_PATH/libclang.so"
             browser=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -path "*/chrome-linux*/chrome" -print -quit)
             test -n "$browser"
             "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank

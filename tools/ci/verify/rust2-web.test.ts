@@ -207,6 +207,82 @@ test("the same-run builder refuses publication, substituted userspace and host e
   }
 });
 
+test("producer smoke passes the literal dpkg format through actual Bash caller quoting", () => {
+  const producer = runOf(stepWith(realJobs("web.yml"), "web-builder", byId("builder")));
+  const marker = 'docker run --rm --network none "$ref" bash -e -o pipefail -c ';
+  const position = producer.indexOf(marker);
+  expect(position).toBeGreaterThan(0);
+  const smoke = producer.slice(position);
+  const directory = mkdtempSync(join(tmpdir(), "web-producer-quote-"));
+  const capture = join(directory, "docker-argument");
+  const caller = (body: string, hostVersion?: string) => {
+    rmSync(capture, { force: true });
+    return Bun.spawnSync(
+      [
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-e",
+        "-u",
+        "-o",
+        "pipefail",
+        "-c",
+        'docker() { [[ "$#" == 11 && "${10}" == -c ]]; printf "%s" "${11}" > "$CAPTURE"; }\n' +
+          body,
+      ],
+      {
+        env: {
+          PATH: process.env["PATH"],
+          ref: "source-fixture",
+          CAPTURE: capture,
+          Version: hostVersion,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+  };
+  const canary = "FVOCI_HOST_VERSION_MUST_NOT_REACH_CONTAINER";
+  try {
+    for (const hostVersion of [undefined, canary]) {
+      const actual = caller(smoke, hostVersion);
+      expect(actual.exitCode).toBe(0);
+      const inner = readFileSync(capture, "utf8");
+      expect(inner).not.toContain(canary);
+      const checks = inner.split("\n").filter((line) => line.includes("dpkg-query -W"));
+      expect(checks).toHaveLength(1);
+      const check = checks[0];
+      if (!check) throw new Error("actual Clang check was not passed to Docker");
+      for (const [version, exit] of [
+        ["1:18.1.8-20ubuntu8", 0],
+        ["1:18.1.7-20ubuntu8", 1],
+      ] as const) {
+        const stub =
+          'dpkg-query() { [[ "$#" == 3 && "$1" == -W && "$2" == \'-f=${Version}\' && "$3" == libclang-18-dev ]]; printf "%s" "$FIXTURE_VERSION"; }\n';
+        const result = Bun.spawnSync(
+          ["bash", "--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", stub + check],
+          {
+            env: { PATH: process.env["PATH"], FIXTURE_VERSION: version, Version: hostVersion },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(result.exitCode).toBe(exit);
+        expect(result.stdout.toString() + result.stderr.toString()).not.toContain(canary);
+      }
+    }
+    const regressed = smoke.replace(
+      'dpkg-query -W -f="\\${Version}"',
+      "dpkg-query -W -f='${Version}'",
+    );
+    expect(regressed).not.toBe(smoke);
+    expect(caller(regressed).exitCode).toBe(1);
+    expect(existsSync(capture)).toBe(false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("actual browser consumers forward every explicit step input and refuse live dependency installation", () => {
   const jobs = realJobs("web.yml");
   for (const name of WEB_SQLITE_JOBS) {
