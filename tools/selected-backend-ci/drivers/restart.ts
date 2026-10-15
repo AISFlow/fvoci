@@ -212,6 +212,21 @@ export interface RestartContext {
   receipt: Receipt;
   // Postgres projects the restart browser report through its known spec map.
   projectBrowser: boolean;
+  /** Ordinary SQLite ON only; the existing restart remains the sole owner
+   * of both server processes, stop/port checks and the open producer logs. */
+  sqliteProducts?: {
+    afterSeedStopped: (rows: Row[], seed: Json) => Promise<void>;
+    afterReadback: (server: {
+      row: Row;
+      child: Child;
+      base: string;
+      log: number;
+      logpath: string;
+      seed: Json;
+      readback: Json;
+    }) => Promise<void>;
+    afterRestartStopped: (rows: Row[]) => Promise<void>;
+  };
   role?: string;
   masterKey?: string;
   db?: string;
@@ -266,6 +281,10 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
   assert.ok(actorUid === 1000 && actorGid === 1000);
   assert.ok(process.env.FVOCI_ROOT_RUN_OWNER === owner);
   assert.ok((selected === "postgres" || selected === "sqlite") && g.code === 0);
+  assert.ok(
+    g.sqliteProducts === undefined ||
+      (selected === "sqlite" && g.spec === "workspace-wiki-selected-backend.spec.ts"),
+  );
   assert.ok(g.head === g.compiledHead, "changed current Rust requires its actual compiled SHA");
   const grantPath = env("FVOCI_ROOT_RESTART_GRANT");
   assert.ok(isAbsolute(grantPath) && !lstatSync(grantPath).isSymbolicLink());
@@ -304,6 +323,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     restartServer: Row | null = null,
     restartBase: string | null = null;
   const restartLogPath = join(run, "restarted-normal-server.log");
+  const productFinish: { error?: Error } = {};
   const inputs = async () => {
     restartBrowserArgs(g);
     assert.ok(deepEquals(await g.inputCheck(), g.sourceBefore, true));
@@ -401,6 +421,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     );
     receipt.oldRecordedRows = beforeRows;
     receipt.oldPortClosed = true;
+    await g.sqliteProducts?.afterSeedStopped(beforeRows, seed);
     if (selected === "sqlite") {
       // Only our confirmed actor receipt is relocated; keep its bytes and inode.
       const dbroot = g.dbroot as string;
@@ -598,6 +619,18 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
       restartAttachmentSha256: sha(join(run, "selected-vue-restart-readback.private.json")),
     });
     await inputs();
+    if (g.sqliteProducts !== undefined) {
+      receipt.stage = "SQLite PRODUCT4";
+      await g.sqliteProducts.afterReadback({
+        row: restartServer,
+        child: restartProcess,
+        base: restartBase,
+        log: restartLog,
+        logpath: restartLogPath,
+        seed,
+        readback,
+      });
+    }
   } catch (error) {
     receipt.originalFailure = errorFacts(error);
     // Publish only a fixed helper file:line and the maintained reporter projection.
@@ -679,6 +712,18 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
             receipt.restartedPortClosed = await seam.portClosed(browserPort(restartBase));
             assert.ok(receipt.restartedPortClosed);
           }
+          if (g.sqliteProducts !== undefined) {
+            try {
+              await g.sqliteProducts.afterRestartStopped(
+                current.filter((row) => row.args.startsWith("/fvoci/bin/")),
+              );
+            } catch (error) {
+              productFinish.error ??=
+                error instanceof Error ? error : new Error("SQLite product finish failed");
+              receipt.originalFailure ??= errorFacts(error);
+              throw error;
+            }
+          }
         } catch (error) {
           cleanupErrors.push(errorFacts(error));
         }
@@ -702,6 +747,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
       privateWrite(join(run, "restart-receipt.private.json"), receipt);
     });
   }
+  if (productFinish.error !== undefined) throw productFinish.error;
   assert.ok(
     cleanupErrors.length === 0,
     "restart cleanup failure is not PASS; parent retains original failure",

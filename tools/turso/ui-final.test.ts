@@ -606,6 +606,24 @@ describe("final native serial admission", () => {
     );
     expect(() => validateSerialObservation(first, policy)).toThrow();
   });
+  test("SQLite serial observations require the explicit backend without changing remote default", () => {
+    const sqlite = observation();
+    record(sqlite, "dataset").backend = "sqlite";
+    expect(() => validateSerialObservation(sqlite, policy)).toThrow(
+      "UI_SERIAL_CURRENT_SCHEMA_REQUIRED",
+    );
+    expect(validateSerialObservation(sqlite, policy, false, "sqlite").dataset.backend).toBe(
+      "sqlite",
+    );
+    expect(() => validateSerialObservation(observation(), policy, false, "sqlite")).toThrow(
+      "UI_SERIAL_CURRENT_SCHEMA_REQUIRED",
+    );
+    record(sqlite, "dataset").backend = "postgres";
+    expect(() => validateSerialObservation(sqlite, policy, false, "sqlite")).toThrow(
+      "UI_SERIAL_CURRENT_SCHEMA_REQUIRED",
+    );
+  });
+
   test("native observations retain integer precision beyond 2^53", () => {
     const value = observation();
     Object.assign(record(value, "checks"), {

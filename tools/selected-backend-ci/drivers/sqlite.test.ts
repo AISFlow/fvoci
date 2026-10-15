@@ -8,6 +8,8 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -26,7 +28,7 @@ import { laneRetirement } from "../runtime.ts";
 import { discoverGroups } from "../../web-e2e/groups.ts";
 import type { Current } from "./binding.ts";
 import { restoreSpec, restoreBrowserTitle, validateRestoreReport } from "./binding.ts";
-import { runtimeError } from "./common.ts";
+import { runtimeError, command as actualCommand } from "./common.ts";
 import type { Child, CommandOptions, Completed, Row } from "./common.ts";
 import {
   expectedMigrations,
@@ -38,6 +40,7 @@ import {
   retiredIdentities,
   shellExports,
   summary,
+  readSelectedSqlitePacket,
 } from "./sqlite.ts";
 import type { Seam, State } from "./sqlite.ts";
 
@@ -57,6 +60,48 @@ function directory(): string {
   return path;
 }
 const ok = (stdout = ""): Completed => ({ returncode: 0, stdout, stderr: "" });
+
+test("actual waited logged command returns empty streams; only its completed private packet is parsed", async () => {
+  const base = directory(),
+    packet = join(base, "observation.json"),
+    log = join(base, "native.log");
+  writeFileSync(log, "", { mode: 0o600 });
+  const value = {
+    connectionClose: "confirmed",
+    lifecycleDrain: "confirmed",
+    leases: 0,
+    payload: "exact native packet",
+  };
+  const script = `const { publishSelectedSqlitePacket } = await import(${JSON.stringify(join(root, "tools/turso/ui-container.ts"))});
+    console.error("PRIVATE_DIAGNOSTIC is not JSON");
+    publishSelectedSqlitePacket(${JSON.stringify(packet)}, ${JSON.stringify(value)});`;
+  const result = await actualCommand([process.execPath, "--no-env-file", "-e", script], {
+    cwd: root,
+    log,
+    waitOnInterrupt: true,
+  });
+  expect(result).toEqual({ returncode: 0, stdout: "", stderr: "" });
+  expect(readFileSync(log, "utf8")).toContain("PRIVATE_DIAGNOSTIC is not JSON");
+  expect(readSelectedSqlitePacket(packet)).toEqual(value);
+  expect(statSync(packet).mode & 0o777).toBe(0o600);
+  // Strict packet parsing never falls back to the mixed diagnostic transcript.
+  for (const bytes of [
+    Buffer.from("{}\nPRIVATE_DIAGNOSTIC"),
+    Buffer.from([0xff]),
+    Buffer.from("[]"),
+  ]) {
+    writeFileSync(packet, bytes);
+    expect(() => readSelectedSqlitePacket(packet)).toThrow();
+  }
+  chmodSync(packet, 0o644);
+  expect(() => readSelectedSqlitePacket(packet)).toThrow();
+  chmodSync(packet, 0o600);
+  truncateSync(packet, 64 * 1024 * 1024);
+  expect(() => readSelectedSqlitePacket(packet)).toThrow();
+  const link = join(base, "link.json");
+  symlinkSync(packet, link);
+  expect(() => readSelectedSqlitePacket(link)).toThrow();
+});
 function restoreReport() {
   return {
     config: { workers: 1 },
@@ -266,7 +311,18 @@ function world(
         : { chrome: "4".repeat(64) },
     migrationRows: () => migrations,
     validateOffReport: () => Array.from({ length: 8 }, (_, index) => "off " + String(index)),
-    restart: () => Promise.resolve({ restartBrowserExit: 0 }),
+    products: () => {
+      calls.push(["PRODUCT4-PARENT-BINDING"]);
+      return Promise.resolve({
+        afterSeedStopped: () => Promise.resolve(),
+        afterReadback: () => Promise.resolve(),
+        afterRestartStopped: () => Promise.resolve(),
+      });
+    },
+    restart: (context) => {
+      expect(context.sqliteProducts).toBeDefined();
+      return Promise.resolve({ restartBrowserExit: 0 });
+    },
     emit(line) {
       emitted.push(line);
     },
@@ -383,6 +439,10 @@ describe("selected sqlite driver body", () => {
       expect(receipt.cleanup_errors).toEqual([]);
       expect(Object.hasOwn(receipt, "diagnostic_errors")).toBe(false);
       expect(receipt.actual_browser_tests).toBe(flow === "off" ? 8 : 1);
+      expect(fixture.calls.filter((args) => args[0] === "PRODUCT4-PARENT-BINDING").length).toBe(
+        flow === "on" ? 1 : 0,
+      );
+      expect(statSync(join(fixture.run, "normal-server.log")).mode & 0o777).toBe(0o600);
       const restoreCalls = fixture.calls.filter((args) => args.includes(restoreSpec));
       expect(restoreCalls.length).toBe(flow === "on" ? 1 : 0);
       if (flow === "on") {

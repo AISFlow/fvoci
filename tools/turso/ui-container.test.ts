@@ -37,6 +37,7 @@ import {
   publishContainer,
   qualifyDaemonExit,
   readShellProof,
+  readStatOnce,
   releaseFailedPublish,
   reportCleanup,
   runningDaemonSample,
@@ -178,6 +179,31 @@ describe("container shape", () => {
       { ...environment, FVOCI_LIBSQL_AUTH_TOKEN: "invented" },
     ])
       expect(() => capsuleText(changed)).toThrow("UI_SQLITE_DESTINATION_REFUSED");
+  });
+
+  test("selected SQLite observer capsule admits only its owned explicit backend and file", () => {
+    const environment = {
+      E2E_DATABASE_BACKEND: "sqlite",
+      FVOCI_DATABASE_BACKEND: "sqlite",
+      FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+      FVOCI_E2E_SQLITE_RUN_ROOT: directory,
+      FVOCI_E2E_SQLITE_PATH: join(directory, "app.sqlite"),
+      FVOCI_STORAGE_DIR: join(directory, "storage"),
+    };
+    expect(capsuleText(environment)).toContain("FVOCI_E2E_SQLITE_OBSERVER_SELECTED=1");
+    const changes: Record<string, string>[] = [
+      { E2E_DATABASE_BACKEND: "libsql-remote" },
+      { FVOCI_DATABASE_BACKEND: "postgres" },
+      { FVOCI_E2E_SQLITE_RUN_ROOT: "relative" },
+      { FVOCI_E2E_SQLITE_PATH: join(directory, "foreign.sqlite") },
+      { PASSWORD_PEPPER_KEYS: "private" },
+      { FVOCI_LIBSQL_URL: "private" },
+      { ENCRYPTION_KEYS: "private" },
+    ];
+    for (const change of changes)
+      expect(() => capsuleText({ ...environment, ...change })).toThrow(
+        "UI_SQLITE_OBSERVER_TARGET_REFUSED",
+      );
   });
 
   test("the shell proof comes only from the grant and the config env stays clean", () => {
@@ -434,6 +460,138 @@ describe("container shape", () => {
 });
 
 describe("local grant and publish", () => {
+  test("an aborted native fixture publishes no resource and reads no FIFO", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT");
+    signal.abort(original);
+    const { scope } = fakeScope({ root: () => directory });
+    let published = false;
+    const publish: typeof publishContainer = () => {
+      published = true;
+      throw Error("must not publish");
+    };
+    const manifest = { binaries: {} };
+    expect(
+      await localFixture(
+        scope,
+        manifest,
+        "observe",
+        {},
+        undefined,
+        undefined,
+        publish,
+        signal.signal,
+      ).catch((error: unknown) => error),
+    ).toBe(original);
+    expect(published).toBe(false);
+    expect(await readStatOnce(-1, 0, signal.signal).catch((error: unknown) => error)).toBe(
+      original,
+    );
+  });
+
+  test("interrupt after native FIFO publication removes only its owned container and FIFOs", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT");
+    const { scope } = fakeScope({ root: () => directory });
+    const calls: string[][] = [],
+      container = "c".repeat(64);
+    docker.client = (_scope, args) => {
+      calls.push(args);
+      return Promise.resolve(new Uint8Array());
+    };
+    let output = "";
+    const publish: typeof publishContainer = (_owned, path) => {
+      output = path;
+      preparePrivateFifos(path);
+      signal.abort(original);
+      return Promise.resolve([
+        container,
+        {
+          phase: "created",
+          liveDaemon: "unsupported-before-execution",
+          qualification: "BLOCKED",
+          cgroupCaps: "not-observed",
+          shell: "/bin/sh",
+          image: QUALIFIED_CANONICAL_IMAGE,
+        },
+        {},
+      ]);
+    };
+    expect(
+      await localFixture(
+        scope,
+        { binaries: {} },
+        "observe",
+        {},
+        undefined,
+        undefined,
+        publish,
+        signal.signal,
+      ).catch((error: unknown) => error),
+    ).toBe(original);
+    expect(calls).toEqual([["docker", "rm", container]]);
+    expect(existsSync(join(output, "stat.ready"))).toBe(false);
+    expect(existsSync(join(output, "exec.go"))).toBe(false);
+    expect(scope.allocations).toHaveLength(0);
+  });
+
+  test("interrupt after owned native child start still waits cleanup and closes its FIFOs", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT"),
+      child = exitedChild(null, "", 321),
+      container = "d".repeat(64),
+      commands: string[][] = [];
+    const { scope, calls } = fakeScope({
+      root: () => directory,
+      spawn: () => {
+        signal.abort(original);
+        return child;
+      },
+    });
+    docker.client = (_scope, args) => {
+      commands.push(args);
+      if (args[1] === "stop") Object.defineProperty(child, "exitCode", { value: 0 });
+      return Promise.resolve(new Uint8Array());
+    };
+    let output = "";
+    const publish: typeof publishContainer = (_owned, path) => {
+      output = path;
+      preparePrivateFifos(path);
+      return Promise.resolve([
+        container,
+        {
+          phase: "created",
+          liveDaemon: "unsupported-before-execution",
+          qualification: "BLOCKED",
+          cgroupCaps: "not-observed",
+          shell: "/bin/sh",
+          image: QUALIFIED_CANONICAL_IMAGE,
+        },
+        {},
+      ]);
+    };
+    const result = await localFixture(
+      scope,
+      { binaries: {} },
+      "observe",
+      {},
+      undefined,
+      undefined,
+      publish,
+      signal.signal,
+    ).catch((error: unknown) => error);
+    expect(result).toBe(original);
+    expect(commands).toEqual([
+      ["docker", "stop", "-t", "10", container],
+      ["docker", "rm", container],
+    ]);
+    expect(calls.finish).toEqual([[child, undefined]]);
+    expect(scope.allocations[0]?.closed).toBe(true);
+    expect(scope.allocations[0]?.forced).toBe(false);
+    expect(existsSync(join(output, "stat.ready"))).toBe(false);
+    expect(existsSync(join(output, "exec.go"))).toBe(false);
+  });
+
   test("repeated local fixtures of one mode each get their own allocation directory", async () => {
     // A consumer calls owner, observe and baseline more than once per run.
     const grant = qualifiedGrant();

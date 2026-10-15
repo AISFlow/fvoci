@@ -2,7 +2,7 @@
 //! there is no JSON row bag, SQL conversion or lossy numeric coercion.
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
-use sqlx::{Row, TypeInfo, ValueRef};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +110,27 @@ pub(crate) enum FamilyRow {
     Remote(libsql::Row),
 }
 impl FamilyRow {
+    pub(crate) fn column_count(&self) -> Result<usize, sqlx::Error> {
+        match self {
+            Self::Local(row) => Ok(row.columns().len()),
+            Self::Remote(row) => {
+                usize::try_from(row.column_count()).map_err(|_| invalid("column count overflow"))
+            }
+        }
+    }
+    pub(crate) fn column_name(&self, index: usize) -> Result<&str, sqlx::Error> {
+        match self {
+            Self::Local(row) => row
+                .columns()
+                .get(index)
+                .map(|column| column.name())
+                .ok_or_else(|| invalid("column index out of bounds")),
+            Self::Remote(row) => row
+                .column_name(i32::try_from(index).map_err(|_| invalid("column index overflow"))?)
+                .ok_or_else(|| invalid("column metadata unavailable")),
+        }
+    }
+
     pub(crate) fn cell(&self, index: usize) -> Result<Cell, sqlx::Error> {
         match self {
             Self::Local(row) => {

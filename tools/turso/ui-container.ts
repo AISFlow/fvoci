@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { deepEquals } from "bun";
 import { dirname, isAbsolute, join } from "node:path";
-import { root as checkout, sha, uid, gid } from "../selected-backend-ci/io.ts";
+import { root as checkout, sha, uid, gid, write, jsonText } from "../selected-backend-ci/io.ts";
 import { image as finalFixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import {
   fixtureInput,
@@ -87,6 +87,9 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
   "E2E_DATABASE_BACKEND",
   "FVOCI_E2E_TURSO_UI_SELECTED",
+  "FVOCI_E2E_SQLITE_OBSERVER_SELECTED",
+  "FVOCI_E2E_SQLITE_RUN_ROOT",
+  "FVOCI_E2E_SQLITE_PATH",
   "FVOCI_DATABASE_BACKEND",
   "FVOCI_SQLITE_PATH",
   "FVOCI_REALTIME_MODE",
@@ -316,7 +319,18 @@ export function capsuleText(environment: Record<string, string>): string {
       !value.includes("\n"), "UI_DOCKER_ENV_SECRET_REFUSED");
     lines.push(key + "=" + shellQuote(value) + "\n");
   }
-  if (environment.FVOCI_DATABASE_BACKEND === "sqlite") {
+  if (environment.FVOCI_E2E_SQLITE_OBSERVER_SELECTED === "1") {
+    const directory = environment.FVOCI_E2E_SQLITE_RUN_ROOT,
+      file = environment.FVOCI_E2E_SQLITE_PATH;
+    require(environment.E2E_DATABASE_BACKEND === "sqlite" &&
+      environment.FVOCI_DATABASE_BACKEND === "sqlite" &&
+      typeof directory === "string" &&
+      isAbsolute(directory) &&
+      file === join(directory, "app.sqlite") &&
+      SECRET_ENV_KEYS.every((key) => !Object.hasOwn(environment, key)) &&
+      !Object.hasOwn(environment, "PASSWORD_PEPPER_KEYS") &&
+      !Object.hasOwn(environment, "ENCRYPTION_KEYS"), "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+  } else if (environment.FVOCI_DATABASE_BACKEND === "sqlite") {
     const file = environment.FVOCI_SQLITE_PATH,
       storage = environment.FVOCI_STORAGE_DIR;
     require(typeof file === "string" &&
@@ -588,8 +602,13 @@ export const openStatReader = (path: string) => openSync(path, statOpenFlags());
 export const openGoHolder = (path: string) => openSync(path, goOpenFlags());
 
 /** select(2) on the stat FIFO until readable or the budget ends; one bounded read. */
-export async function readStatOnce(fd: number, deadline: number): Promise<string> {
+export async function readStatOnce(
+  fd: number,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<string> {
   for (;;) {
+    signal?.throwIfAborted();
     budgetRemain(deadline);
     if (readable(fd)) break;
     await pause(20);
@@ -811,12 +830,14 @@ export async function releaseAttached(
   deadline: number,
   grant: unknown,
   proc: DaemonProc = linuxProc,
+  signal?: AbortSignal,
 ): Promise<[Bound, number]> {
+  signal?.throwIfAborted();
   const statFd = openStatReader(join(directory, STAT_FIFO_NAME));
   let goFd: number | null = null;
   try {
     goFd = openGoHolder(join(directory, GO_FIFO_NAME));
-    const statText = await readStatOnce(statFd, deadline);
+    const statText = await readStatOnce(statFd, deadline, signal);
     const sample = await samplePausedDaemon(
       scope,
       containerId,
@@ -826,6 +847,7 @@ export async function releaseAttached(
       grant,
       proc,
     );
+    signal?.throwIfAborted();
     writeGoOnce(goFd);
     return [sample, goFd];
   } catch (error) {
@@ -1119,6 +1141,18 @@ export async function publishContainer(
       mountSpec(join(checkout, "apps/web/dist"), DIST_DST, true),
       mountSpec(storage, storage, false),
     ];
+    if (prepared.FVOCI_E2E_SQLITE_OBSERVER_SELECTED === "1") {
+      require(binaryName === "fvoci-e2e-fixture" &&
+        ["baseline", "observe", "serial-observe"].includes(command[0] ?? "") &&
+        command.length === 1, "UI_SQLITE_OBSERVER_MODE_REFUSED");
+      mounts.push(
+        mountSpec(
+          prepared.FVOCI_E2E_SQLITE_RUN_ROOT as string,
+          prepared.FVOCI_E2E_SQLITE_RUN_ROOT as string,
+          false,
+        ),
+      );
+    }
     if (environment.SSL_CERT_FILE) {
       require(isAbsolute(environment.SSL_CERT_FILE) &&
         !lstatSync(environment.SSL_CERT_FILE).isSymbolicLink() &&
@@ -1152,6 +1186,29 @@ export async function publishContainer(
   }
 }
 
+/** Interrupt only the wait; the existing fixture owner still settles its
+ * output and performs its container/FD/FIFO cleanup before returning failure. */
+async function interruptibleFixtureOutput(
+  output: Promise<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal === undefined) return output;
+  signal.throwIfAborted();
+  let stop: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    stop = () => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new UiError("UI_PARENT_INTERRUPT"));
+    };
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  try {
+    return await Promise.race([output, aborted]);
+  } finally {
+    if (stop !== undefined) signal.removeEventListener("abort", stop);
+  }
+}
+
 export async function localFixture(
   scope: Scope,
   manifest: Pick<Manifest, "binaries">,
@@ -1159,11 +1216,15 @@ export async function localFixture(
   environment: Record<string, string>,
   input?: Record_,
   proc: DaemonProc = linuxProc,
+  publish: typeof publishContainer = publishContainer,
+  signal?: AbortSignal,
+  pending?: { output?: Promise<Uint8Array> },
 ): Promise<Record_> {
+  signal?.throwIfAborted();
   // One directory per call: a consumer runs the same mode more than once.
   const directory = join(scope.io.root(), "local-fixture-" + mode + "-" + token(6));
   mkdirSync(directory, 0o700);
-  const [containerId, creation, grant] = await publishContainer(
+  const [containerId, creation, grant] = await publish(
     scope,
     directory,
     environment,
@@ -1177,7 +1238,9 @@ export async function localFixture(
     original: unknown = null,
     value: Record_ | undefined;
   const receiptErrors: string[] = [];
+  let output: Promise<Uint8Array> | undefined;
   try {
+    signal?.throwIfAborted();
     require(creation.qualification === BLOCKED &&
       creation.liveDaemon === ONE_SHOT_LIVE &&
       creation.cgroupCaps === "not-observed", "UI_DAEMON_OBSERVATION_UNSUPPORTED");
@@ -1195,10 +1258,13 @@ export async function localFixture(
       deadline,
       grant,
       proc,
+      signal,
     );
     goFd = fd;
     const payload = fixtureInput(input);
-    const stdout = await communicate(child, payload, budgetRemain(deadline));
+    output = communicate(child, payload, budgetRemain(deadline));
+    if (pending !== undefined) pending.output = output;
+    const stdout = await interruptibleFixtureOutput(output, signal);
     const state = await readDaemonExit(scope, containerId, 10);
     require(stdout.length < 64 * 1024 * 1024, "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
     const parsed = parsePlain(stdout);
@@ -1229,6 +1295,15 @@ export async function localFixture(
     original = error;
   }
   const errors = await cleanupOwned(scope, containerId, child, directory, [goFd]);
+  // Stopping the owned native process closes its output. Await the same
+  // pending communication as well; no abandoned reader/timer survives.
+  if (output !== undefined && (pending === undefined || original === null)) {
+    try {
+      await output;
+    } catch {
+      /* The original wait error stays first. */
+    }
+  }
   errors.push(...receiptErrors);
   reportCleanup(scope, original, errors);
   if (original !== null) throw original as Error;
@@ -1446,5 +1521,217 @@ export async function localServerStart(
     }
     reportCleanup(scope, original, errors);
     throw original as Error;
+  }
+}
+
+/** Narrow selected-parent observer entry. Its own existing process scope has
+ * no preexisting server child; the selected parent keeps normal server ownership. */
+export function publishSelectedSqlitePacket(path: string, value: Record_): void {
+  const parent = lstatSync(dirname(path));
+  require(isAbsolute(path) &&
+    realpathSync(dirname(path)) === dirname(path) &&
+    parent.isDirectory() &&
+    !parent.isSymbolicLink() &&
+    parent.uid === uid() &&
+    parent.gid === gid() &&
+    (parent.mode & 0o777) === 0o700 &&
+    Buffer.byteLength(jsonText(value)) < 64 * 1024 * 1024, "UI_SQLITE_OBSERVER_PACKET_REFUSED");
+  write(path, value);
+}
+
+export async function selectedSqliteObserver(
+  mode: string,
+  request: Record_,
+  signal?: AbortSignal,
+  packetPath?: string,
+): Promise<Record_> {
+  signal?.throwIfAborted();
+  require(["baseline", "observe", "serial-observe"].includes(mode) &&
+    deepEquals(Object.keys(request).sort(), [
+      "container",
+      "inode",
+      "input",
+    ]), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+  const { loadCurrent } = await import("../selected-backend-ci/drivers/binding.ts");
+  const { sqliteDriver } = await import("../selected-backend-ci/drivers/sqlite.ts");
+  const { inodeOf } = await import("../selected-backend-ci/drivers/common.ts");
+  const { localAllocation } = await import("../selected-backend-ci/admission.ts");
+  const { UiProcesses, withProcesses } = await import("./ui-processes.ts");
+  const current = await loadCurrent("sqlite", sqliteDriver);
+  require(current.flow === "on" &&
+    current.manifest.purpose === undefined &&
+    current.grant.backend === "sqlite", "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+  require(packetPath === undefined ||
+    (dirname(packetPath) === join(current.run, "products") &&
+      !existsSync(packetPath)), "UI_SQLITE_OBSERVER_PACKET_REFUSED");
+  const container = request.container;
+  const input = request.input;
+  require(typeof container === "string" &&
+    /^fvoci-v060-vue-sqlite-current-[a-f0-9]{12}$/.test(container) &&
+    isRecord(input), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+  const database = join(current.run, "database"),
+    file = join(database, "app.sqlite"),
+    storage = join(current.run, "storage");
+  const target = () => {
+    const root = lstatSync(database),
+      db = lstatSync(file);
+    require(root.isDirectory() &&
+      !root.isSymbolicLink() &&
+      root.uid === uid() &&
+      (root.mode & 0o777) === 0o700 &&
+      db.isFile() &&
+      !db.isSymbolicLink() &&
+      db.uid === uid() &&
+      db.gid === gid() &&
+      db.nlink === 1 &&
+      (db.mode & 0o777) === 0o600 &&
+      deepEquals(inodeOf(file), request.inode), "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+  };
+  target();
+  const binaries = Object.fromEntries(
+    Object.entries(current.build.binaries).map(([path, binary]) => [
+      binary.target.name,
+      { ...binary, path },
+    ]),
+  );
+  const directory = join(current.run, "selected-observer-" + mode + "-" + token(6));
+  mkdirSync(directory, 0o700);
+  const scope = new UiProcesses(undefined, {
+    root: () => directory,
+    write,
+    output: {
+      out: (line) => {
+        process.stdout.write(line + "\n");
+      },
+      err: (line) => {
+        process.stderr.write(line + "\n");
+      },
+    },
+  });
+  signal?.throwIfAborted();
+  const pending: { output?: Promise<Uint8Array> } = {};
+  let value: Record_;
+  try {
+    value = await withProcesses(async (owned) => {
+      signal?.throwIfAborted();
+      // Derive the actual runtime from the already owned normal container, never
+      // from a source-labelled literal or a fabricated Turso runtime lease.
+      const observed = parsePlain(await docker.client(owned, ["docker", "inspect", container], 10));
+      const config = record(observed, 0, "Config"),
+        host = record(observed, 0, "HostConfig");
+      const imageId = get(observed, 0, "Image");
+      require(config.Image === finalFixtureImage &&
+        get(config, "Labels", "fvoci.owner") === current.grant.owner &&
+        get(config, "Labels", "fvoci.test-run") === "v060-current-normal-vue-sqlite" &&
+        get(observed, 0, "State", "Running") === true &&
+        host.NetworkMode === "host" &&
+        typeof imageId === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(imageId), "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+      for (const [source, destination] of [
+        [database, "/fvoci/database"],
+        [storage, "/fvoci/storage"],
+      ]) {
+        const mounts = get(observed, 0, "Mounts");
+        require(Array.isArray(mounts) &&
+          mounts.filter(
+            (mount) =>
+              isRecord(mount) &&
+              mount.Type === "bind" &&
+              mount.Source === source &&
+              mount.Destination === destination &&
+              mount.RW === true,
+          ).length === 1, "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+      }
+      let grant: Record_;
+      if (executionMode() === "orca-local") {
+        // This is the existing selected allocation, not a LocalLease or a new purpose.
+        const local: unknown = localAllocation("run");
+        require(isRecord(local) &&
+          isRecord(local.canonicalRuntime) &&
+          local.canonicalRuntime.imageId === imageId &&
+          local.canonicalRuntime.networkAuthorized === true &&
+          readShellProof(local.canonicalRuntime) ===
+            QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+        grant = { canonicalRuntime: local.canonicalRuntime };
+      } else {
+        grant = { finalRuntime: { reference: finalFixtureImage, imageId, uid: uid(), gid: gid() } };
+      }
+      target();
+      const result = await localFixture(
+        owned,
+        { binaries },
+        mode,
+        {
+          E2E_DATABASE_BACKEND: "sqlite",
+          FVOCI_DATABASE_BACKEND: "sqlite",
+          FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+          FVOCI_E2E_SQLITE_RUN_ROOT: database,
+          FVOCI_E2E_SQLITE_PATH: file,
+          FVOCI_STORAGE_DIR: storage,
+        },
+        input,
+        linuxProc,
+        (scope, output, env, manifest, binary, command, kind) =>
+          publishContainer(scope, output, env, manifest, binary, command, kind, () => grant),
+        signal,
+        pending,
+      );
+      require(result.connectionClose === "confirmed" &&
+        (mode === "serial-observe" ? get(result, "dataset", "backend") : result.backend) ===
+          "sqlite", "UI_SQLITE_OBSERVER_NATIVE_REFUSED");
+      target();
+      return result;
+    }, scope);
+  } finally {
+    // The existing Scope owner has closed its resources before this actual
+    // communication settles; no additional kill/timeout fallback is introduced.
+    if (pending.output !== undefined) {
+      try {
+        await pending.output;
+      } catch {
+        /* Preserve the original failure. */
+      }
+    }
+  }
+  signal?.throwIfAborted();
+  require(deepEquals(
+    await loadCurrent("sqlite", sqliteDriver),
+    current,
+    true,
+  ), "UI_SQLITE_OBSERVER_SOURCE_CHANGED");
+  target();
+  // Publication occurs only after the actual Scope/communication closure,
+  // source/target revalidation and interrupt checks above have all completed.
+  if (packetPath !== undefined) publishSelectedSqlitePacket(packetPath, value);
+  return value;
+}
+
+if (import.meta.main) {
+  const interrupt = new AbortController();
+  const onInterrupt = () => {
+    interrupt.abort(new UiError("UI_PARENT_INTERRUPT"));
+  };
+  process.on("SIGINT", onInterrupt);
+  try {
+    const [entry, mode, packetPath, extra] = process.argv.slice(2);
+    require(entry === "--selected-sqlite-observe" &&
+      typeof mode === "string" &&
+      typeof packetPath === "string" &&
+      extra === undefined, "UI_SQLITE_OBSERVER_MODE_REFUSED");
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    for await (const chunk of Bun.stdin.stream()) {
+      length += chunk.length;
+      require(length <= 32768, "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+      chunks.push(chunk);
+    }
+    const request = parsePlain(Buffer.concat(chunks));
+    require(isRecord(request), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+    await selectedSqliteObserver(mode, request, interrupt.signal, packetPath);
+  } catch (error) {
+    console.error(failureCode(error));
+    process.exitCode = 1;
+  } finally {
+    process.off("SIGINT", onInterrupt);
   }
 }
