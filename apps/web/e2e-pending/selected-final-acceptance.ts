@@ -167,7 +167,7 @@ if (binding.suite === "products") {
         parentId: project.rootDocumentId,
       });
       if (!document.displayId) throw new Error("SELECTED_FINAL_PROJECT_DISPLAY_ID_MISSING");
-      return document;
+      return { ...document, displayId: document.displayId };
     };
     const doc = await create("project actual body"),
       reference = await create("selected 참조 대상");
