@@ -137,12 +137,67 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - &sqlite_input_hashes
+        name: Record SQLite input hashes
+        id: sqlite_diagnostics
+        if: ${{ always() && steps.sqlite.outcome == 'success' }}
+        run: |
+          bun --no-env-file - <<'SQLITE_INPUT_HASHES'
+          import { createHash } from "node:crypto";
+          import { appendFileSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          const parent = process.env.RUNNER_TEMP;
+          const fail = () => { console.error("SQLite input diagnostics MISSING"); process.exit(0); };
+          if (!parent) fail();
+          const output = join(parent, "fvoci-sqlite-input-hashes");
+          try { mkdirSync(output, { mode: 0o700 }); } catch { fail(); }
+          const hash = (value) => createHash("sha256").update(value).digest("hex");
+          const fields = ["inputs", "exports", "wrapper_sha256", "os_release", "architecture", "packages", "libclang_path", "libclang_sha256", "build_environment_sha256", "rustc"];
+          const limit = 512;
+          let diagnostic = { schema: 1, status: "unavailable" };
+          try {
+            const path = join(parent, "fvoci-sqlite/consumer-inputs.json");
+            const stat = lstatSync(path);
+            if (!stat.isFile() || stat.size > 4 * 1024 * 1024) throw new Error();
+            const bytes = readFileSync(path);
+            if (bytes.length > 4 * 1024 * 1024) throw new Error();
+            const input = JSON.parse(bytes.toString("utf8"));
+            if (!input || Array.isArray(input) || !fields.every((key) => Object.hasOwn(input, key)) ||
+                !fields.every((key) => ["inputs", "exports"].includes(key)
+                  ? input[key] && typeof input[key] === "object" && !Array.isArray(input[key])
+                  : typeof input[key] === "string") || typeof input.cache_identity !== "string" ||
+                !/^[0-9a-f]{64}$/.test(input.cache_identity)) throw new Error();
+            const rows = input.packages.split("\n");
+            if (rows.at(-1) === "") rows.pop();
+            if (rows.length === 0) throw new Error();
+            const seen = new Set();
+            const packages = rows.map((line) => {
+              const match = /^([a-z0-9][a-z0-9+.:_-]*)\t([0-9A-Za-z+.:~_-]+)$/.exec(line);
+              if (!match || seen.has(match[1])) throw new Error();
+              seen.add(match[1]);
+              return [hash(match[1]), hash(match[2])];
+            }).sort(([a], [b]) => a.localeCompare(b));
+            diagnostic = {
+              schema: 1, status: "available", identity_sha256: input.cache_identity,
+              fields: Object.fromEntries(fields.map((key) => [key, hash(JSON.stringify(input[key]))])),
+              packages_sha256: hash(input.packages), package_count: packages.length,
+              package_entry_limit: limit, packages_truncated: packages.length > limit,
+              package_entries: packages.slice(0, limit),
+            };
+          } catch { /* Non-authoritative diagnostics never replace preparation or refusal. */ }
+          try {
+            writeFileSync(join(output, "hashes.json"), JSON.stringify(diagnostic) + "\n", { mode: 0o600, flag: "wx" });
+            if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, "written=true\n");
+          } catch { fail(); }
+          SQLITE_INPUT_HASHES
       - name: Restore web gate Rust outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -167,6 +222,15 @@ jobs:
       - name: Verify normal web e2e shard plan
         run: |
           bash scripts/test-web-e2e-groups.sh
+      - &save_sqlite_input_hashes
+        name: Retain SQLite input hashes
+        if: ${{ always() && steps.sqlite_diagnostics.outputs.written == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqlite-input-hashes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fvoci-sqlite-input-hashes/hashes.json
+          if-no-files-found: warn
+          retention-days: 3
 
   web-native-checks:
     needs: ci-plan
@@ -206,12 +270,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Restore native web gate Rust outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -226,7 +293,9 @@ jobs:
           cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
           cargo test --locked --offline --test static_api
 
-  # Exact default-feature browser binaries and fresh dist, built once for all shards.
+      # Exact default-feature browser binaries and fresh dist, built once for all shards.
+      - *save_sqlite_input_hashes
+
   workspace-browser-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
@@ -277,12 +346,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Restore web gate Rust outputs
         id: cache_workspace_browser_shard_5
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -345,6 +417,7 @@ jobs:
         with:
           path: crates/collab-engine/target
           key: v1-web-browser-worker-helper-ubuntu-26.04-${{ runner.arch }}-1.99.0-worker-nodebug-${{ hashFiles('crates/collab-engine/Cargo.toml', 'crates/collab-engine/Cargo.lock') }}-${{ hashFiles('crates/collab-engine/src/**') }}
+      - *save_sqlite_input_hashes
 
   workspace-browser-shard:
     needs: [ci-plan, workspace-browser-build]
@@ -399,12 +472,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           cargo fetch --locked
@@ -463,9 +539,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  # Separate cold compilation budgets. Each phase hands its target to the next
-  # job as a run-scoped artifact (caches can be evicted mid-run); these
-  # artifacts are not qualified packets.
+      # Separate cold compilation budgets. Each phase hands its target to the next
+      # job as a run-scoped artifact (caches can be evicted mid-run); these
+      # artifacts are not qualified packets.
+      - *save_sqlite_input_hashes
+
   collaboration-main-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_collaboration_main_build == 'true'
@@ -528,12 +606,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Restore web gate Rust outputs
         id: cache_collaboration_main_seed
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -571,6 +652,7 @@ jobs:
         with:
           path: target
           key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.99.0-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
+      - *save_sqlite_input_hashes
 
   collaboration-test-build:
     needs: [ci-plan, collaboration-main-build]
@@ -634,12 +716,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       # The producer's arch/SHA/attempt/SQLite identity must equal this job's.
       - name: Require exact current native preparation
         env:
@@ -697,6 +782,7 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+      - *save_sqlite_input_hashes
 
   collaboration-build:
     needs: [ci-plan, collaboration-main-build, collaboration-test-build]
@@ -759,12 +845,15 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Require exact current native preparation
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-test-build.result }}
@@ -801,8 +890,8 @@ jobs:
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-build-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-build-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -810,8 +899,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-build-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-build-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Qualify current selected native outputs (no browser or DB)
         id: prepare
@@ -819,8 +908,8 @@ jobs:
           FVOCI_E2E_PENDING: "1"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-build-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-build-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-build-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
@@ -857,6 +946,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - *save_sqlite_input_hashes
+
   collaboration-install-on:
     needs: [ci-plan, collaboration-build]
     if: needs.ci-plan.outputs.select_collaboration_install_on == 'true'
@@ -916,17 +1007,20 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-install-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -934,8 +1028,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-install-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -944,8 +1038,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-install-on-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -960,8 +1054,8 @@ jobs:
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-install-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -973,8 +1067,8 @@ jobs:
           FVOCI_COLLAB_LANE: "install/on"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-install-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-install-on-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-install-on-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
@@ -1016,6 +1110,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
+      - *save_sqlite_input_hashes
 
   collaboration-postgres-on:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
@@ -1074,17 +1169,20 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -1092,8 +1190,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -1102,8 +1200,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-on-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -1124,8 +1222,8 @@ jobs:
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-on-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -1138,8 +1236,8 @@ jobs:
           FVOCI_COLLAB_LANE: "postgres/on"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-on-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-on-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
@@ -1173,6 +1271,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
+      - *save_sqlite_input_hashes
 
   collaboration-sqlite-on:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
@@ -1231,17 +1330,20 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -1249,8 +1351,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -1259,8 +1361,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-on-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -1281,8 +1383,8 @@ jobs:
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-on-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -1295,8 +1397,8 @@ jobs:
           FVOCI_COLLAB_LANE: "sqlite/on"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-on-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-on-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-on-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
@@ -1330,6 +1432,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
+      - *save_sqlite_input_hashes
 
   collaboration-postgres-off:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
@@ -1388,17 +1491,20 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-off-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -1406,8 +1512,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-off-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -1416,8 +1522,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-off-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -1438,8 +1544,8 @@ jobs:
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-off-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -1452,8 +1558,8 @@ jobs:
           FVOCI_COLLAB_LANE: "postgres/off"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-postgres-off-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-postgres-off-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-postgres-off-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
@@ -1487,6 +1593,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
+      - *save_sqlite_input_hashes
 
   collaboration-sqlite-off:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
@@ -1545,17 +1652,20 @@ jobs:
             arm64) ;;
             *) exit 1 ;;
           esac
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
+          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
           bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
             --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+      - *sqlite_input_hashes
       - name: Prepare locked dependencies
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-07 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-07 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-off-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
@@ -1563,8 +1673,8 @@ jobs:
         working-directory: apps/web
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-08 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-08 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-off-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun --bun x --no-install playwright install --with-deps chromium
       - name: Require a successful exact producer artifact
         env:
@@ -1573,8 +1683,8 @@ jobs:
           PRODUCER_DIGEST: ${{ needs.collaboration-build.outputs.handoff_sha256 }}
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-09 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-09 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-off-step-10 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-10 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           [[ "$PRODUCER_RESULT" == success ]]
           [[ "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ ]]
@@ -1595,8 +1705,8 @@ jobs:
         # Same per-test bound as the web and editor test scripts (node --test had none).
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-11 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-11 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-off-step-13 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-13 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
           bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
           (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
@@ -1609,8 +1719,8 @@ jobs:
           FVOCI_COLLAB_LANE: "sqlite/off"
         run: |
           fvoci_timing_started=$SECONDS
-          printf 'ci-step stage=collaboration-sqlite-off-step-12 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-12 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
+          printf 'ci-step stage=collaboration-sqlite-off-step-14 started at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          trap 'fvoci_timing_exit=$?; printf "ci-step stage=collaboration-sqlite-off-step-14 finished at=%s elapsed_seconds=%s exit=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - ${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT
           set -euo pipefail
           # Only this ephemeral CI job's checkout/SQLite input/target/report ownership.
           # No account creation/global Git setting or operating resource changes.
@@ -1644,6 +1754,7 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
+      - *save_sqlite_input_hashes
 
   web-ci-gate:
     name: web-ci-gate

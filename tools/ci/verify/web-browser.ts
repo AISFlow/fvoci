@@ -4,6 +4,7 @@
 // and that no job uses python.
 import { get, has, isMapping, pyContains, pyEq, pySplitlines, type Mapping } from "./py.ts";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { rawBlockScalar } from "./raw-yaml.ts";
 import { get as safeGet } from "./load.ts";
 import { gatedWorkflowJobs } from "./registry.ts";
@@ -218,8 +219,9 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
       safeGet(job, "outputs"),
       COLLABORATION_NATIVE_OUTPUTS,
     ), "outputs the artifact ID, digest and arch/SHA/attempt/SQLite identity");
-    require(steps.filter((step) => usesPrefix(step, "actions/upload-artifact@")).length ===
-      1, "preparation cannot publish qualified packets");
+    require(steps.filter(
+      (step) => usesPrefix(step, "actions/upload-artifact@") && !isSQLiteHashUpload(step),
+    ).length === 1, "preparation cannot publish qualified packets");
   }
   for (const [name, producer, phase] of [
     ["collaboration-test-build", "collaboration-main-build", "main"],
@@ -495,6 +497,7 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
     ...verifyNoRunScopedCacheKeys(jobs),
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
+    ...verifyWebHostInputsJobs(jobs),
   ];
 }
 
@@ -539,6 +542,105 @@ const TIMED_RUSTUP_JOBS = [
   "collaboration-build",
   ...WEB_COLLAB_LANES.map((lane) => lane.name),
 ];
+
+export const WEB_SQLITE_JOBS = [
+  "web-checks",
+  "web-native-checks",
+  ...UNTIMED_RUSTUP_JOBS,
+  ...TIMED_RUSTUP_JOBS,
+];
+// The same complete host preparation precedes every Web SQLite/cache identity.
+const WEB_SQLITE_RUN = String.raw`set -euo pipefail
+# Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
+case "$(dpkg --print-architecture)" in
+  amd64)
+    test -f /etc/apt/apt-mirrors.txt
+    grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
+    grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
+    test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+    ;;
+  arm64) ;;
+  *) exit 1 ;;
+esac
+printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
+mkdir "$RUNNER_TEMP/fvoci-sqlite"
+dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
+bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
+  --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+`;
+const SQLITE_HASH_RUN_SHA256 = "940de49368cfbd4955078f899e8f46c3233b63519845764e3e7696a2087189af";
+const SQLITE_HASH_CONDITION = "${{ always() && steps.sqlite.outcome == 'success' }}";
+const SQLITE_HASH_UPLOAD_CONDITION =
+  "${{ always() && steps.sqlite_diagnostics.outputs.written == 'true' }}";
+const SQLITE_HASH_UPLOAD: Mapping = {
+  name: "Retain SQLite input hashes",
+  if: SQLITE_HASH_UPLOAD_CONDITION,
+  uses: UPLOAD_PIN,
+  with: {
+    name: "sqlite-input-hashes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}",
+    path: "${{ runner.temp }}/fvoci-sqlite-input-hashes/hashes.json",
+    "if-no-files-found": "warn",
+    "retention-days": 3,
+  },
+};
+function isSQLiteHashUpload(step: Mapping): boolean {
+  return pyEq(step, SQLITE_HASH_UPLOAD);
+}
+
+export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
+  const errors: string[] = [];
+  for (const name of WEB_SQLITE_JOBS) {
+    const job = get(jobs, name);
+    const raw = isMapping(job) ? get(job, "steps") : undefined;
+    const steps = Array.isArray(raw) ? raw.filter(isMapping) : [];
+    const sqlites = steps.filter((step) => get(step, "id") === "sqlite");
+    const sqlite = sqlites[0];
+    const at = sqlite ? steps.indexOf(sqlite) : -1;
+    const preamble = TIMED_RUSTUP_JOBS.includes(name) ? timingPreamble(name, at + 1) : "";
+    if (
+      sqlites.length !== 1 ||
+      !sqlite ||
+      !pyEq(sqlite, {
+        name: "Prepare pinned SQLite root build inputs",
+        id: "sqlite",
+        env: { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" },
+        run: preamble + WEB_SQLITE_RUN,
+      })
+    )
+      errors.push(
+        `web: ${name} requires complete unmasked host preparation before whole SQLite inputs`,
+      );
+    const records = steps.filter((step) => get(step, "id") === "sqlite_diagnostics");
+    const record = records[0];
+    if (
+      records.length !== 1 ||
+      !record ||
+      steps.indexOf(record) !== at + 1 ||
+      !pyEq(Object.keys(record).sort(), ["id", "if", "name", "run"]) ||
+      get(record, "name") !== "Record SQLite input hashes" ||
+      get(record, "if") !== SQLITE_HASH_CONDITION ||
+      createHash("sha256").update(stepRun(record)).digest("hex") !== SQLITE_HASH_RUN_SHA256
+    )
+      errors.push(
+        `web: ${name} requires the bounded hash-only diagnostic after successful SQLite preparation`,
+      );
+    const uploads = steps.filter((step) => get(step, "name") === "Retain SQLite input hashes");
+    if (
+      uploads.length !== 1 ||
+      !uploads[0] ||
+      !isSQLiteHashUpload(uploads[0]) ||
+      steps.at(-1) !== uploads[0]
+    )
+      errors.push(`web: ${name} retains only the safe hash diagnostic after mandatory steps`);
+  }
+  return errors;
+}
 
 // The collaboration jobs wrap each run in a ci-step timer named by position.
 function timingPreamble(job: string, position: number): string {

@@ -1467,8 +1467,8 @@ function caseList(): MutationCase[] {
     'python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"';
   const SQLITE_STEP = "      - name: Prepare pinned SQLite root build inputs\n";
   const APT_NO_PYTHON =
-    "sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
-  const APT_PYTHON = APT_NO_PYTHON.replace("recommends gcc", "recommends python3 gcc");
+    "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev\n";
+  const APT_PYTHON = APT_NO_PYTHON.replace(" gcc", " python3 gcc");
   const helper = (job: string) => `web: ${job} Rustup metadata must build and run the locked xtask`;
   const order = (job: string) => `web: ${job} Rustup metadata must follow the toolchain install`;
   const once = (job: string) => `web: ${job} requires exactly one Rustup metadata step`;

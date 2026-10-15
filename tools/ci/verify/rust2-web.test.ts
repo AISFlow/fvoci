@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { contextFromTexts } from "./load.ts";
 import type { Mapping } from "./py.ts";
 import {
@@ -23,6 +24,8 @@ import {
   verifyWebBuildHandoffJobs,
   verifyCollaborationPreparationJobs,
   verifyNoRunScopedCacheKeys,
+  verifyWebHostInputsJobs,
+  WEB_SQLITE_JOBS,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 
@@ -46,6 +49,201 @@ const runOf = (step: Mapping): string => {
   if (typeof run !== "string") throw new Error("step has no run script");
   return run;
 };
+
+test("every Web SQLite caller upgrades complete host inputs before capture without relaxing refusal", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyWebHostInputsJobs(jobs)).toEqual([]);
+  for (const name of WEB_SQLITE_JOBS) {
+    for (const [before, after] of [
+      ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
+      ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
+      ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
+      ["--with-new-pkgs", ""],
+      ["--no-remove", ""],
+      [" linux-libc-dev", ""],
+      [" libcrypt-dev", ""],
+      ["libclang-18-dev=1:18.1.8-20ubuntu8", "libclang-18-dev"],
+      ["dpkg-query -W >", "dpkg-query -W gcc >"],
+      ["Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", "Trusted: yes"],
+    ] as const) {
+      const bad = clone(jobs);
+      const prep = stepWith(bad, name, byId("sqlite"));
+      expect(runOf(prep)).toContain(before);
+      prep["run"] = runOf(prep).replace(before, after);
+      expect(verifyWebHostInputsJobs(bad).join("\n")).toContain(
+        "complete unmasked host preparation",
+      );
+    }
+    const masked = clone(jobs);
+    stepWith(masked, name, byId("sqlite"))["continue-on-error"] = true;
+    expect(verifyWebHostInputsJobs(masked).join("\n")).toContain(
+      "complete unmasked host preparation",
+    );
+    const reordered = clone(jobs);
+    const prep = stepWith(reordered, name, byId("sqlite"));
+    const capture = 'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n';
+    prep["run"] = runOf(prep)
+      .replace(capture, "")
+      .replace(
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+        capture + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+      );
+    expect(verifyWebHostInputsJobs(reordered).join("\n")).toContain(
+      "complete unmasked host preparation",
+    );
+  }
+});
+
+test("SQLite diagnostics publish only the exact hash file after original mandatory steps", () => {
+  const jobs = realJobs("web.yml");
+  for (const name of WEB_SQLITE_JOBS) {
+    for (const edit of [
+      (step: Mapping) => {
+        step["if"] = "always()";
+      },
+      (step: Mapping) => {
+        step["continue-on-error"] = true;
+      },
+      (step: Mapping) => {
+        (step["with"] as Mapping)["path"] = "${{ runner.temp }}/fvoci-sqlite/consumer-inputs.json";
+      },
+      (step: Mapping) => {
+        (step["with"] as Mapping)["path"] = "${{ runner.temp }}/**";
+      },
+      (step: Mapping) => {
+        step["uses"] = "actions/upload-artifact@main";
+      },
+    ]) {
+      const bad = clone(jobs);
+      edit(stepWith(bad, name, (step) => step["name"] === "Retain SQLite input hashes"));
+      expect(verifyWebHostInputsJobs(bad).join("\n")).toContain("safe hash diagnostic");
+    }
+    const bad = clone(jobs),
+      list = steps(bad, name);
+    list.splice(list.findIndex(byId("sqlite")), 0, list.pop()!);
+    expect(verifyWebHostInputsJobs(bad).join("\n")).toContain("safe hash diagnostic");
+    const changed = clone(jobs);
+    const record = stepWith(changed, name, byId("sqlite_diagnostics"));
+    record["run"] = runOf(record).replace("const limit = 512", "const limit = Infinity");
+    expect(verifyWebHostInputsJobs(changed).join("\n")).toContain("bounded hash-only diagnostic");
+  }
+});
+
+test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replace the original producer refusal", () => {
+  const jobs = realJobs("web.yml");
+  const run = runOf(stepWith(jobs, "collaboration-test-build", byId("sqlite_diagnostics")));
+  const match =
+    /^bun --no-env-file - <<'SQLITE_INPUT_HASHES'\n([\s\S]+)SQLITE_INPUT_HASHES\n$/.exec(run);
+  expect(match).not.toBeNull();
+  const code = match![1]!;
+  const canary = "PRIVATE_INPUT_CANARY";
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const packages =
+    Array.from({ length: 600 }, (_, n) => `canary-package-${n}\t1.0-${canary}`).join("\n") + "\n";
+  const input = {
+    inputs: { private: canary },
+    exports: { private: canary },
+    wrapper_sha256: "a".repeat(64),
+    os_release: canary,
+    architecture: canary,
+    packages,
+    libclang_path: canary,
+    libclang_sha256: "b".repeat(64),
+    build_environment_sha256: "c".repeat(64),
+    rustc: canary,
+    cache_identity: "d".repeat(64),
+    unknown_secret: canary,
+  };
+  const base = mkdtempSync(join(tmpdir(), "web-input-hashes-"));
+  try {
+    const invoke = (name: string, contents: string | null, occupied = false) => {
+      const parent = join(base, name);
+      mkdirSync(join(parent, "fvoci-sqlite"), { recursive: true });
+      if (contents !== null)
+        writeFileSync(join(parent, "fvoci-sqlite/consumer-inputs.json"), contents);
+      const output = join(parent, "github-output");
+      writeFileSync(output, "");
+      if (occupied) {
+        mkdirSync(join(parent, "fvoci-sqlite-input-hashes"));
+        writeFileSync(join(parent, "fvoci-sqlite-input-hashes/hashes.json"), canary);
+      }
+      const child = Bun.spawnSync([process.execPath, "--no-env-file", "-"], {
+        stdin: Buffer.from(code),
+        env: { PATH: "/usr/bin:/bin", RUNNER_TEMP: parent, GITHUB_OUTPUT: output },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.exitCode).toBe(0);
+      expect(child.stdout.toString() + child.stderr.toString()).not.toContain(canary);
+      const text = readFileSync(join(parent, "fvoci-sqlite-input-hashes/hashes.json"), "utf8");
+      return {
+        text,
+        output: readFileSync(output, "utf8"),
+        stderr: child.stderr.toString(),
+        parent,
+      };
+    };
+    const good = invoke("good", JSON.stringify(input));
+    expect(good.text).not.toContain(canary);
+    const diagnostic = JSON.parse(good.text);
+    expect(diagnostic.status).toBe("available");
+    expect(diagnostic.identity_sha256).toBe(input.cache_identity);
+    expect(diagnostic.fields.os_release).toBe(hash(JSON.stringify(canary)));
+    expect(diagnostic.packages_sha256).toBe(hash(packages));
+    expect(diagnostic.package_count).toBe(600);
+    expect(diagnostic.package_entries).toHaveLength(512);
+    expect(diagnostic.packages_truncated).toBe(true);
+    expect(
+      diagnostic.package_entries.every(
+        (row: string[]) => row.length === 2 && row.every((value) => /^[0-9a-f]{64}$/.test(value)),
+      ),
+    ).toBe(true);
+    expect(good.output).toBe("written=true\n");
+    expect(statSync(join(good.parent, "fvoci-sqlite-input-hashes/hashes.json")).mode & 0o777).toBe(
+      0o600,
+    );
+    const changed = invoke(
+      "changed",
+      JSON.stringify({ ...input, packages: packages + "last-package\t9.0\n" }),
+    );
+    expect(JSON.parse(changed.text).packages_sha256).not.toBe(diagnostic.packages_sha256);
+    for (const [index, contents] of [
+      null,
+      canary,
+      JSON.stringify({ ...input, cache_identity: [input.cache_identity] }),
+      JSON.stringify({ ...input, packages: "" }),
+      JSON.stringify({ ...input, packages: "duplicate\t1\nduplicate\t1\n" }),
+      JSON.stringify({ ...input, packages: canary }),
+      " ".repeat(4 * 1024 * 1024 + 1),
+    ].entries()) {
+      const unavailable = invoke(`missing-${index}`, contents);
+      expect(JSON.parse(unavailable.text)).toEqual({ schema: 1, status: "unavailable" });
+      expect(unavailable.output).toBe("written=true\n");
+    }
+    const occupied = invoke("occupied", JSON.stringify(input), true);
+    expect(occupied.text).toBe(canary);
+    expect(occupied.output).toBe(""); // An occupied destination can never be uploaded.
+    expect(occupied.stderr).toContain("MISSING");
+    const original = runOf(stepWith(jobs, "collaboration-test-build", requireStep));
+    const identity = `X64-1.99.0-${"a".repeat(40)}-1-${"b".repeat(64)}`;
+    expect(
+      Bun.spawnSync(["bash", "-c", original], {
+        env: {
+          PATH: "/usr/bin:/bin",
+          PRODUCER_RESULT: "success",
+          PRODUCER_ARTIFACT: "123",
+          PRODUCER_DIGEST: "c".repeat(64),
+          PRODUCER_IDENTITY: identity,
+          CURRENT_IDENTITY: identity.replace(/b$/, "c"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exitCode,
+    ).toBe(1);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
 
 test("collaboration preparation hands exact current-run targets over by artifact and compiles completely", () => {
   const jobs = realJobs("web.yml");
