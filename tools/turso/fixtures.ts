@@ -21,6 +21,7 @@ export const FIXTURE_SUITES = [
   "tools/turso/guard-receipts.test.ts",
   "tools/turso/guard.test.ts",
   "tools/turso/ui-audit.test.ts",
+  "tools/turso/ui-auth-session.test.ts",
   "tools/turso/ui-cli.test.ts",
   "tools/turso/ui-container.test.ts",
   "tools/turso/ui-flow.test.ts",

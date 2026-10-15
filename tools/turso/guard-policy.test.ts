@@ -73,6 +73,61 @@ describe("dispatch admission", () => {
     denied("DESTRUCTIVE_NOT_ALLOWED", () => validateTarget(restore, settings, secrets));
   });
 
+  test("ui-auth reaches the dedicated auth consumer only on exact main source", () => {
+    const auth: Inputs = {
+      phase: "ui-auth",
+      destructive: true,
+      ui_source_sha: A,
+      ui_baseline_sha256: "b".repeat(64),
+      ui_target_sha256: "c".repeat(64),
+    };
+    expect(decide("--consume", context, auth, A)).toEqual({ kind: "consume", phase: "ui-auth" });
+    expect(() => {
+      validateUiInputs("ui-auth", auth, A);
+    }).not.toThrow();
+    for (const [key, code] of [
+      ["ui_source_sha", "UI_REVIEWED_SOURCE_REQUIRED"],
+      ["ui_baseline_sha256", "UI_CURRENT_DATASET_BINDING_REQUIRED"],
+      ["ui_target_sha256", "UI_CURRENT_TARGET_BINDING_REQUIRED"],
+    ] as const) {
+      const missing = { ...auth };
+      Reflect.deleteProperty(missing, key);
+      denied(code, () => {
+        validateUiInputs("ui-auth", missing, A);
+      });
+    }
+    denied("UI_REVIEWED_SOURCE_REQUIRED", () => {
+      validateUiInputs("ui-auth", { ...auth, ui_source_sha: "d".repeat(40) }, A);
+    });
+    denied("UI_AUTH_MAIN_REF_REQUIRED", () =>
+      validateDispatch({ ...context, ref: REVIEWED_REF }, auth, A),
+    );
+    denied("UI_REF_PHASE_REQUIRED", () =>
+      validateDispatch({ ...context, ref: UI_REVIEWED_REF }, auth, A),
+    );
+    denied("UNTRUSTED_DISPATCH", () =>
+      validateDispatch({ ...context, ref: "refs/heads/topic" }, auth, A),
+    );
+    denied("SECRET_MODE_REQUIRES_MANUAL", () =>
+      validateDispatch({ ...context, event_name: "push", ref: REVIEWED_REF }, auth, A),
+    );
+    denied("CHECKOUT_MISMATCH", () => validateDispatch(context, auth, "d".repeat(40)));
+    denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", () =>
+      validateDispatch(context, { ...auth, destructive: false }, A),
+    );
+    denied("DESTRUCTIVE_NOT_ALLOWED", () => validateTarget(auth, settings, secrets));
+    denied("DESTRUCTIVE_NOT_ALLOWED", () =>
+      validateTarget(
+        { ...auth, destructive: false },
+        { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" },
+        secrets,
+      ),
+    );
+    expect(validateTarget(auth, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets)).toBe(
+      "ui-auth",
+    );
+  });
+
   test("trusted dispatch configuration", () => {
     expect(validateDispatch(context, inputs, A)).toBe("connection");
   });
@@ -288,7 +343,7 @@ describe("target configuration", () => {
       expect(
         validateTarget(confirmed, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets),
       ).toBe(phase);
-      if (!["migration", "reset", "ui-ack", "restore"].includes(phase))
+      if (!["migration", "reset", "ui-ack", "restore", "ui-auth"].includes(phase))
         denied("NOT_IMPLEMENTED", () => {
           requireImplemented(phase);
         });

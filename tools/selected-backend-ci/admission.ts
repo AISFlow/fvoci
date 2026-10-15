@@ -57,7 +57,9 @@ export function localAllocation(
 ): LocalGrant {
   const grant = localIdentity(expected);
   assert.ok(
-    grant.purpose === undefined || grant.purpose === "equal-work",
+    grant.purpose === undefined ||
+      grant.purpose === "equal-work" ||
+      grant.purpose === "auth-session",
     "selected allocation purpose only",
   );
   assert.ok(
@@ -144,6 +146,13 @@ export const registeredModules = [
   "tools/selected-backend-ci/drivers/install.ts",
   "tools/selected-backend-ci/drivers/postgres.ts",
   "tools/selected-backend-ci/drivers/sqlite.ts",
+  // The auth-session lane purpose: its shared consumer and the owned SMTP sink.
+  "tools/turso/ui-auth-session.ts",
+  "tools/turso/ui-audit.ts",
+  "tools/turso/ui-common.ts",
+  "tools/web-e2e/compat.ts",
+  "tools/web-e2e/smtp-sink.ts",
+  "apps/web/e2e-pending/auth-session-contract.ts",
 ] as const;
 
 const consumerCommonModules = [
@@ -187,6 +196,15 @@ export const tursoUiModules = Object.freeze([
   "apps/web/e2e-pending/collab-restart.ts",
   "apps/web/e2e-pending/collab-wire.ts",
   "apps/web/e2e/helpers.ts",
+  // The dedicated auth allocations of --local-auth.
+  "tools/turso/ui-auth-session.ts",
+  "tools/web-e2e/smtp-sink.ts",
+  "apps/web/e2e-pending/auth-session-playwright.config.ts",
+  "apps/web/e2e-pending/auth-session-tsconfig.json",
+  "apps/web/e2e-pending/auth-session-selected-backend.acceptance.ts",
+  "apps/web/e2e-pending/auth-session-helpers.ts",
+  "apps/web/e2e-pending/auth-session-contract.ts",
+  "apps/web/e2e-pending/selected-backend-fixture.ts",
 ] as const);
 
 export const keycloakModules = Object.freeze([
@@ -284,8 +302,15 @@ function admittedCommands(grant: LocalConsumerGrant): void {
       "--no-run",
       "--message-format=json",
     ];
+  // Exactly one local Turso runtime per grant: the restore or the dedicated
+  // auth allocations. Any other argv stays unapproved.
   if (grant.purpose === "turso-ui")
-    expected.run = [process.execPath, "--no-env-file", entry, "--local-restore"];
+    expected.run = [
+      process.execPath,
+      "--no-env-file",
+      entry,
+      grant.stageCommands.run?.[3] === "--local-auth" ? "--local-auth" : "--local-restore",
+    ];
   else if (grant.stageCommands.run) {
     const command = grant.stageCommands.run;
     assert.ok(command, "exact Keycloak runtime command required");
@@ -347,8 +372,12 @@ function admittedProcessObserver(grant: LocalConsumerGrant): void {
   assert.equal(witness.config.sha256, digest(""));
 }
 
-function consumerAllocation(mode: string, purpose: "turso-ui" | "keycloak"): LocalConsumerGrant {
-  const grant = localIdentity([1000, 1000]) as LocalConsumerGrant;
+function consumerAllocation(
+  mode: string,
+  purpose: "turso-ui" | "keycloak",
+  expected: readonly [number, number] = [1000, 1000],
+): LocalConsumerGrant {
+  const grant = localIdentity(expected) as LocalConsumerGrant;
   assert.equal(call(["git", "status", "--short"]), "", "current consumer source must be clean");
   assert.equal(grant.purpose, purpose, "local consumer purpose mismatch");
   if (purpose === "turso-ui")
@@ -453,10 +482,21 @@ function consumerAllocation(mode: string, purpose: "turso-ui" | "keycloak"): Loc
 }
 
 /** Each entry owns its static policy; callers cannot supply a smaller registry. */
-export const localTursoUiAllocation = (mode: string): LocalConsumerGrant =>
-  consumerAllocation(mode, "turso-ui");
+export const localTursoUiAllocation = (
+  mode: string,
+  expected?: readonly [number, number],
+): LocalConsumerGrant => consumerAllocation(mode, "turso-ui", expected);
 export const localKeycloakAllocation = (mode: string): LocalConsumerGrant =>
   consumerAllocation(mode, "keycloak");
+/** The granted local Turso runtime argv selects exactly one consumer entry. */
+export function localTursoUiRun(
+  mode: "--local-restore" | "--local-auth",
+  expected?: readonly [number, number],
+): LocalConsumerGrant {
+  const grant = localTursoUiAllocation("server", expected);
+  assert.equal(grant.stageCommands.run?.[3], mode, "unapproved consumer stage argv");
+  return grant;
+}
 
 // The whole-flow job and the five per-lane jobs that start the selected runtime.
 export const runtimeJobs = [

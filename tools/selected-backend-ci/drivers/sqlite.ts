@@ -74,7 +74,17 @@ import {
   type Receipt,
   type Row,
 } from "./common.ts";
-import { browserArgs } from "./postgres.ts";
+import { AUTH_SPEC, authEventRows } from "../../turso/ui-auth-session.ts";
+import {
+  authBrowserEnvironment,
+  authConfig,
+  authLaneVerdict,
+  authServerEnvironment,
+  browserArgs,
+  startAuthSink,
+  stopAuthSink,
+  type AuthSink,
+} from "./postgres.ts";
 import { equalSpec, measureBrowser, measurementInputs, validateEqualReport } from "./equal-work.ts";
 import {
   browserPort,
@@ -138,6 +148,7 @@ export interface State {
   browserInputs: Browser | null;
   databaseInode: Inode | null;
   code: number;
+  sink?: AuthSink;
 }
 
 // ---- pure decisions -------------------------------------------------------
@@ -538,6 +549,9 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   const equal = state.current.manifest.purpose === "equal-work";
   const measurements = join(run, "equal-work-samples");
   if (equal) state.browserEnv.FVOCI_E2E_EQUAL_WORK_DIR = measurements;
+  const sink = state.sink;
+  if (sink !== undefined)
+    Object.assign(state.browserEnv, authBrowserEnvironment(state.head, state.tree, sink));
   const web = join(root, "apps/web");
   // prettier-ignore
   const chromium = (await seam.command([state.bun, "--eval",
@@ -553,6 +567,8 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   writeJson(join(run, "actual-browser-inputs.json"), browserInputs);
   const args = browserArgs(state.bun, join(root, "node_modules/playwright/cli.js"), state.spec);
   if (equal) args[args.indexOf("--config") + 1] = "e2e-pending/equal-work-playwright.config.ts";
+  if (sink !== undefined) args[args.indexOf("--config") + 1] = authConfig;
+  const eventsBefore = sink === undefined ? null : authEventRows(authEvents(db), "sqlite");
   receipt.phase = "browser";
   Object.assign(receipt, {
     browser_command: args,
@@ -610,6 +626,25 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     };
     Object.assign(receipt, {
       actual_browser_tests: 1,
+      retries: 0,
+      ignored: 0,
+      actual_fixture_pin_checks_completed: true,
+    });
+    return;
+  }
+  if (eventsBefore !== null) {
+    const after = authEventRows(authEvents(db), "sqlite");
+    const binding = { backend: "sqlite", flow, source: state.head, tree: state.tree } as const;
+    const verdict = authLaneVerdict(read(report), binding, eventsBefore, after);
+    privateText(join(run, "auth-session-verdict.private.json"), JSON.stringify(verdict));
+    Object.assign(receipt, {
+      purpose: "auth-session",
+      auth_session: {
+        cases: verdict.cases,
+        events: verdict.events,
+        verdict_sha256: sha(join(run, "auth-session-verdict.private.json")),
+      },
+      actual_browser_tests: 3,
       retries: 0,
       ignored: 0,
       actual_fixture_pin_checks_completed: true,
@@ -793,6 +828,13 @@ export function finalize(state: State, seam: Seam): Promise<number> {
       if (receipt.owned_loopback_port_closed !== true)
         cleanupErrors.push("owned-loopback-port-closure-unconfirmed");
     } else cleanupErrors.push("owned loopback port never observed; retirement remains unqualified");
+    const sink = state.sink;
+    if (sink !== undefined) {
+      const stopped = await attempt("smtp-sink-stop-failed", () => stopAuthSink(sink));
+      receipt.auth_smtp_sink = stopped;
+      if (stopped === null || stopped.exit !== -15 || stopped.forced || !stopped.listenerAbsent)
+        cleanupErrors.push("owned-smtp-sink-retirement-unconfirmed");
+    }
     try {
       const after = await seam.inputCheck(state.before, state.head, state.tree);
       writeJson(join(run, "source-inputs-after.json"), after);
@@ -859,9 +901,11 @@ export async function main(
   const spec =
     current.manifest.purpose === "equal-work"
       ? equalSpec
-      : flow === "off"
-        ? "workspace-off-selected-backend.spec.ts"
-        : "workspace-wiki-selected-backend.spec.ts";
+      : current.manifest.purpose === "auth-session"
+        ? AUTH_SPEC
+        : flow === "off"
+          ? "workspace-off-selected-backend.spec.ts"
+          : "workspace-wiki-selected-backend.spec.ts";
   const bun = env("FVOCI_CI_BUN", source);
   assert.ok(source.FVOCI_ROOT_RUN_OWNER === owner);
   const before = current.before;
@@ -895,8 +939,14 @@ export async function main(
   const name = "fvoci-v060-vue-sqlite-current-" + randomBytes(6).toString("hex");
   const serverEnv = serverEnvironment(flow, () => randomBytes(32).toString("hex"));
   if (current.manifest.purpose === "equal-work") serverEnv.METRICS_ALLOW_IPS = "127.0.0.1";
-  privateText(join(run, "environment.private.json"), JSON.stringify(serverEnv));
-  privateText(join(run, "environment.private.sh"), shellExports(serverEnv));
+  const auth = current.manifest.purpose === "auth-session";
+  if (auth) Object.assign(serverEnv, authServerEnvironment(null));
+  const environmentFiles = () => {
+    privateText(join(run, "environment.private.json"), JSON.stringify(serverEnv));
+    privateText(join(run, "environment.private.sh"), shellExports(serverEnv));
+  };
+  // The auth files wait for the owned sink, which finalize then retires.
+  if (!auth) environmentFiles();
   const state: State = {
     current,
     driver,
@@ -977,6 +1027,11 @@ export async function main(
   writeJson(join(run, "start.json"), state.receipt);
   seam.trap();
   try {
+    if (auth) {
+      state.sink = await startAuthSink(run, bun);
+      Object.assign(serverEnv, authServerEnvironment(state.sink));
+      environmentFiles();
+    }
     await prepareContainer(state, seam);
     await startServer(state, seam);
     await qualifyServer(state, seam);
@@ -993,6 +1048,19 @@ export function migrationRows(path: string): unknown[][] {
   try {
     return observer
       .query("SELECT version,lineage,sql_sha256 FROM schema_migrations ORDER BY version")
+      .values();
+  } finally {
+    observer.close();
+  }
+}
+// Read-only `auth.%` event observation; a full bound is refused by the caller.
+export function authEvents(path: string): unknown[][] {
+  const observer = new Database(path, { readonly: true });
+  try {
+    return observer
+      .query(
+        "SELECT seq,verb,channel,workspace_id,actor_user_id,target_type,target_id,payload FROM events WHERE verb LIKE 'auth.%' ORDER BY seq LIMIT 10001",
+      )
       .values();
   } finally {
     observer.close();

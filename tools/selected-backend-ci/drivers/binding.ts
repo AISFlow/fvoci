@@ -222,6 +222,15 @@ export function validateRestoreReport(report: unknown): void {
 const git = async (...args: string[]) =>
   (await command(["git", "-c", "safe.directory=" + root, "-C", root, ...args])).stdout;
 
+/** A manifest names exactly its local grant's lane purpose; install has none. */
+export function lanePurpose(lane: Lane, purpose: unknown, local: LocalGrant | null): void {
+  assert.ok(
+    purpose === undefined ||
+      ((purpose === "equal-work" || purpose === "auth-session") && local?.purpose === purpose),
+  );
+  assert.ok(purpose === (lane === "install" ? undefined : local?.purpose));
+}
+
 // Rejects an absent or false allocation before hashing large inputs or any
 // resource mutation. `driver` is the lane driver file the grant names.
 export async function loadCurrent(lane: Lane, driver: string): Promise<Current> {
@@ -238,10 +247,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   const execution = process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci";
   assert.ok(execution === "github-ci" || execution === "orca-local");
   const local: LocalGrant | null = execution === "orca-local" ? localAllocation("run") : null;
-  assert.ok(
-    m.purpose === undefined || (m.purpose === "equal-work" && local?.purpose === "equal-work"),
-  );
-  assert.ok(m.purpose === (lane === "install" ? undefined : local?.purpose));
+  lanePurpose(lane, m.purpose, local);
   if (local !== null) assert.ok(m.source === local.source && m.tree === local.tree);
   else {
     assert.ok(env("GITHUB_ACTIONS") === "true" && env("CI") === "true");

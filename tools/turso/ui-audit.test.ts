@@ -470,6 +470,52 @@ describe("preservation audit", () => {
     },
   );
 
+  test("auth revocation events are witnessed only for a dedicated auth allocation actor", () => {
+    for (const kind of ["actor-logout", "actor-password-change", "actor-password-reset"]) {
+      const logout = kind === "actor-logout";
+      const [original, after, audit] = counterRecords();
+      const subject = must(actor[1]);
+      const authAudit: Audit = { ...audit, authActors: [subject] };
+      const allocations = (after.allocations as Record<string, Record<string, Record_>>).events;
+      const refs = must(must(allocations)["3".repeat(64)]);
+      refs.workspaces = [];
+      refs.actors = [subject];
+      refs.eventWitness = {
+        class: kind,
+        sequence: number(1),
+        ...(logout ? { actor: subject } : { target: subject }),
+      };
+      must(ops(after).events)[0] = [number(1), ["null"], actor];
+      assertPreserved(original, after, authAudit);
+      // The same producer of a non-auth allocation actor stays foreign.
+      expect(() => {
+        assertPreserved(original, after, audit);
+      }, kind).toThrow(UiError);
+      const witnessOf = (value: Record_) =>
+        must(
+          must((value.allocations as Record<string, Record<string, Record_>>).events)[
+            "3".repeat(64)
+          ],
+        );
+      for (const fault of ["subject", "extra", "people", "spaces", "class"]) {
+        const wrong = clone(after);
+        const wrongRefs = witnessOf(wrong);
+        const witness = wrongRefs.eventWitness as Record_;
+        if (fault === "subject") witness[logout ? "actor" : "target"] = "9".repeat(32);
+        else if (fault === "extra") witness[logout ? "target" : "actor"] = subject;
+        else if (fault === "people") wrongRefs.actors = ["9".repeat(32)];
+        else if (fault === "spaces") wrongRefs.workspaces = [workspace[1]];
+        else witness.class = "actor-password-unknown";
+        expect(
+          () => {
+            assertPreserved(original, wrong, authAudit);
+          },
+          kind + " " + fault,
+        ).toThrow(UiError);
+      }
+    }
+  });
+
   test("background preflight keeps populated users but refuses old work", () => {
     const [original] = counterRecords();
     expect(startupBlockers(original)).toEqual([]);

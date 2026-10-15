@@ -256,6 +256,19 @@ describe("container shape", () => {
     expect(argv.indexOf(QUALIFIED_CANONICAL_IMAGE)).toBe(Math.max(...positions) + 1);
   });
 
+  test("the normal server capsule carries the owned SMTP relay settings", () => {
+    const environment = {
+      FVOCI_LIBSQL_URL: "u",
+      FVOCI_LIBSQL_AUTH_TOKEN: "t",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: "2525",
+      SMTP_FROM: "auth-session@example.invalid",
+    };
+    const text = capsuleText(environment);
+    for (const [key, value] of Object.entries(environment).slice(2))
+      expect(text).toContain(key + "=" + shellQuote(value) + "\n");
+  });
+
   test("the capsule refuses LOCPATH, unlisted secrets and multi-line values", () => {
     const base = { FVOCI_LIBSQL_URL: "u", FVOCI_LIBSQL_AUTH_TOKEN: "t" };
     expect(() => capsuleText({ ...base, LOCPATH: "/x" })).toThrow("UI_LOCPATH_REFUSED");
@@ -592,6 +605,9 @@ describe("local grant and publish", () => {
         FVOCI_STORAGE_DIR: "/work/storage",
         ENCRYPTION_KEYS: "PRIVATE_UNUSED_KEYRING",
         ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+        SMTP_HOST: "127.0.0.1",
+        SMTP_PORT: "2525",
+        SMTP_FROM: "auth-session@example.invalid",
       },
       { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never,
       "fvoci-e2e-fixture",
@@ -601,6 +617,7 @@ describe("local grant and publish", () => {
     );
     const blob = calls.flat().join("\n");
     expect(readFileSync(join(directory, "native-env.sh"), "utf8")).not.toContain("ENCRYPTION_");
+    expect(readFileSync(join(directory, "native-env.sh"), "utf8")).not.toContain("SMTP_");
     expect(blob).not.toContain("PRIVATE_UNUSED_KEYRING");
     expect(blob).not.toContain(token);
     expect(JSON.stringify(created.Config.Env)).not.toContain(token);

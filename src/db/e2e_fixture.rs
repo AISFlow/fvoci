@@ -2,6 +2,7 @@
 //! migration/reset/cleanup operation or public SQL executor is exposed.
 use super::backend::{Backend, DbTransaction, FamilyTx};
 use super::codec::{Cell, FamilyRow};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,11 +301,37 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             .map(|(_, value)| value)
             .ok_or_else(refused)
     };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0) {
+        return Ok(Value::Null);
+    }
+    let payload = cell("payload")?.value()?;
+    // The normal logout producer has no stored target. Bind its actual actor
+    // explicitly; never manufacture a user target for this event.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.logout") {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("target_id")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Null, Cell::Null, Cell::Blob(actor))
+                if channel == "web" && actor.len() == 16 && payload == json!({}) =>
+            {
+                actor
+            }
+            _ => return Ok(Value::Null),
+        };
+        return Ok(json!({
+            "class":"actor-logout",
+            "sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor)
+        }));
+    }
     let target = match cell("target_id")? {
         Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
         _ => return Ok(Value::Null),
     };
-    let payload = cell("payload")?.value()?;
     let class = match (
         cell("verb")?,
         cell("channel")?,
@@ -325,6 +352,24 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             && payload == json!({"userId":target.to_string(),"method":"password"}) =>
         {
             "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if (verb == "auth.password_changed" || verb == "auth.password_reset")
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string()}) =>
+        {
+            if verb == "auth.password_changed" {
+                "actor-password-change"
+            } else {
+                "actor-password-reset"
+            }
         }
         (
             Cell::Text(verb),
@@ -696,6 +741,48 @@ const PRESERVATION_READS: &[(&str, &str)] = &[
 ];
 
 pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
+    Ok(capture_primary(backend, None).await?.dataset)
+}
+
+/// Conditional eligibility inputs, never evidence that a server used them.
+/// The authenticated consumer must bind these exact values to its sealed
+/// server configuration, source/native binary and target before admission.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SerialPolicy {
+    revision_keep: std::num::NonZeroU32,
+    revision_snapshot_interval_hours: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialObservation {
+    dataset: Value,
+    checks: SerialChecks,
+}
+
+struct PrimaryCapture {
+    dataset: Value,
+    checks: Option<SerialChecks>,
+}
+
+/// Fixed observation, with no caller-supplied completion witness or horizon.
+/// There is deliberately no aggregate `ready` or process-closure assertion.
+pub async fn capture_serial_observation(
+    backend: &Backend,
+    policy: SerialPolicy,
+) -> Result<SerialObservation, sqlx::Error> {
+    let captured = capture_primary(backend, Some(policy)).await?;
+    Ok(SerialObservation {
+        dataset: captured.dataset,
+        checks: captured.checks.ok_or_else(refused)?,
+    })
+}
+
+async fn capture_primary(
+    backend: &Backend,
+    policy: Option<SerialPolicy>,
+) -> Result<PrimaryCapture, sqlx::Error> {
     if !matches!(backend, Backend::LibsqlRemote(_)) {
         return Err(baseline_failure("backend-contract", refused()));
     }
@@ -728,6 +815,9 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
         let mut instance_config = Vec::new();
+        let mut serial_users = Vec::new();
+        let mut serial_memberships = Vec::new();
+        let mut serial_workspaces = BTreeSet::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             phase = "preservation-read";
@@ -740,6 +830,23 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             for row in &rows {
                 phase = "row-hash";
                 let hash = row_hash(row)?;
+                if matches!(*name, "users" | "memberships" | "workspaces") && policy.is_some() {
+                    phase = "serial-actor-witness";
+                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
+                    let mut columns = Vec::new();
+                    for i in 0..remote.column_count() {
+                        let column = remote.column_name(i).ok_or_else(refused)?;
+                        if matches!(column, "id" | "email" | "workspace_id" | "user_id" | "role") {
+                            columns.push((column.to_string(), row.cell(i as usize)?));
+                        }
+                    }
+                    match *name {
+                        "users" => serial_users.push(serial_user_witness(&columns, &hash)?),
+                        "memberships" => serial_memberships.push(serial_membership_witness(&columns, &hash)?),
+                        "workspaces" => { serial_workspaces.insert(serial_column(&columns, "id")?.id()?); }
+                        _ => return Err(refused()),
+                    }
+                }
                 if *name == "instance_config" {
                     let FamilyRow::Remote(remote) = row else { return Err(refused()) };
                     let columns = (0..remote.column_count()).map(|i| {
@@ -780,12 +887,21 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         phase = "ledger-conversion";
         let ledger = ledger.iter().map(|row| (0..4).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
         phase = "summary-conversion";
-        Ok(json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
+        let dataset = json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
             "instanceConfig":instance_config,
-            "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
+            "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?});
+        phase = "serial-observation";
+        let checks = match policy {
+            Some(policy) => {
+                join_serial_memberships(&serial_users, &serial_workspaces, &serial_memberships)?;
+                Some(serial_checks(f, policy, serial_users, serial_memberships).await?)
+            },
+            None => None,
+        };
+        Ok(PrimaryCapture { dataset, checks })
     }.await;
     let result = result.map_err(|original| {
         sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
@@ -799,6 +915,692 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         .await
         .map_err(|error| baseline_failure("rollback", error));
     finished(result, rollback, "not-attempted")
+}
+
+// Cover the entire existing job limit forwards from the native clock. This is
+// stronger than its remaining horizon and cannot be shortened by CLI input.
+const SERIAL_HORIZON_MICROS: i64 = 40 * 60 * 1_000_000;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialChecks {
+    schema: u8,
+    clock_micros: String,
+    horizon_end_micros: String,
+    coverage_micros: String,
+    policy: SerialPolicy,
+    policy_sha256: String,
+    policy_binding: &'static str,
+    users: Vec<SerialUser>,
+    memberships: Vec<SerialMembership>,
+    event_head: String,
+    relay_completion: RelayCompletion,
+    outbox: Vec<RelayObservation>,
+    owners: BTreeMap<&'static str, Vec<Vec<Value>>>,
+    background: Vec<BackgroundFact>,
+    revision_candidates: Vec<RevisionObservation>,
+    automatic_revision_ranks: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialUser {
+    id: Uuid,
+    email: String,
+    row_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialMembership {
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    row_fingerprint: String,
+}
+
+fn serial_column<'a>(columns: &'a [(String, Cell)], name: &str) -> Result<&'a Cell, sqlx::Error> {
+    columns
+        .iter()
+        .find(|(column, _)| column == name)
+        .map(|(_, cell)| cell)
+        .ok_or_else(refused)
+}
+
+fn serial_membership_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialMembership, sqlx::Error> {
+    Ok(SerialMembership {
+        workspace_id: serial_column(columns, "workspace_id")?.id()?,
+        user_id: serial_column(columns, "user_id")?.id()?,
+        role: serial_column(columns, "role")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
+}
+
+fn join_serial_memberships(
+    users: &[SerialUser],
+    workspaces: &BTreeSet<Uuid>,
+    memberships: &[SerialMembership],
+) -> Result<(), sqlx::Error> {
+    let users = users.iter().map(|user| user.id).collect::<BTreeSet<_>>();
+    let mut keys = BTreeSet::new();
+    for membership in memberships {
+        if !users.contains(&membership.user_id)
+            || !workspaces.contains(&membership.workspace_id)
+            || !keys.insert((membership.workspace_id, membership.user_id))
+        {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
+fn serial_user_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialUser, sqlx::Error> {
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(refused());
+    }
+    Ok(SerialUser {
+        id: serial_column(columns, "id")?.id()?,
+        email: serial_column(columns, "email")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum RelayCompletion {
+    Complete,
+    Incomplete,
+    UnknownRegistry,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayObservation {
+    consumer: String,
+    immutable_sha256: String,
+    row_sha256: String,
+    last_seq: String,
+    lease_owner: Option<String>,
+    lease_until_micros: Option<String>,
+    updated_at_micros: String,
+}
+
+fn relay_completion(head: i64, relays: &[RelayObservation]) -> RelayCompletion {
+    use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
+    let expected = BTreeSet::from([
+        crate::notifications::NOTIFICATIONS_CONSUMER,
+        crate::mail::MAIL_CONSUMER,
+        crate::push::consumer::PUSH_CONSUMER,
+        WEBHOOKS_CONSUMER,
+        GITHUB_CONSUMER,
+    ]);
+    let names = relays
+        .iter()
+        .map(|r| r.consumer.as_str())
+        .collect::<BTreeSet<_>>();
+    if names != expected || relays.len() != expected.len() {
+        RelayCompletion::UnknownRegistry
+    } else if head < 0
+        || relays.iter().any(|r| {
+            r.last_seq.parse::<i64>() != Ok(head)
+                || r.lease_owner.is_some()
+                || r.lease_until_micros.is_some()
+        })
+    {
+        RelayCompletion::Incomplete
+    } else {
+        RelayCompletion::Complete
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundFact {
+    kind: &'static str,
+    // Counts are either exact eligibility or an explicit conservative blocker.
+    // They never grant a foreign row an ownership/preservation exemption.
+    interpretation: &'static str,
+    eligibility: Eligibility,
+    now: i64,
+    through_horizon: i64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Eligibility {
+    Clear,
+    Blocked,
+    Unknown,
+}
+
+impl BackgroundFact {
+    fn observe(
+        kind: &'static str,
+        interpretation: &'static str,
+        now: i64,
+        through_horizon: i64,
+    ) -> Result<Self, sqlx::Error> {
+        if !(0..=100000).contains(&now) || !(now..=100000).contains(&through_horizon) {
+            return Err(refused());
+        }
+        let eligibility = if interpretation == "unknown" && through_horizon > 0 {
+            Eligibility::Unknown
+        } else if through_horizon > 0 {
+            Eligibility::Blocked
+        } else {
+            Eligibility::Clear
+        };
+        Ok(Self {
+            kind,
+            interpretation,
+            eligibility,
+            now,
+            through_horizon,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionObservation {
+    workspace: String,
+    target_kind: String,
+    target: String,
+    writer_generation: String,
+    state_updated_at_micros: String,
+    anchor_at_micros: String,
+    due_now: bool,
+    due_through_horizon: bool,
+}
+
+fn serial_horizon(now: i64) -> Result<i64, sqlx::Error> {
+    if now <= 0 {
+        return Err(refused());
+    }
+    now.checked_add(SERIAL_HORIZON_MICROS)
+        .filter(|end| chrono::DateTime::from_timestamp_micros(*end).is_some())
+        .ok_or_else(refused)
+}
+
+fn revision_due(
+    candidate: &super::revisions::ScheduledRevisionCandidate,
+    at: i64,
+    policy: SerialPolicy,
+) -> Result<bool, sqlx::Error> {
+    let at = chrono::DateTime::from_timestamp_micros(at).ok_or_else(refused)?;
+    let cutoff = at
+        .checked_sub_signed(chrono::Duration::hours(i64::from(
+            policy.revision_snapshot_interval_hours,
+        )))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    Ok(policy.revision_snapshot_interval_hours != 0 && candidate.snapshot_due(cutoff))
+}
+
+async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+    let rows = f.query(sql, &[]).await?;
+    if rows.len() > 10000 {
+        return Err(refused());
+    }
+    rows.iter()
+        .map(|row| {
+            let FamilyRow::Remote(remote) = row else {
+                return Err(refused());
+            };
+            (0..remote.column_count())
+                .map(|i| row.cell(i as usize).map(exact))
+                .collect()
+        })
+        .collect()
+}
+
+// Readonly counterparts of the current scheduler leaves. Retention durations
+// come from their maintained public constants, not a separate observer policy.
+// Fixed queries only; the caller cannot supply a table, predicate or cutoff.
+const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
+    ("magic-expiry", "eligible", "SELECT count(*) FROM magic_tokens WHERE expires_at<=?1"),
+    ("mfa-expiry", "eligible", "SELECT count(*) FROM mfa_challenges WHERE expires_at<=?1"),
+    ("oidc-expiry", "eligible", "SELECT count(*) FROM oidc_states WHERE expires_at<=?1"),
+    ("ics-expiry", "eligible", "SELECT count(*) FROM ics_tokens WHERE expires_at IS NOT NULL AND expires_at<=?1"),
+    ("github-install-expiry", "eligible", "SELECT count(*) FROM github_install_states WHERE expires_at<=?1"),
+    ("withdrawn-users", "conservative-blocker", "SELECT count(*) FROM users WHERE deleted_at IS NOT NULL"),
+    ("deleted-workspaces", "conservative-blocker", "SELECT count(*) FROM workspaces WHERE deleted_at IS NOT NULL"),
+    ("trashed-documents", "conservative-blocker", "SELECT count(*) FROM documents WHERE deleted_at IS NOT NULL"),
+    ("unfinished-uploads", "conservative-blocker", "SELECT count(*) FROM attachments WHERE status<>'stored' OR extract_status='pending' OR preview_status='pending'"),
+    ("object-cleanup", "pending", "SELECT count(*) FROM attachment_object_cleanups"),
+    ("imports", "conservative-blocker", "SELECT count(*) FROM import_jobs WHERE status<>'completed' OR lease_token IS NOT NULL OR lease_until IS NOT NULL OR payload IS NOT NULL"),
+    ("deferred-import-events", "pending", "SELECT count(*) FROM import_deferred_events"),
+    ("outbox-failures", "conservative-blocker", "SELECT count(*) FROM outbox_failures"),
+    ("push-deliveries", "conservative-blocker", "SELECT count(*) FROM push_deliveries"),
+    ("pending-webhooks", "pending", "SELECT count(*) FROM webhook_deliveries WHERE status='pending'"),
+    // Digest claims can update last_digest_at even when no message is sent.
+    // Without sharing its private interval, refuse enabled digest preferences.
+    ("enabled-digests", "conservative-blocker", "SELECT count(*) FROM notification_prefs WHERE mail_digest=1"),
+    ("notification-read-retention", "eligible", "SELECT count(*) FROM notifications WHERE read_at IS NOT NULL AND read_at<?1-?2"),
+    ("notification-archived-retention", "eligible", "SELECT count(*) FROM notifications WHERE archived_at IS NOT NULL AND read_at IS NULL AND archived_at<?1-?2"),
+    ("processed-retention", "eligible", "SELECT count(*) FROM processed_events p INNER JOIN events e ON e.id=p.event_id WHERE p.consumer IN (?3,?4,?5,?6,?7,?8) AND e.seq<(SELECT max(e2.seq) FROM processed_events p2 INNER JOIN events e2 ON e2.id=p2.event_id WHERE p2.consumer=p.consumer) AND p.processed_at<?1-?2"),
+    ("unknown-processed-consumer", "unknown", "SELECT count(*) FROM processed_events WHERE consumer NOT IN (?3,?4,?5,?6,?7,?8)"),
+    ("webhook-retention", "eligible", "SELECT count(*) FROM webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<?1-?2"),
+    ("github-retention", "eligible", "SELECT count(*) FROM github_deliveries WHERE processed_at<?1-?2"),
+    ("maintenance-owners", "owner", "SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NOT NULL"),
+    // TTL expiry alone is not a normal owner-release receipt.
+    ("document-room-owners", "owner", "SELECT count(*) FROM collab_room_fences WHERE owner_token IS NOT NULL"),
+    ("task-room-owners", "owner", "SELECT count(*) FROM task_collab_room_fences WHERE owner_token IS NOT NULL"),
+];
+
+async fn serial_checks(
+    f: &mut FamilyTx,
+    policy: SerialPolicy,
+    mut users: Vec<SerialUser>,
+    mut memberships: Vec<SerialMembership>,
+) -> Result<SerialChecks, sqlx::Error> {
+    use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
+    let clock = f
+        .query(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+            &[],
+        )
+        .await?;
+    let now = clock.first().ok_or_else(refused)?.cell(0)?.integer()?;
+    let horizon = serial_horizon(now)?;
+    let head = f.query("SELECT last_seq,(SELECT coalesce(max(seq),0) FROM events) FROM event_sequence WHERE id=1", &[]).await?;
+    if head.len() != 1 {
+        return Err(refused());
+    }
+    let head_seq = head[0].cell(0)?.integer()?;
+    if head_seq < 0 || head_seq != head[0].cell(1)?.integer()? {
+        return Err(refused());
+    }
+    let relay_rows = f.query("SELECT consumer,last_seq,lease_owner,lease_until,updated_at FROM outbox_consumers ORDER BY consumer LIMIT 10001", &[]).await?;
+    if relay_rows.len() > 10000 {
+        return Err(refused());
+    }
+    let outbox = relay_rows
+        .iter()
+        .map(|row| {
+            let consumer = row.cell(0)?.string()?;
+            let immutable =
+                serde_json::to_vec(&[exact(Cell::text(&consumer))]).map_err(|_| refused())?;
+            Ok(RelayObservation {
+                consumer,
+                immutable_sha256: hex::encode(Sha256::digest(immutable)),
+                row_sha256: row_hash(row)?,
+                last_seq: row.cell(1)?.integer()?.to_string(),
+                lease_owner: row.cell(2)?.optional(Cell::id)?.map(|id| id.to_string()),
+                lease_until_micros: row.cell(3)?.optional(Cell::integer)?.map(|v| v.to_string()),
+                updated_at_micros: row.cell(4)?.integer()?.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let mut owners = BTreeMap::new();
+    for (name, sql) in UI_OPERATION_READS.iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "maintenance_job_claims" | "collab_room_fences" | "task_collab_room_fences"
+        )
+    }) {
+        owners.insert(*name, serial_cells(f, sql).await?);
+    }
+    let mut background = Vec::new();
+    for (kind, interpretation, sql) in SERIAL_BACKGROUND_READS {
+        let days = match *kind {
+            "notification-read-retention" => crate::jobs::NOTIFICATION_READ_RETENTION_DAYS,
+            "notification-archived-retention" => crate::jobs::NOTIFICATION_ARCHIVED_RETENTION_DAYS,
+            "processed-retention" => crate::jobs::PROCESSED_GC_WINDOW_DAYS,
+            "webhook-retention" => super::integrations::WEBHOOK_DELIVERY_RETENTION_DAYS,
+            "github-retention" => super::integrations::GITHUB_DELIVERY_RETENTION_DAYS,
+            _ => 0,
+        };
+        let mut counts = Vec::new();
+        for at in [now, horizon] {
+            // libSQL rejects extra bind parameters. Each fixed statement uses
+            // exactly its highest numbered placeholder (including sparse ?3).
+            let mut args = vec![
+                Cell::Integer(at),
+                Cell::Integer(i64::from(days) * 86_400_000_000),
+                Cell::text(crate::notifications::NOTIFICATIONS_CONSUMER),
+                Cell::text(crate::mail::MAIL_CONSUMER),
+                Cell::text(crate::push::consumer::PUSH_CONSUMER),
+                Cell::text(crate::search::index::SEARCH_INDEX_CONSUMER),
+                Cell::text(WEBHOOKS_CONSUMER),
+                Cell::text(GITHUB_CONSUMER),
+            ];
+            args.truncate(if sql.contains("?8") {
+                8
+            } else if sql.contains("?2") {
+                2
+            } else if sql.contains("?1") {
+                1
+            } else {
+                0
+            });
+            let rows = f.query(sql, &args).await?;
+            if rows.len() != 1 {
+                return Err(refused());
+            }
+            let count = rows[0].cell(0)?.integer()?;
+            if !(0..=100000).contains(&count) {
+                return Err(refused());
+            }
+            counts.push(count);
+        }
+        background.push(BackgroundFact::observe(
+            kind,
+            interpretation,
+            counts[0],
+            counts[1],
+        )?);
+    }
+    let mut revision_candidates = Vec::new();
+    for (kind, sql) in [
+        ("document", "SELECT s.workspace_id,s.document_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='document' AND r.target_id=s.document_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM document_states s INNER JOIN documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id AND d.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.document_id LIMIT 10001"),
+        ("task", "SELECT s.workspace_id,s.task_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='task' AND r.target_id=s.task_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM task_states s INNER JOIN tasks t ON t.workspace_id=s.workspace_id AND t.id=s.task_id AND t.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.task_id LIMIT 10001"),
+    ] {
+        let rows = f.query(sql, &[]).await?;
+        if rows.len() > 10000 { return Err(refused()); }
+        for row in rows {
+            let workspace = row.cell(0)?.id()?;
+            let target = row.cell(1)?.id()?;
+            let candidate = super::revisions::ScheduledRevisionCandidate {
+                workspace_id: workspace,
+                target: if kind == "document" { super::revisions::RevisionTarget::Document(target) } else { super::revisions::RevisionTarget::Task(target) },
+                writer_generation: row.cell(2)?.integer()?,
+                state_updated_at: row.cell(3)?.datetime()?,
+                anchor_at: row.cell(4)?.datetime()?,
+            };
+            revision_candidates.push(RevisionObservation {
+                workspace: workspace.to_string(), target_kind: kind.into(), target: target.to_string(),
+                writer_generation: candidate.writer_generation.to_string(),
+                state_updated_at_micros: candidate.state_updated_at.timestamp_micros().to_string(),
+                anchor_at_micros: candidate.anchor_at.timestamp_micros().to_string(),
+                due_now: revision_due(&candidate, now, policy)?,
+                due_through_horizon: revision_due(&candidate, horizon, policy)?,
+            });
+        }
+    }
+    let automatic_revision_ranks = serial_cells(f, "SELECT r.workspace_id,r.target_kind,r.target_id,r.id,r.reason,r.created_at,row_number() OVER (PARTITION BY r.workspace_id,r.target_kind,r.target_id ORDER BY r.created_at DESC,r.id DESC) FROM revisions r INNER JOIN workspaces w ON w.id=r.workspace_id AND w.deleted_at IS NULL WHERE r.reason IN ('session','scheduled') ORDER BY r.workspace_id,r.target_kind,r.target_id,r.created_at DESC,r.id DESC LIMIT 10001").await?;
+    let mut excess = 0;
+    for row in &automatic_revision_ranks {
+        let rank = row[6][1]
+            .as_str()
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or_else(refused)?;
+        if rank > i64::from(policy.revision_keep.get()) {
+            excess += 1;
+        }
+    }
+    background.push(BackgroundFact::observe(
+        "automatic-revision-retention",
+        "eligible-conditional-on-policy",
+        excess,
+        excess,
+    )?);
+    let policy_bytes = serde_json::to_vec(&policy).map_err(|_| refused())?;
+    users.sort_unstable_by_key(|user| user.id);
+    memberships.sort_unstable_by_key(|membership| (membership.workspace_id, membership.user_id));
+    Ok(SerialChecks {
+        schema: 1,
+        clock_micros: now.to_string(),
+        horizon_end_micros: horizon.to_string(),
+        coverage_micros: SERIAL_HORIZON_MICROS.to_string(),
+        policy,
+        policy_sha256: hex::encode(Sha256::digest(policy_bytes)),
+        policy_binding: "required-from-sealed-server",
+        users,
+        memberships,
+        event_head: head_seq.to_string(),
+        relay_completion: relay_completion(head_seq, &outbox),
+        outbox,
+        owners,
+        background,
+        revision_candidates,
+        automatic_revision_ranks,
+    })
+}
+
+#[cfg(test)]
+mod serial_tests {
+    use super::*;
+
+    #[test]
+    fn serial_membership_requires_actual_user_workspace_and_unique_native_key() {
+        let user = Uuid::from_u128(7);
+        let workspace = Uuid::from_u128(8);
+        let columns = vec![
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("user_id".into(), Cell::uuid(user)),
+            ("role".into(), Cell::text("admin")),
+        ];
+        let users = vec![SerialUser {
+            id: user,
+            email: "native@example.invalid".into(),
+            row_fingerprint: "a".repeat(64),
+        }];
+        let membership = serial_membership_witness(&columns, &"b".repeat(64)).unwrap();
+        assert_eq!(membership.role, "admin");
+        assert_eq!(membership.row_fingerprint, "b".repeat(64));
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_ok());
+        assert!(join_serial_memberships(
+            &[],
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([Uuid::nil()]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        let duplicate = serial_membership_witness(&columns, &"c".repeat(64)).unwrap();
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            &[membership, duplicate]
+        )
+        .is_err());
+        for missing in ["workspace_id", "user_id", "role"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_membership_witness(&absent, &"b".repeat(64)).is_err());
+        }
+        let mut wrong = columns;
+        wrong[2].1 = Cell::Null;
+        assert!(serial_membership_witness(&wrong, &"b".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn serial_user_witness_preserves_actual_identity_and_refuses_missing_or_wrong_types() {
+        let columns = vec![
+            ("id".into(), Cell::uuid(Uuid::from_u128(7))),
+            ("email".into(), Cell::text("exact+한글@example.invalid")),
+            (
+                "password_hash".into(),
+                Cell::text("PRIVATE_PASSWORD_HASH_CANARY"),
+            ),
+        ];
+        let fingerprint = "a".repeat(64);
+        let witness = serial_user_witness(&columns, &fingerprint).unwrap();
+        assert_eq!(witness.id, Uuid::from_u128(7));
+        assert_eq!(witness.email, "exact+한글@example.invalid");
+        assert_eq!(witness.row_fingerprint, fingerprint);
+        let encoded = serde_json::to_value(witness).unwrap();
+        assert_eq!(encoded.as_object().unwrap().len(), 3);
+        assert!(!encoded.to_string().contains("PRIVATE_"));
+        assert!(!encoded.to_string().contains("password"));
+        for missing in ["id", "email"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_user_witness(&absent, &fingerprint).is_err());
+        }
+        for invalid in [
+            Cell::Null,
+            Cell::text("not-a-native-uuid"),
+            Cell::Blob(vec![0; 15]),
+        ] {
+            let mut wrong = columns.clone();
+            wrong[0].1 = invalid;
+            assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        }
+        let mut wrong = columns.clone();
+        wrong[1].1 = Cell::Integer(7);
+        assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        assert!(serial_user_witness(&columns, "unbound").is_err());
+    }
+
+    fn policy(interval: u32) -> SerialPolicy {
+        SerialPolicy {
+            revision_keep: std::num::NonZeroU32::new(200).unwrap(),
+            revision_snapshot_interval_hours: interval,
+        }
+    }
+
+    fn relays(head: i64) -> Vec<RelayObservation> {
+        ["notifications", "mail", "push", "webhooks", "github"]
+            .into_iter()
+            .map(|consumer| RelayObservation {
+                consumer: consumer.into(),
+                immutable_sha256: String::new(),
+                row_sha256: String::new(),
+                last_seq: head.to_string(),
+                lease_owner: None,
+                lease_until_micros: None,
+                updated_at_micros: "1".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn serial_completion_requires_exact_registry_head_and_no_lease() {
+        let good = relays(9007199254740993);
+        assert_eq!(
+            relay_completion(9007199254740993, &good),
+            RelayCompletion::Complete
+        );
+        for cursor in ["9007199254740992", "9007199254740994", "not-an-integer"] {
+            let mut backlog = relays(9007199254740993);
+            backlog[0].last_seq = cursor.into();
+            assert_eq!(
+                relay_completion(9007199254740993, &backlog),
+                RelayCompletion::Incomplete
+            );
+        }
+        for until_only in [false, true] {
+            let mut leased = relays(1);
+            if until_only {
+                leased[0].lease_until_micros = Some("0".into());
+            } else {
+                leased[0].lease_owner = Some(Uuid::nil().to_string());
+            }
+            assert_eq!(relay_completion(1, &leased), RelayCompletion::Incomplete);
+        }
+        for names in [
+            vec!["notifications", "mail", "push", "webhooks"],
+            vec!["notifications", "mail", "push", "webhooks", "unknown"],
+            vec![
+                "notifications",
+                "mail",
+                "push",
+                "webhooks",
+                "github",
+                "github",
+            ],
+        ] {
+            let mut unknown = relays(1);
+            unknown.clear();
+            for name in names {
+                let mut row = relays(1).remove(0);
+                row.consumer = name.into();
+                unknown.push(row);
+            }
+            assert_eq!(
+                relay_completion(1, &unknown),
+                RelayCompletion::UnknownRegistry
+            );
+        }
+    }
+
+    #[test]
+    fn serial_background_unknown_pending_future_and_missing_facts_fail_closed() {
+        assert_eq!(
+            BackgroundFact::observe("pending", "pending", 0, 0)
+                .unwrap()
+                .eligibility,
+            Eligibility::Clear
+        );
+        for interpretation in ["pending", "owner", "eligible", "conservative-blocker"] {
+            assert_eq!(
+                BackgroundFact::observe("work", interpretation, 0, 1)
+                    .unwrap()
+                    .eligibility,
+                Eligibility::Blocked
+            );
+        }
+        assert_eq!(
+            BackgroundFact::observe("unknown", "unknown", 1, 1)
+                .unwrap()
+                .eligibility,
+            Eligibility::Unknown
+        );
+        for (now, future) in [(-1, 0), (0, -1), (2, 1), (0, 100001)] {
+            assert!(BackgroundFact::observe("missing", "pending", now, future).is_err());
+        }
+    }
+
+    #[test]
+    fn serial_horizon_is_full40_native_clock_checked_and_precise() {
+        let now = 9007199254740993;
+        assert_eq!(serial_horizon(now).unwrap() - now, 2400000000);
+        for invalid in [0, -1, i64::MAX, i64::MAX - SERIAL_HORIZON_MICROS] {
+            assert!(serial_horizon(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn serial_revision_reuses_due_boundary_and_detects_future_work() {
+        use super::super::revisions::{RevisionTarget, ScheduledRevisionCandidate};
+        let at = 1700000000000000;
+        let instant = |micros| chrono::DateTime::from_timestamp_micros(micros).unwrap();
+        let mut candidate = ScheduledRevisionCandidate {
+            workspace_id: Uuid::nil(),
+            target: RevisionTarget::Document(Uuid::nil()),
+            writer_generation: 0,
+            anchor_at: instant(at - 3600000000),
+            state_updated_at: instant(at),
+        };
+        assert!(
+            !revision_due(&candidate, at, policy(1)).unwrap(),
+            "equal cutoff skips"
+        );
+        assert!(revision_due(&candidate, at + 1, policy(1)).unwrap());
+        assert!(revision_due(&candidate, serial_horizon(at).unwrap(), policy(1)).unwrap());
+        assert!(
+            !revision_due(&candidate, at + 1, policy(0)).unwrap(),
+            "disabled scheduled snapshots"
+        );
+        candidate.state_updated_at = candidate.anchor_at;
+        assert!(
+            !revision_due(&candidate, at + 1, policy(1)).unwrap(),
+            "already snapshotted"
+        );
+        candidate.state_updated_at = instant(candidate.anchor_at.timestamp_micros() - 1);
+        assert!(!revision_due(&candidate, at + 1, policy(1)).unwrap());
+        assert!(revision_due(&candidate, i64::MAX, policy(1)).is_err());
+    }
 }
 
 pub struct ActorInput<'a> {
@@ -937,6 +1739,106 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn auth_event(verb: &str) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let logout = verb == "auth.logout";
+        vec![
+            ("seq".into(), Cell::Integer(7)),
+            ("verb".into(), Cell::text(verb)),
+            ("channel".into(), Cell::text("web")),
+            ("workspace_id".into(), Cell::Null),
+            ("actor_user_id".into(), Cell::uuid(actor)),
+            (
+                "target_id".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::uuid(actor)
+                },
+            ),
+            (
+                "target_type".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::text("user")
+                },
+            ),
+            (
+                "payload".into(),
+                Cell::json(&if logout {
+                    json!({})
+                } else {
+                    json!({"userId":actor.to_string()})
+                })
+                .unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn event_witness_accepts_exact_auth_revocation_producers() {
+        for (verb, class) in [
+            ("auth.logout", "actor-logout"),
+            ("auth.password_changed", "actor-password-change"),
+            ("auth.password_reset", "actor-password-reset"),
+        ] {
+            let witness = event_witness(&auth_event(verb)).unwrap();
+            let mut expected = json!({
+                "class":class,
+                "sequence":["integer","7"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())
+            });
+            if verb == "auth.logout" {
+                expected.as_object_mut().unwrap().remove("target");
+                expected["actor"] = json!(hex::encode(Uuid::from_u128(1).as_bytes()));
+            }
+            assert_eq!(witness, expected, "{verb}");
+        }
+    }
+
+    #[test]
+    fn event_witness_refuses_mismatched_auth_revocation_fields() {
+        for verb in [
+            "auth.logout",
+            "auth.password_changed",
+            "auth.password_reset",
+        ] {
+            let original = auth_event(verb);
+            let wrong = Uuid::from_u128(2);
+            for (name, value) in [
+                ("verb", Cell::text("auth.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1])),
+                ("target_id", Cell::uuid(wrong)),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({"userId":wrong.to_string()})).unwrap()),
+                ("payload", Cell::json(&json!({"userId":Uuid::from_u128(1).to_string(),"extra":"PRIVATE_EVENT_CANARY"})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+                assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb} {name}");
+            }
+            if verb != "auth.logout" {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "actor_user_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} mismatched actor"
+                );
+            }
+        }
+    }
 
     #[test]
     fn event_witness_accepts_only_exact_login_and_projection_producers() {
