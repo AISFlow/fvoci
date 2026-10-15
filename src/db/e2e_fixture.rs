@@ -493,7 +493,41 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
     )
 }
 
-fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
+// The selected SQLite preparation accepts an invitation before the separate
+// password login. Keep this fallback out of the shared/remote witness contract.
+fn sqlite_invitation_login_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let actor = match cell("actor_user_id")? {
+        Cell::Blob(actor) if actor.len() == 16 => Uuid::from_slice(actor).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0)
+        || !matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.login")
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("workspace_id")?, Cell::Null)
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "user")
+        || !matches!(cell("target_id")?, Cell::Blob(target) if target == actor.as_bytes())
+        || cell("payload")?.value()? != json!({"userId":actor.to_string(),"method":"invitation"})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"actor-invitation-login","sequence":exact(cell("seq")?.clone()),
+        "target":hex::encode(actor.as_bytes())}),
+    )
+}
+
+fn row_allocation(
+    table: &str,
+    row: &FamilyRow,
+    selected_sqlite: bool,
+) -> Result<Value, sqlx::Error> {
     let columns = column_names(row)?;
     let mut workspaces = Vec::new();
     let mut actors = Vec::new();
@@ -542,6 +576,9 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let mut allocation = json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer});
     if table == "events" {
         allocation["eventWitness"] = event_witness(&event_columns)?;
+        if selected_sqlite && allocation["eventWitness"].is_null() {
+            allocation["eventWitness"] = sqlite_invitation_login_witness(&event_columns)?;
+        }
     }
     Ok(allocation)
 }
@@ -962,7 +999,7 @@ async fn capture_primary_read(
                     instance_config.push(instance_config_witness(&hash, &columns)?);
                 }
                 phase = "row-allocation";
-                owners.insert(hash.clone(), row_allocation(name, row)?);
+                owners.insert(hash.clone(), row_allocation(name, row, backend == "sqlite")?);
                 *hashes.entry(hash).or_default() += 1;
             }
             fingerprints.insert(*name, hashes);
@@ -1997,6 +2034,8 @@ async fn observe_native_read(
                 for (table, sql) in [
                     ("document_collab_updates", "SELECT * FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
                     ("document_collab_op_receipts", "SELECT * FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                    ("events", "SELECT * FROM events WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY seq LIMIT 10001"),
+                    ("audit_log", "SELECT * FROM audit_log WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY created_at,id LIMIT 10001"),
                 ] {
                     let native = f.query(sql, &args).await?;
                     if native.len() > 10000 { return Err(refused()) }
@@ -2163,6 +2202,71 @@ mod tests {
                 .unwrap(),
             ),
         ]
+    }
+
+    #[test]
+    fn sqlite_invitation_witness_binds_exact_local_producer_without_changing_shared_witness() {
+        let actor = Uuid::from_u128(1);
+        let mut original = auth_event("auth.login");
+        original
+            .iter_mut()
+            .find(|(name, _)| name == "payload")
+            .unwrap()
+            .1 = Cell::json(&json!({"userId":actor.to_string(),"method":"invitation"})).unwrap();
+        assert_eq!(event_witness(&original).unwrap(), Value::Null);
+        assert_eq!(
+            sqlite_invitation_login_witness(&original).unwrap(),
+            json!({"class":"actor-invitation-login","sequence":["integer","7"],"target":hex::encode(actor.as_bytes())})
+        );
+        for (name, value) in [
+            ("seq", Cell::Integer(0)),
+            ("seq", Cell::text("7")),
+            ("verb", Cell::text("auth.logout")),
+            ("channel", Cell::text("system")),
+            ("workspace_id", Cell::uuid(actor)),
+            ("actor_user_id", Cell::Null),
+            ("actor_user_id", Cell::Blob(vec![1; 15])),
+            ("target_type", Cell::text("document")),
+            ("target_id", Cell::uuid(Uuid::from_u128(2))),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"password"})).unwrap(),
+            ),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"invitation","extra":true}))
+                    .unwrap(),
+            ),
+        ] {
+            let mut columns = original.clone();
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_invitation_login_witness(&columns).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+        for name in [
+            "seq",
+            "verb",
+            "channel",
+            "workspace_id",
+            "actor_user_id",
+            "target_type",
+            "target_id",
+            "payload",
+        ] {
+            let mut columns = original.clone();
+            columns.retain(|(column, _)| column != name);
+            assert!(
+                sqlite_invitation_login_witness(&columns).is_err(),
+                "missing {name}"
+            );
+        }
     }
 
     #[test]
