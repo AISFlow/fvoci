@@ -323,7 +323,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     restartServer: Row | null = null,
     restartBase: string | null = null;
   const restartLogPath = join(run, "restarted-normal-server.log");
-  let productFinishFailure: Error | null = null;
+  const productFinish: { error?: Error } = {};
   const inputs = async () => {
     restartBrowserArgs(g);
     assert.ok(deepEquals(await g.inputCheck(), g.sourceBefore, true));
@@ -718,7 +718,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
                 current.filter((row) => row.args.startsWith("/fvoci/bin/")),
               );
             } catch (error) {
-              productFinishFailure =
+              productFinish.error ??=
                 error instanceof Error ? error : new Error("SQLite product finish failed");
               receipt.originalFailure ??= errorFacts(error);
               throw error;
@@ -747,7 +747,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
       privateWrite(join(run, "restart-receipt.private.json"), receipt);
     });
   }
-  if (productFinishFailure !== null) throw productFinishFailure;
+  if (productFinish.error !== undefined) throw productFinish.error;
   assert.ok(
     cleanupErrors.length === 0,
     "restart cleanup failure is not PASS; parent retains original failure",
