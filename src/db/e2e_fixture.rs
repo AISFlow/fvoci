@@ -489,7 +489,7 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
         } else if name == "id"
             && matches!(
                 table,
-                "users" | "workspaces" | "events" | "documents" | "tasks"
+                "users" | "workspaces" | "events" | "documents" | "tasks" | "identity_links"
             )
         {
             let bytes = cell.bytes()?;
@@ -2153,6 +2153,198 @@ mod tests {
             }
             assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb}");
         }
+    }
+
+    // Registration is not execution authority. ROOT must qualify the exact
+    // source/ELF, CA and fresh startLocalLibsql allocation before selecting it,
+    // and owns that fixture's normal process/port retirement after this test.
+    #[tokio::test]
+    #[ignore = "ROOT-owned strict-TLS disposable remote allocation only"]
+    async fn root_owned_serial_remote_roundtrip_and_eligibility() -> Result<(), &'static str> {
+        collab_engine::process::make_process_non_dumpable().map_err(|_| "NON_DUMPABLE_FAILED")?;
+        if !cfg!(target_os = "linux") {
+            return Err("NON_DUMPABLE_PLATFORM_REQUIRED");
+        }
+        const NAME: &str =
+            "db::e2e_fixture::tests::root_owned_serial_remote_roundtrip_and_eligibility";
+        let args = std::env::args().collect::<Vec<_>>();
+        if ![NAME, "--exact", "--ignored"]
+            .iter()
+            .all(|expected| args.iter().any(|arg| arg.as_str() == *expected))
+            || [
+                ("FVOCI_E2E_SERIAL_REMOTE_SELECTED", "1"),
+                ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+                ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+            ]
+            .iter()
+            .any(|(name, expected)| std::env::var(name).as_deref() != Ok(*expected))
+        {
+            return Err("ROOT_EXACT_SELECTION_REQUIRED");
+        }
+        let endpoint = std::env::var("FVOCI_LIBSQL_URL").map_err(|_| "LOCAL_ENDPOINT_REQUIRED")?;
+        let token = std::env::var("FVOCI_LIBSQL_AUTH_TOKEN").map_err(|_| "LOCAL_TOKEN_REQUIRED")?;
+        let ca = std::env::var("SSL_CERT_FILE").map_err(|_| "LOCAL_CA_REQUIRED")?;
+        let parsed = url::Url::parse(&endpoint).map_err(|_| "LOCAL_ENDPOINT_REFUSED")?;
+        let loopback = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if parsed.scheme() != "https"
+            || !loopback
+            || parsed.port().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !std::fs::metadata(ca).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err("ROOT_LOCAL_TLS_ALLOCATION_REQUIRED");
+        }
+        let remote = super::super::backend::RemoteDatabase::connect(endpoint, token, 1)
+            .await
+            .map_err(|_| "LOCAL_CONNECT_FAILED")?;
+        let backend = Backend::LibsqlRemote(remote);
+        let result = async {
+            for consumer in [
+                crate::notifications::NOTIFICATIONS_CONSUMER,
+                crate::mail::MAIL_CONSUMER,
+                crate::push::consumer::PUSH_CONSUMER,
+                crate::integrations::webhooks::WEBHOOKS_CONSUMER,
+                crate::integrations::github::GITHUB_CONSUMER,
+            ] {
+                super::super::outbox::ensure_consumer_backend(&backend, consumer)
+                    .await
+                    .map_err(|_| "RELAY_ENSURE_FAILED")?;
+            }
+            let policy = SerialPolicy {
+                revision_keep: std::num::NonZeroU32::new(200).ok_or("POLICY_REFUSED")?,
+                revision_snapshot_interval_hours: 24,
+            };
+            let before = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            let serial = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            let after = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            // Never use assert_eq!/Debug with private native snapshots.
+            if before != serial.dataset || before != after {
+                return Err("READONLY_FULL_DATASET_CHANGED");
+            }
+            let now = serial
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            if serial.checks.coverage_micros != SERIAL_HORIZON_MICROS.to_string()
+                || serial.checks.horizon_end_micros
+                    != serial_horizon(now)
+                        .map_err(|_| "HORIZON_REFUSED")?
+                        .to_string()
+                || serial.checks.event_head != "0"
+                || serial.checks.relay_completion != RelayCompletion::Complete
+                || serial.checks.background.len() != SERIAL_BACKGROUND_READS.len() + 1
+                || serial
+                    .checks
+                    .background
+                    .iter()
+                    .any(|fact| fact.eligibility != Eligibility::Clear)
+            {
+                return Err("FRESH_SERIAL_NOT_CLEAR");
+            }
+            let consumer = crate::notifications::NOTIFICATIONS_CONSUMER;
+            let owner = Uuid::now_v7();
+            let owner_id = owner.to_string();
+            if !super::super::outbox::lease_consumer_backend(&backend, consumer, owner, 60)
+                .await
+                .map_err(|_| "RELAY_LEASE_FAILED")?
+            {
+                return Err("RELAY_LEASE_NOT_ACQUIRED");
+            }
+            let held = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if held.checks.relay_completion != RelayCompletion::Incomplete
+                || !held.checks.outbox.iter().any(|relay| {
+                    relay.consumer == consumer
+                        && relay.lease_owner.as_deref() == Some(owner_id.as_str())
+                        && relay.lease_until_micros.is_some()
+                })
+            {
+                return Err("HELD_LEASE_NOT_BLOCKED");
+            }
+            if !super::super::outbox::release_consumer_backend(&backend, consumer, owner)
+                .await
+                .map_err(|_| "RELAY_RELEASE_FAILED")?
+            {
+                return Err("RELAY_RELEASE_NOT_CONFIRMED");
+            }
+            let released = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if released.checks.relay_completion != RelayCompletion::Complete {
+                return Err("RELEASED_RELAY_NOT_COMPLETE");
+            }
+            let now = released
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            for (hash, expiry, expected_now, expected_horizon) in [
+                ("a".repeat(64), now.checked_add(20 * 60 * 1_000_000), 0, 1),
+                ("b".repeat(64), now.checked_sub(1), 1, 2),
+            ] {
+                let expiry = expiry
+                    .and_then(chrono::DateTime::from_timestamp_micros)
+                    .ok_or("EXPIRY_REFUSED")?;
+                super::super::oidc::issue_state_backend(
+                    &backend,
+                    &hash,
+                    "root-owned-opaque-state",
+                    expiry,
+                )
+                .await
+                .map_err(|_| "OIDC_STATE_ISSUE_FAILED")?;
+                let observed = capture_serial_observation(&backend, policy)
+                    .await
+                    .map_err(|_| "SERIAL_FAILED")?;
+                let fact = observed
+                    .checks
+                    .background
+                    .iter()
+                    .find(|fact| fact.kind == "oidc-expiry")
+                    .ok_or("OIDC_EXPIRY_FACT_MISSING")?;
+                if fact.now != expected_now
+                    || fact.through_horizon != expected_horizon
+                    || fact.eligibility != Eligibility::Blocked
+                {
+                    return Err("OIDC_CURRENT_OR_FORWARD_EXPIRY_NOT_BLOCKED");
+                }
+            }
+            Ok(())
+        }
+        .await;
+        // No follow-up mutation/reconciliation after an uncertain operation.
+        // Always await SDK cleanup, retaining operation and drain categories.
+        let close = backend.close().await;
+        let zero = backend
+            .connection_stats()
+            .is_ok_and(|stats| stats.size == 0);
+        println!(
+            "FVOCI_SERIAL_REMOTE_RESULT operation={} close={} leases={}",
+            result.as_ref().err().copied().unwrap_or("OK"),
+            if close.is_ok() { "OK" } else { "FAILED" },
+            if zero { "ZERO" } else { "UNCONFIRMED" }
+        );
+        result?;
+        if close.is_err() || !zero {
+            return Err("LOCAL_DRAIN_UNCONFIRMED");
+        }
+        Ok(())
     }
 
     #[test]
