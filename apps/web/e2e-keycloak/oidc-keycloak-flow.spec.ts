@@ -7,7 +7,7 @@
 //
 // No value of a password, client secret, code, state, nonce, token or cookie
 // is printed, recorded, or passed to an assertion that would print it.
-import { observeDatabase, type LinkRow } from "./observer";
+import { beforePreparedUnlink, observeDatabase, type LinkRow } from "./observer";
 import { expectedUsers, realmSummary, USERS } from "../../../tools/keycloak/realm";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -1304,6 +1304,7 @@ test.describe("failure boundaries", () => {
         status: 302,
         location: "/settings/account?linked=1",
       });
+      beforePreparedUnlink(PAT.email, config().users.bob.email, await kcUserId("bob"));
       const unlink = await pat.page.request.post("/api/v1/auth/oidc/generic/unlink", {
         headers: { Origin: fvociOrigin },
       });

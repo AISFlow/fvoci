@@ -5,12 +5,15 @@ import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -27,10 +30,12 @@ import { assertNoEnvFile } from "../selected-backend-ci/drivers/common.ts";
 import { cleanEnv, bunIsolation } from "../turso/ui-common.ts";
 import {
   communicate,
+  mkfifo,
   now,
   pause,
   poll,
   procIdentity,
+  readable,
   UiProcesses,
   withProcesses,
   type Child,
@@ -44,6 +49,7 @@ import {
   type Manifest,
 } from "../turso/ui-record.ts";
 import { awaitListening, portClosed, requireSetup } from "../turso/ui-server.ts";
+import { maintenanceReceipts } from "../turso/ui-audit.ts";
 import { events, ready, verify } from "./admin.ts";
 import {
   CLIENT_ID,
@@ -80,7 +86,11 @@ import {
 } from "../../apps/web/e2e-keycloak/config.ts";
 import {
   assertPreparedDelta,
+  preparedReadValue,
+  PREPARED_REQUEST_LIMIT,
+  PREPARED_REPLY_LIMIT,
   type PreparedDelta,
+  type PreparedReadRequest,
   type PreparedSnapshot,
 } from "../../apps/web/e2e-keycloak/observer.ts";
 
@@ -123,6 +133,7 @@ export interface CommandOptions {
   signal?: AbortSignal;
   seconds?: number;
   output?: (stdout: string, stderr: string) => void;
+  started?: (child: Child) => void;
 }
 /** One owned child, output drained before retirement; failures never quote argv. */
 export async function runCommand(scope: UiProcesses, args: string[], options: CommandOptions = {}) {
@@ -146,6 +157,7 @@ export async function runCommand(scope: UiProcesses, args: string[], options: Co
       ? new Response(child.stderr).text()
       : Promise.resolve("");
   try {
+    options.started?.(child);
     const stdout = await communicate(child, options.input ?? "", options.seconds ?? 240);
     const errors = await stderr;
     const code = await scope.finish(child);
@@ -197,6 +209,10 @@ export interface ProcessObserver {
   module: { path: string; sha256: string };
   config: { path: string; sha256: string };
 }
+export interface PreparedServerEvidence {
+  identity: { pid: number; startTicks: string };
+  executable: { path: string; sha256: string };
+}
 export async function assertServerEnvironment(
   scope: UiProcesses,
   pid: number,
@@ -204,6 +220,7 @@ export async function assertServerEnvironment(
   manifest: Manifest,
   observer: ProcessObserver,
   negatives: boolean,
+  captureServer?: (observed: PreparedServerEvidence) => void,
 ) {
   require(realpathSync(observer.directory) ===
     observer.directory, "privileged observer directory is not physical");
@@ -306,7 +323,132 @@ export async function assertServerEnvironment(
         (JSON.parse(rejected.stdout) as { accepted: unknown }).accepted ===
           false, "privileged process observer negative control was accepted");
     }
+  captureServer?.({
+    identity: { pid: server.pid, startTicks: server.startTicks },
+    executable: {
+      path: manifest.binaries["fvoci-server"]?.path ?? "",
+      sha256: input.executableSha256,
+    },
+  });
   return { ...facts, unprivilegedEnvironmentDenied, negativeControls: negatives ? 5 : 0 };
+}
+
+/** Private observations of this normal-server allocation, never a grant or whole-scope closure. */
+export interface PreparedOperationWitness {
+  binding: PreparedBinding;
+  server: PreparedServerEvidence;
+  log: { path: string; sha256: string };
+  retirement: {
+    exitCode: number;
+    allocationClosed: boolean;
+    forced: boolean;
+    portClosed: boolean;
+    identities: Array<{ pid: number; startTicks: string; retired: boolean }>;
+    errors: string[];
+  };
+  maintenance: ReturnType<typeof maintenanceReceipts>;
+}
+/** Consumer-owned handles and observations; no file/JSON loader accepts this context. */
+export interface PreparedOperationContext {
+  binding: PreparedBinding;
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">;
+  scope: Pick<UiProcesses, "allocations" | "entries" | "errors" | "retired">;
+  child: Child;
+  server: PreparedServerEvidence | undefined;
+  logPath: string;
+  logFd: number;
+  exitCode: number;
+  portClosed: boolean;
+}
+
+/** Join protected live-process evidence to its actual retirement and log before awaiting the parent. */
+export async function auditPreparedOperation(
+  primary: Pick<PreparedPrimary, "assertWholePrimary">,
+  before: PreparedSnapshot,
+  after: PreparedSnapshot,
+  delta: PreparedDelta,
+  context: PreparedOperationContext | undefined,
+): Promise<void> {
+  if (!context?.server || typeof primary.assertWholePrimary !== "function")
+    throw new HelperError("Keycloak prepared operation witness missing");
+  const { scope, child, server, manifest } = context;
+  const binary = manifest.binaries["fvoci-server"];
+  if (binary === undefined) throw new HelperError("Keycloak prepared operation executable missing");
+  assertPreparedBinding(before.binding, context.binding);
+  assertPreparedBinding(before.binding, after.binding);
+  require(context.binding.source === manifest.sourceInputs.source &&
+    context.binding.tree === manifest.sourceInputs.tree &&
+    Number.isSafeInteger(server.identity.pid) &&
+    server.identity.pid > 0 &&
+    /^[1-9][0-9]*$/.test(server.identity.startTicks) &&
+    server.identity.pid === child.pid &&
+    /^[a-f0-9]{64}$/.test(server.executable.sha256) &&
+    server.executable.path === binary.path &&
+    server.executable.sha256 ===
+      binary.sha256, "Keycloak prepared operation server binding differs");
+  const index = scope.allocations.findIndex((allocation) => allocation.process === child);
+  const allocation = scope.allocations[index];
+  if (allocation === undefined)
+    throw new HelperError("Keycloak prepared operation allocation missing");
+  const rootEntry = allocation.key === undefined ? undefined : scope.entries.get(allocation.key);
+  const rows = [...scope.entries.values()].filter((entry) => entry.allocation === index);
+  require(index >= 0 &&
+    allocation.label === "normal-server" &&
+    rootEntry?.allocation === index &&
+    rootEntry.identity.pid === server.identity.pid &&
+    rootEntry.identity.startTicks === server.identity.startTicks &&
+    context.exitCode === 0 &&
+    allocation.closed &&
+    !allocation.forced &&
+    context.portClosed &&
+    scope.errors.length === 0 &&
+    rows.length > 0 &&
+    rows.every((entry) =>
+      scope.retired(entry.identity),
+    ), "Keycloak prepared operation retirement differs");
+  const logBytes = () => {
+    try {
+      const file = lstatSync(context.logPath),
+        opened = fstatSync(context.logFd);
+      require(file.isFile() &&
+        !file.isSymbolicLink() &&
+        (file.mode & 0o077) === 0 &&
+        realpathSync(context.logPath) === context.logPath &&
+        file.dev === opened.dev &&
+        file.ino === opened.ino, "Keycloak prepared operation log differs");
+      return file.size;
+    } catch {
+      throw new HelperError("Keycloak prepared operation log differs");
+    }
+  };
+  const size = logBytes();
+  // The maintained reader enforces its existing cap before any whole-log hash read.
+  const maintenance = maintenanceReceipts(context.logPath, server.identity, context.binding.target);
+  const logDigest = () => {
+    require(size === logBytes(), "Keycloak prepared operation log changed");
+    return sha(context.logPath);
+  };
+  const hash = logDigest();
+  const witness: PreparedOperationWitness = {
+    binding: { ...context.binding },
+    server: structuredClone(server),
+    log: { path: context.logPath, sha256: hash },
+    retirement: {
+      exitCode: context.exitCode,
+      allocationClosed: allocation.closed,
+      forced: allocation.forced,
+      portClosed: context.portClosed,
+      identities: rows.map((entry) => ({
+        pid: entry.identity.pid,
+        startTicks: entry.identity.startTicks,
+        retired: scope.retired(entry.identity),
+      })),
+      errors: [...scope.errors],
+    },
+    maintenance,
+  };
+  await primary.assertWholePrimary(before, after, delta, witness);
+  require(hash === logDigest(), "Keycloak prepared operation log changed");
 }
 
 export interface PreparedBackend {
@@ -324,11 +466,15 @@ export interface PreparedPrimary {
   groups: Record<(typeof MODES)[number], PreparedActors>;
   /** The admitted caller binds native reads to its existing target and full original baseline. */
   observe(binding: PreparedBinding): Promise<PreparedSnapshot>;
+  /** Parent invokes existing native reads; before-unlink retains a full snapshot
+   * in its closure and returns only {ack:true}. Never return the full dataset. */
+  observeOperation(request: PreparedReadRequest): Promise<unknown>;
   /** Reuse the maintained serial native whole-primary/horizon auditor, with unfiltered inputs. */
   assertWholePrimary(
     before: PreparedSnapshot,
     after: PreparedSnapshot,
     delta: PreparedDelta,
+    witness: PreparedOperationWitness,
   ): Promise<void>;
 }
 export interface ConsumerInputs {
@@ -354,6 +500,7 @@ export function validatePreparedInputs(inputs: ConsumerInputs): void {
     typeof p.target === "string" &&
     p.target.length > 0 &&
     typeof p.observe === "function" &&
+    typeof p.observeOperation === "function" &&
     typeof p.assertWholePrimary === "function" &&
     inputs.workspaceSso === undefined, "Keycloak prepared source or target contract differs");
   const identities = new Set<string>();
@@ -384,6 +531,265 @@ export function assertPreparedBinding(
     actual,
     true,
   ), "Keycloak prepared current source, target, group or issuer differs");
+}
+
+export interface PreparedReadContext {
+  binding: PreparedBinding;
+  actors: PreparedActors;
+  ordinal: number;
+  checkpointTaken: boolean;
+  scope: Pick<UiProcesses, "allocations" | "entries" | "retired">;
+  child: Child;
+  peer: ReturnType<typeof procIdentity>;
+}
+
+export function preparedReadFrame(bytes: Uint8Array): PreparedReadRequest {
+  try {
+    if (
+      bytes.length === 0 ||
+      bytes.length > PREPARED_REQUEST_LIMIT ||
+      bytes.indexOf(10) !== bytes.length - 1
+    )
+      throw new Error();
+    const value: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, -1)),
+    );
+    // Only inspect a bounded PID before the owned-allocation validator. Parser
+    // errors never quote untrusted frame bytes or private operation inputs.
+    const r = value as Partial<PreparedReadRequest> | null;
+    if (!r?.peer || !Number.isSafeInteger(r.peer.pid) || r.peer.pid <= 1) throw new Error();
+    return r as PreparedReadRequest;
+  } catch {
+    throw new HelperError("Keycloak prepared read frame differs");
+  }
+}
+
+/** Fixed operations only, against an independently observed live PW descendant. */
+export function acceptPreparedRead(
+  value: unknown,
+  context: PreparedReadContext,
+): PreparedReadRequest {
+  const fail = () => {
+    throw new HelperError("Keycloak prepared read request differs");
+  };
+  const object = (v: unknown): v is Record<string, unknown> =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
+  const keys = (v: object, expected: string[]) =>
+    deepEquals(Object.keys(v).sort(), expected.sort(), true);
+  if (!object(value) || !keys(value, ["binding", "ordinal", "actor", "input", "peer"])) fail();
+  const r = value as PreparedReadRequest;
+  assertPreparedBinding(context.binding, r.binding);
+  if (
+    !Number.isSafeInteger(r.ordinal) ||
+    r.ordinal !== context.ordinal + 1 ||
+    !object(r.input) ||
+    !object(r.peer) ||
+    !keys(r.peer, ["pid", "startTicks"]) ||
+    !Number.isSafeInteger(r.peer.pid) ||
+    r.peer.pid <= 1 ||
+    typeof r.peer.startTicks !== "string" ||
+    !/^[0-9]+$/.test(r.peer.startTicks)
+  )
+    fail();
+  const emails = [
+    context.actors.owner.email,
+    context.actors.member.email,
+    context.actors.mismatchEmail,
+    context.actors.crossOriginEmail,
+    ...Object.values(context.actors.users).map((u) => u.email),
+  ];
+  switch (r.input.operation) {
+    case "users":
+    case "states":
+    case "links":
+      if (!keys(r.input, ["operation"]) || r.actor !== context.actors.owner.email) fail();
+      break;
+    case "user":
+    case "sessions":
+    case "invitation":
+      if (
+        !keys(r.input, ["operation", "email"]) ||
+        !emails.includes(r.input.email) ||
+        r.actor !== r.input.email
+      )
+        fail();
+      break;
+    case "before-unlink":
+      if (
+        !keys(r.input, ["operation", "email", "identityEmail", "subject"]) ||
+        context.binding.group !== "failures" ||
+        context.checkpointTaken ||
+        r.actor !== context.actors.member.email ||
+        r.input.email !== r.actor ||
+        r.input.identityEmail !== context.actors.users.bob.email ||
+        typeof r.input.subject !== "string" ||
+        !/^[a-f0-9-]{36}$/.test(r.input.subject)
+      )
+        fail();
+      break;
+    default:
+      fail();
+  }
+  const allocation = context.scope.allocations.findIndex((a) => a.process === context.child);
+  const owned = context.scope.allocations[allocation];
+  const entry = [...context.scope.entries.values()].find(
+    (e) => e.identity.pid === r.peer.pid && e.identity.startTicks === r.peer.startTicks,
+  );
+  if (
+    !owned ||
+    owned.closed ||
+    owned.forced ||
+    !entry ||
+    entry.allocation !== allocation ||
+    context.peer.pid !== r.peer.pid ||
+    context.peer.startTicks !== r.peer.startTicks ||
+    context.peer.state === "Z" ||
+    context.scope.retired(context.peer)
+  )
+    fail();
+  return structuredClone(r);
+}
+
+/** The parent's callback is awaited and only its fixed projection can leave it. */
+export async function readPreparedOperation(
+  primary: Pick<PreparedPrimary, "observeOperation">,
+  request: PreparedReadRequest,
+): Promise<unknown> {
+  if (typeof primary.observeOperation !== "function")
+    throw new HelperError("Keycloak prepared read callback missing");
+  return preparedReadValue(request.input, await primary.observeOperation(structuredClone(request)));
+}
+
+/** Two group-private FIFOs connect this consumer's fixed reads to its parent. */
+async function runPreparedBrowser(
+  scope: UiProcesses,
+  args: string[],
+  options: CommandOptions,
+  directory: string,
+  primary: PreparedPrimary,
+  binding: PreparedBinding,
+  actors: PreparedActors,
+) {
+  const requestPath = join(directory, "read-request.fifo"),
+    replyPath = join(directory, "read-reply.fifo");
+  for (const path of [requestPath, replyPath]) {
+    mkfifo(path, 0o600);
+    const info = lstatSync(path);
+    require(info.isFIFO() &&
+      (info.mode & 0o777) === 0o600 &&
+      info.uid === process.getuid?.(), "Keycloak prepared read FIFO differs");
+  }
+  // Holding the write side prevents EOF between sequential clients. Actual
+  // peer retirement and the owned PW allocation still reject a closed peer.
+  const requestInfo = lstatSync(requestPath),
+    replyInfo = lstatSync(replyPath);
+  const fd = openSync(requestPath, constants.O_RDWR | constants.O_NONBLOCK);
+  const stop = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal;
+  let done = false,
+    ordinal = 0,
+    checkpointTaken = false;
+  let original: Error | undefined;
+  let serving: Promise<void> = Promise.resolve();
+  const serve = async (child: Child) => {
+    while (!done && poll(child) === null) {
+      if (!readable(fd)) {
+        await pause(20);
+        continue;
+      }
+      const bytes = Buffer.alloc(PREPARED_REQUEST_LIMIT + 1);
+      const length = readSync(fd, bytes, 0, bytes.length, null);
+      const value = preparedReadFrame(bytes.subarray(0, length));
+      const requestNow = lstatSync(requestPath),
+        opened = fstatSync(fd);
+      require(requestNow.isFIFO() &&
+        requestNow.dev === requestInfo.dev &&
+        requestNow.ino === requestInfo.ino &&
+        opened.dev === requestInfo.dev &&
+        opened.ino === requestInfo.ino &&
+        (opened.mode & 0o777) === 0o600 &&
+        opened.uid === process.getuid?.(), "Keycloak prepared read request FIFO differs");
+      scope.snapshot();
+      const request = acceptPreparedRead(value, {
+        binding,
+        actors,
+        ordinal,
+        checkpointTaken,
+        scope,
+        child,
+        peer: procIdentity(value.peer.pid),
+      });
+      const projected = await readPreparedOperation(primary, request);
+      require(poll(child) === null &&
+        !scope.retired(request.peer), "Keycloak prepared read peer closed");
+      const response = Buffer.from(
+        JSON.stringify({ ordinal: request.ordinal, value: projected }) + "\n",
+      );
+      require(response.length <=
+        PREPARED_REPLY_LIMIT, "Keycloak prepared read response exceeded bound");
+      const replyFd = openSync(replyPath, constants.O_WRONLY | constants.O_NONBLOCK);
+      try {
+        const actual = fstatSync(replyFd);
+        require(actual.isFIFO() &&
+          actual.dev === replyInfo.dev &&
+          actual.ino === replyInfo.ino &&
+          (actual.mode & 0o777) === 0o600 &&
+          actual.uid === process.getuid?.(), "Keycloak prepared read response FIFO differs");
+        let offset = 0;
+        const deadline = now() + 30;
+        while (offset < response.length) {
+          require(now() < deadline &&
+            !scope.retired(request.peer) &&
+            poll(child) === null, "Keycloak prepared read peer closed");
+          try {
+            const written = writeSync(replyFd, response, offset, response.length - offset);
+            require(written > 0, "Keycloak prepared read response closed");
+            offset += written;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error;
+            await pause(20);
+          }
+        }
+      } finally {
+        closeSync(replyFd);
+      }
+      ordinal = request.ordinal;
+      if (request.input.operation === "before-unlink") checkpointTaken = true;
+    }
+  };
+  try {
+    const result = await runCommand(scope, args, {
+      ...options,
+      signal,
+      env: {
+        ...options.env,
+        FVOCI_KC_READ_REQUEST: requestPath,
+        FVOCI_KC_READ_REPLY: replyPath,
+        FVOCI_KC_READ_BINDING: JSON.stringify(binding),
+        FVOCI_KC_READ_OWNER: actors.owner.email,
+      },
+      started: (child) => {
+        serving = serve(child).catch((error: unknown) => {
+          original =
+            error instanceof Error
+              ? error
+              : new HelperError("Keycloak prepared parent read failed");
+          stop.abort();
+        });
+      },
+    }).catch((error: unknown) => {
+      if (original !== undefined) throw original;
+      throw error;
+    });
+    if (original !== undefined) throw original;
+    if (result.code === 0 && binding.group === "failures")
+      require(checkpointTaken, "Keycloak prepared before-unlink checkpoint missing");
+    return result;
+  } finally {
+    done = true;
+    await serving;
+    closeSync(fd);
+  }
 }
 
 /** One backend, a fresh official Keycloak, the unchanged 8/7/1 browser oracle. */
@@ -634,7 +1040,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           FVOCI_PUBLIC_ORIGIN: "http://127.0.0.1:0",
           FVOCI_STATIC_DIR: join(root, "apps/web/dist"),
           FVOCI_STORAGE_DIR: join(group, "storage"),
-          RUST_LOG: "warn,tower_http=debug",
+          RUST_LOG: binding ? "info" : "warn,tower_http=debug",
         };
         mkdirSync(app.FVOCI_STORAGE_DIR, { mode: 0o700 });
         server = scope.spawn(
@@ -644,6 +1050,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         );
         base = await awaitListening(logPath, server, now() + 30);
         await requireSetup(base, binding === undefined);
+        let observedServer: PreparedServerEvidence | undefined;
         retain(
           `process-environment-${mode}.json`,
           JSON.stringify(
@@ -654,6 +1061,11 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
               inputs.manifest,
               inputs.processObserver,
               mode === "flows",
+              binding
+                ? (observed) => {
+                    observedServer = observed;
+                  }
+                : undefined,
             ),
           ),
         );
@@ -730,7 +1142,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           );
         }
         const observer = join(group, "observer.json");
-        privateWrite(observer, JSON.stringify(database.observer));
+        if (!binding) privateWrite(observer, JSON.stringify(database.observer));
         const env = {
           ...cleanEnv(),
           PLAYWRIGHT_BASE_URL: base,
@@ -738,8 +1150,12 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           FVOCI_KC_E2E_CONFIG: groupConfigPath,
           FVOCI_KC_E2E_OUT: out,
           FVOCI_KC_E2E_MODE: mode,
-          FVOCI_KC_OBSERVER_BIN: inputs.manifest.binaries["fvoci-e2e-fixture"]?.path ?? "",
-          FVOCI_KC_OBSERVER_ENV: observer,
+          ...(!binding
+            ? {
+                FVOCI_KC_OBSERVER_BIN: inputs.manifest.binaries["fvoci-e2e-fixture"]?.path ?? "",
+                FVOCI_KC_OBSERVER_ENV: observer,
+              }
+            : {}),
           SERVER_LOG: logPath,
           OIDC_GENERIC_ISSUER: issuer,
           OIDC_GENERIC_CLIENT_SECRET: app.OIDC_GENERIC_CLIENT_SECRET,
@@ -757,12 +1173,25 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           "--config=e2e-keycloak/keycloak.config.ts",
           "--output=" + join(group, "playwright-output"),
         ];
-        const result = await runCommand(scope, inputs.heavy ? [inputs.heavy, ...args] : args, {
+        const browserArgs = inputs.heavy ? [inputs.heavy, ...args] : args;
+        const browserOptions = {
           env,
           cwd: join(root, "apps/web"),
           signal: inputs.signal,
           seconds: 1800,
-        });
+        };
+        const result =
+          inputs.prepared && binding
+            ? await runPreparedBrowser(
+                scope,
+                browserArgs,
+                browserOptions,
+                group,
+                inputs.prepared,
+                binding,
+                inputs.prepared.groups[mode],
+              )
+            : await runCommand(scope, browserArgs, browserOptions);
         if ([-1, -2, -13, -15].includes(result.code)) throw new RunInterrupted(128 - result.code);
         emit(result.stdout);
         emit(result.stderr);
@@ -814,10 +1243,11 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
             ) &&
             new Set(delta.links.map((row) => row.subject)).size ===
               delta.links.length, "Keycloak prepared IdP or actor link delta differs");
-          const closed = await scope.finish(server, true);
+          const actualServer = server;
+          const closed = await scope.finish(actualServer, true);
           server = undefined;
-          require(closed === 0 &&
-            (await portClosed(base)), "Keycloak prepared server closure failed");
+          const serverPortClosed = await portClosed(base);
+          require(closed === 0 && serverPortClosed, "Keycloak prepared server closure failed");
           const after = structuredClone(await inputs.prepared.observe(binding));
           assertPreparedDelta(before, after, delta);
           for (const email of delta.emails) {
@@ -830,7 +1260,17 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
                   row.role === "member",
               ).length === 1, "Keycloak prepared member membership differs");
           }
-          await inputs.prepared.assertWholePrimary(before, after, delta);
+          await auditPreparedOperation(inputs.prepared, before, after, delta, {
+            binding,
+            manifest: inputs.manifest,
+            scope,
+            child: actualServer,
+            server: observedServer,
+            logPath,
+            logFd: fd,
+            exitCode: closed,
+            portClosed: serverPortClosed,
+          });
           inputs.checkInputs();
         }
         if (result.code !== 0 && inputs.evidence) {
