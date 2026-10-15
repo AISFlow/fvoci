@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Page, WebSocketRoute } from "@playwright/test";
-import { activeRoom } from "../../apps/web/e2e-pending/auth-session-helpers.ts";
+import { resolve } from "node:path";
 import {
   AUTH_CASES,
   assertAuthNoEffect,
@@ -318,47 +317,56 @@ describe("PostgreSQL/SQLite auth event oracle", () => {
   });
 });
 
-async function routedRoom() {
-  let closed: (code?: number, reason?: string) => Promise<void> = () =>
-    Promise.reject(new Error("Server close observer was not registered"));
-  const forwarded: { code?: number; reason?: string }[] = [];
-  const socket = {
-    connectToServer: () => ({
-      onClose(handler: typeof closed) {
-        closed = handler;
-      },
-    }),
-    close(options: { code?: number; reason?: string }) {
-      forwarded.push(options);
-      return Promise.resolve();
-    },
-  } as unknown as WebSocketRoute;
-  const page = {
-    async routeWebSocket(pattern: string, handler: (route: WebSocketRoute) => unknown) {
-      expect(pattern).toBe("**/collab");
-      await handler(socket);
-    },
-  } as unknown as Page;
-  const actual = await activeRoom(page);
-  return { actual, forwarded, close: (code?: number, reason?: string) => closed(code, reason) };
+function routedRoom(closes: { code?: number; reason?: string }[]) {
+  // Keep the browser helper's DOM declarations in its own Bun process, like
+  // the config tests; the admission suite remains a backend TypeScript project.
+  const helper = resolve(import.meta.dir, "../../apps/web/e2e-pending/auth-session-helpers.ts");
+  const child = Bun.spawnSync(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--eval",
+      `
+        import assert from "node:assert/strict";
+        import { activeRoom } from ${JSON.stringify(helper)};
+        let closed = () => { throw new Error("Server close observer was not registered"); };
+        const forwarded = [];
+        const socket = {
+          connectToServer: () => ({ onClose: handler => { closed = handler; } }),
+          close: options => { forwarded.push(options); return Promise.resolve(); }
+        };
+        const page = {
+          async routeWebSocket(pattern, handler) {
+            assert.equal(pattern, "**/collab");
+            await handler(socket);
+          }
+        };
+        const actual = await activeRoom(page);
+        for (const value of ${JSON.stringify(closes)}) await closed(value.code, value.reason);
+        console.log(JSON.stringify({actual, forwarded}));
+      `,
+    ],
+    { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR }, stdout: "pipe", stderr: "pipe" },
+  );
+  expect(child.exitCode).toBe(0);
+  return JSON.parse(child.stdout.toString()) as {
+    actual: { connections: number; closedCodes: (number | null)[] };
+    forwarded: { code?: number; reason?: string }[];
+  };
 }
 
-test("a code-less navigation closure is observed and forwarded without inventing revocation", async () => {
-  const room = await routedRoom();
-  await room.close(undefined, undefined);
+test("a code-less navigation closure is observed and forwarded without inventing revocation", () => {
+  const room = routedRoom([{}]);
   expect(room.actual.connections).toBe(1);
-  expect(room.actual.closedCodes).toEqual([undefined]);
+  expect(room.actual.closedCodes).toEqual([null]);
   expect(room.actual.closedCodes).not.toContain(1008);
-  const projection = JSON.parse(JSON.stringify(room.actual)) as { closedCodes: (number | null)[] };
-  expect(projection.closedCodes).toEqual([null]);
-  expect(room.forwarded).toEqual([{ code: undefined, reason: undefined }]);
+  expect(room.forwarded).toEqual([{}]);
 });
 
-test("only an observed server 1008 supplies revocation evidence and forwards its actual reason", async () => {
-  const room = await routedRoom();
-  await room.close(1000, "normal departure");
-  expect(room.actual.closedCodes).not.toContain(1008);
-  await room.close(1008, "session revoked");
+test("only an observed server 1008 supplies revocation evidence and forwards its actual reason", () => {
+  const normal = { code: 1000, reason: "normal departure" };
+  expect(routedRoom([normal]).actual.closedCodes).not.toContain(1008);
+  const room = routedRoom([normal, { code: 1008, reason: "session revoked" }]);
   expect(room.actual.closedCodes).toEqual([1000, 1008]);
   expect(room.forwarded).toEqual([
     { code: 1000, reason: "normal departure" },
