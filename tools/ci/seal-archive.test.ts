@@ -12,6 +12,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { collaborationScriptInventory } from "./verify/rust-collab.ts";
+import { postgresS3Inventory } from "./verify/rust-exec.ts";
+import { selectedInstallInventory } from "./verify/rust-install.ts";
+import { schemaBaselineInventory } from "./verify/rust-schema.ts";
+import { postgresMatrixInventory } from "./verify/rust-shared.ts";
 
 const root = resolve(import.meta.dir, "../..");
 type Step = { name?: string; run?: string; uses?: string; with?: Record<string, unknown> };
@@ -68,6 +73,50 @@ const compress = step("postgres-build", "Compress sealed executable archives wit
 const hash = step("postgres-build", "Hash compressed executable archives");
 
 function fixture() {
+  const [collaboration, collaborationError] = collaborationScriptInventory(root);
+  if (collaborationError !== null) throw new Error(collaborationError);
+  const [matrix, matrixError] = postgresMatrixInventory(workflow.jobs);
+  if (matrixError !== null) throw new Error(matrixError);
+  const postgresTests = new Set([
+    ...matrix.x64,
+    ...matrix.arm64,
+    ...[
+      postgresS3Inventory(workflow.jobs),
+      schemaBaselineInventory(workflow.jobs),
+      selectedInstallInventory(workflow.jobs),
+    ].flatMap(([names, error]) => {
+      if (error !== null) throw new Error(error);
+      return [...names];
+    }),
+  ]);
+  const metadata = JSON.parse(
+    command([
+      "cargo",
+      "metadata",
+      "--no-deps",
+      "--format-version",
+      "1",
+      "--offline",
+      "--locked",
+      "--manifest-path",
+      join(root, "Cargo.toml"),
+    ]).stdout.toString(),
+  ) as {
+    packages: {
+      manifest_path: string;
+      targets: { name: string; kind: string[]; "required-features"?: string[] }[];
+    }[];
+  };
+  const pkg = metadata.packages.find((pkg) => pkg.manifest_path === join(root, "Cargo.toml"));
+  if (!pkg) throw new Error("fixture root Cargo package missing");
+  const products = pkg.targets
+    .filter(
+      (target) =>
+        target.kind.length === 1 &&
+        target.kind[0] === "bin" &&
+        (target["required-features"] ?? []).every((feature) => feature === "db-tests"),
+    )
+    .map((target) => target.name);
   const directory = mkdtempSync(join(root, ".c2b-fixture-"));
   // Synthetic transport bytes and Cargo records; these are never executed and
   // do not establish that a product executable was built or accepted.
@@ -86,11 +135,25 @@ function fixture() {
       features: ["db-tests"],
       prefix: "target",
     },
-    {
-      name: "fvoci-server",
-      target: "fvoci-server",
+    ...products.map((name) => ({
+      name,
+      target: name,
       kind: "bin",
       features: ["db-tests"],
+      prefix: "target",
+    })),
+    ...[...new Set([...collaboration, ...postgresTests])].map((name) => ({
+      name,
+      target: name,
+      kind: "test",
+      features: ["db-tests"],
+      prefix: "target",
+    })),
+    {
+      name: "schema-migrate",
+      target: "fvoci-migrate",
+      kind: "bin",
+      features: [],
       prefix: "target",
     },
   ].map((file) => {
@@ -102,6 +165,23 @@ function fixture() {
       bytes: Buffer.from(`sealed ${file.name} transport fixture bytes\n`),
     };
   });
+  const helperNames = new Set([
+    "collab-engine",
+    "db-tests-library",
+    "fvoci-server",
+    ...collaboration,
+  ]);
+  const postgresNames = new Set([
+    "collab-engine",
+    "db-tests-library",
+    "schema-migrate",
+    ...products,
+    ...postgresTests,
+  ]);
+  const cohorts = {
+    helper: files.filter((file) => helperNames.has(file.name)),
+    postgres: files.filter((file) => postgresNames.has(file.name)),
+  };
   const createdTargets = [...new Set(files.map((file) => dirname(file.destination)))].filter(
     (target) => !existsSync(target),
   );
@@ -147,7 +227,7 @@ function fixture() {
           sha256: createHash("sha256").update(file.bytes).digest("hex"),
           record: {
             features: file.features,
-            profile: { opt_level: "0", debuginfo: 0, test: file.kind === "lib" },
+            profile: { opt_level: "0", debuginfo: 0, test: file.kind !== "bin" },
             target: { name: file.target, kind: [file.kind] },
             executable: file.destination,
           },
@@ -176,8 +256,16 @@ function fixture() {
       mkdirSync(dirname(join(stage, file.relative)), { recursive: true });
       writeFileSync(join(stage, file.relative), payload);
     }
-    writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
-    for (const cohort of ["postgres", "helper"]) {
+    for (const [cohort, members] of Object.entries(cohorts)) {
+      writeFileSync(
+        join(stage, "manifest.json"),
+        JSON.stringify({
+          ...manifest,
+          entries: Object.fromEntries(
+            members.map((file) => [file.name, manifest.entries[file.name]]),
+          ),
+        }),
+      );
       command([
         "tar",
         "-cf",
@@ -185,7 +273,7 @@ function fixture() {
         "-C",
         stage,
         "manifest.json",
-        ...files.map((file) => file.relative),
+        ...members.map((file) => file.relative),
       ]);
     }
     const result = run(compress);
@@ -198,6 +286,7 @@ function fixture() {
   return {
     packet,
     files,
+    cohorts,
     pack,
     run,
     cleanup() {
@@ -237,7 +326,7 @@ test("zstd transport retains the actual consumer's SHA256 admission", () => {
     expect(hashed.stdout.toString()).toMatch(
       /stage=rust-binaries-hash finished at=\S+ elapsed_seconds=\d+ exit=0/,
     );
-    for (const cohort of ["postgres", "helper"]) {
+    for (const cohort of ["postgres", "helper"] as const) {
       const expected = createHash("sha256")
         .update(readFileSync(join(f.packet, `${cohort}.tar.zst`)))
         .digest("hex");
@@ -249,15 +338,18 @@ test("zstd transport retains the actual consumer's SHA256 admission", () => {
         ),
       );
       expect(result.exitCode).toBe(0);
+      const admitted = f.run(
+        step(
+          cohort === "postgres" ? "postgres" : "collaboration",
+          `Validate and restore finished ${cohort} executables (no rebuild fallback)`,
+        ),
+      );
+      expect(admitted.exitCode).toBe(0);
+      for (const file of f.cohorts[cohort]) {
+        expect(readFileSync(file.destination)).toEqual(file.bytes);
+        rmSync(file.destination);
+      }
     }
-    const admitted = f.run(
-      step(
-        "collaboration",
-        "Validate and restore finished helper executables (no rebuild fallback)",
-      ),
-    );
-    expect(admitted.exitCode).toBe(0);
-    for (const file of f.files) expect(readFileSync(file.destination)).toEqual(file.bytes);
   });
 });
 
