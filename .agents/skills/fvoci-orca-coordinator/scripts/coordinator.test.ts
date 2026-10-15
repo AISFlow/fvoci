@@ -187,7 +187,11 @@ else if(verb==='orchestration worker-start'&&argv.includes('--agent')) {
 }
 else if(verb==='orchestration worker-show') { const id=flag('--dispatch'); r={dispatch:{id,runId:scenario==='wrongrun'?'run_other':'run_fixture'},worker:{dispatchId:id,worktreeId:'repo-fixture::/work/fvoci/checkout',startOptions:{launch:{effective:{agent:'claude',model:scenario==='effective'?'claude-fable-5-1':'claude-opus-5-5',effort:'high'}}}}}; }
 else if(verb==='orchestration worker-start') { if(scenario==='failedstage') {console.log(JSON.stringify({ok:false,result:{failedStage:'inject',residualResources:['term_agent']}}));process.exit(1);} r=scenario==='partial'?{state:'ready',taskId:'task_fixture'}:{runId:'run_fixture',state:'ready',stage:'input_accepted',taskId:'task_fixture',dispatchId:'ctx_fixture',effects:[{kind:'terminal',role:'agent',id:'term_agent'},{kind:'dispatch_input',id:'term_agent',state:'accepted'}]}; }
-else if(verb==='orchestration worker-list') { const second=a.includes('--cursor'); r={scope:{run:'run_fixture'},workers:[{dispatchId:second?'ctx_2':'ctx_1',agentTerminalHandle:scenario==='unknownagent'?null:'term_agent',dispatchStatus:scenario==='liveagent'?'dispatched':'completed',terminalState:'retained',projection:{outcome:scenario==='liveagent'?'in_progress':'succeeded',liveness:{verdict:'live'}}}],page:{hasMore:!second,nextCursor:second?null:'page2'}}; }
+else if(verb==='orchestration worker-list') {
+ const second=a.includes('--cursor');
+ const status=scenario==='settled-failed'||scenario==='failed-success'||(scenario.startsWith('mixed-')&&!second)?'failed':scenario==='liveagent'||(scenario==='mixed-active'&&second)?'dispatched':scenario==='pendingagent'?'pending':scenario==='unknownstatus'||(scenario==='mixed-unknown'&&second)?undefined:'completed';
+ r={scope:{run:scenario==='foreignworkers'?'run_other':'run_fixture'},workers:[{dispatchId:second?'ctx_2':'ctx_1',agentTerminalHandle:scenario==='unknownagent'?null:'term_agent',dispatchStatus:status,terminalState:scenario==='notretained'?'reclaimable':'retained',projection:{outcome:status==='failed'&&scenario!=='failed-success'?'failed':status==='dispatched'||status==='pending'?'in_progress':'succeeded',liveness:{verdict:'live'}}}],page:{hasMore:!second,nextCursor:second?null:'page2'}};
+}
 else if(verb==='orchestration reply') r={replied:true};
 else if(verb==='orchestration check') { const ack=a.includes('--ack'); r={runId:'run_fixture',deliveryId:ack?'delivery2':'delivery1',count:ack?1:3,messages:ack?[{id:'new-arrival',type:'escalation',body:'new'}]:[{id:'heartbeat',type:'heartbeat'},{id:'question-original',type:'question',body:'answer me'},{id:'done',type:'worker_done',taskId:'task_fixture',dispatchId:'ctx_fixture'}]}; }
 else throw new Error('unsupported stub call');
@@ -308,6 +312,36 @@ test("reviewer selects reviewer common prompt", async () => {
     "Reviewer-only fixture",
   );
 });
+for (const scenario of ["settled-failed", "mixed-settled"])
+  test(`settled failed reviewer reuse launches exactly once: ${scenario}`, async () => {
+    const f = fixture(scenario);
+    const request = { ...f.request, role: "reviewer" as const };
+    expect(await f.c.launch(request)).toMatchObject({
+      state: "ready",
+      taskId: "task_fixture",
+      dispatchId: "ctx_fixture",
+    });
+    expect(f.calls().filter((a) => a.includes("worker-start"))).toHaveLength(1);
+    expect(f.calls().some((a) => a.includes("send") || a.includes("create"))).toBe(false);
+    await expect(f.c.launch(request)).rejects.toThrow();
+    expect(f.calls().filter((a) => a.includes("worker-start"))).toHaveLength(1);
+  });
+for (const scenario of [
+  "mixed-active",
+  "mixed-unknown",
+  "pendingagent",
+  "unknownstatus",
+  "failed-success",
+  "notretained",
+  "foreignworkers",
+])
+  test(`unsettled or foreign reviewer reuse refuses before mutation: ${scenario}`, async () => {
+    const f = fixture(scenario);
+    await expect(f.c.launch({ ...f.request, role: "reviewer" })).rejects.toThrow();
+    expect(existsSync(join(f.root, "unit/launch.once"))).toBe(false);
+    expect(existsSync(join(f.root, "unit/dispatch-prompt.md"))).toBe(false);
+    expect(f.calls().some((a) => a.includes("worker-start") || a.includes("send"))).toBe(false);
+  });
 for (const scenario of [
   "wrongparent",
   "missingparent",

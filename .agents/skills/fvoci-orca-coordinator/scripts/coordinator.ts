@@ -662,8 +662,9 @@ export class Coordinator {
         prior.length > 0 &&
           prior.every(
             (w) =>
-              w.dispatchStatus === "completed" &&
-              ["succeeded", "failed"].includes(w.outcome || "") &&
+              ((w.dispatchStatus === "completed" &&
+                ["succeeded", "failed"].includes(w.outcome || "")) ||
+                (w.dispatchStatus === "failed" && w.outcome === "failed")) &&
               w.terminalState === "retained",
           ),
         "existing agent lacks settled retained ownership; inspect before reuse",
