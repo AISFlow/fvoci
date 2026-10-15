@@ -6,6 +6,7 @@ import {
   appendFileSync,
   closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -44,6 +45,7 @@ import {
   type Manifest,
 } from "../turso/ui-record.ts";
 import { awaitListening, portClosed, requireSetup } from "../turso/ui-server.ts";
+import { maintenanceReceipts } from "../turso/ui-audit.ts";
 import { events, ready, verify } from "./admin.ts";
 import {
   CLIENT_ID,
@@ -197,6 +199,10 @@ export interface ProcessObserver {
   module: { path: string; sha256: string };
   config: { path: string; sha256: string };
 }
+export interface PreparedServerEvidence {
+  identity: { pid: number; startTicks: string };
+  executable: { path: string; sha256: string };
+}
 export async function assertServerEnvironment(
   scope: UiProcesses,
   pid: number,
@@ -204,6 +210,7 @@ export async function assertServerEnvironment(
   manifest: Manifest,
   observer: ProcessObserver,
   negatives: boolean,
+  captureServer?: (observed: PreparedServerEvidence) => void,
 ) {
   require(realpathSync(observer.directory) ===
     observer.directory, "privileged observer directory is not physical");
@@ -306,7 +313,131 @@ export async function assertServerEnvironment(
         (JSON.parse(rejected.stdout) as { accepted: unknown }).accepted ===
           false, "privileged process observer negative control was accepted");
     }
+  captureServer?.({
+    identity: { pid: server.pid, startTicks: server.startTicks },
+    executable: {
+      path: manifest.binaries["fvoci-server"]?.path ?? "",
+      sha256: input.executableSha256,
+    },
+  });
   return { ...facts, unprivilegedEnvironmentDenied, negativeControls: negatives ? 5 : 0 };
+}
+
+/** Private observations of this normal-server allocation, never a grant or whole-scope closure. */
+export interface PreparedOperationWitness {
+  binding: PreparedBinding;
+  server: PreparedServerEvidence;
+  log: { path: string; sha256: string };
+  retirement: {
+    exitCode: number;
+    allocationClosed: boolean;
+    forced: boolean;
+    portClosed: boolean;
+    identities: Array<{ pid: number; startTicks: string; retired: boolean }>;
+    errors: string[];
+  };
+  maintenance: ReturnType<typeof maintenanceReceipts>;
+}
+/** Consumer-owned handles and observations; no file/JSON loader accepts this context. */
+export interface PreparedOperationContext {
+  binding: PreparedBinding;
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">;
+  scope: Pick<UiProcesses, "allocations" | "entries" | "errors" | "retired">;
+  child: Child;
+  server: PreparedServerEvidence | undefined;
+  logPath: string;
+  logFd: number;
+  exitCode: number;
+  portClosed: boolean;
+}
+
+/** Join protected live-process evidence to its actual retirement and log before awaiting the parent. */
+export async function auditPreparedOperation(
+  primary: Pick<PreparedPrimary, "assertWholePrimary">,
+  before: PreparedSnapshot,
+  after: PreparedSnapshot,
+  delta: PreparedDelta,
+  context: PreparedOperationContext | undefined,
+): Promise<void> {
+  if (!context?.server || typeof primary.assertWholePrimary !== "function")
+    throw new HelperError("Keycloak prepared operation witness missing");
+  const { scope, child, server, manifest } = context;
+  assertPreparedBinding(before.binding, context.binding);
+  assertPreparedBinding(before.binding, after.binding);
+  require(context.binding.source === manifest.sourceInputs.source &&
+    context.binding.tree === manifest.sourceInputs.tree &&
+    Number.isSafeInteger(server.identity.pid) &&
+    server.identity.pid > 0 &&
+    /^[1-9][0-9]*$/.test(server.identity.startTicks) &&
+    server.identity.pid === child.pid &&
+    /^[a-f0-9]{64}$/.test(server.executable.sha256) &&
+    server.executable.path === manifest.binaries["fvoci-server"]?.path &&
+    server.executable.sha256 ===
+      manifest.binaries["fvoci-server"]
+        ?.sha256, "Keycloak prepared operation server binding differs");
+  const index = scope.allocations.findIndex((allocation) => allocation.process === child);
+  const allocation = scope.allocations[index];
+  if (allocation === undefined)
+    throw new HelperError("Keycloak prepared operation allocation missing");
+  const rootEntry = allocation.key === undefined ? undefined : scope.entries.get(allocation.key);
+  const rows = [...scope.entries.values()].filter((entry) => entry.allocation === index);
+  require(index >= 0 &&
+    allocation.label === "normal-server" &&
+    rootEntry?.allocation === index &&
+    rootEntry.identity.pid === server.identity.pid &&
+    rootEntry.identity.startTicks === server.identity.startTicks &&
+    context.exitCode === 0 &&
+    allocation.closed &&
+    !allocation.forced &&
+    context.portClosed &&
+    scope.errors.length === 0 &&
+    rows.length > 0 &&
+    rows.every((entry) =>
+      scope.retired(entry.identity),
+    ), "Keycloak prepared operation retirement differs");
+  const logBytes = () => {
+    try {
+      const file = lstatSync(context.logPath),
+        opened = fstatSync(context.logFd);
+      require(file.isFile() &&
+        !file.isSymbolicLink() &&
+        (file.mode & 0o077) === 0 &&
+        realpathSync(context.logPath) === context.logPath &&
+        file.dev === opened.dev &&
+        file.ino === opened.ino, "Keycloak prepared operation log differs");
+      return file.size;
+    } catch {
+      throw new HelperError("Keycloak prepared operation log differs");
+    }
+  };
+  const size = logBytes();
+  // The maintained reader enforces its existing cap before any whole-log hash read.
+  const maintenance = maintenanceReceipts(context.logPath, server.identity, context.binding.target);
+  const logDigest = () => {
+    require(size === logBytes(), "Keycloak prepared operation log changed");
+    return sha(context.logPath);
+  };
+  const hash = logDigest();
+  const witness: PreparedOperationWitness = {
+    binding: { ...context.binding },
+    server: structuredClone(server),
+    log: { path: context.logPath, sha256: hash },
+    retirement: {
+      exitCode: context.exitCode,
+      allocationClosed: allocation.closed,
+      forced: allocation.forced,
+      portClosed: context.portClosed,
+      identities: rows.map((entry) => ({
+        pid: entry.identity.pid,
+        startTicks: entry.identity.startTicks,
+        retired: scope.retired(entry.identity),
+      })),
+      errors: [...scope.errors],
+    },
+    maintenance,
+  };
+  await primary.assertWholePrimary(before, after, delta, witness);
+  require(hash === logDigest(), "Keycloak prepared operation log changed");
 }
 
 export interface PreparedBackend {
@@ -329,6 +460,7 @@ export interface PreparedPrimary {
     before: PreparedSnapshot,
     after: PreparedSnapshot,
     delta: PreparedDelta,
+    witness: PreparedOperationWitness,
   ): Promise<void>;
 }
 export interface ConsumerInputs {
@@ -634,7 +766,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
           FVOCI_PUBLIC_ORIGIN: "http://127.0.0.1:0",
           FVOCI_STATIC_DIR: join(root, "apps/web/dist"),
           FVOCI_STORAGE_DIR: join(group, "storage"),
-          RUST_LOG: "warn,tower_http=debug",
+          RUST_LOG: binding ? "info" : "warn,tower_http=debug",
         };
         mkdirSync(app.FVOCI_STORAGE_DIR, { mode: 0o700 });
         server = scope.spawn(
@@ -644,6 +776,7 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
         );
         base = await awaitListening(logPath, server, now() + 30);
         await requireSetup(base, binding === undefined);
+        let observedServer: PreparedServerEvidence | undefined;
         retain(
           `process-environment-${mode}.json`,
           JSON.stringify(
@@ -654,6 +787,11 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
               inputs.manifest,
               inputs.processObserver,
               mode === "flows",
+              binding
+                ? (observed) => {
+                    observedServer = observed;
+                  }
+                : undefined,
             ),
           ),
         );
@@ -814,10 +952,11 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
             ) &&
             new Set(delta.links.map((row) => row.subject)).size ===
               delta.links.length, "Keycloak prepared IdP or actor link delta differs");
-          const closed = await scope.finish(server, true);
+          const actualServer = server;
+          const closed = await scope.finish(actualServer, true);
           server = undefined;
-          require(closed === 0 &&
-            (await portClosed(base)), "Keycloak prepared server closure failed");
+          const serverPortClosed = await portClosed(base);
+          require(closed === 0 && serverPortClosed, "Keycloak prepared server closure failed");
           const after = structuredClone(await inputs.prepared.observe(binding));
           assertPreparedDelta(before, after, delta);
           for (const email of delta.emails) {
@@ -830,7 +969,17 @@ export async function consumeKeycloak(scope: UiProcesses, inputs: ConsumerInputs
                   row.role === "member",
               ).length === 1, "Keycloak prepared member membership differs");
           }
-          await inputs.prepared.assertWholePrimary(before, after, delta);
+          await auditPreparedOperation(inputs.prepared, before, after, delta, {
+            binding,
+            manifest: inputs.manifest,
+            scope,
+            child: actualServer,
+            server: observedServer,
+            logPath,
+            logFd: fd,
+            exitCode: closed,
+            portClosed: serverPortClosed,
+          });
           inputs.checkInputs();
         }
         if (result.code !== 0 && inputs.evidence) {
