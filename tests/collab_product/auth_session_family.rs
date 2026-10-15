@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+type NativeReceiptRow = (i64, Vec<u8>, i64, Vec<u8>, Vec<u8>);
+type NativeRevisionRow = (Vec<u8>, Vec<u8>, String, String, String, i64);
+
 enum Readback {
     Sqlite(sqlx::SqlitePool),
     Remote(Backend),
@@ -38,10 +41,10 @@ impl Readback {
                 let updates: Vec<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(
                     "SELECT seq,op_id,payload FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq LIMIT 10001",
                 ).bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_all(&mut *tx).await.unwrap();
-                let receipts: Vec<(i64, Vec<u8>, i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+                let receipts: Vec<NativeReceiptRow> = sqlx::query_as(
                     "SELECT seq,op_id,payload_len,payload_sha256,actor_user_id FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001",
                 ).bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_all(&mut *tx).await.unwrap();
-                let revisions: Vec<(Vec<u8>, Vec<u8>, String, String, String, i64)> = sqlx::query_as(
+                let revisions: Vec<NativeRevisionRow> = sqlx::query_as(
                     "SELECT id,y_snapshot,content_json,text,reason,created_at FROM revisions WHERE workspace_id=?1 AND target_id=?2 AND target_kind='document' ORDER BY created_at,id LIMIT 10001",
                 ).bind(workspace.as_bytes().as_slice()).bind(document.as_bytes().as_slice()).fetch_all(&mut *tx).await.unwrap();
                 let events: Vec<(Vec<u8>, i64, String, String, String)> = sqlx::query_as(
