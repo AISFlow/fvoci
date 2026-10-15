@@ -2437,6 +2437,12 @@ mod tests {
                 .clock_micros
                 .parse::<i64>()
                 .map_err(|_| "CLOCK_REFUSED")?;
+            let keys = crate::auth::password::Keyring::parse_named(
+                &format!(r#"{{"serial-test":"{}"}}"#, "11".repeat(32)),
+                "serial-test",
+                "ENCRYPTION_KEYS",
+            )
+            .map_err(|_| "OIDC_TEST_KEYRING_FAILED")?;
             for (hash, expiry, expected_now, expected_horizon) in [
                 ("a".repeat(64), now.checked_add(20 * 60 * 1_000_000), 0, 1),
                 ("b".repeat(64), now.checked_sub(1), 1, 2),
@@ -2444,14 +2450,15 @@ mod tests {
                 let expiry = expiry
                     .and_then(chrono::DateTime::from_timestamp_micros)
                     .ok_or("EXPIRY_REFUSED")?;
-                super::super::oidc::issue_state_backend(
-                    &backend,
-                    &hash,
+                let sealed = crate::secret_box::seal(
+                    &keys,
                     "root-owned-opaque-state",
-                    expiry,
+                    &format!("oidc-state:{hash}"),
                 )
-                .await
-                .map_err(|_| "OIDC_STATE_ISSUE_FAILED")?;
+                .map_err(|_| "OIDC_TEST_SEAL_FAILED")?;
+                super::super::oidc::issue_state_backend(&backend, &hash, &sealed, expiry)
+                    .await
+                    .map_err(|_| "OIDC_STATE_ISSUE_FAILED")?;
                 let observed = capture_serial_observation(&backend, policy)
                     .await
                     .map_err(|_| "SERIAL_FAILED")?;
