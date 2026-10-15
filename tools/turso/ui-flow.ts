@@ -351,7 +351,7 @@ export async function executeUi(
   const serverAllocations: [
     ServerHandle,
     string,
-    { pid: number; startTicks: string },
+    { pid: number; startTicks: string } | undefined,
     RoomLogOrigin | undefined,
     number,
   ][] = [];
@@ -388,7 +388,16 @@ export async function executeUi(
           setupNeeded,
         ));
         audit.serverStarts += 1;
-        serverAllocations.push([server, directory, steps.serverIdentity(server), roomLog, log]);
+        // The audit owns this actual FD even if the identity lookup fails.
+        const allocation: (typeof serverAllocations)[number] = [
+          server,
+          directory,
+          undefined,
+          roomLog,
+          log,
+        ];
+        serverAllocations.push(allocation);
+        allocation[2] = steps.serverIdentity(server);
         const browserEnv: Record<string, string> = {
           PLAYWRIGHT_BASE_URL: base,
           FVOCI_E2E_SELECTED_BACKEND: "libsql-remote",
@@ -480,7 +489,15 @@ export async function executeUi(
           mkdirSync(restartDir, 0o700);
           ({ server, base, log, roomLog } = await steps.start(scope, manifest, env, restartDir));
           audit.serverStarts += 1;
-          serverAllocations.push([server, restartDir, steps.serverIdentity(server), roomLog, log]);
+          const allocation: (typeof serverAllocations)[number] = [
+            server,
+            restartDir,
+            undefined,
+            roomLog,
+            log,
+          ];
+          serverAllocations.push(allocation);
+          allocation[2] = steps.serverIdentity(server);
           const restartEnv: Record<string, string> = { ...browserEnv };
           delete restartEnv.FVOCI_E2E_SELECTED_FIXTURE_BIN;
           delete restartEnv.FVOCI_E2E_TURSO_PRIVATE_INPUT;
@@ -570,6 +587,7 @@ export async function executeUi(
           roomRetirement(scope, manifest, origin, audit.targetSha256),
         );
       }
+      require(serverIdentity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),
@@ -806,7 +824,7 @@ export async function executeAuth(
   let lastEnvironment = environment;
   const serverAllocations: [
     string,
-    { pid: number; startTicks: string },
+    { pid: number; startTicks: string } | undefined,
     RoomLogOrigin | undefined,
     number,
   ][] = [];
@@ -852,7 +870,9 @@ export async function executeAuth(
           setupNeeded,
         ));
         audit.serverStarts += 1;
-        serverAllocations.push([directory, steps.serverIdentity(server), roomLog, log]);
+        const allocation: (typeof serverAllocations)[number] = [directory, undefined, roomLog, log];
+        serverAllocations.push(allocation);
+        allocation[1] = steps.serverIdentity(server);
         const before = await steps.fixture(scope, manifest, "baseline", env);
         const report = await steps.browser(
           scope,
@@ -968,6 +988,7 @@ export async function executeAuth(
           roomRetirement(scope, manifest, origin, audit.targetSha256),
         );
       }
+      require(serverIdentity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
       audit.servers.push(
         steps.maintenanceReceipts(
           join(directory, "server.private.log"),

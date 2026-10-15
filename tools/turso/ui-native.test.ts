@@ -11,6 +11,8 @@ import {
   unlinkSync,
   writeFileSync,
   existsSync,
+  fstatSync,
+  closeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +23,7 @@ import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import { failureCode, UiError, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
-import { browser, fixture, stop } from "./ui-native.ts";
+import { browser, fixture, start, stop } from "./ui-native.ts";
 import { linuxKernel, UiProcesses, withProcesses } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
 
@@ -728,3 +730,47 @@ describe.skipIf(process.platform !== "linux")("browser child environment", () =>
     });
   });
 });
+
+test.each(["spawn", "clock"] as const)(
+  "FD ownership covers native startup %s failure",
+  async (fault) => {
+    let fd: number | undefined;
+    const original = new UiError("UI_START_INITIALIZATION_FAULT");
+    const { scope, calls } = fakeScope({
+      spawn: (_args, _label, options) => {
+        fd = options.stdout as number;
+        if (fault === "spawn") throw original;
+        return exitedChild(0);
+      },
+      finish: () => {
+        throw new UiError("UI_CLEANUP_FAULT");
+      },
+    });
+    try {
+      const caught = await start(
+        scope,
+        { binaries: { "fvoci-migrate": { path: "/never-executed" } } } as unknown as Manifest,
+        {},
+        directory,
+        false,
+        () => {
+          throw original;
+        },
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(caught).toBe(original);
+      expect(() => fstatSync(must(fd))).toThrow(expect.objectContaining({ code: "EBADF" }));
+      expect(calls.finish).toHaveLength(fault === "clock" ? 1 : 0);
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      }
+    }
+  },
+);

@@ -456,7 +456,7 @@ async function executeFinalKeycloak(
   return { observation: accepted, audit };
 }
 
-async function executeEqualCase(
+export async function executeEqualCase(
   manifest: Manifest,
   environment: Record<string, string>,
   policy: SerialPolicy,
@@ -527,12 +527,13 @@ async function executeEqualCase(
     rememberActor(audit, owner, namespace);
     rememberActor(audit, member, namespace);
     const running = await hostedFinalServerStart(scope, manifest, env, directory);
-    const serverIdentity = allocationIdentity(running.server);
+    let serverIdentity: ReturnType<typeof allocationIdentity> | undefined;
     let original: unknown = null;
     const cleanup: string[] = [];
     let retired: RoomRetirement | undefined;
     let measurement: HostedCase["measurement"] | undefined, closure: Record_ | undefined;
     try {
+      serverIdentity = allocationIdentity(running.server);
       running.roomLog = serverRoomLog(scope, manifest, running, directory, audit.targetSha256);
       const logged = await requestPublic(running.base, "/api/v1/auth/login", {
         email: get(owner, "email"),
@@ -681,6 +682,7 @@ async function executeEqualCase(
       closure.containerAbsent === true &&
       closure.forced === false &&
       closure.serverExit === 0, "UI_FINAL_EQUAL_NORMAL_CLOSURE_REQUIRED");
+    require(serverIdentity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
     audit.servers.push(
       maintenanceReceipts(
         join(directory, "server.private.log"),
@@ -729,7 +731,7 @@ async function executeEqualCase(
 }
 
 /** The actual additional product4 or one explicitly selected boundary case. */
-async function executeSelectedStage(
+export async function executeSelectedStage(
   manifest: Manifest,
   environment: Record<string, string>,
   policy: SerialPolicy,
@@ -765,8 +767,8 @@ async function executeSelectedStage(
       member = await fixture(scope, manifest, "member", env);
     rememberActor(audit, owner, namespace);
     rememberActor(audit, member, namespace);
-    const running = await start(scope, manifest, env, directory, false),
-      serverIdentity = allocationIdentity(running.server);
+    const running = await start(scope, manifest, env, directory, false);
+    let serverIdentity: ReturnType<typeof allocationIdentity> | undefined;
     let original: unknown = null;
     const cleanup: string[] = [];
     let retired: RoomRetirement | undefined;
@@ -778,6 +780,7 @@ async function executeSelectedStage(
       receipts: SelectedNativeReceipt[];
     }[] = [];
     try {
+      serverIdentity = allocationIdentity(running.server);
       const logged = await requestPublic(running.base, "/api/v1/auth/login", {
         email: get(owner, "email"),
         password: "supersecret1",
@@ -939,6 +942,7 @@ async function executeSelectedStage(
       if (original !== null) throw original as Error;
       require(false, "UI_FINAL_SELECTED_CLOSURE_FAILED");
     }
+    require(serverIdentity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
     audit.servers.push(
       maintenanceReceipts(
         join(directory, "server.private.log"),
@@ -1013,12 +1017,13 @@ export async function prepareKeycloakOwners(
       const bootstrap = await fixture(scope, manifest, "owner", env);
       rememberActor(phaseAudit, bootstrap, namespace);
       const running = await start(scope, manifest, env, directory, false);
-      const serverIdentity = allocationIdentity(running.server);
+      let serverIdentity: ReturnType<typeof allocationIdentity> | undefined;
       let actors: PreparedActors | undefined;
       let original: unknown = null;
       const cleanup: string[] = [];
       let retired: RoomRetirement | undefined;
       try {
+        serverIdentity = allocationIdentity(running.server);
         const logged = await requestPublic(running.base, "/api/v1/auth/login", {
           email: namespace + "-owner@example.invalid",
           password: "supersecret1",
@@ -1097,6 +1102,7 @@ export async function prepareKeycloakOwners(
         if (original !== null) throw original as Error;
         require(false, "UI_FINAL_PREPARATION_CLOSURE_FAILED");
       }
+      require(serverIdentity !== undefined, "UI_NORMAL_MAIN_IDENTITY_FAILED");
       phaseAudit.servers.push(
         maintenanceReceipts(
           join(directory, "server.private.log"),
