@@ -215,8 +215,12 @@ export function verifyRustBinaryHandoff(jobs: Mapping): string[] {
     } else {
       require(!list.some(
         (step) =>
-          str(step, "run").includes("--bin collab-engine") ||
-          field(step.with, "path") === "crates/collab-engine/target",
+          ["cargo ", '"cargo"', "'cargo'"].some((word) => str(step, "run").includes(word)) ||
+          (isCacheStep(step) &&
+            !contains(consumerPrefix, step) &&
+            !["~/.cargo/registry\n~/.cargo/git\n", "~/.cargo/registry\n~/.cargo/git"].includes(
+              String(field(step.with, "path")),
+            )),
       ), "collaboration must reuse helper without build/cache fallback");
     }
   }

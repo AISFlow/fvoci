@@ -51,7 +51,7 @@ function withRepoInputs(dir: string): string {
   const rel = [
     "Cargo.toml",
     "xtask/native-library-cohorts.tsv",
-    "scripts/run-rust-collaboration-ci-tests.sh",
+    "xtask/collaboration-suites.tsv",
     "scripts/collab-capacity-probe.sh",
     ...readdirSync(join(root, "tests"))
       .filter((name) => name.endsWith(".rs"))

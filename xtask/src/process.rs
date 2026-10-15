@@ -7,7 +7,8 @@
 //! call, killed as a whole when the call ends.
 
 use serde_json::{json, Value};
-use std::io::{self, Read};
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -106,7 +107,7 @@ type Results = Receiver<(usize, io::Result<Vec<u8>>)>;
 /// Read each captured pipe of `child` to EOF on its own thread. A stream that
 /// was not captured is complete and empty; a captured stream without a pipe
 /// is a read error.
-fn read_pipes(child: &mut Child, capture: bool) -> (Results, Output) {
+fn read_pipes(child: &mut Child, capture: bool, logs: Option<[File; 2]>) -> (Results, Output) {
     let (sender, results) = mpsc::channel();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
         child
@@ -119,6 +120,7 @@ fn read_pipes(child: &mut Child, capture: bool) -> (Results, Output) {
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     ];
     let mut output: Output = [None, None];
+    let mut logs = logs.map(|files| files.map(Some)).unwrap_or([None, None]);
     for (slot, pipe) in pipes.into_iter().enumerate() {
         let Some(mut pipe) = pipe else {
             if capture {
@@ -128,13 +130,34 @@ fn read_pipes(child: &mut Child, capture: bool) -> (Results, Output) {
             }
             continue;
         };
+        let log = logs[slot].take();
         let sender = sender.clone();
         thread::spawn(move || {
             // A reader `run` detached on timeout outlives the call; it must
             // not take a forwarded signal that `run_owned` holds at spawn.
             hold_interrupts();
             let mut buffer = Vec::new();
-            let result = pipe.read_to_end(&mut buffer).map(|_| buffer);
+            let result = if let Some(mut log) = log {
+                (|| {
+                    let mut chunk = [0; 8192];
+                    loop {
+                        let count = pipe.read(&mut chunk)?;
+                        if count == 0 {
+                            return Ok(buffer);
+                        }
+                        let bytes = &chunk[..count];
+                        log.write_all(bytes)?;
+                        if slot == 0 {
+                            io::stdout().write_all(bytes)?;
+                        } else {
+                            io::stderr().write_all(bytes)?;
+                        }
+                        buffer.extend_from_slice(bytes);
+                    }
+                })()
+            } else {
+                pipe.read_to_end(&mut buffer).map(|_| buffer)
+            };
             let _ = sender.send((slot, result));
         });
     }
@@ -168,23 +191,32 @@ fn settle(
     pid: u32,
     results: &Results,
     output: &mut Output,
-    deadline: Instant,
-    timeout: Duration,
+    budget: Option<(Instant, Duration)>,
+    kill_after_exit: bool,
 ) -> Result<(), RunError> {
     let mut child_done = false;
     let mut pause = Duration::from_millis(1);
     loop {
         if !child_done {
             child_done = exited(pid).map_err(RunError::Wait)?;
+            if child_done && kill_after_exit {
+                // Keep the direct child unreaped while terminating descendants
+                // that could otherwise keep captured pipes open indefinitely.
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
         }
         if child_done && output.iter().all(Option::is_some) {
             return Ok(());
         }
         let now = Instant::now();
-        if now >= deadline {
-            return Err(RunError::Timeout(timeout));
+        if let Some((deadline, timeout)) = budget {
+            if now >= deadline {
+                return Err(RunError::Timeout(timeout));
+            }
         }
-        let wait = pause.min(deadline - now);
+        let wait = budget.map_or(pause, |(deadline, _)| pause.min(deadline - now));
         pause = (pause * 2).min(Duration::from_millis(50));
         match results.recv_timeout(wait) {
             Ok((slot, Ok(bytes))) => output[slot] = Some(bytes),
@@ -226,8 +258,14 @@ pub fn run(command: &mut Command, timeout: Duration, capture: bool) -> Result<Fi
     }
     let deadline = Instant::now() + timeout;
     let mut child = command.spawn().map_err(RunError::Spawn)?;
-    let (results, mut output) = read_pipes(&mut child, capture);
-    let outcome = settle(child.id(), &results, &mut output, deadline, timeout);
+    let (results, mut output) = read_pipes(&mut child, capture, None);
+    let outcome = settle(
+        child.id(),
+        &results,
+        &mut output,
+        Some((deadline, timeout)),
+        false,
+    );
     if outcome.is_err() {
         // Still unreaped, so the pid cannot have been reused.
         let _ = child.kill();
@@ -240,6 +278,15 @@ pub fn run(command: &mut Command, timeout: Duration, capture: bool) -> Result<Fi
 /// Process group of the `run_owned` call in progress (0: none), for the
 /// interrupt handler.
 static OWNED_GROUP: AtomicI32 = AtomicI32::new(0);
+// Streaming CI callers return the shell signal status after reaping the child
+// and draining both pipes; older bounded callers retain signal termination.
+static STREAMING: AtomicI32 = AtomicI32::new(0);
+static STREAM_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+pub fn streaming_signal_status() -> Option<i32> {
+    let signal = STREAM_SIGNAL.load(Ordering::SeqCst);
+    (signal != 0).then_some(128 + signal)
+}
 
 /// SIGINT/SIGTERM/SIGHUP while an owned group runs: kill the group, then die
 /// of the same signal (only async-signal-safe calls).
@@ -248,6 +295,10 @@ extern "C" fn interrupt(signal: libc::c_int) {
     unsafe {
         if group > 0 {
             libc::killpg(group, libc::SIGKILL);
+        }
+        if STREAMING.load(Ordering::SeqCst) != 0 {
+            STREAM_SIGNAL.store(signal, Ordering::SeqCst);
+            return;
         }
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
@@ -303,7 +354,25 @@ fn release_interrupts(old: libc::sigset_t) {
 /// (exit, timeout or error) every process left in the group is killed and the
 /// direct child is reaped.
 pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, RunError> {
-    let deadline = Instant::now() + timeout;
+    owned(command, Some(timeout), None)
+}
+
+/// Live, separate stdout/stderr and durable logs using the existing owned
+/// process group. CI owns the unchanged job deadline; there is no new budget.
+/// Interrupts kill the group, drain EOF and reap before the caller returns
+/// `streaming_signal_status()` and its outer service wrapper cleans up.
+pub fn run_owned_streaming(command: &mut Command, logs: [File; 2]) -> Result<Finished, RunError> {
+    STREAMING.store(1, Ordering::SeqCst);
+    owned(command, None, Some(logs))
+}
+
+fn owned(
+    command: &mut Command,
+    timeout: Option<Duration>,
+    logs: Option<[File; 2]>,
+) -> Result<Finished, RunError> {
+    let budget = timeout.map(|timeout| (Instant::now() + timeout, timeout));
+    let streaming = logs.is_some();
     forward_interrupts();
     command
         .stdout(Stdio::piped())
@@ -320,15 +389,22 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> Result<Finished, R
             Ok(())
         });
     }
-    let spawned = command.spawn();
+    let spawned = if streaming_signal_status().is_some() {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "collaboration interrupted",
+        ))
+    } else {
+        command.spawn()
+    };
     if let Ok(child) = &spawned {
         OWNED_GROUP.store(child.id() as i32, Ordering::SeqCst);
     }
     release_interrupts(held);
     let mut child = spawned.map_err(RunError::Spawn)?;
     let pid = child.id();
-    let (results, mut output) = read_pipes(&mut child, true);
-    let outcome = settle(pid, &results, &mut output, deadline, timeout);
+    let (results, mut output) = read_pipes(&mut child, true, logs);
+    let outcome = settle(pid, &results, &mut output, budget, streaming);
     // The child is not reaped yet, so the group id is still ours; forget it
     // before reaping so the interrupt handler never signals a reused id.
     unsafe {

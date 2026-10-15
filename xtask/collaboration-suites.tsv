@@ -1,0 +1,11 @@
+# libtest scheduling<TAB>test executable; shared producer/consumer/CI inventory
+parallel	collab_product
+parallel	collab_projection
+parallel	collab_lifecycle
+parallel	collab_shutdown
+parallel	document_collab_lifecycle
+parallel	revision_integration
+parallel	document_api_integration
+parallel	document_import_export_integration
+parallel	document_import_formats_integration
+serial	task_collab_integration

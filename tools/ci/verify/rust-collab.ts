@@ -1,27 +1,11 @@
-// The collaboration job runs the maintained script on both architectures; the
-// script's literal `cargo test ... --test X \` lines are its target inventory.
+// Both architectures execute the sealed collaboration inventory shared with xtask.
 import { join } from "node:path";
-import {
-  get,
-  has,
-  isMapping,
-  pyRepr,
-  pyRstripChar,
-  pySplit,
-  pySplitlines,
-  pyStrip,
-  sortedPy,
-  intersect,
-  type Mapping,
-} from "./py.ts";
-import { validateCargoTestInvocation } from "./rust-exec.ts";
+import { get, has, isMapping, pyRepr, sortedPy, type Mapping } from "./py.ts";
 import {
   RUST_COLLAB_CI_SCRIPT,
   RUST_COLLAB_INTEGRATION_RUN,
   RUST_COLLAB_INTEGRATION_STEP,
   RUST_COLLAB_MATRIX_RUNNERS,
-  cargoCommandSuppressionError,
-  cargoTestFlagsInText,
   executionStepMasked,
   isFile,
   notUtf8,
@@ -30,13 +14,6 @@ import {
   uniqueNamedStep,
   type Result,
 } from "./rust-shared.ts";
-
-// libtest scheduling the script may pass after `--`: never a filter, skip or
-// ignored selection.
-export const RUST_COLLAB_LIBTEST_ARGS: ReadonlySet<string> = new Set([
-  "--nocapture",
-  "--test-threads=1",
-]);
 
 export function verifyCollaborationWorkflowExecution(jobs: Mapping): string[] {
   const job = get(jobs, "collaboration");
@@ -78,61 +55,41 @@ export function verifyCollaborationWorkflowExecution(jobs: Mapping): string[] {
   return [];
 }
 
-// Every `cargo test` line with its `--test` continuation lines and an
-// optional final `-- ...` libtest line, joined with single spaces.
-export function collaborationScriptCargoCommands(text: string): string[] {
-  const lines = pySplitlines(text);
-  const continuation = (line: string) => pyStrip(pyRstripChar(line, "\\"));
-  const commands: string[] = [];
-  lines.forEach((line, index) => {
-    const stripped = pyStrip(line);
-    if (!stripped.startsWith("cargo test ")) return;
-    const parts = [continuation(stripped)];
-    for (let next = index + 1; next < lines.length; next += 1) {
-      const candidate = pyStrip(lines[next] as string);
-      if (candidate.startsWith("--test ")) {
-        parts.push(continuation(candidate));
-        continue;
-      }
-      if (candidate.startsWith("-- ")) parts.push(continuation(candidate));
-      break;
-    }
-    commands.push(parts.join(" "));
-  });
-  return commands;
-}
-
+// Retain the registry API while its source moves from shell to the shared TSV.
 export function collaborationScriptInventoryFromText(text: string): Result<Set<string>> {
-  const context = "collaboration CI script cargo test";
-  const commands = collaborationScriptCargoCommands(text);
-  if (commands.length === 0)
-    return [null, "rust: collaboration CI script missing cargo test invocation"];
   const tests = new Set<string>();
-  for (const command of commands) {
-    const suppression = cargoCommandSuppressionError(command, context, RUST_COLLAB_LIBTEST_ARGS);
-    if (suppression) return [null, suppression];
-    const at = command.indexOf(" -- ");
-    const cargoArgs = at === -1 ? command : command.slice(0, at);
-    const shapeErr = validateCargoTestInvocation(pySplit(cargoArgs), context, true);
-    if (shapeErr) return [null, shapeErr];
-    const invocationTests = cargoTestFlagsInText(cargoArgs);
-    const repeated = sortedPy(intersect(tests, invocationTests));
-    if (repeated.length > 0) {
-      return [
-        null,
-        "rust: collaboration CI script runs --test targets more than once: " + repeated.join(", "),
-      ];
-    }
-    for (const name of invocationTests) tests.add(name);
+  const suites: [string, string][] = [];
+  for (const line of text
+    .split(/\r?\n/)
+    .filter(
+      (line, index, lines) => !line.startsWith("#") && !(index === lines.length - 1 && line === ""),
+    )) {
+    const [mode, name, extra] = line.split("\t");
+    if (
+      !name ||
+      extra !== undefined ||
+      !/^[A-Za-z0-9_]+$/.test(name) ||
+      (mode !== "parallel" && mode !== "serial")
+    )
+      return [null, "rust: invalid collaboration suite row"];
+    if (tests.has(name)) return [null, "rust: duplicate collaboration suite: " + name];
+    tests.add(name);
+    suites.push([mode, name]);
   }
-  if (tests.size === 0) return [null, "rust: collaboration CI script declares no --test targets"];
+  if (
+    suites.filter(([mode]) => mode === "parallel").length !== 9 ||
+    suites.filter(([mode]) => mode === "serial").length !== 1 ||
+    suites.at(-1)?.join("\t") !== "serial\ttask_collab_integration" ||
+    !tests.has("collab_product")
+  )
+    return [null, "rust: collaboration requires nine parallel suites and the serial task suite"];
   return [tests, null];
 }
 
 export function collaborationScriptInventory(root: string): Result<Set<string>> {
   const path = join(root, RUST_COLLAB_CI_SCRIPT);
   if (!isFile(path))
-    return [null, `rust: missing collaboration CI script ${RUST_COLLAB_CI_SCRIPT}`];
+    return [null, `rust: missing collaboration suite inventory ${RUST_COLLAB_CI_SCRIPT}`];
   const text = readUtf8(path);
   if (text === null) return [null, notUtf8(RUST_COLLAB_CI_SCRIPT)];
   return collaborationScriptInventoryFromText(text);
