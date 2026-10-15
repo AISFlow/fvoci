@@ -17,6 +17,19 @@ export function require(condition: unknown, code: string): asserts condition {
   if (!condition) throw new UiError(code);
 }
 
+const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function uuidHex(value: unknown): string {
+  require(typeof value === "string", "UI_ALLOCATION_ID_REFUSED");
+  // Any accepted UUID spelling that is not the canonical lowercase form is refused.
+  const bare = value
+    .replaceAll("urn:", "")
+    .replaceAll("uuid:", "")
+    .replace(/^\{+|\}+$/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(bare.replaceAll("-", ""))) throw new TypeError("not a UUID");
+  require(canonicalUuid.test(value), "UI_ALLOCATION_ID_REFUSED");
+  return value.replaceAll("-", "");
+}
+
 export function failureCode(error: unknown): string {
   const value = error instanceof UiError ? error.message : "";
   return /^(?:UI|TURSO_UI|RESTORE)_[A-Z_]+$/.test(value) ? value : "UI_CONSUMER_FAILED";
@@ -225,7 +238,6 @@ export async function inviteFinalActor(
     get(owner.value, "userId") ===
       get(issued.value, "userId"), "UI_FINAL_PREPARED_OWNER_LOGIN_FAILED");
   const userId = String(get(owner.value, "userId"));
-  const { uuidHex } = await import("./ui-audit.ts");
   uuidHex(userId);
   return { userId, email, password, cookie: owner.cookie };
 }

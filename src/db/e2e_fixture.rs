@@ -1991,6 +1991,22 @@ async fn observe_native_read(
                 let columns = column_names(&state[0])?;
                 observed["stateColumns"] = json!(columns);
                 observed["stateRow"] = json!((0..columns.len()).map(|index| state[0].cell(index).map(exact)).collect::<Result<Vec<_>, _>>()?);
+                // Same-connection full typed rows bind a readback append to the
+                // complete primary fingerprint, including native timestamps.
+                let mut append_rows = BTreeMap::new();
+                for (table, sql) in [
+                    ("document_collab_updates", "SELECT * FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                    ("document_collab_op_receipts", "SELECT * FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                ] {
+                    let native = f.query(sql, &args).await?;
+                    if native.len() > 10000 { return Err(refused()) }
+                    let values = native.iter().map(|row| {
+                        let columns = column_names(row)?;
+                        Ok(json!({"columns":columns,"sha256":row_hash(row)?,"cells":(0..columns.len()).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>,_>>()?}))
+                    }).collect::<Result<Vec<_>,sqlx::Error>>()?;
+                    append_rows.insert(table, values);
+                }
+                observed["appendRows"] = json!(append_rows);
             }
             rows.insert(id.to_string(), observed);
         }

@@ -5,19 +5,23 @@ import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 
-export const FINAL_SPEC = "selected-final-acceptance.ts";
-export const PRODUCT_TITLES = [
-  "selected final ON: personal capture, matching ACK and private native readback",
-  "selected final ON: private project, references, attachment and grant coedit",
-  "selected final ON: role change and removal refuse live writes without effects",
-  "selected final ON: reconnect unsent edits, personal undo and structured history",
-] as const;
-export const browsers = ["chromium", "firefox", "webkit"] as const;
-export const flows = ["on", "off"] as const;
-export type FinalBrowser = (typeof browsers)[number];
-export type FinalFlow = (typeof flows)[number];
-export const boundaryTitle = (browser: FinalBrowser, flow: FinalFlow) =>
-  `selected final ${browser} ${flow}: Ctrl Home End before keyup and focus repair`;
+import {
+  browsers,
+  flows,
+  assertFinalInventory,
+  selectedMetadata,
+} from "../../../tools/turso/ui-selected-native-policy.ts";
+export {
+  FINAL_SPEC,
+  PRODUCT_TITLES,
+  browsers,
+  flows,
+  boundaryTitle,
+  finalTitles,
+  assertFinalInventory,
+  type FinalBrowser,
+  type FinalFlow,
+} from "../../../tools/turso/ui-selected-native-policy.ts";
 
 const actor = z
   .object({
@@ -83,30 +87,21 @@ export function validateFinalBinding(value: unknown, env: Env): FinalBinding {
   return b;
 }
 
-export function finalTitles(binding: Pick<FinalBinding, "suite" | "browser" | "flow">): string[] {
-  return binding.suite === "products"
-    ? [...PRODUCT_TITLES]
-    : [boundaryTitle(binding.browser, binding.flow)];
-}
-
-export function assertFinalInventory(actual: string[], binding: FinalBinding): void {
-  if (JSON.stringify(actual) !== JSON.stringify(finalTitles(binding))) refuse();
-}
-
 export function assertFinalMetadata(
   metadata: unknown,
   sha256: string,
   binding: FinalBinding,
 ): void {
+  const expected = selectedMetadata(sha256, binding);
   const result = z
     .object({
-      actorBindingSha256: z.literal(sha256),
-      source: z.literal(binding.source),
-      tree: z.literal(binding.tree),
-      selectedBackend: z.literal(binding.backend),
-      selectedFlow: z.literal(binding.flow),
-      browser: z.literal(binding.browser),
-      suite: z.literal(binding.suite),
+      actorBindingSha256: z.literal(expected.actorBindingSha256),
+      source: z.literal(expected.source),
+      tree: z.literal(expected.tree),
+      selectedBackend: z.literal(expected.selectedBackend),
+      selectedFlow: z.literal(expected.selectedFlow),
+      browser: z.literal(expected.browser),
+      suite: z.literal(expected.suite),
       titles: z.array(z.string()),
     })
     .safeParse(metadata);

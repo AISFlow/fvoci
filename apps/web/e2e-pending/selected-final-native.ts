@@ -14,17 +14,16 @@ import { createHash } from "node:crypto";
 import type { Manifest, LocalLease } from "../../../tools/turso/ui-record";
 import type { Audit } from "../../../tools/turso/ui-audit";
 import { isDeepStrictEqual } from "node:util";
+import {
+  type SelectedSyncWrite,
+  type SelectedNativeReceipt,
+} from "../../../tools/turso/ui-selected-native-policy.ts";
+export {
+  assertSelectedSuccessfulWrites,
+  type SelectedSyncWrite,
+  type SelectedNativeReceipt,
+} from "../../../tools/turso/ui-selected-native-policy.ts";
 type RevisionDetail = components["schemas"]["RevisionDetailResponse"];
-
-export interface SelectedSyncWrite {
-  workspaceId: string;
-  documentId: string;
-  actorId: string;
-  sha256: string;
-  length: number;
-  empty: boolean;
-  applied: boolean;
-}
 
 /** Safe projection of real sync traffic. Installed lib0/Yjs/Hocuspocus codecs
  * own the protocol. Neither authentication frames nor credentials are retained. */
@@ -100,58 +99,6 @@ export function observeSelectedWrites(page: Page, actorId: string) {
       throw Error("SELECTED_FINAL_SYNC_UNCONFIRMED");
     return structuredClone(writes);
   };
-}
-
-export interface SelectedNativeReceipt {
-  seq: number;
-  op: string;
-  actor: string;
-  sha: string;
-  len: number;
-}
-
-/** The parent passes only new receipts for this exact target after proving
- * original rows retained. Every nonempty successful wire write is consumed
- * once; an additional denied/foreign/duplicate native operation fails closed. */
-export function assertSelectedSuccessfulWrites(
-  receipts: SelectedNativeReceipt[],
-  writes: SelectedSyncWrite[],
-  workspaceId: string,
-  documentId: string,
-): void {
-  const successful = writes.filter(
-    (w) => w.workspaceId === workspaceId && w.documentId === documentId,
-  );
-  if (
-    successful.some(
-      (w) =>
-        !w.applied ||
-        !UUID_RE.test(w.actorId) ||
-        !/^[a-f0-9]{64}$/.test(w.sha256) ||
-        !Number.isSafeInteger(w.length) ||
-        w.length < 1 ||
-        (w.empty &&
-          (w.length !== 2 ||
-            w.sha256 !==
-              createHash("sha256")
-                .update(new Uint8Array([0, 0]))
-                .digest("hex"))),
-    ) ||
-    new Set(receipts.map((r) => r.op)).size !== receipts.length ||
-    new Set(receipts.map((r) => r.seq)).size !== receipts.length
-  )
-    throw Error("SELECTED_FINAL_NATIVE_DELTA_REFUSED");
-  const remaining = successful.filter((w) => !w.empty);
-  for (const receipt of receipts) {
-    if (!Number.isSafeInteger(receipt.seq) || receipt.seq < 1 || !UUID_RE.test(receipt.op))
-      throw Error("SELECTED_FINAL_NATIVE_DELTA_REFUSED");
-    const index = remaining.findIndex(
-      (w) => w.actorId === receipt.actor && w.sha256 === receipt.sha && w.length === receipt.len,
-    );
-    if (index < 0) throw Error("SELECTED_FINAL_NATIVE_DELTA_REFUSED");
-    remaining.splice(index, 1);
-  }
-  if (remaining.length) throw Error("SELECTED_FINAL_NATIVE_DELTA_REFUSED");
 }
 
 /** PARENT ONLY. Browser actors never call this function or read its environment.
@@ -231,16 +178,8 @@ export async function auditSelectedFinalNative(
   targets: { workspaceId: string; documentId: string; receipts: SelectedNativeReceipt[] }[],
   writes: SelectedSyncWrite[],
 ) {
-  const { assertPreserved } = await import("../../../tools/turso/ui-audit");
-  assertPreserved(before, after, audit);
-  const keys = targets.map((t) => `${t.workspaceId}:document:${t.documentId}`);
-  if (
-    new Set(keys).size !== keys.length ||
-    writes.some((w) => !keys.includes(`${w.workspaceId}:document:${w.documentId}`))
-  )
-    throw Error("SELECTED_FINAL_NATIVE_DELTA_REFUSED");
-  for (const target of targets)
-    assertSelectedSuccessfulWrites(target.receipts, writes, target.workspaceId, target.documentId);
+  const { auditSelectedFinalNative: auditNative } = await import("../../../tools/turso/ui-audit");
+  auditNative(before, after, audit, targets, writes);
 }
 
 export function documentNodeIds(value: unknown): string[] {

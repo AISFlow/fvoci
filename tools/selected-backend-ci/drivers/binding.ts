@@ -22,11 +22,11 @@ import type {
 import { command, hex40, inputCheck, lines, readText, treeHashes } from "./common.ts";
 import { restartHelper, validateAllocation, type RestartBinding } from "./restart.ts";
 import {
-  assertFinalMetadata,
+  selectedMetadata,
   FINAL_SPEC,
   PRODUCT_TITLES,
-  type FinalBinding,
-} from "../../../apps/web/e2e-pending/selected-final-contract.ts";
+} from "../../turso/ui-selected-native-policy.ts";
+import type { FinalBinding } from "../../../apps/web/e2e-pending/selected-final-contract.ts";
 
 export const bindingModule = import.meta.path;
 // The feature list cargo emits for the engine stage: crates/collab-engine
@@ -173,7 +173,12 @@ export function validateProductReport(
     suites: OffSuite[];
   };
   assert.ok(jsonInteger(r.config, "workers") && r.config.workers === 1 && deepEquals(r.errors, []));
-  assertFinalMetadata(r.config.metadata, bindingSha256, binding);
+  const metadata = r.config.metadata;
+  assert.ok(typeof metadata === "object" && metadata !== null && !Array.isArray(metadata));
+  for (const [key, value] of Object.entries(selectedMetadata(bindingSha256, binding)))
+    assert.ok(
+      Object.hasOwn(metadata, key) && deepEquals((metadata as Record<string, unknown>)[key], value),
+    );
   assert.ok(r.stats.expected === 4);
   assert.ok(["unexpected", "flaky", "skipped"].every((key) => r.stats[key] === 0));
   const titles: string[] = [];
@@ -357,7 +362,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(deepEquals(before, after) && before.head === m.source && before.tree === m.tree);
   assert.ok(Object.keys(before.tracked).length && Object.keys(before.external).length);
   assert.ok(
-    before.tracked[wikiSpec] === "a5b6d579593fed10131f57d6f44234eb5fb07b95bda31a868848b623bc854fcf",
+    before.tracked[wikiSpec] === "a71670b987fe0240282da7cac3ea6fefaa4649a69d669f24610b34e222492e4d",
   );
   const flow: unknown = m.flow ?? "on";
   assert.ok(flow === "on" || flow === "off");

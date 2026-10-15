@@ -7,7 +7,7 @@
 import { deepEquals } from "bun";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -80,6 +80,21 @@ import {
   type Row,
 } from "./common.ts";
 import { AUTH_SPEC, authEventRows } from "../../turso/ui-auth-session.ts";
+import * as auditModule from "../../turso/ui-audit.ts";
+import {
+  get,
+  list,
+  record,
+  requestPublic,
+  inviteFinalActor,
+  token,
+} from "../../turso/ui-common.ts";
+import {
+  assertSelectedSuccessfulWrites,
+  type SelectedNativeReceipt,
+  type SelectedSyncWrite,
+} from "../../turso/ui-selected-native-policy.ts";
+
 import {
   authBrowserEnvironment,
   authConfig,
@@ -101,6 +116,140 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
+
+/** Bind only the two existing fresh-open/reload writes to complete native rows.
+ * Original bytes and every original receipt/update remain independently exact. */
+export async function sqliteReadbackAppendWitness(input: {
+  original: unknown;
+  current: unknown;
+  before: unknown;
+  prepared: unknown;
+  workspaceId: string;
+  documentId: string;
+  actorId: string;
+  writes: unknown;
+  clocks: [string, string];
+}) {
+  const { integer, uuidHex } = auditModule;
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const original = input.original,
+    current = input.current;
+  for (const key of ["state", "cutoff", "content", "text", "version", "revisions"])
+    assert.ok(
+      deepEquals(get(original, key), get(current, key), true),
+      "original wiki bytes changed",
+    );
+  const oldTail = get(original, "tail");
+  assert.ok(Number.isSafeInteger(oldTail) && Number(oldTail) >= 0);
+  assert.ok(get(current, "tail") === Number(oldTail) + 2);
+  const added: Record<string, unknown[]> = {};
+  for (const key of ["updates", "receipts"]) {
+    const old = list(original, key),
+      now = list(current, key);
+    assert.ok(now.length === old.length + 2 && deepEquals(now.slice(0, old.length), old, true));
+    const delta = now.slice(old.length);
+    added[key] = delta;
+    assert.ok(delta.every((row, i) => get(row, "seq") === Number(oldTail) + i + 1));
+  }
+  const receipts = added.receipts as SelectedNativeReceipt[];
+  assert.ok(Array.isArray(input.writes) && input.writes.length <= 10000);
+  const writes = input.writes as SelectedSyncWrite[];
+  assert.ok(
+    writes.every(
+      (w) =>
+        w.workspaceId === input.workspaceId &&
+        w.documentId === input.documentId &&
+        w.actorId === input.actorId,
+    ),
+  );
+  assertSelectedSuccessfulWrites(receipts, writes, input.workspaceId, input.documentId);
+  assert.ok(receipts.every((r) => r.actor === input.actorId));
+  for (let i = 0; i < 2; i++) {
+    const update = added.updates?.[i],
+      receipt = receipts[i];
+    const hex = get(update, "hex");
+    assert.ok(typeof hex === "string" && /^(?:[a-f0-9]{2})+$/.test(hex) && receipt !== undefined);
+    assert.ok(
+      get(update, "op") === receipt.op &&
+        get(update, "seq") === receipt.seq &&
+        Buffer.from(hex, "hex").length === receipt.len &&
+        createHash("sha256").update(Buffer.from(hex, "hex")).digest("hex") === receipt.sha,
+    );
+  }
+  const rows: Record<string, Record<string, number>> = {};
+  for (const [table, columns, key] of [
+    [
+      "document_collab_updates",
+      ["workspace_id", "document_id", "seq", "op_id", "payload", "created_at"],
+      "updates",
+    ],
+    [
+      "document_collab_op_receipts",
+      [
+        "workspace_id",
+        "document_id",
+        "op_id",
+        "seq",
+        "payload_len",
+        "payload_sha256",
+        "actor_user_id",
+        "created_at",
+      ],
+      "receipts",
+    ],
+  ] as const) {
+    const old = list(original, "appendRows", table),
+      now = list(current, "appendRows", table);
+    assert.ok(now.length === old.length + 2 && deepEquals(now.slice(0, old.length), old, true));
+    rows[table] = {};
+    for (const [index, row] of now.entries()) {
+      const cells = list(row, "cells"),
+        sha = get(row, "sha256");
+      assert.ok(
+        deepEquals(get(row, "columns"), columns, true) &&
+          cells.length === columns.length &&
+          sha === hash(cells),
+      );
+      assert.ok(
+        deepEquals(cells[0], ["blob", uuidHex(input.workspaceId)], true) &&
+          deepEquals(cells[1], ["blob", uuidHex(input.documentId)], true),
+      );
+      assert.ok(get(input.prepared, "fingerprints", table, sha) === 1);
+      if (index < old.length) {
+        assert.ok(get(input.before, "fingerprints", table, sha) === 1);
+        continue;
+      }
+      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), sha));
+      const delta = index - old.length,
+        receipt = receipts[delta];
+      assert.ok(receipt !== undefined);
+      const expected =
+        key === "updates"
+          ? [
+              ["integer", String(receipt.seq)],
+              ["blob", uuidHex(receipt.op)],
+              ["blob", get(added.updates?.[delta], "hex")],
+            ]
+          : [
+              ["blob", uuidHex(receipt.op)],
+              ["integer", String(receipt.seq)],
+              ["integer", String(receipt.len)],
+              ["blob", receipt.sha],
+              ["blob", uuidHex(input.actorId)],
+            ];
+      assert.ok(deepEquals(cells.slice(2, -1), expected, true));
+      const time = integer(cells.at(-1));
+      assert.ok(
+        time >= integer(["integer", input.clocks[0]]) &&
+          time <= integer(["integer", input.clocks[1]]),
+      );
+      assert.ok(!Object.hasOwn(rows[table], sha));
+      rows[table][sha] = 1;
+    }
+    assert.ok(Object.keys(rows[table]).length === 2);
+  }
+  return Promise.resolve({ count: 2 as const, rows });
+}
 
 /** Read only the separate, completed observer packet, never its mixed log. */
 export function readSelectedSqlitePacket(path: string): Record<string, unknown> {
@@ -1112,11 +1261,6 @@ export async function productCallbacks(
   state: State,
   seam: Seam,
 ): Promise<NonNullable<RestartContext["sqliteProducts"]>> {
-  const auditModule = await import("../../turso/ui-audit.ts");
-  const { requestPublic, inviteFinalActor, get, list, record, token } =
-    await import("../../turso/ui-common.ts");
-  const { auditSelectedFinalNative } =
-    await import("../../../apps/web/e2e-pending/selected-final-native.ts");
   assert.ok(
     state.flow === "on" &&
       state.current.manifest.purpose === undefined &&
@@ -1272,16 +1416,16 @@ export async function productCallbacks(
   let current: import("../../turso/ui-audit.ts").SerialObservation | undefined;
   let restartedOrigin: import("../../turso/ui-audit.ts").SelectedRoomOrigin | undefined;
   let originalSeed: Record<string, unknown> | undefined;
+  let preparedSeed: unknown;
   let storageOriginal: Record<string, string> | undefined;
   const targets: {
     workspaceId: string;
     documentId: string;
-    receipts: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedNativeReceipt[];
+    receipts: SelectedNativeReceipt[];
   }[] = [];
-  const writes: import("../../../apps/web/e2e-pending/selected-final-native.ts").SelectedSyncWrite[] =
-    [];
+  const writes: SelectedSyncWrite[] = [];
   let productPassed = false;
-  return {
+  return Promise.resolve({
     async afterSeedStopped(rows, seed) {
       const retired = await auditModule.selectedRoomRetirement(manifest, oldOrigin, target, rows);
       original = await serial("original", true);
@@ -1438,21 +1582,18 @@ export async function productCallbacks(
       );
       const seedRow = get(seedNative, "rows", seedId),
         oldSeed = get(originalSeed, "rows", seedId);
-      for (const key of [
-        "state",
-        "cutoff",
-        "tail",
-        "content",
-        "text",
-        "version",
-        "updates",
-        "receipts",
-        "revisions",
-      ])
-        assert.ok(
-          deepEquals(get(oldSeed, key), get(seedRow, key), true),
-          "original wiki native bytes/receipts changed",
-        );
+      audit.sqlitePreparation.readback = await sqliteReadbackAppendWitness({
+        original: oldSeed,
+        current: seedRow,
+        before: original.dataset,
+        prepared: current.dataset,
+        workspaceId: seedWorkspace,
+        documentId: seedId,
+        actorId: String(get(server.seed, "freshActorId")),
+        writes: get(server.readback, "readbackWrites"),
+        clocks: [String(original.checks.clockMicros), String(current.checks.clockMicros)],
+      });
+      preparedSeed = seedRow;
       assert.ok(
         deepEquals(get(seedRow, "stateColumns"), [
           "workspace_id",
@@ -1671,11 +1812,8 @@ export async function productCallbacks(
         "after-seed",
       );
       const finalRow = get(finalSeed, "rows", Object.keys(record(finalSeed, "rows"))[0] as string);
-      const oldRow = get(
-        originalSeed,
-        "rows",
-        Object.keys(record(originalSeed, "rows"))[0] as string,
-      );
+      assert.ok(preparedSeed !== undefined);
+      const oldRow = preparedSeed;
       for (const key of [
         "state",
         "cutoff",
@@ -1686,13 +1824,14 @@ export async function productCallbacks(
         "updates",
         "receipts",
         "revisions",
+        "appendRows",
       ])
         assert.ok(
           deepEquals(get(oldRow, key), get(finalRow, key), true),
           "original wiki native bytes/receipts changed after retirement",
         );
       audit.sqlitePreparation.state.after = list(finalRow, "stateRow");
-      await auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
+      auditModule.auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
       const storageAfter = seam.treeHashes(state.storage);
       for (const [path, hash] of Object.entries(storageOriginal))
         assert.ok(storageAfter[path] === hash, "original storage bytes changed");
@@ -1705,7 +1844,7 @@ export async function productCallbacks(
         audit_sha256: sha(join(directory, "audit.private.json")),
       };
     },
-  };
+  });
 }
 
 export const sqliteSeam: Seam = {
