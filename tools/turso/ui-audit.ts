@@ -144,7 +144,7 @@ export interface Audit {
     prepared: SerialObservation;
     maintenance?: { server: Record_; leaseMicros: string };
     /** Parent-derived wire/ACK/native full-row witness, never a browser grant. */
-    readback?: { count: 2; rows: Record<string, Record<string, number>> };
+    readback?: { count: number; rows: Record<string, Record<string, number>> };
     state: { original: unknown[]; current: unknown[]; after: unknown[] };
   };
   actors: Record<string, string>;

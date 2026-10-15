@@ -204,12 +204,12 @@ export async function sqliteReadbackAppendWitness(input: {
         deepEquals(cells[0], ["blob", uuidHex(input.workspaceId)], true) &&
           deepEquals(cells[1], ["blob", uuidHex(input.documentId)], true),
       );
-      assert.ok(get(input.prepared, "fingerprints", table, String(sha)) === 1);
+      assert.ok(get(input.prepared, "fingerprints", table, sha) === 1);
       if (index < old.length) {
-        assert.ok(get(input.before, "fingerprints", table, String(sha)) === 1);
+        assert.ok(get(input.before, "fingerprints", table, sha) === 1);
         continue;
       }
-      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), String(sha)));
+      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), sha));
       const delta = index - old.length,
         receipt = receipts[delta];
       assert.ok(receipt !== undefined);
@@ -233,8 +233,8 @@ export async function sqliteReadbackAppendWitness(input: {
         time >= integer(["integer", input.clocks[0]]) &&
           time <= integer(["integer", input.clocks[1]]),
       );
-      assert.ok(!Object.hasOwn(rows[table], String(sha)));
-      rows[table][String(sha)] = 1;
+      assert.ok(!Object.hasOwn(rows[table], sha));
+      rows[table][sha] = 1;
     }
     assert.ok(Object.keys(rows[table]).length === 2);
   }

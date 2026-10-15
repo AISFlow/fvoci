@@ -257,7 +257,7 @@ test("SQLite readback admits only two wire/ACK-matched full typed native appends
   for (const change of changes) {
     const wrong = readbackAppendFixture();
     change(wrong);
-    await expect(sqliteReadbackAppendWitness(wrong)).rejects.toThrow();
+    expect(await rejection(sqliteReadbackAppendWitness(wrong))).toBeInstanceOf(Error);
   }
 });
 
