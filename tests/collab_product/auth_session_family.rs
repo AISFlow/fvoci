@@ -217,6 +217,9 @@ async fn reader_sync_fence(
                     };
                     assert_eq!(routing_key, routing, "reader fence changed document");
                     match message {
+                        DocumentMessage::Close { .. } => {
+                            panic!("healthy reader document closed before its fence")
+                        }
                         DocumentMessage::Sync(SyncMessage {
                             step: SyncStep::Update,
                             ..
