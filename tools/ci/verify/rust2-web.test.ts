@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { contextFromTexts } from "./load.ts";
-import type { Mapping } from "./py.ts";
+import { isMapping, type Mapping } from "./py.ts";
 import {
   WEB_COLLAB_LANES,
   verifyWebBrowserBudget,
@@ -160,7 +160,9 @@ test("SQLite diagnostics publish only the exact hash file after original mandato
     }
     const bad = clone(jobs),
       list = steps(bad, name);
-    list.splice(list.findIndex(byId("sqlite")), 0, list.pop()!);
+    const last = list.pop();
+    if (last === undefined) throw new Error("diagnostic upload step missing");
+    list.splice(list.findIndex(byId("sqlite")), 0, last);
     expect(verifyWebHostInputsJobs(bad).join("\n")).toContain("safe hash diagnostic");
     const changed = clone(jobs);
     const record = stepWith(changed, name, byId("sqlite_diagnostics"));
@@ -175,11 +177,13 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
   const match =
     /^bun --no-env-file - <<'SQLITE_INPUT_HASHES'\n([\s\S]+)SQLITE_INPUT_HASHES\n$/.exec(run);
   expect(match).not.toBeNull();
-  const code = match![1]!;
+  const [, code] = match ?? [];
+  if (code === undefined) throw new Error("workflow diagnostic code missing");
   const canary = "PRIVATE_INPUT_CANARY";
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
   const packages =
-    Array.from({ length: 600 }, (_, n) => `canary-package-${n}\t1.0-${canary}`).join("\n") + "\n";
+    Array.from({ length: 600 }, (_, n) => `canary-package-${String(n)}\t1.0-${canary}`).join("\n") +
+    "\n";
   const input = {
     inputs: { private: canary },
     exports: { private: canary },
@@ -225,17 +229,29 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
     };
     const good = invoke("good", JSON.stringify(input));
     expect(good.text).not.toContain(canary);
-    const diagnostic = JSON.parse(good.text);
+    const parseDiagnostic = (text: string): Mapping => {
+      const value: unknown = JSON.parse(text);
+      if (!isMapping(value)) throw new Error("diagnostic must be an object");
+      return value;
+    };
+    const diagnostic = parseDiagnostic(good.text);
+    const fields = diagnostic.fields;
+    const entries = diagnostic.package_entries;
+    if (!isMapping(fields) || !Array.isArray(entries))
+      throw new Error("diagnostic fields or package entries missing");
     expect(diagnostic.status).toBe("available");
     expect(diagnostic.identity_sha256).toBe(input.cache_identity);
-    expect(diagnostic.fields.os_release).toBe(hash(JSON.stringify(canary)));
+    expect(fields.os_release).toBe(hash(JSON.stringify(canary)));
     expect(diagnostic.packages_sha256).toBe(hash(packages));
     expect(diagnostic.package_count).toBe(600);
     expect(diagnostic.package_entries).toHaveLength(512);
     expect(diagnostic.packages_truncated).toBe(true);
     expect(
-      diagnostic.package_entries.every(
-        (row: string[]) => row.length === 2 && row.every((value) => /^[0-9a-f]{64}$/.test(value)),
+      entries.every(
+        (row: unknown) =>
+          Array.isArray(row) &&
+          row.length === 2 &&
+          row.every((value: unknown) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value)),
       ),
     ).toBe(true);
     expect(good.output).toBe("written=true\n");
@@ -246,7 +262,7 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
       "changed",
       JSON.stringify({ ...input, packages: packages + "last-package\t9.0\n" }),
     );
-    expect(JSON.parse(changed.text).packages_sha256).not.toBe(diagnostic.packages_sha256);
+    expect(parseDiagnostic(changed.text).packages_sha256).not.toBe(diagnostic.packages_sha256);
     for (const [index, contents] of [
       null,
       canary,
@@ -256,8 +272,8 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
       JSON.stringify({ ...input, packages: canary }),
       " ".repeat(4 * 1024 * 1024 + 1),
     ].entries()) {
-      const unavailable = invoke(`missing-${index}`, contents);
-      expect(JSON.parse(unavailable.text)).toEqual({ schema: 1, status: "unavailable" });
+      const unavailable = invoke(`missing-${String(index)}`, contents);
+      expect(parseDiagnostic(unavailable.text)).toEqual({ schema: 1, status: "unavailable" });
       expect(unavailable.output).toBe("written=true\n");
     }
     const occupied = invoke("occupied", JSON.stringify(input), true);
