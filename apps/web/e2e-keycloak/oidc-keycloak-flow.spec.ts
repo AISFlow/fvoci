@@ -8,6 +8,7 @@
 // No value of a password, client secret, code, state, nonce, token or cookie
 // is printed, recorded, or passed to an assertion that would print it.
 import { observeDatabase, type LinkRow } from "./observer";
+import { expectedUsers, realmSummary, USERS } from "../../../tools/keycloak/realm";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -31,25 +32,98 @@ const configPath = process.env.FVOCI_KC_E2E_CONFIG ?? "";
 const mode = process.env.FVOCI_KC_E2E_MODE ?? "";
 const outDir = process.env.FVOCI_KC_E2E_OUT ?? "";
 const kc = loadKcConfig(configPath);
+const prepared = kc?.prepared;
+if (prepared && (prepared.binding.group !== mode || prepared.binding.issuer !== kc.issuer))
+  throw new Error("Keycloak prepared instance group or issuer differs");
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:1";
 const fvociOrigin = new URL(baseURL).origin;
 const CALLBACK_PATH = "/api/v1/auth/oidc/generic/callback";
 const redirectUri = `${fvociOrigin}${CALLBACK_PATH}`;
 
-const WORKSPACE = { slug: "kc-e2e", name: "Keycloak E2E 워크스페이스" };
+const WORKSPACE = prepared?.actors.workspace ?? {
+  slug: "kc-e2e",
+  name: "Keycloak E2E 워크스페이스",
+};
 const OWNER = {
-  email: "kc-owner@example.com",
+  email: prepared?.actors.owner.email ?? "kc-owner@example.com",
   password: kc?.fvoci.ownerPassword ?? "",
   familyName: "김",
   givenName: "소유자",
 };
 const PAT = {
-  email: "kc-pat@example.com",
+  email: prepared?.actors.member.email ?? "kc-pat@example.com",
   password: kc?.fvoci.memberPassword ?? "",
   familyName: "박",
   givenName: "비번",
 };
+const mismatchEmail = prepared?.actors.mismatchEmail ?? "kc-dave@example.com";
+const crossOriginEmail = prepared?.actors.crossOriginEmail ?? "kc-xorigin@example.com";
+const expectedAddedEmails: string[] = [];
+const expectedAddedLinks: LinkRow[] = [];
+const baselineLinks = prepared?.baseline.links ?? [];
+const expectedCount = (fresh: number) =>
+  prepared ? prepared.baseline.users.length + fresh - 1 : fresh;
+const sortedLinks = (rows: LinkRow[]) =>
+  [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+function expectBaselineLinks(): void {
+  if (prepared)
+    expect(
+      JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(baselineLinks)),
+      "the whole original global link set is unchanged",
+    ).toBe(true);
+  else expect(links()).toEqual([]);
+}
+async function rememberLink(email: string, key: keyof KcConfig["users"]): Promise<void> {
+  if (!prepared) return;
+  expectedAddedLinks.push({
+    user: email,
+    provider: "generic",
+    subject: await kcUserId(key),
+    issuer: config().issuer,
+    email: config().users[key].email,
+  });
+}
+
+/** Preserve the imported oracle and all earlier groups before adding this group's six identities. */
+async function registerPreparedUsers(): Promise<void> {
+  if (!prepared) return;
+  const verifyUsers = async (extra: Array<[string, string, boolean, string[]]>) => {
+    const rep = await kcAdmin("");
+    const users = await kcAdmin("/users?max=100");
+    expect(rep.status).toBe(200);
+    expect(users.status).toBe(200);
+    const problems: string[] = [];
+    realmSummary(
+      await rep.json(),
+      await users.json(),
+      config().realm,
+      [...expectedUsers(), ...prepared.idpBefore, ...extra],
+      problems,
+    );
+    expect(problems).toEqual([]);
+  };
+  await verifyUsers([]);
+  const added: Array<[string, string, boolean, string[]]> = [];
+  for (const [key, user] of Object.entries(config().users)) {
+    const oracle = USERS[key];
+    if (!oracle) throw new Error("Keycloak fixture user oracle missing");
+    const response = await kcAdmin("/users", {
+      method: "POST",
+      body: JSON.stringify({
+        username: user.username,
+        email: user.email,
+        enabled: true,
+        emailVerified: oracle[1],
+        requiredActions: [...oracle[2]],
+        credentials: [{ type: "password", value: user.password, temporary: false }],
+      }),
+    });
+    expect(response.status).toBe(201);
+    added.push([user.username, user.email, oracle[1], [...oracle[2]]]);
+  }
+  await verifyUsers(added);
+}
 
 const MSG = {
   notLinked: "연결된 소셜 계정이 없습니다. 이메일로 로그인해 주세요.",
@@ -184,6 +258,8 @@ async function registerRedirectUri(): Promise<void> {
 }
 
 async function kcUserId(username: string): Promise<string> {
+  if (Object.hasOwn(config().users, username))
+    username = config().users[username as keyof KcConfig["users"]].username;
   const response = await kcAdmin(`/users?exact=true&username=${encodeURIComponent(username)}`);
   const users = (await response.json()) as Array<{ id: string }>;
   expect(users).toHaveLength(1);
@@ -232,8 +308,16 @@ function links(): LinkRow[] {
 function linksOf(email: string): LinkRow[] {
   return links().filter((l) => l.user === email);
 }
-function membershipRole(email: string): string | null {
-  return observeDatabase({ operation: "membership", email, slug: WORKSPACE.slug });
+async function membershipRole(email: string, page: Page): Promise<string | null> {
+  if (!prepared) return observeDatabase({ operation: "membership", email, slug: WORKSPACE.slug });
+  expect((await me(page))?.email).toBe(email);
+  const response = await page.request.get("/api/v1/me/workspaces");
+  expect(response.status()).toBe(200);
+  const body = (await response.json()) as { items: Array<{ id: string; role: string }> };
+  const rows = body.items.filter((row) => row.id === prepared.actors.workspace.id);
+  expect(rows).toHaveLength(1);
+  // The admitted parent also verifies the exact native workspace/user tuple after normal closure.
+  return rows[0]?.role ?? null;
 }
 function liveSessions(email: string): number {
   return observeDatabase({ operation: "sessions", email });
@@ -615,9 +699,14 @@ async function prepareInstance(browser: Browser): Promise<void> {
     keycloakOrigin: c.keycloakOrigin,
   });
   await registerRedirectUri();
+  await registerPreparedUsers();
 
   const { context, page } = await newPage(browser);
-  await setupOwner(page);
+  if (prepared) {
+    await login(page, OWNER.email, OWNER.password);
+    expect((await me(page))?.userId).toBe(prepared.actors.owner.id);
+    expect(await workspaceSlugs(page)).toEqual([WORKSPACE.slug]);
+  } else await setupOwner(page);
   const providersResponse = await page.request.get("/api/v1/auth/providers");
   expect(providersResponse.status()).toBe(200);
   const providersText = await providersResponse.text();
@@ -683,9 +772,27 @@ async function servedAssetsWithout(page: Page, secret: string): Promise<Record<s
 
 test.describe.configure({ mode: "serial" });
 test.skip(!kc, "opt-in: set by tools/keycloak/run.ts (real Keycloak)");
+test.afterEach(() => {
+  if (!prepared) return;
+  expect(userCount()).toBe(prepared.baseline.users.length + expectedAddedEmails.length);
+  expect(
+    JSON.stringify(sortedLinks(links())) ===
+      JSON.stringify(sortedLinks([...baselineLinks, ...expectedAddedLinks])),
+    "the whole global link set equals the original plus the exact allocated delta",
+  ).toBe(true);
+});
 
 test.afterAll(() => {
   if (!outDir || !kc) return;
+  if (prepared)
+    writeFileSync(
+      `${outDir}/prepared-${mode}.private.json`,
+      JSON.stringify({
+        emails: expectedAddedEmails,
+        links: expectedAddedLinks,
+      }),
+      { mode: 0o600, flag: "wx" },
+    );
   writeFileSync(
     `${outDir}/observations-${mode}.json`,
     `${JSON.stringify(observations, null, 2)}\n`,
@@ -776,7 +883,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(await me(page)).toBeNull();
     expect(stateCookie(await context.cookies(fvociOrigin))).toBeUndefined();
     expect(userCount()).toBe(usersBefore);
-    expect(links()).toEqual([]);
+    expectBaselineLinks();
     expect(csp).toEqual([]);
     observe("A_unlinked", { callback: "/login?error=oidc_not_linked", accountCreated: false });
     await context.close();
@@ -802,7 +909,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(items.map((i) => [i.provider, i.email])).toEqual([
       ["generic", config().users.alice.email],
     ]);
-    const [link] = links();
+    const [link] = prepared ? linksOf(OWNER.email) : links();
     // The id_token `iss` the server verified is stored with the link.
     expect(link).toEqual({
       user: OWNER.email,
@@ -811,7 +918,8 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
       issuer: config().issuer,
       email: config().users.alice.email,
     });
-    expect(userCount()).toBe(1);
+    await rememberLink(OWNER.email, "alice");
+    expect(userCount()).toBe(expectedCount(1));
     expect(csp).toEqual([]);
     if (!link) throw new Error("expected Keycloak identity link missing");
     observe("B_link", {
@@ -852,7 +960,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(first.me.userId).toBe(ownerId);
     expect(first.me.email).toBe(OWNER.email);
     expect(await workspaceSlugs(page)).toEqual([WORKSPACE.slug]);
-    expect(userCount()).toBe(1);
+    expect(userCount()).toBe(expectedCount(1));
 
     // D: sign out again; this browser's Keycloak session stays (no single
     // logout): the next provider sign-in skips Keycloak's form.
@@ -865,7 +973,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     const again = await providerSignIn(page, null);
     expect(again.via).toBe("sso");
     expect(again.me.userId).toBe(ownerId);
-    expect(userCount()).toBe(1);
+    expect(userCount()).toBe(expectedCount(1));
     // Nor the other way round: ending alice's Keycloak sessions does not end
     // the FVOCI session (no back-channel logout).
     const kcLogout = await kcAdmin(`/users/${await kcUserId("alice")}/logout`, { method: "POST" });
@@ -920,7 +1028,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     });
     await expect(page.getByText(MSG.alreadyLinked)).toBeVisible();
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
-    expect(userCount()).toBe(1);
+    expect(userCount()).toBe(expectedCount(1));
     observe("B_second_identity", {
       callback: "/settings/account?error=oidc_already_linked",
       ownerLinks: 1,
@@ -947,8 +1055,10 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
     expect(member?.email).toBe(carol.email);
     expect(member?.hasPassword).toBe(false);
     expect(await workspaceSlugs(page)).toEqual([WORKSPACE.slug]);
-    expect(membershipRole(carol.email)).toBe("member");
+    expect(await membershipRole(carol.email, page)).toBe("member");
     expect(userCount()).toBe(usersBefore + 1);
+    if (prepared) expectedAddedEmails.push(carol.email);
+    await rememberLink(carol.email, "carol");
     expect(linksOf(carol.email)).toEqual([
       {
         user: carol.email,
@@ -980,8 +1090,12 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
 
   // ACC-1 (pending decision): the current behaviour is recorded, not changed.
   for (const probe of [
-    { key: "C_invite_email_mismatch", invited: "kc-dave@example.com", user: "mallory" as const },
-    { key: "C_invite_email_unverified", invited: "kc-erin@example.com", user: "erin" as const },
+    { key: "C_invite_email_mismatch", invited: mismatchEmail, user: "mallory" as const },
+    {
+      key: "C_invite_email_unverified",
+      invited: kc?.users.erin.email ?? "kc-erin@example.com",
+      user: "erin" as const,
+    },
   ]) {
     test(`C (ACC-1 record): ${probe.key}`, async ({ browser }) => {
       const owner = await newPage(browser);
@@ -1008,7 +1122,7 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
         accountEmail: current?.email ?? null,
         accountsCreated: userCount() - usersBefore,
         links: linksOf(probe.invited).map((l) => ({ email: l.email, issuer: l.issuer })),
-        role: current ? membershipRole(probe.invited) : null,
+        role: current ? await membershipRole(probe.invited, page) : null,
       };
       observe(probe.key, observed);
       // Current behaviour: the invitation token decides; the account takes the
@@ -1025,6 +1139,8 @@ test.describe("sign-in, account linking, invitations, sign-out", () => {
         links: [{ email: idpUser.email, issuer: config().issuer }],
         role: "member",
       });
+      if (prepared) expectedAddedEmails.push(probe.invited);
+      await rememberLink(probe.invited, probe.user);
       await context.close();
     });
   }
@@ -1045,6 +1161,7 @@ test.describe("failure boundaries", () => {
     await linkButton(page).click();
     expect(await leg.pass(config().users.alice)).toBe("form");
     expect((await callbackResult(await leg.callback)).location).toBe("/settings/account?linked=1");
+    await rememberLink(OWNER.email, "alice");
     const token = await inviteViaUi(page, PAT.email);
     await context.close();
 
@@ -1057,7 +1174,8 @@ test.describe("failure boundaries", () => {
     await pat.page.getByRole("button", { name: "수락" }).click();
     await expect(pat.page).toHaveURL(/\/$/);
     await pat.context.close();
-    expect(userCount()).toBe(2);
+    if (prepared) expectedAddedEmails.push(PAT.email);
+    expect(userCount()).toBe(expectedCount(2));
   });
 
   test("tampered state creates no session; a restart signs in", async ({ browser }) => {
@@ -1068,6 +1186,7 @@ test.describe("failure boundaries", () => {
     await clickProvider(page);
     expect(await leg.pass(config().users.alice)).toBe("form");
     const held = new URL(await hold.url);
+    const originalStateCookie = stateCookie(await context.cookies(fvociOrigin));
     await hold.release();
     const statesBefore = stateCount();
     const tampered = new URL(held);
@@ -1080,6 +1199,14 @@ test.describe("failure boundaries", () => {
     expect(liveSessions(OWNER.email)).toBe(sessionsBefore);
     // The real state was not consumed by the tampered request.
     expect(stateCount()).toBe(statesBefore);
+
+    if (prepared) {
+      if (!originalStateCookie) throw new Error("Keycloak original state cookie missing");
+      await context.addCookies([originalStateCookie]);
+      expect(await visitCallback(page, held.toString())).toEqual({ status: 302, location: "/" });
+      expect((await me(page))?.userId).toBe(ownerId);
+      await logout(page);
+    }
 
     const restarted = await providerSignIn(page, null);
     expect(restarted.me.userId).toBe(ownerId);
@@ -1163,7 +1290,7 @@ test.describe("failure boundaries", () => {
     expect(await patLeg.pass(config().users.bob)).toBe("form");
     const patHeld = await patHold.url;
     await patHold.release();
-    await pat.context.close();
+    if (!prepared) await pat.context.close();
 
     const owner = await newPage(browser);
     await login(owner.page, OWNER.email, OWNER.password);
@@ -1172,6 +1299,18 @@ test.describe("failure boundaries", () => {
     expect(linksOf(OWNER.email).map((l) => l.email)).toEqual([config().users.alice.email]);
     expect(linksOf(PAT.email)).toEqual([]);
     await owner.context.close();
+    if (prepared) {
+      expect(await visitCallback(pat.page, patHeld)).toEqual({
+        status: 302,
+        location: "/settings/account?linked=1",
+      });
+      const unlink = await pat.page.request.post("/api/v1/auth/oidc/generic/unlink", {
+        headers: { Origin: fvociOrigin },
+      });
+      expect(unlink.status()).toBe(200);
+      expect(linksOf(PAT.email)).toEqual([]);
+      await pat.context.close();
+    }
     observe("F_other_browser_context", {
       signInCallbackInOtherContext: other.location,
       originalContextCompletes: own.location,
@@ -1228,6 +1367,7 @@ test.describe("failure boundaries", () => {
     await page.locator("#kc-accept").click();
     const linked = await callbackResult(await retry.callback);
     expect(linked).toEqual({ status: 302, location: "/settings/account?linked=1" });
+    await rememberLink(PAT.email, "tina");
     await expect(page.getByText(MSG.linked)).toBeVisible();
     expect(linksOf(PAT.email).map((l) => [l.email, l.issuer])).toEqual([
       [tina.email, config().issuer],
@@ -1249,7 +1389,7 @@ test.describe("failure boundaries", () => {
   test("cross-origin link and invite starts are refused", async ({ browser }) => {
     const { context, page } = await newPage(browser);
     await login(page, OWNER.email, OWNER.password);
-    const token = await inviteViaUi(page, "kc-xorigin@example.com");
+    const token = await inviteViaUi(page, crossOriginEmail);
     const statesBefore = stateCount();
     const linksBefore = links();
 
@@ -1337,8 +1477,13 @@ window.post = async (url, body) => {
       }
       expect(stateCookie(await context.cookies(fvociOrigin))).toBeUndefined();
       expect(stateCount()).toBe(statesBefore);
-      expect(links()).toEqual(linksBefore);
-      expect(invitationAccepted("kc-xorigin@example.com")).toBe(false);
+      if (prepared)
+        expect(
+          JSON.stringify(sortedLinks(links())) === JSON.stringify(sortedLinks(linksBefore)),
+          "cross-origin refusal preserves all global links",
+        ).toBe(true);
+      else expect(links()).toEqual(linksBefore);
+      expect(invitationAccepted(crossOriginEmail)).toBe(false);
       // The owner's session was attached (same site, other origin) and is intact.
       expect((await me(page))?.userId).toBe(ownerId);
       observe("F_cross_origin", { otherOrigin, sameSite: true, ...refused, statesIssued: 0 });
@@ -1376,8 +1521,8 @@ test.describe("wrong client secret on the server", () => {
     expect(result).toEqual({ status: 302, location: "/login?error=oidc_provider_error" });
     await expect(page.getByText(MSG.providerError)).toBeVisible();
     expect(await me(page)).toBeNull();
-    expect(userCount()).toBe(1);
-    expect(links()).toEqual([]);
+    expect(userCount()).toBe(expectedCount(1));
+    expectBaselineLinks();
 
     const log = readFileSync(process.env.SERVER_LOG ?? "", "utf8");
     const failures = serverLogLines(process.env.SERVER_LOG ?? "")
