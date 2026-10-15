@@ -9,14 +9,13 @@ RUN rustup set profile minimal \
  && chmod -R go-w /usr/local/rustup /usr/local/cargo
 
 # Ubuntu's index includes native linux/amd64 and linux/arm64 images.
-FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS system-tools
+FROM ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 AS apt-source
 
 ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV LIBCLANG_PATH=/usr/lib/llvm-18/lib
 # Archive signatures remain mandatory; historical Release expiry is disabled
 # for this fixed snapshot, including Playwright's later apt commands.
-RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/bootstrap-ca.crt,readonly \
-    printf '%s\n' \
+RUN printf '%s\n' \
       'Types: deb' \
       "URIs: https://snapshot.ubuntu.com/ubuntu/$UBUNTU_SNAPSHOT/" \
       'Suites: resolute resolute-updates resolute-security' \
@@ -24,8 +23,11 @@ RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.
       'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
       'Check-Valid-Until: no' \
       > /etc/apt/sources.list.d/ubuntu.sources \
- && cat /etc/apt/sources.list.d/ubuntu.sources \
- && apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt -o APT::Update::Error-Mode=any update \
+ && cat /etc/apt/sources.list.d/ubuntu.sources
+
+FROM apt-source AS system-tools
+RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/bootstrap-ca.crt,readonly \
+    apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt -o APT::Update::Error-Mode=any update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt install -y --no-install-recommends \
       ca-certificates \
  && test -s /etc/ssl/certs/ca-certificates.crt \
@@ -55,8 +57,9 @@ RUN install -d -o 1000 -g 1000 -m 0755 /home/ci/.cargo /home/ci/.cargo/registry 
  && test "$(rustc --version | cut -d' ' -f2)" = 1.99.0 \
  && cargo --version && cargo fmt --version && cargo clippy --version
 
-FROM rust-tools AS ci-base
-# CI tools use pinned official binaries.
+# Download the same checksum-pinned native Bun independently of Ubuntu APT.
+# Only its binary is copied; Debian's packages and CA bundle stay in this stage.
+FROM rust-toolchain AS bun-tool
 RUN case "$(dpkg --print-architecture)" in \
       amd64) archive=bun-linux-x64; checksum=3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18 ;; \
       arm64) archive=bun-linux-aarch64; checksum=efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21 ;; \
@@ -70,6 +73,31 @@ RUN case "$(dpkg --print-architecture)" in \
  && ln -s bun /usr/local/bin/bunx \
  && test "$(bun --version)" = 1.4.3 \
  && rm -rf /tmp/bun /tmp/bun.zip
+
+# Prefetch Playwright's complete native APT dependency closure while the common
+# tools install. APT still owns resolution, signed indexes and archive hashes.
+# No mutable cache is imported: this branch shares the exact Ubuntu/source/Bun
+# build graph, and the final installer validates its own package selection.
+FROM apt-source AS ci-web-debs
+COPY --from=bun-tool --chown=0:0 /usr/local/bin/bun /usr/local/bin/bun
+RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.crt,target=/tmp/bootstrap-ca.crt,readonly \
+    apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt -o APT::Update::Error-Mode=any update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::CAInfo=/tmp/bootstrap-ca.crt install -y --no-install-recommends ca-certificates \
+ && test -s /etc/ssl/certs/ca-certificates.crt \
+ && mkdir /tmp/ci-web /ci-web-archives \
+ && cd /tmp/ci-web \
+ && printf '%s\n' '{"private":true,"dependencies":{"@playwright/test":"1.64.0"}}' > package.json \
+ && bun install --ignore-scripts \
+ && test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0' \
+ && printf '%s\n' 'APT::Get::Download-Only "true";' 'Dir::Cache::archives "/ci-web-archives";' > /etc/apt/apt.conf.d/99-ci-web-prefetch \
+ && bun --bun x --no-install playwright install-deps chromium \
+ && test -n "$(find /ci-web-archives -maxdepth 1 -name '*.deb' -print -quit)"
+
+FROM rust-tools AS ci-base
+# CI tools use pinned official binaries.
+COPY --from=bun-tool --chown=0:0 /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s bun /usr/local/bin/bunx \
+ && test "$(bun --version)" = 1.4.3
 
 RUN version=0.9.148 \
  && case "$(dpkg --print-architecture)" in \
@@ -94,7 +122,10 @@ WORKDIR /home/ci
 FROM ci-base AS ci-web
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN mkdir /tmp/ci-web \
+RUN --mount=type=bind,from=ci-web-debs,source=/ci-web-archives,target=/tmp/ci-web-prefetched,readonly \
+    cp -a /tmp/ci-web-prefetched /tmp/ci-web-archives \
+ && printf '%s\n' 'Dir::Cache::archives "/tmp/ci-web-archives";' > /etc/apt/apt.conf.d/99-ci-web-archives \
+ && mkdir /tmp/ci-web \
  && cd /tmp/ci-web \
  && printf '%s\n' '{"private":true,"dependencies":{"@playwright/test":"1.64.0"}}' > package.json \
  && bun install --ignore-scripts \
@@ -103,5 +134,6 @@ RUN mkdir /tmp/ci-web \
  && bun --bun x --no-install playwright install --with-deps chromium \
  && dpkg-query -W > /usr/local/share/ci-web-build-packages.txt \
  && cat /usr/local/share/ci-web-build-packages.txt \
- && rm -rf /tmp/ci-web /root/.bun /var/lib/apt/lists/*
+ && rm /etc/apt/apt.conf.d/99-ci-web-archives \
+ && rm -rf /tmp/ci-web /tmp/ci-web-archives /root/.bun /var/lib/apt/lists/*
 USER 1000:1000
