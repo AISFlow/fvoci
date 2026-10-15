@@ -258,7 +258,7 @@ test("producer smoke passes the literal dpkg format through actual Bash caller q
         ["1:18.1.7-20ubuntu8", 1],
       ] as const) {
         const stub =
-          'dpkg-query() { [[ "$#" == 3 && "$1" == -W && "$2" == \'-f=${Version}\' && "$3" == libclang-18-dev ]]; printf "%s" "$FIXTURE_VERSION"; }\n';
+          'dpkg-query() { [[ "$#" == 3 && "$1" == -W && "$2" == \'-f=${Version}\' && "$3" == libclang-18-dev ]] || return 1; printf "%s" "$FIXTURE_VERSION"; }\n';
         const result = Bun.spawnSync(
           ["bash", "--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", stub + check],
           {
@@ -269,6 +269,38 @@ test("producer smoke passes the literal dpkg format through actual Bash caller q
         );
         expect(result.exitCode).toBe(exit);
         expect(result.stdout.toString() + result.stderr.toString()).not.toContain(canary);
+        if (exit === 0) {
+          const wrongFormat = smoke.replace(
+            'dpkg-query -W -f="\\${Version}"',
+            'dpkg-query -W -f="FVOCI_WRONG_DPKG_FORMAT"',
+          );
+          expect(wrongFormat).not.toBe(smoke);
+          expect(caller(wrongFormat, hostVersion).exitCode).toBe(0);
+          const wrongCheck = readFileSync(capture, "utf8")
+            .split("\n")
+            .find((line) => line.includes("dpkg-query -W"));
+          if (!wrongCheck) throw new Error("wrong-format caller did not reach Docker");
+          const refusal = Bun.spawnSync(
+            [
+              "bash",
+              "--noprofile",
+              "--norc",
+              "-e",
+              "-u",
+              "-o",
+              "pipefail",
+              "-c",
+              stub + wrongCheck,
+            ],
+            {
+              env: { PATH: process.env["PATH"], FIXTURE_VERSION: version, Version: hostVersion },
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          );
+          expect(refusal.exitCode).toBe(1);
+          expect(refusal.stdout.toString()).toBe("");
+        }
       }
     }
     const regressed = smoke.replace(
