@@ -753,32 +753,146 @@ test("Turso restore destination: malformed input publishes nothing and identical
     );
     expect(workspace.id).not.toBe(state.source.workspace.id);
     const base = `/api/v1/workspaces/${workspace.id}`;
-    const before = await jsonObject(page.request.get(base + "/projects"));
-    const beforeCounts = observeRestoreCounts();
-    expect(beforeCounts.counts.nativeJobs).toBe(0);
-    const beforeDocuments = await jsonObject(page.request.get(base + "/tree"));
-    const invalid = Buffer.from("not a native archive");
-    const rebound = await reboundArchive(Buffer.from(exported.base64, "base64"));
-    const malformedPreflight = await page.request.post(base + "/native-archive/preflight", {
-      data: { archiveBase64: rebound.toString("base64") },
-    });
-    expect(malformedPreflight.status()).toBe(422);
-    expect(await malformedPreflight.json()).toMatchObject({
-      params: { code: "native_archive_invalid" },
-    });
-    const malformedRestore = await page.request.post(base + "/native-archive/restore", {
-      data: {
-        archiveBase64: invalid.toString("base64"),
-        archiveHash: hash(invalid),
-        requestId: randomUUID(),
-        destinationActorId: actor.userId,
-        confirm: true,
-      },
-    });
-    expect(malformedRestore.status()).toBe(422);
-    expect(await jsonObject(page.request.get(base + "/projects"))).toEqual(before);
-    expect(await jsonObject(page.request.get(base + "/tree"))).toEqual(beforeDocuments);
-    expect(observeRestoreCounts().counts).toEqual(beforeCounts.counts);
+    // Invalid-input checks belong to a second genuine personal owner. Keep
+    // the restore owner's five native-archive calls for preflight, restore,
+    // replay, the pre-client archive and the post-ACK stage archive.
+    const rejectionContext = await newCollabContext(browser, baseURL);
+    let rejectionFailed = true;
+    let beforeCounts: ReturnType<typeof observeRestoreCounts>;
+    try {
+      const rejectionPage = await rejectionContext.newPage();
+      const spaces = await json(
+        page.request.get("/api/v1/me/workspaces"),
+        z.object({
+          items: z.array(workspaceSchema.extend({ role: z.string(), kind: z.string() })),
+        }),
+      );
+      const team = spaces.items.find((item) => item.slug === admin.workspaceSlug);
+      expect(team?.role).toBe("owner");
+      expect(team?.kind).toBe("team");
+      if (!team) throw new Error("RESTORE_REJECTION_TEAM_MISSING");
+      let rejectionActor: z.infer<typeof identitySchema>;
+      let rejectionWorkspace: z.infer<typeof workspaceSchema>;
+      try {
+        // Token-bearing responses and request failures must never enter the
+        // reporter; use the normal invitation session without a DB fixture.
+        const email = `restore-rejection-${randomUUID()}@example.invalid`;
+        const invitation = await json(
+          page.request.post(`/api/v1/workspaces/${team.id}/invitations`, {
+            data: { email, role: "member" },
+          }),
+          z.object({ acceptUrl: z.string() }),
+          201,
+        );
+        const token = z
+          .string()
+          .min(1)
+          .parse(new URL(invitation.acceptUrl).pathname.split("/invite/")[1]);
+        const invitationPath = `/api/v1/invitations/${encodeURIComponent(token)}`;
+        const preview = await json(
+          rejectionPage.request.get(invitationPath),
+          z.object({
+            requiredLegal: z.array(z.object({ kind: z.string(), version: z.number().int() })),
+          }),
+        );
+        expect(
+          (
+            await rejectionPage.request.post(invitationPath + "/accept", {
+              data: {
+                email,
+                givenName: "복구거부검증",
+                password: randomUUID() + "Aa1!",
+                consents: preview.requiredLegal,
+              },
+            })
+          ).status(),
+        ).toBe(200);
+        const current = await jsonObject(rejectionPage.request.get("/api/v1/auth/me"));
+        expect(current.isInstanceAdmin).toBe(false);
+        rejectionActor = identitySchema.parse(current);
+        rejectionWorkspace = await json(
+          rejectionPage.request.post("/api/v1/me/personal-workspace"),
+          workspaceSchema,
+        );
+      } catch {
+        throw new Error("RESTORE_REJECTION_OWNER_SETUP_FAILED");
+      }
+      expect(rejectionActor.userId).not.toBe(actor.userId);
+      expect(rejectionActor.sessionId).not.toBe(actor.sessionId);
+      expect(rejectionWorkspace.id).not.toBe(workspace.id);
+      const owned = await json(
+        rejectionPage.request.get("/api/v1/me/workspaces"),
+        z.object({
+          items: z.array(workspaceSchema.extend({ role: z.string(), kind: z.string() })),
+        }),
+      );
+      const personal = owned.items.find((item) => item.id === rejectionWorkspace.id);
+      expect(personal).toMatchObject({ role: "owner", kind: "personal" });
+      const rejectionBase = `/api/v1/workspaces/${rejectionWorkspace.id}`;
+      // All account/workspace setup precedes the global no-publication
+      // baseline. Both owners' targets must stay unchanged on rejection.
+      const before = await jsonObject(page.request.get(base + "/projects"));
+      const beforeDocuments = await jsonObject(page.request.get(base + "/tree"));
+      const rejectedProjects = await jsonObject(
+        rejectionPage.request.get(rejectionBase + "/projects"),
+      );
+      const rejectedDocuments = await jsonObject(
+        rejectionPage.request.get(rejectionBase + "/tree"),
+      );
+      beforeCounts = observeRestoreCounts();
+      expect(beforeCounts.counts.nativeJobs).toBe(0);
+      const invalid = Buffer.from("not a native archive");
+      const rebound = await reboundArchive(Buffer.from(exported.base64, "base64"));
+      const malformedPreflight = await rejectionPage.request.post(
+        rejectionBase + "/native-archive/preflight",
+        {
+          data: { archiveBase64: rebound.toString("base64") },
+        },
+      );
+      expect(malformedPreflight.status()).toBe(422);
+      expect(await malformedPreflight.json()).toMatchObject({
+        params: { code: "native_archive_invalid" },
+      });
+      const malformedRestore = await rejectionPage.request.post(
+        rejectionBase + "/native-archive/restore",
+        {
+          data: {
+            archiveBase64: invalid.toString("base64"),
+            archiveHash: hash(invalid),
+            requestId: randomUUID(),
+            destinationActorId: rejectionActor.userId,
+            confirm: true,
+          },
+        },
+      );
+      expect(malformedRestore.status()).toBe(422);
+      expect(await jsonObject(page.request.get(base + "/projects"))).toEqual(before);
+      expect(await jsonObject(page.request.get(base + "/tree"))).toEqual(beforeDocuments);
+      expect(await jsonObject(rejectionPage.request.get(rejectionBase + "/projects"))).toEqual(
+        rejectedProjects,
+      );
+      expect(await jsonObject(rejectionPage.request.get(rejectionBase + "/tree"))).toEqual(
+        rejectedDocuments,
+      );
+      const after = observeRestoreCounts();
+      expect(after).toEqual(beforeCounts);
+      await info.attach("restore-rejection-owner.private.json", {
+        body: JSON.stringify({
+          restoreActor: actor.userId,
+          restoreWorkspace: workspace.id,
+          rejectionActor: rejectionActor.userId,
+          rejectionWorkspace: rejectionWorkspace.id,
+          scope: personal,
+          statuses: [malformedPreflight.status(), malformedRestore.status()],
+          before: beforeCounts,
+          after,
+        }),
+        contentType: "application/json",
+      });
+      rejectionFailed = false;
+    } finally {
+      await closeCollabContext(rejectionContext, rejectionFailed);
+    }
     const preflight = await jsonObject(
       page.request.post(base + "/native-archive/preflight", {
         data: { archiveBase64: exported.base64 },
