@@ -138,6 +138,7 @@ RUN --mount=type=bind,from=ci-web-debs,source=/ci-web-archives,target=/tmp/ci-we
  && test "$(bun --bun x --no-install playwright --version)" = 'Version 1.64.0' \
  && cat /etc/apt/sources.list.d/ubuntu.sources \
  && bun --bun x --no-install playwright install --with-deps chromium \
+ && chmod -R a+rX,go-w /opt/playwright \
  && dpkg-query -W > /usr/local/share/ci-web-build-packages.txt \
  && cat /usr/local/share/ci-web-build-packages.txt \
  && rm /etc/apt/apt.conf.d/99-ci-web-archives \

@@ -130,11 +130,11 @@ const WEB_BUILDER_DOWNLOAD: Mapping = {
     path: "${{ runner.temp }}/fvoci-web-builder",
   },
 };
-const WEB_BUILDER_ADMIT_SHA256 = "89c32947d331760ef8e841a9e63d91e6ab2c222f74c568009df3b061bd50f381";
+const WEB_BUILDER_ADMIT_SHA256 = "a52aaf334110712557fd06bdef6e24020c6065dda564e92919d0b9cda8acd3cc";
 const WEB_BUILDER_RETIRE_SHA256 =
   "804363947c93c842c3d2a69d7845e3c65e7bb5a7a987ea2122747e8e2ddeee18";
 const WEB_BUILDER_PRODUCER_SHA256 =
-  "53298b4d2375b4ec9cfb9454ec54986dc917597daacbc40b22b7e0731133d19f";
+  "dc670da6d105b8fc03e7e2092fa8e2767f3942b001cb018d06a6602c3b549827";
 function isWebBuilderDownload(step: Mapping): boolean {
   return pyEq(step, WEB_BUILDER_DOWNLOAD);
 }

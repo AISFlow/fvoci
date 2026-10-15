@@ -155,13 +155,28 @@ jobs:
           docker image inspect "$ref" --format '{{json .}}' > "$packet/image.json"
           docker image save "$ref" --output "$packet/image.tar"
           bun tools/ci/ci-base-image.ts web-export "$packet" "$GITHUB_OUTPUT"
-          docker run --rm --network none "$ref" bash -e -o pipefail -c '
+          docker run --rm --network none --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" --workdir "$GITHUB_WORKSPACE" "$ref" bash -e -o pipefail -c '
             test "$(id -u):$(id -g)" = 1000:1000
             test "$(rustc --version | cut -d" " -f2)" = 1.99.0
             test "$(bun --version)" = 1.4.3
             test -z "$(find /opt/rustup /opt/cargo ! -uid 0 -print -quit)"
             test -z "$(find -L /opt/rustup /opt/cargo -perm -0002 -print -quit)"
             test -z "$(find -L /opt/rustup /opt/cargo -writable -print -quit)"
+            bun - <<"BUN"
+          import { strict as assert } from "node:assert";
+          import { lstatSync } from "node:fs";
+          import { join } from "node:path";
+          import { browserInventory } from "./tools/selected-backend-ci/admission.ts";
+          const baked = "/opt/playwright", closure = browserInventory(baked, undefined, true);
+          for (const key of Object.keys(closure)) {
+            const facts = lstatSync(key === "." ? baked : join(baked, key));
+            assert.equal(facts.uid, 0);
+            assert.equal(facts.gid, 0);
+            assert.equal(facts.mode & 0o022, 0);
+            const readable = facts.isDirectory() ? 0o555 : 0o444;
+            assert.equal(facts.mode & readable, readable);
+          }
+          BUN
             test -w "$CARGO_HOME/registry"
             test -w "$CARGO_HOME/git"
             cargo --version
@@ -281,11 +296,12 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" --workdir "$GITHUB_WORKSPACE" \
             --env "PLAYWRIGHT_BROWSERS_PATH=$state/browser" \
             --env TINI_KILL_PROCESS_GROUP=1 --env HOME=/home/runner --env CARGO_HOME=/home/runner/.cargo --env RUSTUP_HOME=/home/runner/.rustup \
+            --env RUSTUP_AUTO_INSTALL=0 --env RUSTUP_TOOLCHAIN=1.99.0 \
             --env PATH=/home/runner/.cargo/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin \
             "$BUILDER_IMAGE" bash --noprofile --norc -e -o pipefail -c '
               test "$(id -u):$(id -g)" = 1001:1001
-              test "$(/opt/cargo/bin/rustup --version | cut -d" " -f2)" = 1.29.1
               cp -a --no-preserve=ownership /opt/rustup/. "$RUSTUP_HOME/"
+              test "$(/opt/cargo/bin/rustup --version | cut -d" " -f2)" = 1.29.1
               mkdir -p "$CARGO_HOME/bin" "$CARGO_HOME/registry" "$CARGO_HOME/git"
               install -m 0755 /opt/cargo/bin/rustup "$CARGO_HOME/bin/rustup"
               for proxy in cargo cargo-clippy rustc rustdoc clippy-driver rust-gdb rust-gdbgui rust-lldb; do
