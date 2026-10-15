@@ -110,7 +110,7 @@ export function assertFinalMetadata(
       titles: z.array(z.string()),
     })
     .safeParse(metadata);
-  if (!result.success) refuse();
+  if (!result.success) return refuse();
   assertFinalInventory(result.data.titles, binding);
 }
 
