@@ -701,7 +701,6 @@ async function runPreparedBrowser(
   let done = false,
     ordinal = 0,
     checkpointTaken = false;
-  let original: Error | undefined;
   let serving: Promise<void> = Promise.resolve();
   const serve = async (child: Child) => {
     while (!done && poll(child) === null) {
@@ -782,18 +781,18 @@ async function runPreparedBrowser(
       },
       started: (child) => {
         serving = serve(child).catch((error: unknown) => {
-          original =
+          stop.abort(
             error instanceof Error
               ? error
-              : new HelperError("Keycloak prepared parent read failed");
-          stop.abort();
+              : new HelperError("Keycloak prepared parent read failed"),
+          );
         });
       },
     }).catch((error: unknown) => {
-      if (original !== undefined) throw original;
+      signal.throwIfAborted();
       throw error;
     });
-    if (original !== undefined) throw original;
+    signal.throwIfAborted();
     if (result.code === 0 && binding.group === "failures")
       require(checkpointTaken, "Keycloak prepared before-unlink checkpoint missing");
     return result;
