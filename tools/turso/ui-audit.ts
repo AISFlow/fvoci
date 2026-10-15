@@ -143,6 +143,8 @@ export interface Audit {
     original: SerialObservation;
     prepared: SerialObservation;
     maintenance?: { server: Record_; leaseMicros: string };
+    /** Parent-derived wire/ACK/native full-row witness, never a browser grant. */
+    readback?: { count: 2; rows: Record<string, Record<string, number>> };
     state: { original: unknown[]; current: unknown[]; after: unknown[] };
   };
   actors: Record<string, string>;
@@ -940,6 +942,7 @@ export function allocatedRows(
         continue;
       }
       const refs = get(after, "allocations", table, sha);
+      if (selectedReadbackAppendEffect(before, after, table, sha, count, refs, audit)) continue;
       if (selected !== undefined) {
         for (const actor of [selected.preparationActor, selected.readbackActor]) {
           if (!list(refs, "actors").includes(actor.id)) continue;
@@ -1594,15 +1597,19 @@ export function selectedReadbackState(
     get(selected.prepared.dataset, "backend") === "sqlite", "UI_SQLITE_READBACK_STATE_REFUSED");
   const table = "document_states";
   const state = selected.state;
-  require(state.original.length === 10 &&
+  require((selected.readback === undefined || selected.readback.count === 2) &&
+    state.original.length === 10 &&
     state.current.length === 10 &&
     (phase === "prepared" || state.after.length === 10) &&
     same(state.original[0], ["blob", selected.workspace]) &&
     same(state.original[1], ["blob", selected.document]) &&
     (phase === "prepared" || same(state.current, state.after)) &&
     state.original.every(
-      (value, index) => index === 6 || index === 7 || same(value, state.current[index]),
+      (value, index) =>
+        index === 6 || index === 7 || index === 9 || same(value, state.current[index]),
     ) &&
+    integer(state.current[9]) ===
+      integer(state.original[9]) + BigInt(selected.readback?.count ?? 0) &&
     integer(state.current[7]) === integer(state.original[7]) + 1n &&
     integer(state.current[6]) >= decimal(selected.original.checks.clockMicros) &&
     integer(state.current[6]) <= decimal(selected.prepared.checks.clockMicros) &&
@@ -1615,6 +1622,52 @@ export function selectedReadbackState(
       rowHash(phase === "prepared" ? state.current : state.after),
     ) === 1, "UI_SQLITE_READBACK_STATE_REFUSED");
   return rowHash(state.original);
+}
+
+/** Only exact parent-proven append hashes can cross the old actor/workspace
+ * boundary; all prior rows and unrelated actor effects retain their guards. */
+export function selectedReadbackAppendEffect(
+  before: unknown,
+  after: unknown,
+  table: string,
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  audit: Audit,
+): boolean {
+  const selected = audit.sqlitePreparation,
+    seal = selected?.readback;
+  if (
+    !selected ||
+    !seal ||
+    !Object.hasOwn(seal.rows, table) ||
+    !Object.hasOwn(seal.rows[table] ?? {}, sha)
+  )
+    return false;
+  require(seal.count === 2 &&
+    same(Object.keys(seal.rows).sort(), [
+      "document_collab_op_receipts",
+      "document_collab_updates",
+    ]) &&
+    Object.entries(seal.rows).every(
+      ([name, hashes]) =>
+        Object.keys(hashes).length === 2 &&
+        Object.entries(hashes).every(
+          ([hash, n]) =>
+            /^[a-f0-9]{64}$/.test(hash) &&
+            n === 1 &&
+            !Object.hasOwn(record(before, "fingerprints", name), hash) &&
+            get(selected.prepared.dataset, "fingerprints", name, hash) === 1 &&
+            get(after, "fingerprints", name, hash) === 1,
+        ),
+    ) &&
+    count === 1 &&
+    same(get(refs, "workspaces"), [selected.workspace]) &&
+    same(
+      get(refs, "actors"),
+      table === "document_collab_updates" ? [] : [selected.readbackActor.id],
+    ), "UI_SQLITE_READBACK_APPEND_REFUSED");
+  return true;
 }
 
 function preservedPrimaryRows(

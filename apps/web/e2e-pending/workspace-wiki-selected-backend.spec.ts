@@ -35,6 +35,7 @@ import {
   expectCanonicalContent,
   expectCanonicalOracleControls,
   observeNativeWire,
+  observeSelectedWrites,
   nativeHistory,
   expectRetainedNative,
   expectNativeHistoryControls,
@@ -422,6 +423,8 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
     const page = await ctx.newPage();
     const wire = attachCollabWire(page);
     const nativeWire = observeNativeWire(page);
+    const readbackWrites =
+      selected === "sqlite" ? observeSelectedWrites(page, seed.freshActorId) : undefined;
     const csp = watchCspViolations(page);
     let failed = true;
     try {
@@ -524,6 +527,19 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
         reloadedNative.destroy();
       }
       expect(csp).toEqual([]);
+      if (readbackWrites !== undefined) {
+        // Observe completion of existing sync traffic; this emits no frame.
+        await expect
+          .poll(() => {
+            try {
+              readbackWrites();
+              return true;
+            } catch {
+              return false;
+            }
+          })
+          .toBe(true);
+      }
       await testInfo.attach("selected-vue-restart-readback.json", {
         contentType: "application/json",
         body: Buffer.from(
@@ -544,6 +560,7 @@ if (process.env.FVOCI_E2E_SELECTED_RESTART_CHECKPOINT !== undefined) {
             nativeHistoryOracleControls: nativeControls,
             nativeHistoryReadback:
               "fresh browser and reloaded connection server-received sync only",
+            ...(readbackWrites === undefined ? {} : { readbackWrites: readbackWrites() }),
           }),
         ),
       });

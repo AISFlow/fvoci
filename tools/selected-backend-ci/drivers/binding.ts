@@ -357,7 +357,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
   assert.ok(deepEquals(before, after) && before.head === m.source && before.tree === m.tree);
   assert.ok(Object.keys(before.tracked).length && Object.keys(before.external).length);
   assert.ok(
-    before.tracked[wikiSpec] === "a5b6d579593fed10131f57d6f44234eb5fb07b95bda31a868848b623bc854fcf",
+    before.tracked[wikiSpec] === "a71670b987fe0240282da7cac3ea6fefaa4649a69d669f24610b34e222492e4d",
   );
   const flow: unknown = m.flow ?? "on";
   assert.ok(flow === "on" || flow === "off");

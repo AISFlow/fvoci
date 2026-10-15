@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -41,6 +42,7 @@ import {
   shellExports,
   summary,
   readSelectedSqlitePacket,
+  sqliteReadbackAppendWitness,
 } from "./sqlite.ts";
 import type { Seam, State } from "./sqlite.ts";
 
@@ -60,6 +62,204 @@ function directory(): string {
   return path;
 }
 const ok = (stdout = ""): Completed => ({ returncode: 0, stdout, stderr: "" });
+
+function readbackAppendFixture() {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const workspaceId = uuid(1),
+    documentId = uuid(2),
+    actorId = uuid(3);
+  const blob = (v: string) => ["blob", v.replaceAll("-", "")];
+  const integer = (v: number) => ["integer", String(v)];
+  const hash = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+  const columns = {
+    document_collab_updates: [
+      "workspace_id",
+      "document_id",
+      "seq",
+      "op_id",
+      "payload",
+      "created_at",
+    ],
+    document_collab_op_receipts: [
+      "workspace_id",
+      "document_id",
+      "op_id",
+      "seq",
+      "payload_len",
+      "payload_sha256",
+      "actor_user_id",
+      "created_at",
+    ],
+  };
+  const updates: unknown[] = [],
+    receipts: unknown[] = [],
+    writes: unknown[] = [];
+  const appendRows: Record<string, unknown[]> = {
+    document_collab_updates: [],
+    document_collab_op_receipts: [],
+  };
+  for (let seq = 1; seq <= 3; seq++) {
+    const op = uuid(seq + 3),
+      hex = "0102",
+      sha = createHash("sha256").update(Buffer.from(hex, "hex")).digest("hex");
+    updates.push({ seq, op, hex });
+    receipts.push({ seq, op, len: 2, sha, actor: actorId });
+    if (seq > 1)
+      writes.push({
+        workspaceId,
+        documentId,
+        actorId,
+        sha256: sha,
+        length: 2,
+        empty: false,
+        applied: true,
+      });
+    const cells = {
+      document_collab_updates: [
+        blob(workspaceId),
+        blob(documentId),
+        integer(seq),
+        blob(op),
+        ["blob", hex],
+        integer(seq === 1 ? 10 : 30),
+      ],
+      document_collab_op_receipts: [
+        blob(workspaceId),
+        blob(documentId),
+        blob(op),
+        integer(seq),
+        integer(2),
+        ["blob", sha],
+        blob(actorId),
+        integer(seq === 1 ? 10 : 30),
+      ],
+    };
+    for (const table of Object.keys(columns) as (keyof typeof columns)[])
+      appendRows[table]?.push({
+        columns: columns[table],
+        cells: cells[table],
+        sha256: hash(cells[table]),
+      });
+  }
+  const current = {
+    state: "ff80",
+    cutoff: 0,
+    tail: 3,
+    content: { exact: true },
+    text: "original",
+    version: 1,
+    revisions: [],
+    updates,
+    receipts,
+    appendRows,
+  };
+  const original = structuredClone(current);
+  original.tail = 1;
+  original.updates = original.updates.slice(0, 1);
+  original.receipts = original.receipts.slice(0, 1);
+  for (const table of Object.keys(appendRows))
+    original.appendRows[table] = original.appendRows[table]?.slice(0, 1) ?? [];
+  const dataset = (value: typeof current) => ({
+    fingerprints: Object.fromEntries(
+      Object.entries(value.appendRows).map(([table, rows]) => [
+        table,
+        Object.fromEntries(rows.map((row) => [(row as { sha256: string }).sha256, 1])),
+      ]),
+    ),
+  });
+  return {
+    original,
+    current,
+    before: dataset(original),
+    prepared: dataset(current),
+    workspaceId,
+    documentId,
+    actorId,
+    writes,
+    clocks: ["20", "40"] as [string, string],
+  };
+}
+
+test("SQLite readback admits only two wire/ACK-matched full typed native appends and retains every original", async () => {
+  const input = readbackAppendFixture();
+  const seal = await sqliteReadbackAppendWitness(input);
+  expect(seal.count).toBe(2);
+  expect(Object.values(seal.rows).map((rows) => Object.keys(rows).length)).toEqual([2, 2]);
+  const changes: ((f: ReturnType<typeof readbackAppendFixture>) => void)[] = [
+    (f) => {
+      f.current.state = "ff81";
+    },
+    (f) => {
+      f.current.cutoff = 1;
+    },
+    (f) => {
+      f.current.content = { exact: false };
+    },
+    (f) => {
+      f.current.tail = 4;
+    },
+    (f) => {
+      f.current.updates.shift();
+    },
+    (f) => {
+      f.current.receipts[0] = {};
+    },
+    (f) => {
+      f.writes.pop();
+    },
+    (f) => {
+      f.writes.push(structuredClone(f.writes[0]));
+    },
+    (f) => {
+      (f.writes[0] as Record<string, unknown>).applied = false;
+    },
+    (f) => {
+      (f.writes[0] as Record<string, unknown>).actorId = f.documentId;
+    },
+    (f) => {
+      (f.writes[0] as Record<string, unknown>).documentId = f.workspaceId;
+    },
+    (f) => {
+      (f.current.receipts[2] as Record<string, unknown>).op = (
+        f.current.receipts[1] as Record<string, unknown>
+      ).op;
+    },
+    (f) => {
+      (f.current.updates[1] as Record<string, unknown>).hex = "0103";
+    },
+    (f) => {
+      (f.current.receipts[1] as Record<string, unknown>).len = 3;
+    },
+    (f) => {
+      f.current.appendRows.document_collab_updates?.shift();
+    },
+    (f) => {
+      (f.current.appendRows.document_collab_updates?.[1] as { sha256: string }).sha256 = "f".repeat(
+        64,
+      );
+    },
+    (f) => {
+      (f.current.appendRows.document_collab_op_receipts?.[1] as { cells: string[][] }).cells[6] = [
+        "blob",
+        f.documentId.replaceAll("-", ""),
+      ];
+    },
+    (f) => {
+      f.clocks[1] = "29";
+    },
+    (f) => {
+      f.prepared.fingerprints.document_collab_updates = {};
+    },
+    (f) => {
+      f.before.fingerprints.document_collab_op_receipts = {};
+    },
+  ];
+  for (const change of changes) {
+    const wrong = readbackAppendFixture();
+    change(wrong);
+    await expect(sqliteReadbackAppendWitness(wrong)).rejects.toThrow();
+  }
+});
 
 test("actual waited logged command returns empty streams; only its completed private packet is parsed", async () => {
   const base = directory(),

@@ -9,6 +9,7 @@ import {
   assertPreserved,
   baselineFailureDiagnostic,
   maintenanceReceipts,
+  selectedReadbackAppendEffect,
   nativeReceiptsRetained,
   reportCases,
   startupBlockers,
@@ -983,6 +984,78 @@ test("SQLite seeded readback state preserves every byte and only admits one nati
   expect(() => selectedReadbackState(before, missing, audit)).toThrow();
   const remote = { ...after, backend: "libsql-remote" };
   expect(() => selectedReadbackState(before, remote, audit)).toThrow();
+  // A native append witness changes only the exact tail, alongside the
+  // existing one-claim metadata; cutoff and state bytes stay pinned above.
+  const appended = structuredClone(audit);
+  const selected = must(appended.sqlitePreparation);
+  selected.readback = { count: 2, rows: {} };
+  selected.state.current[9] = number(4);
+  selected.state.after = structuredClone(selected.state.current);
+  const appendedDataset = dataset(selected.state.current);
+  selected.prepared.dataset = appendedDataset;
+  expect(selectedReadbackState(before, appendedDataset, appended)).toBe(hash(original));
+  for (const tail of [2, 3, 5]) {
+    const wrong = structuredClone(appended);
+    must(wrong.sqlitePreparation).state.current[9] = number(tail);
+    expect(() => selectedReadbackState(before, appendedDataset, wrong)).toThrow();
+  }
+});
+
+test("SQLite readback full-row seal admits only its two exact hashes and exact old reader references", () => {
+  const tables = ["document_collab_op_receipts", "document_collab_updates"];
+  const rows = Object.fromEntries(
+    tables.map((table) => [
+      table,
+      {
+        [digest(table + "first")]: 1,
+        [digest(table + "second")]: 1,
+      },
+    ]),
+  );
+  const before = { fingerprints: Object.fromEntries(tables.map((table) => [table, {}])) };
+  const after = { fingerprints: rows };
+  const audit = {
+    sqlitePreparation: {
+      workspace: "a".repeat(32),
+      readbackActor: { id: "b".repeat(32) },
+      prepared: { dataset: structuredClone(after) },
+      readback: { count: 2, rows: structuredClone(rows) },
+    },
+  } as unknown as Audit;
+  const table = tables[0] as string,
+    sha = Object.keys(rows[table] ?? {})[0] as string;
+  const refs = { workspaces: ["a".repeat(32)], actors: ["b".repeat(32)] };
+  expect(selectedReadbackAppendEffect(before, after, table, sha, 1, refs, audit)).toBe(true);
+  expect(selectedReadbackAppendEffect(before, after, table, "f".repeat(64), 1, refs, audit)).toBe(
+    false,
+  );
+  for (const mutate of [
+    (_a: Audit, b: typeof after) => {
+      b.fingerprints[table] = {};
+    },
+    (a: Audit) => {
+      must(a.sqlitePreparation).readback = { count: 2, rows: { [table]: rows[table] ?? {} } };
+    },
+    (a: Audit) => {
+      must(must(a.sqlitePreparation).readback).rows[table] = { [sha]: 1 };
+    },
+    (a: Audit) => {
+      must(a.sqlitePreparation).prepared.dataset = before;
+    },
+  ]) {
+    const a = structuredClone(audit),
+      b = structuredClone(after);
+    mutate(a, b);
+    expect(() => selectedReadbackAppendEffect(before, b, table, sha, 1, refs, a)).toThrow();
+  }
+  for (const wrong of [
+    { ...refs, actors: [] },
+    { ...refs, workspaces: ["c".repeat(32)] },
+  ])
+    expect(() =>
+      selectedReadbackAppendEffect(before, after, table, sha, 1, wrong, audit),
+    ).toThrow();
+  expect(() => selectedReadbackAppendEffect(before, after, table, sha, 2, refs, audit)).toThrow();
 });
 
 function sqlitePreparedRecords() {
