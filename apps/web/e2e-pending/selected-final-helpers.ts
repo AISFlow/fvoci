@@ -6,7 +6,11 @@ import {
   type Page,
   type TestInfo,
 } from "@playwright/test";
-import { yDocToTiptapJson } from "../../../packages/editor/src/collab-tiptap";
+import {
+  isTiptapDoc,
+  tiptapJsonToYDoc,
+  yDocToTiptapJson,
+} from "../../../packages/editor/src/collab-tiptap";
 import { extractText } from "../../../packages/editor/src/extract";
 import type { components } from "../src/generated/api";
 import {
@@ -220,7 +224,13 @@ export async function freshReadback(
   await mount(reader, target, actors.binding.flow);
   expect(await editorShape(reader.page)).toEqual(expected);
   const current = await body(reader.page, target);
-  expect(current.contentJson).toEqual(expected.document);
+  if (!isTiptapDoc(expected.document)) throw new Error("SELECTED_FINAL_EXPECTED_DOCUMENT_INVALID");
+  const expectedNative = tiptapJsonToYDoc(expected.document);
+  try {
+    expect(current.contentJson).toEqual(yDocToTiptapJson(expectedNative));
+  } finally {
+    expectedNative.destroy();
+  }
   if (attachmentBytes) {
     const { storedAttachmentDownloadBytes } = await import("./collab-helpers");
     expect(await storedAttachmentDownloadBytes(reader.page)).toEqual(attachmentBytes);
