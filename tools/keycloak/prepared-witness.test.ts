@@ -16,7 +16,7 @@ import * as runner from "./run.ts";
 import type { PreparedSnapshot } from "../../apps/web/e2e-keycloak/observer.ts";
 import type { PreparedOperationContext, PreparedPrimary } from "./run.ts";
 
-const audit = Reflect.get(runner, "auditPreparedOperation") as typeof runner.auditPreparedOperation;
+const audit = runner.auditPreparedOperation;
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const close of cleanups.splice(0)) close();
@@ -113,6 +113,8 @@ function fixture() {
 
 test("the awaited parent receives actual allocation-only closure and the maintained private log receipts", async () => {
   const f = fixture();
+  const expectedServer = f.context.server;
+  if (expectedServer === undefined) throw new Error("fixture server missing");
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -128,10 +130,10 @@ test("the awaited parent receives actual allocation-only closure and the maintai
       expect(after).toBe(f.after);
       expect(delta).toBe(f.delta);
       expect(witness.binding).toEqual(f.before.binding);
-      expect(witness.server).toEqual(f.context.server);
+      expect(witness.server).toEqual(expectedServer);
       expect(witness.retirement.identities.map((row) => row.pid)).toEqual([123, 124]);
       expect(witness.maintenance.receipts).toHaveLength(9);
-      expect(witness.maintenance.identity).toEqual(f.context.server?.identity);
+      expect(witness.maintenance.identity).toEqual(expectedServer.identity);
       entered();
       await gate;
     },
@@ -273,8 +275,9 @@ for (const [name, mutate] of rejectionCases)
     try {
       await audit(
         {
-          assertWholePrimary: async () => {
+          assertWholePrimary: () => {
             calls++;
+            return Promise.resolve();
           },
         },
         f.before,
@@ -333,8 +336,9 @@ test("the existing maintenance reader rejects oversized and foreign-PID logs", a
     try {
       await audit(
         {
-          assertWholePrimary: async () => {
+          assertWholePrimary: () => {
             calls++;
+            return Promise.resolve();
           },
         },
         f.before,
@@ -357,9 +361,7 @@ test("the parent's original failure propagates and a changed log cannot finish s
   try {
     await audit(
       {
-        assertWholePrimary: async () => {
-          throw original;
-        },
+        assertWholePrimary: () => Promise.reject(original),
       },
       f.before,
       f.after,
@@ -374,12 +376,13 @@ test("the parent's original failure propagates and a changed log cannot finish s
   try {
     await audit(
       {
-        assertWholePrimary: async () => {
+        assertWholePrimary: () => {
           const bytes = readFileSync(f.context.logPath);
           const first = bytes[0];
           if (first === undefined) throw new Error("fixture log empty");
           bytes[0] = first ^ 1;
           writeFileSync(f.context.logPath, bytes);
+          return Promise.resolve();
         },
       },
       f.before,

@@ -362,6 +362,8 @@ export async function auditPreparedOperation(
   if (!context?.server || typeof primary.assertWholePrimary !== "function")
     throw new HelperError("Keycloak prepared operation witness missing");
   const { scope, child, server, manifest } = context;
+  const binary = manifest.binaries["fvoci-server"];
+  if (binary === undefined) throw new HelperError("Keycloak prepared operation executable missing");
   assertPreparedBinding(before.binding, context.binding);
   assertPreparedBinding(before.binding, after.binding);
   require(context.binding.source === manifest.sourceInputs.source &&
@@ -371,10 +373,9 @@ export async function auditPreparedOperation(
     /^[1-9][0-9]*$/.test(server.identity.startTicks) &&
     server.identity.pid === child.pid &&
     /^[a-f0-9]{64}$/.test(server.executable.sha256) &&
-    server.executable.path === manifest.binaries["fvoci-server"]?.path &&
+    server.executable.path === binary.path &&
     server.executable.sha256 ===
-      manifest.binaries["fvoci-server"]
-        ?.sha256, "Keycloak prepared operation server binding differs");
+      binary.sha256, "Keycloak prepared operation server binding differs");
   const index = scope.allocations.findIndex((allocation) => allocation.process === child);
   const allocation = scope.allocations[index];
   if (allocation === undefined)
