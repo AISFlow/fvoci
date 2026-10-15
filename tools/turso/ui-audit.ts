@@ -142,6 +142,7 @@ export interface Audit {
     document: string;
     original: SerialObservation;
     prepared: SerialObservation;
+    maintenance?: { server: Record_; leaseMicros: string };
     state: { original: unknown[]; current: unknown[]; after: unknown[] };
   };
   actors: Record<string, string>;
@@ -1222,6 +1223,29 @@ export async function selectedRoomRetirement(
   return readRoomRetirement(manifest, selected.origin, targetSha256);
 }
 
+/** Rebind the live parent-owned producer/FD before reading startup receipts. */
+export function selectedMaintenanceSnapshot(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  selected: SelectedRoomOrigin,
+  target: string,
+): Record_ {
+  const current = captureSelectedRoomLog(
+    manifest,
+    selected.origin.log.path,
+    selected.origin.log.fd,
+    selected.child,
+    selected.row,
+    selected.base,
+    target,
+  );
+  require(same(current.origin.log, selected.origin.log) &&
+    current.origin.source === selected.origin.source &&
+    current.origin.tree === selected.origin.tree &&
+    same(current.origin.identity, selected.origin.identity) &&
+    same(current.origin.executable, selected.origin.executable), "UI_SERIAL_ROOM_ORIGIN_CHANGED");
+  return maintenanceReceipts(current.origin.log.path, current.origin.identity, target);
+}
+
 /** Expiry is necessary, but only a real confirmed release and retirement authorize it. */
 export function assertRoomClosure(observation: SerialObservation, target: string): void {
   const history = observation.roomHistory ?? [];
@@ -1354,6 +1378,106 @@ export function auditMaintenance(before: unknown[], after: unknown[], audit: Aud
       same(old[3], ["null"]) &&
       same(updated[3], ["null"]), "UI_MAINTENANCE_OWNER_REMAINS");
     require(integer(updated[2]) === current.get(key), "UI_MAINTENANCE_GENERATION_UNEXPLAINED");
+  });
+}
+
+/** Live preparation permits only this restarted producer's exact startup
+ * prefixes. Unscheduled keys keep all four native cells, not just generation. */
+function auditPreparedMaintenance(before: unknown, prepared: unknown, audit: Audit): void {
+  const selected = audit.sqlitePreparation;
+  require(selected?.maintenance !== undefined, "UI_SQLITE_MAINTENANCE_PRODUCER_REQUIRED");
+  const { server, leaseMicros } = selected.maintenance;
+  const original = list(before, "operations", "maintenance_job_claims"),
+    current = list(prepared, "operations", "maintenance_job_claims");
+  const keys = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
+  require(same(
+    original.map((r) => integer(get(r, 0))),
+    keys,
+  ) &&
+    same(
+      current.map((r) => integer(get(r, 0))),
+      keys,
+    ) &&
+    same(fingerprints(original), get(before, "fingerprints", "maintenance_job_claims")) &&
+    same(fingerprints(current), get(prepared, "fingerprints", "maintenance_job_claims")) &&
+    same(
+      current,
+      get(selected.prepared.checks, "owners", "maintenance_job_claims"),
+    ), "UI_SQLITE_MAINTENANCE_ROWS_REFUSED");
+  const start = decimal(selected.original.checks.clockMicros),
+    now = decimal(selected.prepared.checks.clockMicros),
+    lease = decimal(leaseMicros);
+  require(start > 0n &&
+    now >= start &&
+    lease === 300000000n &&
+    get(server, "targetSha256") === audit.targetSha256 &&
+    typeof get(server, "identity", "pid") === "number" &&
+    (get(server, "identity", "pid") as number) > 0 &&
+    /^[0-9]+$/.test(
+      text(server, "identity", "startTicks"),
+    ), "UI_SQLITE_MAINTENANCE_PRODUCER_REQUIRED");
+  const records = list(server, "receipts"),
+    owners = new Set<unknown>();
+  require(records.length >= 3 &&
+    records.length <= 9 &&
+    records.every((r) =>
+      [1, 8, 9].includes(get(r, "key") as number),
+    ), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+  original.forEach((old, index) => {
+    const row = list(current[index]),
+      key = integer(get(old, 0));
+    require(list(old).length === 4 &&
+      row.length === 4 &&
+      same(get(old, 1), ["null"]) &&
+      same(get(old, 3), ["null"]) &&
+      integer(get(old, 2)) >= 0n, "UI_SQLITE_MAINTENANCE_ROWS_REFUSED");
+    if (![1n, 8n, 9n].includes(key)) {
+      require(same(old, row), "UI_SQLITE_UNSCHEDULED_MAINTENANCE_CHANGED");
+      return;
+    }
+    const receipts = records.filter((r) => get(r, "key") === Number(key));
+    const outcomes = receipts.map((r) => get(r, "outcome")),
+      owner = get(receipts[0], "ownerSha256");
+    require(receipts.length >= 1 &&
+      receipts.length <= 3 &&
+      same(outcomes, ["prepared", "acquired", "released"].slice(0, receipts.length)) &&
+      typeof owner === "string" &&
+      /^[a-f0-9]{64}$/.test(owner) &&
+      !owners.has(owner) &&
+      receipts.every(
+        (r) =>
+          get(r, "schema") === 1 &&
+          get(r, "pid") === get(server, "identity", "pid") &&
+          get(r, "ownerSha256") === owner,
+      ) &&
+      get(receipts[0], "generation") === null, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    owners.add(owner);
+    const previous = integer(get(old, 2)),
+      next = previous + 1n;
+    require(receipts
+      .slice(1)
+      .every(
+        (r) => get(r, "generation") === String(next),
+      ), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    if (integer(row[2]) === previous) {
+      require(same(row, old), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    } else {
+      require(integer(row[2]) === next &&
+        receipts.length >= 2, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      if (same(row[1], ["null"])) {
+        require(same(row[3], ["null"]) &&
+          receipts.length === 3, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      } else {
+        const token = text(row[1], 1),
+          expiry = integer(row[3]);
+        require(get(row[1], 0) === "blob" &&
+          /^[a-f0-9]{32}$/.test(token) &&
+          digest(Buffer.from(token, "hex")) === owner &&
+          expiry > now &&
+          expiry - lease >= start &&
+          expiry - lease <= now, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      }
+    }
   });
 }
 
@@ -1563,6 +1687,7 @@ export function assertSqlitePreparedPreserved(
     get(prepared, "backend") === "sqlite" &&
     get(prepared, "schemaCurrent") === true, "UI_SQLITE_PREPARATION_SNAPSHOT_REFUSED");
   preservedPrimaryRows(before, prepared, audit, "prepared");
+  auditPreparedMaintenance(before, prepared, audit);
   auditEventAndFenceCounters(before, prepared, audit, "prepared");
   const prior = list(selected.original.checks, "outbox"),
     current = list(selected.prepared.checks, "outbox");

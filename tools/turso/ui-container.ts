@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { deepEquals } from "bun";
 import { dirname, isAbsolute, join } from "node:path";
-import { root as checkout, sha, uid, gid } from "../selected-backend-ci/io.ts";
+import { root as checkout, sha, uid, gid, write, jsonText } from "../selected-backend-ci/io.ts";
 import { image as finalFixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import {
   fixtureInput,
@@ -1526,10 +1526,24 @@ export async function localServerStart(
 
 /** Narrow selected-parent observer entry. Its own existing process scope has
  * no preexisting server child; the selected parent keeps normal server ownership. */
+export function publishSelectedSqlitePacket(path: string, value: Record_): void {
+  const parent = lstatSync(dirname(path));
+  require(isAbsolute(path) &&
+    realpathSync(dirname(path)) === dirname(path) &&
+    parent.isDirectory() &&
+    !parent.isSymbolicLink() &&
+    parent.uid === uid() &&
+    parent.gid === gid() &&
+    (parent.mode & 0o777) === 0o700 &&
+    Buffer.byteLength(jsonText(value)) < 64 * 1024 * 1024, "UI_SQLITE_OBSERVER_PACKET_REFUSED");
+  write(path, value);
+}
+
 export async function selectedSqliteObserver(
   mode: string,
   request: Record_,
   signal?: AbortSignal,
+  packetPath?: string,
 ): Promise<Record_> {
   signal?.throwIfAborted();
   require(["baseline", "observe", "serial-observe"].includes(mode) &&
@@ -1543,11 +1557,13 @@ export async function selectedSqliteObserver(
   const { inodeOf } = await import("../selected-backend-ci/drivers/common.ts");
   const { localAllocation } = await import("../selected-backend-ci/admission.ts");
   const { UiProcesses, withProcesses } = await import("./ui-processes.ts");
-  const { write } = await import("../selected-backend-ci/io.ts");
   const current = await loadCurrent("sqlite", sqliteDriver);
   require(current.flow === "on" &&
     current.manifest.purpose === undefined &&
     current.grant.backend === "sqlite", "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+  require(packetPath === undefined ||
+    (dirname(packetPath) === join(current.run, "products") &&
+      !existsSync(packetPath)), "UI_SQLITE_OBSERVER_PACKET_REFUSED");
   const container = request.container;
   const input = request.input;
   require(typeof container === "string" &&
@@ -1684,6 +1700,9 @@ export async function selectedSqliteObserver(
     true,
   ), "UI_SQLITE_OBSERVER_SOURCE_CHANGED");
   target();
+  // Publication occurs only after the actual Scope/communication closure,
+  // source/target revalidation and interrupt checks above have all completed.
+  if (packetPath !== undefined) publishSelectedSqlitePacket(packetPath, value);
   return value;
 }
 
@@ -1694,9 +1713,10 @@ if (import.meta.main) {
   };
   process.on("SIGINT", onInterrupt);
   try {
-    const [entry, mode, extra] = process.argv.slice(2);
+    const [entry, mode, packetPath, extra] = process.argv.slice(2);
     require(entry === "--selected-sqlite-observe" &&
       typeof mode === "string" &&
+      typeof packetPath === "string" &&
       extra === undefined, "UI_SQLITE_OBSERVER_MODE_REFUSED");
     const chunks: Uint8Array[] = [];
     let length = 0;
@@ -1707,7 +1727,7 @@ if (import.meta.main) {
     }
     const request = parsePlain(Buffer.concat(chunks));
     require(isRecord(request), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
-    console.log(JSON.stringify(await selectedSqliteObserver(mode, request, interrupt.signal)));
+    await selectedSqliteObserver(mode, request, interrupt.signal, packetPath);
   } catch (error) {
     console.error(failureCode(error));
     process.exitCode = 1;

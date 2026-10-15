@@ -11,10 +11,13 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -98,6 +101,41 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
+
+/** Read only the separate, completed observer packet, never its mixed log. */
+export function readSelectedSqlitePacket(path: string): Record<string, unknown> {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(fd);
+    assert.ok(
+      before.isFile() &&
+        before.nlink === 1 &&
+        before.uid === process.getuid?.() &&
+        before.gid === process.getgid?.() &&
+        (before.mode & 0o777) === 0o600 &&
+        before.size > 0 &&
+        before.size < 64 * 1024 * 1024,
+      "SQLite native packet ownership/bound refused",
+    );
+    const bytes = readFileSync(fd),
+      after = fstatSync(fd);
+    assert.ok(
+      bytes.length === before.size &&
+        after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        after.ctimeMs === before.ctimeMs,
+      "SQLite native packet changed",
+    );
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    assert.ok(
+      typeof value === "object" && value !== null && !Array.isArray(value),
+      "SQLite native packet object required",
+    );
+    return value as Record<string, unknown>;
+  } finally {
+    closeSync(fd);
+  }
+}
 const checkpointKeys = [
   "known_driver_checkpoint",
   "preparation_command_exit",
@@ -1122,6 +1160,14 @@ export async function productCallbacks(
     revisionKeep: constant("DEFAULT_REVISION_KEEP"),
     revisionSnapshotIntervalHours: constant("DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS"),
   };
+  const mainSource = join(root, "src/main.rs");
+  assert.ok(
+    sha(mainSource) === state.before.tracked["src/main.rs"] &&
+      /FamilyMaintenanceLeasePolicy::new\(\s*std::time::Duration::from_secs\(300\),\s*std::time::Duration::from_secs\(60\),\s*\)/.test(
+        readText(mainSource),
+      ),
+    "selected native maintenance policy changed",
+  );
   assert.ok(
     (state.serverEnv.REVISION_KEEP ?? String(policy.revisionKeep)) ===
       String(policy.revisionKeep) &&
@@ -1176,6 +1222,7 @@ export async function productCallbacks(
   const native = async (mode: string, input: Record<string, unknown>, label: string) => {
     assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
     const nativeLog = join(directory, label + ".native.private.log");
+    const packetPath = join(directory, label + ".native.private.json");
     privateText(nativeLog, "");
     const result = await seam.command(
       [
@@ -1185,6 +1232,7 @@ export async function productCallbacks(
         join(root, "tools/turso/ui-container.ts"),
         "--selected-sqlite-observe",
         mode,
+        packetPath,
       ],
       {
         env: nativeEnvironment,
@@ -1194,15 +1242,14 @@ export async function productCallbacks(
         waitOnInterrupt: true,
       },
     );
-    assert.ok(result.returncode === 0 && Buffer.byteLength(result.stdout) < 64 * 1024 * 1024);
-    const parsed = record(JSON.parse(result.stdout));
+    assert.ok(result.returncode === 0 && result.stdout === "" && result.stderr === "");
+    const parsed = readSelectedSqlitePacket(packetPath);
     assert.ok(
       parsed.connectionClose === "confirmed" &&
         parsed.lifecycleDrain === "confirmed" &&
         parsed.leases === 0,
     );
     assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
-    privateText(join(directory, label + ".native.private.json"), JSON.stringify(parsed));
     return parsed;
   };
   const serial = async (label: string, validate: boolean) => {
@@ -1214,7 +1261,12 @@ export async function productCallbacks(
       auditModule.assertNativeClock(checked, start, end);
       return checked;
     }
-    return { dataset: record(observation, "dataset"), checks: record(observation, "checks") };
+    const checked = {
+      dataset: record(observation, "dataset"),
+      checks: record(observation, "checks"),
+    };
+    auditModule.assertNativeClock(checked, start, end);
+    return checked;
   };
   let original: import("../../turso/ui-audit.ts").SerialObservation | undefined;
   let current: import("../../turso/ui-audit.ts").SerialObservation | undefined;
@@ -1417,6 +1469,10 @@ export async function productCallbacks(
       );
       audit.sqlitePreparation.state.current = list(seedRow, "stateRow");
       audit.observedFences.push(...(list(seedRow, "roomFences") as unknown[][]));
+      audit.sqlitePreparation.maintenance = {
+        server: auditModule.selectedMaintenanceSnapshot(manifest, restartedOrigin, target),
+        leaseMicros: "300000000",
+      };
       auditModule.assertSqlitePreparedPreserved(original.dataset, current.dataset, audit);
       assert.ok(storageOriginal !== undefined);
       const storagePrepared = seam.treeHashes(state.storage);
