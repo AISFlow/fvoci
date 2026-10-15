@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { walkTiptap } from "../../../packages/editor/src/extract";
-import { expect, test } from "@playwright/test";
+import { expect, test, type WebSocketRoute } from "@playwright/test";
 import type { components } from "../src/generated/api";
 import { expectDocumentBoundaries } from "../e2e/document-boundary-oracle";
 import { expectBlocks } from "../e2e/workspace-wiki-vue-editor";
@@ -302,6 +302,16 @@ if (binding.suite === "products") {
     const owner = await actors.open("owner"),
       peer = await actors.open("outsider");
     const target = await wiki(owner.page, binding, "same editor reconnect and personal undo");
+    let offline = false;
+    let socket: WebSocketRoute | undefined;
+    await owner.page.routeWebSocket(/\/collab(?:\?|$)/, async (route) => {
+      if (offline) {
+        await route.close({ code: 1013, reason: "owned network pause" });
+        return;
+      }
+      route.connectToServer();
+      socket = route;
+    });
     await mount(owner, target, "on");
     await mount(peer, target, "on");
     const editor = owner.page.locator(".fvoci-editor .ProseMirror");
@@ -314,12 +324,16 @@ if (binding.suite === "products") {
     await expectTokens(peer.page, ["살아남을한글😀"]);
     await owner.context.setOffline(true);
     try {
+      if (!socket) throw new Error("SELECTED_FINAL_ACTUAL_SOCKET_MISSING");
+      offline = true;
+      await socket.close({ code: 1012, reason: "owned temporary disconnect" });
       await expect(owner.page.locator('[data-collab-status="connected"]')).toHaveCount(0);
       await editor.focus();
       await owner.page.keyboard.type(" 끊긴 동안 입력");
       await expectNotDurablySaved(owner.page);
       await expect(owner.page.getByRole("button", { name: "저장", exact: true })).toBeDisabled();
     } finally {
+      offline = false;
       await owner.context.setOffline(false);
     }
     await waitConnected(owner.page);
