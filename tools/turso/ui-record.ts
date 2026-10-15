@@ -400,15 +400,21 @@ export function recheckPhysical(recorded: unknown, collect: () => unknown = phys
 }
 
 export function recordBefore(lease?: LocalLease): void {
+  // Preserve the original missing-output error before admission, without writes.
+  env("RUNNER_TEMP");
   const source = sourceIdentity("record-before", lease);
+  const directory = root();
   if (process.env.FVOCI_TURSO_UI_FINAL === "1") {
     finalRunIdentity(source);
     call(["docker", "pull", finalFixtureImage]);
-    write(join(root(), "final-image-before.private.json"), observeFinalImage());
-    write(join(root(), "final-observer-before.private.json"), prepareFinalProcessObserver(source));
+    write(join(directory, "final-image-before.private.json"), observeFinalImage());
+    write(
+      join(directory, "final-observer-before.private.json"),
+      prepareFinalProcessObserver(source),
+    );
   }
-  write(join(root(), "source-before.json"), source);
-  write(join(root(), "physical-before.private.json"), physicalInputs());
+  write(join(directory, "source-before.json"), source);
+  write(join(directory, "physical-before.private.json"), physicalInputs());
 }
 
 function elf(path: string): boolean {
