@@ -65,7 +65,7 @@ export function copyWorkflows(dst: string): void {
 // Besides the workflows, the files the complete registry check reads.
 const REGISTRY_INPUTS = [
   "Cargo.toml",
-  "scripts/run-rust-collaboration-ci-tests.sh",
+  "xtask/collaboration-suites.tsv",
   "scripts/collab-capacity-probe.sh",
   "xtask/selected-library-filters.txt",
   "xtask/native-library-cohorts.tsv",

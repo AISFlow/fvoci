@@ -1,3 +1,4 @@
+import { RUST_COLLAB_INTEGRATION_RUN } from "./rust-shared.ts";
 // Workflow mutations shared by the registry tests. Each case edits one real
 // workflow text and names a message the verifier must report for it.
 
@@ -1322,8 +1323,8 @@ function caseList(): MutationCase[] {
         "  collaboration:\n",
         "  rust-ci-gate:\n",
         swap(
-          "      - run: cargo fetch --locked\n",
-          "      - uses: actions/setup-python@v5\n      - run: cargo fetch --locked\n",
+          "      - uses: oven-sh/setup-bun@",
+          "      - uses: actions/setup-python@v5\n      - uses: oven-sh/setup-bun@",
         ),
       ),
       "rust: collaboration " + NOT_PYTHON,
@@ -1352,8 +1353,8 @@ function caseList(): MutationCase[] {
     [
       "shell",
       swap(
-        "        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
-        "        shell: python\n        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+        "        run: " + RUST_COLLAB_INTEGRATION_RUN + "\n",
+        "        shell: python\n        run: " + RUST_COLLAB_INTEGRATION_RUN + "\n",
       ),
       "rust: collaboration " + NOT_PYTHON,
     ],

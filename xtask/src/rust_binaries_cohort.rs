@@ -28,6 +28,41 @@ pub const DB_TESTS: &str = "db-tests";
 /// Root db-tests libtest harness, shared by native-input consumers.
 pub const LIBRARY: &str = "db-tests-library";
 
+/// The single inventory of collaboration executables and their scheduling.
+pub const COLLABORATION_SUITES: &str = include_str!("../collaboration-suites.tsv");
+
+pub fn collaboration_suites(text: &str) -> Result<Vec<(&str, &str)>, String> {
+    let mut names = BTreeSet::new();
+    let mut suites = Vec::new();
+    for line in text.lines().filter(|line| !line.starts_with('#')) {
+        let Some((mode, name)) = line.split_once('\t') else {
+            return Err("rust: invalid collaboration suite row".into());
+        };
+        if !matches!(mode, "parallel" | "serial")
+            || name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || !names.insert(name)
+        {
+            return Err("rust: invalid or duplicate collaboration suite".into());
+        }
+        suites.push((mode, name));
+    }
+    if suites
+        .iter()
+        .filter(|(mode, _)| *mode == "parallel")
+        .count()
+        != 9
+        || suites.iter().filter(|(mode, _)| *mode == "serial").count() != 1
+        || suites.last() != Some(&("serial", "task_collab_integration"))
+        || !names.contains("collab_product")
+    {
+        return Err(
+            "rust: collaboration requires nine parallel suites and the serial task suite".into(),
+        );
+    }
+    Ok(suites)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Test,
