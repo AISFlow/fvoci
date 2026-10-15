@@ -1980,6 +1980,14 @@ pub struct ScheduledRevisionCandidate {
     pub anchor_at: DateTime<Utc>,
 }
 
+impl ScheduledRevisionCandidate {
+    /// Shared by the scheduler and the readonly native fixture. This only
+    /// decides eligibility; it does not load/lock a source or grant a writer.
+    pub(crate) fn snapshot_due(&self, cutoff: DateTime<Utc>) -> bool {
+        self.anchor_at < cutoff && self.state_updated_at > self.anchor_at
+    }
+}
+
 /// Exact source retained while the maintenance consumer owns its writer and
 /// awaits native capture/comparison. The current head cannot be fabricated by
 /// the caller from a candidate or a cached room fence.
