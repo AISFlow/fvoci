@@ -7,7 +7,7 @@ import { existsSync, linkSync, mkdirSync, readdirSync, unlinkSync, watch } from 
 import { get } from "node:http";
 import { join } from "node:path";
 import { digest, sha } from "../io.ts";
-import type { Browser, Bundle, DriverReceipt, Inputs, Web } from "../types.ts";
+import type { Browser, Bundle, Inputs, Web } from "../types.ts";
 import { command, privateWrite, readText, type Command, type Completed } from "./common.ts";
 
 import {
@@ -227,13 +227,46 @@ export async function measureBrowser(
     await pending;
   }
 }
+export interface EqualInputs {
+  source: string;
+  tree: string;
+  workloadHash: string;
+  sourceInputsHash: string;
+  image: string;
+  native: Record<string, string>;
+  assets: Record<string, string>;
+  browser: Browser;
+}
+export interface EqualMeasurement {
+  inputs: EqualInputs;
+  browser: Record<string, unknown>;
+  samples: Sample[];
+}
+// Only facts consumed by the pure comparison. Selected driver receipts remain
+// structurally compatible; other admitted lifecycles need no invented lane.
+export interface EqualPairReceipt {
+  source?: string;
+  tree?: string;
+  root_owner?: string;
+  purpose?: unknown;
+  selected_flow?: string;
+  final_exit_code?: number;
+  actual_browser_tests?: number;
+  retries?: number;
+  original_driver_failure?: unknown;
+  owned_container_absent?: boolean;
+  owned_loopback_port_closed?: boolean;
+  recorded_process_identities_retired?: boolean;
+  cleanup_errors?: unknown[];
+  equal_work?: unknown;
+}
 export function measurementInputs(
   before: Inputs,
   bundle: Bundle,
   web: Web,
   browser: Browser,
   image: string,
-): object {
+): EqualInputs {
   return {
     source: before.head,
     tree: before.tree,
@@ -321,7 +354,7 @@ export function validateEqualReport(
   return facts;
 }
 
-export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
+export function comparePair(on: EqualPairReceipt, off: EqualPairReceipt): object {
   const connections = (value: ConnectionFacts, flow: string, closed: boolean) => {
     assert.ok(
       [value.opened, value.collabOpened, value.closeEvents, value.active, value.collabActive].every(
@@ -339,7 +372,7 @@ export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
     assert.ok(flow === "on" ? value.collabOpened >= 1 : value.collabOpened === 0);
     if (closed) assert.ok(value.active === 0);
   };
-  const qualify = (receipt: DriverReceipt, flow: string) => {
+  const qualify = (receipt: EqualPairReceipt, flow: string) => {
     assert.ok(
       receipt.final_exit_code === 0 &&
         receipt.purpose === "equal-work" &&
@@ -356,20 +389,7 @@ export function comparePair(on: DriverReceipt, off: DriverReceipt): object {
         receipt.recorded_process_identities_retired === true &&
         deepEquals(receipt.cleanup_errors, []),
     );
-    const measurement = receipt.equal_work as {
-      inputs: {
-        source: string;
-        tree: string;
-        workloadHash: string;
-        sourceInputsHash: string;
-        image: string;
-        native: Record<string, string>;
-        assets: Record<string, string>;
-        browser: Browser;
-      };
-      browser: Record<string, unknown>;
-      samples: Sample[];
-    };
+    const measurement = receipt.equal_work as EqualMeasurement;
     assert.ok(
       measurement.browser.flow === flow && measurement.browser.workloadHash === workloadHash,
     );

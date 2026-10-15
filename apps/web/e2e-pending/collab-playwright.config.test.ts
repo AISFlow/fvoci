@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve, join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const configPath = resolve(import.meta.dir, "collab-playwright.config.ts");
@@ -11,6 +11,8 @@ function selected(env: Record<string, string> = {}) {
     "FVOCI_E2E_SELECTED_BACKEND",
     "FVOCI_E2E_SELECTED_FLOW",
     "FVOCI_E2E_PENDING",
+    "FVOCI_E2E_FINAL_BROWSER_BIN",
+    "FVOCI_TURSO_UI_FINAL",
   ]);
   const clean = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !selectionNames.has(name)),
@@ -22,7 +24,7 @@ function selected(env: Record<string, string> = {}) {
       `const {default:c}=await import(${JSON.stringify(configPath)});
        const names=["workspace-wiki-selected-backend.spec.ts","workspace-off-selected-backend.spec.ts","v060-sqlite-revision-restore.spec.ts","v060-equal-work.spec.ts","wiki-collab.spec.ts"];
        const ignore=[c.testIgnore].flat();
-       console.log(JSON.stringify({names:names.filter(n=>c.testMatch.test(n)&&!ignore.some(p=>p.test(n))),metadata:c.metadata,workers:c.workers,retries:c.retries}));`,
+       console.log(JSON.stringify({names:names.filter(n=>c.testMatch.test(n)&&!ignore.some(p=>p.test(n))),metadata:c.metadata,workers:c.workers,retries:c.retries,launch:c.use.launchOptions}));`,
     ],
     { env: { ...clean, ...env }, stdout: "pipe", stderr: "pipe" },
   );
@@ -32,6 +34,53 @@ function selected(env: Record<string, string> = {}) {
     error: result.stderr.toString(),
   };
 }
+
+test("final Chromium is explicit and its browser environment excludes parent credentials", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fvoci-final-config-"));
+  try {
+    const binary = join(directory, "chromium"),
+      link = join(directory, "symlink");
+    writeFileSync(binary, "metadata fixture");
+    symlinkSync(binary, link);
+    const valid = {
+      FVOCI_E2E_SELECTED_BACKEND: "libsql-remote",
+      FVOCI_E2E_SELECTED_FLOW: "on",
+      FVOCI_TURSO_UI_FINAL: "1",
+      FVOCI_E2E_FINAL_BROWSER_BIN: binary,
+      FVOCI_LIBSQL_AUTH_TOKEN: "PRIVATE_UNIT_CANARY",
+      JEST_WORKER_ID: "unit",
+    };
+    const result = selected(valid);
+    expect(result.code).toBe(0);
+    const config = JSON.parse(result.output) as {
+      launch: { executablePath: string; env: Record<string, string> };
+    };
+    expect(config.launch.executablePath).toBe(binary);
+    expect(
+      Object.keys(config.launch.env).every((key) => ["PATH", "LANG", "TZ", "TMPDIR"].includes(key)),
+    ).toBe(true);
+    expect(result.output).not.toContain("PRIVATE_UNIT_CANARY");
+    for (const change of [
+      { FVOCI_TURSO_UI_FINAL: "0" },
+      { FVOCI_E2E_SELECTED_BACKEND: "postgres" },
+      { FVOCI_E2E_SELECTED_BACKEND: "sqlite" },
+      { FVOCI_E2E_FINAL_BROWSER_BIN: "relative" },
+      { FVOCI_E2E_FINAL_BROWSER_BIN: directory },
+      { FVOCI_E2E_FINAL_BROWSER_BIN: link },
+    ])
+      expect(selected({ ...valid, ...change }).code).not.toBe(0);
+    expect(
+      selected({
+        ...valid,
+        FVOCI_E2E_SELECTED_BACKEND: "sqlite",
+        FVOCI_E2E_RESTORE_INPUT: join(directory, "restore.private.json"),
+        FVOCI_E2E_RESTORE_SQLITE_ROOT: directory,
+      }).code,
+    ).toBe(0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("pending discovery keeps pending specs; both allocated normal flows and the dedicated restore spec are excluded", () => {
   const result = selected({ FVOCI_E2E_PENDING: "1" });

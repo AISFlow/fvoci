@@ -17,8 +17,10 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { deepEquals } from "bun";
 import { dirname, isAbsolute, join } from "node:path";
-import { root as checkout, sha, uid } from "../selected-backend-ci/io.ts";
+import { root as checkout, sha, uid, gid } from "../selected-backend-ci/io.ts";
+import { image as finalFixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import {
   fixtureInput,
   cleanEnv,
@@ -55,7 +57,7 @@ import {
   type ProcRow,
   type Scope,
 } from "./ui-processes.ts";
-import { loadLocalLease, type LocalLease, type Manifest } from "./ui-record.ts";
+import { currentBuild, loadLocalLease, type LocalLease, type Manifest } from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
@@ -103,6 +105,9 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_MAINTENANCE_INTERVAL_SECS",
   "FVOCI_UPLOAD_GC_INTERVAL_SECS",
   "FVOCI_REVISION_SWEEP_INTERVAL_SECS",
+  "REVISION_KEEP",
+  "REVISION_SNAPSHOT_INTERVAL_HOURS",
+  "METRICS_ALLOW_IPS",
   // The normal mailer relay of a dedicated auth allocation: an owned loopback
   // sink, no SMTP credential. The native fixture never receives it.
   "SMTP_HOST",
@@ -156,6 +161,8 @@ export interface Bound {
 }
 /** Server allocation state carried from start to stop. */
 export interface ServerHandle {
+  /** Actual sealed hosted image of a final-only owned container. */
+  runtimeImage?: string;
   child: Child;
   containerId?: string;
   goFd?: number | null;
@@ -224,10 +231,31 @@ export function readShellProof(runtime: unknown): string {
 }
 
 function canonicalImage(grant: unknown): string {
-  if (executionMode() === "github-ci") return QUALIFIED_CANONICAL_IMAGE;
+  if (executionMode() === "github-ci") {
+    if (isRecord(grant) && isRecord(grant.finalRuntime)) {
+      require(grant.finalRuntime.reference === finalFixtureImage &&
+        typeof grant.finalRuntime.imageId === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(grant.finalRuntime.imageId), "UI_FINAL_RUNTIME_IMAGE_REFUSED");
+      return grant.finalRuntime.imageId;
+    }
+    return QUALIFIED_CANONICAL_IMAGE;
+  }
   const runtime = get(grant, "canonicalRuntime");
   require(readShellProof(runtime) === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
   return get(runtime, "imageId") as string;
+}
+
+function containerUser(context: unknown): { uid: number; gid: number } {
+  if (executionMode() === "github-ci" && isRecord(context) && isRecord(context.finalRuntime)) {
+    const user = uid(),
+      group = gid();
+    require(user > 0 &&
+      group > 0 &&
+      context.finalRuntime.uid === user &&
+      context.finalRuntime.gid === group, "UI_FINAL_RUNTIME_USER_CHANGED");
+    return { uid: user, gid: group };
+  }
+  return { uid: 1000, gid: 1000 };
 }
 
 /** Local receipts and inherited image config must publish no private inputs. */
@@ -344,6 +372,7 @@ export function containerArgv(
   require(launcher.startsWith("/") && capsule.startsWith("/"), "UI_CURRENT_ARTIFACT_MISSING");
   const caps = allocationCaps(grant);
   const image = canonicalImage(grant);
+  const user = containerUser(grant);
   const limit = caps["memory.max"] as string;
   const memory = limit === "max" ? [] : ["--memory", limit, "--memory-swap", limit];
   const argv = [
@@ -359,12 +388,12 @@ export function containerArgv(
     "--security-opt",
     "no-new-privileges",
     "--user",
-    "1000:1000",
+    String(user.uid) + ":" + String(user.gid),
     ...memory,
     "--pids-limit",
     caps["pids.max"] as string,
     "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=67108864,uid=1000,gid=1000",
+    "/tmp:rw,noexec,nosuid,size=67108864,uid=" + String(user.uid) + ",gid=" + String(user.gid),
     "--network",
     "host",
     "--entrypoint",
@@ -426,6 +455,9 @@ export function creationIdentity(
     get(inspect, "State", "Running") === false, "UI_DAEMON_PID_REFUSED");
   const image = canonicalImage(grant);
   require(config.Image === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  if (isRecord(grant) && grant.finalRuntime !== undefined)
+    require(get(inspect, "Image") === image &&
+      get(inspect, "Path") === QUALIFIED_SHELL, "UI_FINAL_RUNTIME_IMAGE_CHANGED");
   if (executionMode() === "orca-local") {
     require(get(inspect, "Image") === image &&
       get(inspect, "Path") === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
@@ -445,7 +477,9 @@ export function creationIdentity(
   require(host.ReadonlyRootfs === true &&
     capDrop.length === 1 &&
     capDrop[0] === "ALL", "UI_DAEMON_CAP_REFUSED");
-  require(config.User === "1000:1000" && host.Privileged !== true, "UI_DAEMON_CAP_REFUSED");
+  const user = containerUser(grant);
+  require(config.User === String(user.uid) + ":" + String(user.gid) &&
+    host.Privileged !== true, "UI_DAEMON_CAP_REFUSED");
   // Present CPU fields must be the Docker zero values. Missing fields are not proof.
   if (Object.hasOwn(host, "CpuQuota"))
     require(isInt(host.CpuQuota) && host.CpuQuota === 0, "UI_DAEMON_CAP_REFUSED");
@@ -668,9 +702,11 @@ export function bindPausedShell(
   const expected = allocationCaps(grant);
   for (const [key, required] of Object.entries(expected))
     require(caps[key] === required, "UI_DAEMON_CAP_REFUSED");
-  const fixed = (value: unknown) =>
-    Array.isArray(value) && value.length === 4 && value.every((item) => item === 1000);
-  require(fixed(credentials.uid) && fixed(credentials.gid), "UI_DAEMON_PID_REFUSED");
+  const user = containerUser(grant);
+  const fixed = (value: unknown, expected: number) =>
+    Array.isArray(value) && value.length === 4 && value.every((item) => item === expected);
+  require(fixed(credentials.uid, user.uid) &&
+    fixed(credentials.gid, user.gid), "UI_DAEMON_PID_REFUSED");
   return {
     maintenance: { pid: namespace, startTicks: ticks },
     retirement: { pid, startTicks: ticks },
@@ -1107,8 +1143,7 @@ export async function publishContainer(
     );
     const creation = creationIdentity(get(inspected, 0), argv, secretValues, kind, grant);
     require(creation.qualification === BLOCKED &&
-      get(grant, "canonicalRuntime", "imageId") ===
-        creation.image, "UI_DAEMON_OBSERVATION_UNSUPPORTED");
+      canonicalImage(grant) === creation.image, "UI_DAEMON_OBSERVATION_UNSUPPORTED");
     scope.io.write(join(directory, "creation-identity.private.json"), creation);
     return [containerId, creation, grant];
   } catch (original) {
@@ -1268,6 +1303,25 @@ export async function stopAttachedDaemon(
   reportCleanup(scope, original, errors);
   if (original !== null) throw original as Error;
   if (errors.length) throw new UiError("UI_PROCESS_CLOSURE_FAILED");
+  if (server.runtimeImage !== undefined) {
+    const listed = await docker.client(
+      scope,
+      [
+        "docker",
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+        "--filter",
+        "id=" + String(server.containerId),
+      ],
+      10,
+    );
+    require(decodeUtf8(listed).trim() === "", "UI_FINAL_CONTAINER_REMAINS");
+    (stopped as Record_).containerAbsent = true;
+    (stopped as Record_).imageId = server.runtimeImage;
+  }
   return stopped as Record_;
 }
 
@@ -1283,6 +1337,31 @@ const localStartSteps: LocalStartSteps = {
   cleanup: cleanupOwned,
   clock: now,
 };
+
+/** The existing publisher/lifecycle with the actual same-job hosted image
+ * observation. This context is not a LocalGrant or a new runtime loader. */
+export async function hostedFinalServerStart(
+  scope: Scope,
+  manifest: Manifest,
+  environment: Record<string, string>,
+  directory: string,
+): Promise<Started> {
+  require(executionMode() === "github-ci" &&
+    environment.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE === "true" &&
+    environment.FVOCI_TEST_TURSO_DESTRUCTIVE === "true", "UI_FINAL_HUMAN_GATE_REQUIRED");
+  const current = currentBuild(lease.load);
+  require(manifest.finalRuntime !== undefined &&
+    deepEquals(current, manifest, true), "UI_FINAL_RUNTIME_IMAGE_CHANGED");
+  const running = await localServerStart(scope, manifest, environment, directory, false, {
+    ...localStartSteps,
+    publish: (owned, output, env, binaries, binary, command, kind) =>
+      publishContainer(owned, output, env, binaries, binary, command, kind, () => ({
+        finalRuntime: manifest.finalRuntime,
+      })),
+  });
+  running.server.runtimeImage = manifest.finalRuntime.imageId;
+  return running;
+}
 
 export async function localServerStart(
   scope: Scope,

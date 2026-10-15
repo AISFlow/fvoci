@@ -24,6 +24,8 @@ export const FIXTURE_SUITES = [
   "tools/turso/ui-auth-session.test.ts",
   "tools/turso/ui-cli.test.ts",
   "tools/turso/ui-container.test.ts",
+  "tools/turso/ui-equal-work.test.ts",
+  "tools/turso/ui-final.test.ts",
   "tools/turso/ui-flow.test.ts",
   "tools/turso/ui-native.test.ts",
   "tools/turso/ui-processes.test.ts",

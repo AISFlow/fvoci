@@ -41,7 +41,12 @@ import {
   type ServerHandle,
 } from "./ui-container.ts";
 import { communicate, identity, now, poll, wait, type Scope } from "./ui-processes.ts";
-import { loadLocalLease, type Manifest } from "./ui-record.ts";
+import {
+  loadLocalLease,
+  recheckFinalBrowsers,
+  type BrowserEngine,
+  type Manifest,
+} from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 
@@ -277,7 +282,8 @@ const SECRET_BROWSER_KEYS = [
 
 export async function browser(
   scope: Scope,
-  manifest: Pick<Manifest, "bun" | "physicalInputs">,
+  manifest: Pick<Manifest, "bun" | "physicalInputs" | "finalBrowsers" | "finalBrowserRuntime"> &
+    Partial<Pick<Manifest, "sourceInputs">>,
   directory: string,
   environment: Record<string, string>,
   spec: string,
@@ -285,15 +291,42 @@ export async function browser(
   workspace: string = checkout,
   config = "collab-playwright.config.ts",
   heavy?: string,
+  engine?: BrowserEngine,
 ): Promise<unknown> {
   const flow = environment.FVOCI_E2E_SELECTED_FLOW;
+  const final =
+    config === "selected-final-playwright.config.ts" && spec === "selected-final-acceptance.ts";
+  const equal = config === "equal-work-playwright.config.ts" && spec === "v060-equal-work.spec.ts";
   // The dedicated auth spec has its own config and exactly its three cases.
-  require((config === "collab-playwright.config.ts" && spec !== AUTH_SPEC) ||
+  require((config === "collab-playwright.config.ts" &&
+    spec !== AUTH_SPEC &&
+    spec !== "selected-final-acceptance.ts") ||
     (spec === RESTORE && config === "turso-restore-playwright.config.ts") ||
     (spec === AUTH_SPEC &&
       config === "auth-session-playwright.config.ts" &&
       grep === undefined &&
-      (flow === "on" || flow === "off")), "UI_BROWSER_CONFIG_REFUSED");
+      (flow === "on" || flow === "off")) ||
+    final ||
+    (equal &&
+      manifest.finalBrowsers !== undefined &&
+      environment.FVOCI_E2E_EQUAL_WORK_PREPARED === "1"), "UI_BROWSER_CONFIG_REFUSED");
+  require(final
+    ? engine !== undefined
+    : engine === undefined, "UI_FINAL_BROWSER_SELECTION_REQUIRED");
+  let finalBindingHash: string | undefined;
+  if (final) {
+    recheckFinalBrowsers(manifest);
+    const bindingPath = environment.FVOCI_E2E_FINAL_ACTOR_BINDING;
+    require(typeof bindingPath === "string", "UI_FINAL_ACTOR_BINDING_REQUIRED");
+    const binding = privateRead(bindingPath, 16384);
+    require(get(binding, "browser") === engine &&
+      manifest.sourceInputs !== undefined &&
+      get(binding, "source") === manifest.sourceInputs.source &&
+      get(binding, "tree") === manifest.sourceInputs.tree &&
+      environment.FVOCI_E2E_FINAL_BROWSER === engine, "UI_FINAL_BROWSER_SELECTION_CHANGED");
+    finalBindingHash = sha(bindingPath);
+  }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   const report = join(directory, "playwright.private.json");
   const env: Record<string, string> = {
     ...cleanEnv(),
@@ -304,6 +337,12 @@ export async function browser(
   };
   // A Bun test worker's id must not reach the Playwright child.
   Reflect.deleteProperty(env, "JEST_WORKER_ID");
+  if (final && engine !== undefined) {
+    env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers?.[engine].path ?? "";
+  } else if (manifest.finalBrowsers !== undefined) {
+    env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers.chromium.path;
+  }
+  if (manifest.finalBrowsers !== undefined) env.FVOCI_TURSO_UI_FINAL = "1";
   require(!SECRET_BROWSER_KEYS.some((key) =>
     Object.hasOwn(env, key),
   ), "UI_BROWSER_SECRET_ENV_REFUSED");
@@ -410,6 +449,12 @@ export async function browser(
   }
   if (existsSync(report)) chmodSync(report, 0o600);
   require(code === 0, "UI_ACTUAL_BROWSER_FAILED");
+  if (final) {
+    recheckFinalBrowsers(manifest);
+    require(sha(environment.FVOCI_E2E_FINAL_ACTOR_BINDING as string) ===
+      finalBindingHash, "UI_FINAL_ACTOR_BINDING_CHANGED");
+  }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   return JSON.parse(readFileSync(report, "utf8"));
 }
 

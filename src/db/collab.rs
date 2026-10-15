@@ -1055,6 +1055,53 @@ pub async fn renew_family_document_room(
     Ok(changed == 1)
 }
 
+#[cfg(feature = "db-tests")]
+fn room_release_receipt(
+    kind: CollabKind,
+    workspace: Uuid,
+    target: Uuid,
+    owner: Uuid,
+    fence: i64,
+    expires_at: i64,
+    pid: u32,
+) -> Value {
+    json!({
+        "schema":1,
+        "kind":match kind { CollabKind::Document => "document", CollabKind::Task => "task" },
+        "workspaceId":workspace.to_string(),
+        "targetId":target.to_string(),
+        "ownerSha256":hex::encode(Sha256::digest(owner.as_bytes())),
+        "fence":fence.to_string(),
+        "expiresAtMicros":expires_at.to_string(),
+        "pid":pid,
+        "commit":"confirmed",
+    })
+}
+
+#[cfg(feature = "db-tests")]
+fn emit_room_release(
+    kind: CollabKind,
+    workspace: Uuid,
+    target: Uuid,
+    owner: Uuid,
+    fence: i64,
+    expires_at: i64,
+) {
+    use std::io::Write as _;
+    let receipt = room_release_receipt(
+        kind,
+        workspace,
+        target,
+        owner,
+        fence,
+        expires_at,
+        std::process::id(),
+    );
+    // Observability cannot change the original writer's bool/error/ACK. The
+    // parent must refuse missing receipts, including a failed stderr write.
+    let _ = writeln!(std::io::stderr().lock(), "FVOCI_ROOM_RELEASE {receipt}");
+}
+
 pub async fn release_family_document_room(
     backend: &Backend,
     fence: FamilyRoomFence,
@@ -1072,6 +1119,17 @@ pub async fn release_family_document_room(
         &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.document_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)],
     ).await?;
     tx.commit().await.map_err(|error| error.source)?;
+    #[cfg(feature = "db-tests")]
+    if changed == 1 {
+        emit_room_release(
+            CollabKind::Document,
+            fence.workspace_id,
+            fence.document_id,
+            fence.owner_token,
+            fence.fence,
+            now,
+        );
+    }
     Ok(changed == 1)
 }
 
@@ -4568,6 +4626,52 @@ impl OperationTx<'_, '_> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "db-tests")]
+    #[test]
+    fn confirmed_room_release_receipt_binds_native_lineage_without_owner() {
+        let workspace = Uuid::from_u128(1);
+        let target = Uuid::from_u128(2);
+        let owner = Uuid::from_u128(3);
+        let exact = 9_007_199_254_740_993;
+        for (kind, label) in [
+            (CollabKind::Document, "document"),
+            (CollabKind::Task, "task"),
+        ] {
+            let receipt = room_release_receipt(kind, workspace, target, owner, exact, exact, 42);
+            assert_eq!(
+                receipt,
+                json!({
+                    "schema":1,"kind":label,"workspaceId":workspace.to_string(),
+                    "targetId":target.to_string(),
+                    "ownerSha256":"8b1ae42fc4b17726106d647de9f43a6f33bf1df273310924b03e789769904c9c",
+                    "fence":"9007199254740993","expiresAtMicros":"9007199254740993",
+                    "pid":42,"commit":"confirmed",
+                })
+            );
+            assert_eq!(receipt.as_object().unwrap().len(), 9);
+            let encoded = receipt.to_string();
+            assert!(!encoded.contains(&owner.to_string()));
+            assert!(!encoded.contains(&hex::encode(owner.as_bytes())));
+            for secret in [
+                "ownerToken",
+                "credential",
+                "password",
+                "token",
+                "email",
+                "payload",
+            ] {
+                assert!(!encoded.contains(secret));
+            }
+            // The normal UPDATE permits another successful release of this
+            // same lineage. The parent must bind commit order/final expiry,
+            // rather than reject every repeated owner/fence as a duplicate.
+            let later = room_release_receipt(kind, workspace, target, owner, exact, exact + 1, 42);
+            assert_eq!(receipt["ownerSha256"], later["ownerSha256"]);
+            assert_eq!(receipt["fence"], later["fence"]);
+            assert_eq!(later["expiresAtMicros"], "9007199254740994");
+        }
+    }
+
     #[test]
     fn empty_yjs_seed_is_fixed_bytes() {
         assert_eq!(EMPTY_YJS_STATE_V1, &[0, 0]);
@@ -5001,6 +5105,16 @@ impl OperationTx<'_, '_> {
         &mut self,
         fence: FamilyTaskRoomFence,
     ) -> Result<bool, sqlx::Error> {
+        Ok(self
+            .release_family_task_room_fence_expiry(fence)
+            .await?
+            .is_some())
+    }
+
+    async fn release_family_task_room_fence_expiry(
+        &mut self,
+        fence: FamilyTaskRoomFence,
+    ) -> Result<Option<i64>, sqlx::Error> {
         let Self::SqliteFamily(tx) = self else {
             return Err(sqlx::Error::Protocol(
                 "task room lease requires SQLite family".into(),
@@ -5011,7 +5125,7 @@ impl OperationTx<'_, '_> {
         let now = family_room_now(tx).await?;
         let changed=tx.execute("UPDATE task_collab_room_fences SET expires_at=?5 WHERE workspace_id=?1 AND task_id=?2 AND owner_token=?3 AND fence=?4",
             &[Cell::uuid(fence.workspace_id),Cell::uuid(fence.task_id),Cell::uuid(fence.owner_token),Cell::Integer(fence.fence),Cell::Integer(now)]).await?;
-        Ok(changed == 1)
+        Ok((changed == 1).then_some(now))
     }
 }
 
@@ -5130,12 +5244,24 @@ pub(crate) async fn release_family_task_room(
     let result = async {
         let mut op = tx.operation();
         op.set_tenant(fence.workspace_id).await?;
-        Ok(Ok(op.release_family_task_room_fence(fence).await?))
+        Ok(Ok(op.release_family_task_room_fence_expiry(fence).await?))
     }
     .await;
-    finish_family_task_room(tx, result)
+    let expires_at = finish_family_task_room(tx, result)
         .await?
-        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(TaskRoomRefusal(error))))
+        .map_err(|error| sqlx::Error::AnyDriverError(Box::new(TaskRoomRefusal(error))))?;
+    #[cfg(feature = "db-tests")]
+    if let Some(expires_at) = expires_at {
+        emit_room_release(
+            CollabKind::Task,
+            fence.workspace_id,
+            fence.task_id,
+            fence.owner_token,
+            fence.fence,
+            expires_at,
+        );
+    }
+    Ok(expires_at.is_some())
 }
 
 pub(crate) async fn abandon_family_task_room_start(

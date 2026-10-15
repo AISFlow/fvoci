@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import { isAbsolute } from "node:path";
+import { finalChromiumLaunch } from "./collab-playwright.config";
 
 const backend = process.env.FVOCI_E2E_SELECTED_BACKEND;
 const flow = process.env.FVOCI_E2E_SELECTED_FLOW;
@@ -23,6 +24,7 @@ if (
     "Auth acceptance requires an allocated normal server, exact source/tree and SMTP capture",
   );
 if (process.env.CI && !process.versions.bun) throw new Error("Playwright must run under Bun in CI");
+const finalLaunch = finalChromiumLaunch();
 
 export default defineConfig({
   forbidOnly: !!process.env.CI,
@@ -37,6 +39,7 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
+    ...(finalLaunch ? { launchOptions: finalLaunch } : {}),
     // Reset URLs contain a real one-use token. Capture only explicit safe witnesses.
     trace: "off",
     screenshot: "off",
