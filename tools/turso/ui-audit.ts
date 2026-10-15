@@ -118,6 +118,8 @@ export interface Audit {
   targetSha256: string;
   serverStarts: number;
   observedFences: unknown[][];
+  /** Members of dedicated auth allocations; only they may revoke sessions. */
+  authActors?: string[];
 }
 
 export function startupBlockers(baseline: unknown): string[] {
@@ -200,6 +202,30 @@ function witnessedEventOperation(
   const witness = refs.eventWitness;
   const spaces = list(refs, "workspaces"),
     people = list(refs, "actors");
+  // Session revocation producers of a dedicated auth allocation member only.
+  // Logout has no stored target; its witness binds the actual actor instead.
+  if (
+    witness.class === "actor-logout" ||
+    witness.class === "actor-password-change" ||
+    witness.class === "actor-password-reset"
+  ) {
+    const logout = witness.class === "actor-logout";
+    const subject = logout ? witness.actor : witness.target;
+    return typeof subject === "string" &&
+      /^[a-f0-9]{32}$/.test(subject) &&
+      same(
+        Object.keys(witness).sort(),
+        logout ? ["actor", "class", "sequence"] : ["class", "sequence", "target"],
+      ) &&
+      integer(witness.sequence) > 0n &&
+      spaces.length === 0 &&
+      people.length === 1 &&
+      people[0] === subject &&
+      (audit.authActors ?? []).includes(subject) &&
+      Object.hasOwn(audit.actors, subject)
+      ? [witness.sequence, ["null"], ["blob", subject]]
+      : null;
+  }
   const target = witness.target;
   if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
   const sequence = witness.sequence;

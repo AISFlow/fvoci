@@ -782,6 +782,34 @@ describe("UI consumer handoff", () => {
     FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "false",
   };
 
+  test("ui-auth refuses without both destructive gates before the consumer loads", async () => {
+    let loaded = 0;
+    const consume = () => {
+      loaded += 1;
+      return Promise.resolve(() => Promise.resolve());
+    };
+    const bound = {
+      phase: "ui-auth",
+      destructive: true,
+      ui_source_sha: A,
+      ui_baseline_sha256: "a".repeat(64),
+      ui_target_sha256: "b".repeat(64),
+    };
+    expect(await refusal(runUi("ui-auth", A, bound, uiEnv, consume))).toBe(
+      "DESTRUCTIVE_NOT_ALLOWED",
+    );
+    const allowed = { ...uiEnv, FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" };
+    expect(
+      await refusal(runUi("ui-auth", A, { ...bound, destructive: false }, allowed, consume)),
+    ).toBe("DESTRUCTIVE_NOT_ALLOWED");
+    expect(
+      await refusal(
+        runUi("ui-auth", A, { ...bound, ui_source_sha: "c".repeat(40) }, allowed, consume),
+      ),
+    ).toBe("UI_REVIEWED_SOURCE_REQUIRED");
+    expect(loaded).toBe(0);
+  });
+
   test("remote baseline keeps the exact source binding", async () => {
     let loaded = 0;
     const consume = () => {
@@ -796,7 +824,7 @@ describe("UI consumer handoff", () => {
     expect(loaded).toBe(0);
   });
 
-  test.each(["ui-ack", "restore"] as const)(
+  test.each(["ui-ack", "restore", "ui-auth"] as const)(
     "%s binds both observed digests; UiError codes pass through, other errors do not",
     async (phase) => {
       const env = { ...uiEnv, FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" };

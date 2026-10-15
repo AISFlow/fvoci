@@ -7,7 +7,7 @@
 // owned Meilisearch wrapper as `--inside <run>`. Every mode first rebinds the
 // whole current artifact/preparation proof. Each process prints at most its
 // final JSON summary on stdout and exits with the lane's first failure code.
-import { deepEquals } from "bun";
+import { deepEquals, spawn } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -29,6 +29,7 @@ import {
   env,
   failureDigest,
   jsonInteger,
+  listenerAbsent,
   parseJson,
   read,
   resolved,
@@ -84,6 +85,15 @@ import {
   type RestartContext,
   type Seam as RestartSeam,
 } from "./restart.ts";
+import {
+  AUTH_SPEC,
+  authEventDelta,
+  authEventRows,
+  authSessionActor,
+  authSessionWitnesses,
+  type AuthEventRow,
+  type AuthSessionBinding,
+} from "../../turso/ui-auth-session.ts";
 
 export const postgresDriver = import.meta.path;
 // The runner's argv for this lane driver.
@@ -137,6 +147,139 @@ export const browserArgs = (bun: string, cli: string, spec: string) => [
   "--reporter=line,json",
   spec,
 ];
+
+// ---- auth-session lane purpose ----------------------------------------------
+// One dedicated auth allocation per selected lane: a fresh install, an owned
+// plaintext SMTP sink and exactly the three auth cases. The original
+// ON1/restart1/OFF8 suite, restart and restore do not run in this lane.
+export const authConfig = "e2e-pending/auth-session-playwright.config.ts";
+export interface AuthSink {
+  child: Child;
+  port: number;
+  capture: string;
+  log: number;
+}
+export type SinkSpawner = (
+  args: string[],
+  log: number,
+  environment: Record<string, string>,
+) => Child;
+export const spawnSink: SinkSpawner = (args, log, environment) =>
+  spawn(args, { stdin: "ignore", stdout: log, stderr: log, env: environment });
+
+/** The maintained sink bound to port 0 with only PATH and LANG. Its own port
+ * file in the private run directory is the readiness and endpoint receipt. */
+export async function startAuthSink(
+  run: string,
+  bun: string,
+  spawner: SinkSpawner = spawnSink,
+  closed: (port: number) => Promise<boolean> = portClosed,
+): Promise<AuthSink> {
+  const capture = join(run, "smtp-capture.private.jsonl"),
+    portFile = join(run, "smtp-port.private");
+  const log = openSync(join(run, "smtp-sink.private.log"), "wx", 0o600);
+  let child: Child | null = null;
+  try {
+    child = spawner(
+      [
+        bun,
+        "--no-env-file",
+        "--config=" + join(root, "bunfig.toml"),
+        join(root, "tools/web-e2e/smtp-sink.ts"),
+        "--capture",
+        capture,
+        "--port-file",
+        portFile,
+      ],
+      log,
+      { PATH: env("PATH"), LANG: process.env.LANG ?? "C.UTF-8" },
+    );
+    const deadline = performance.now() + 10_000;
+    for (;;) {
+      const text = existsSync(portFile) ? readText(portFile) : "";
+      if (/^[1-9][0-9]{0,4}$/.test(text) && Number(text) <= 65535) {
+        // The port file is the readiness receipt only while its child listens there.
+        assert.ok(
+          running(child) && !(await closed(Number(text))),
+          "owned SMTP sink is not listening",
+        );
+        return { child, port: Number(text), capture, log };
+      }
+      assert.ok(running(child), "owned SMTP sink exited before its port file");
+      assert.ok(performance.now() < deadline, "owned SMTP sink port file was not observed");
+      await Bun.sleep(20);
+      checkInterrupt();
+    }
+  } catch (error) {
+    if (child !== null && running(child)) {
+      child.kill("SIGKILL");
+      await waitFor(child, 10_000).catch(() => null);
+    }
+    closeSync(log);
+    throw error;
+  }
+}
+
+/** The sink has no signal handler, so its normal stop is the SIGTERM exit. Its
+ * closure is read from the kernel listener tables right after that exit. */
+export async function stopAuthSink(
+  sink: AuthSink,
+  absent: (port: number) => boolean = listenerAbsent,
+): Promise<{ exit: number | null; forced: boolean; listenerAbsent: boolean }> {
+  if (running(sink.child)) sink.child.kill("SIGTERM");
+  let exit: number | null = null,
+    forced = false;
+  try {
+    exit = await waitFor(sink.child, 10_000);
+  } catch {
+    forced = true;
+    sink.child.kill("SIGKILL");
+    await waitFor(sink.child, 10_000);
+  } finally {
+    closeSync(sink.log);
+  }
+  return { exit, forced, listenerAbsent: absent(sink.port) };
+}
+
+/** The auth server names; SMTP_PORT stays empty until the owned sink listens. */
+export const authServerEnvironment = (sink: AuthSink | null): Record<string, string> => ({
+  // Three case documents keep their rooms within one allocation.
+  FVOCI_COLLAB_MAX_ROOMS: "3",
+  SMTP_HOST: "127.0.0.1",
+  SMTP_PORT: sink === null ? "" : String(sink.port),
+  SMTP_FROM: "auth-session@example.invalid",
+});
+export const authBrowserEnvironment = (
+  head: string,
+  tree: string,
+  sink: AuthSink,
+): Record<string, string> => ({
+  FVOCI_E2E_AUTH_SOURCE: head,
+  FVOCI_E2E_AUTH_TREE: tree,
+  FVOCI_E2E_SMTP_CAPTURE: sink.capture,
+});
+
+/** Read-only observation of every `auth.%` event through the owned fixture
+ * connection; PostgreSQL enforces READ ONLY and the transaction never commits.
+ * The app role has no tenant context here and would hide rows. */
+export const authEventsQuery = `BEGIN TRANSACTION READ ONLY;
+SELECT coalesce(jsonb_agg(jsonb_build_object('seq',seq::text,'verb',verb,'channel',channel,'workspace',workspace_id,'actor',actor_user_id,'targetType',target_type,'target',target_id,'payload',payload) ORDER BY seq),'[]'::jsonb)
+  FROM (SELECT * FROM fvoci.events WHERE verb LIKE 'auth.%' ORDER BY seq LIMIT 10001) e;
+ROLLBACK;`;
+
+/** The three source-bound case witnesses and the member's exact auth events
+ * around the browser phase; missing evidence is a refusal, never zero. */
+export function authLaneVerdict(
+  report: unknown,
+  binding: AuthSessionBinding,
+  before: AuthEventRow[],
+  after: AuthEventRow[],
+): Json {
+  const witnesses = authSessionWitnesses(report, binding);
+  const member = authSessionActor(witnesses);
+  authEventDelta(before, after, member);
+  return { cases: witnesses.length, events: "PASS", member, witnesses, before, after };
+}
 
 // The rebinding every mode performs before it touches a resource.
 export interface Lane {
@@ -196,9 +339,11 @@ export async function rebind(): Promise<Lane> {
     spec:
       current.manifest.purpose === "equal-work"
         ? equalSpec
-        : flow === "off"
-          ? "workspace-off-selected-backend.spec.ts"
-          : "workspace-wiki-selected-backend.spec.ts",
+        : current.manifest.purpose === "auth-session"
+          ? AUTH_SPEC
+          : flow === "off"
+            ? "workspace-off-selected-backend.spec.ts"
+            : "workspace-wiki-selected-backend.spec.ts",
     bun,
     before,
     sourceBefore,
@@ -555,6 +700,7 @@ export interface InsideState {
   bun: string;
   sourceBefore: Inputs;
   browserInputs: Browser | null;
+  sink?: AuthSink;
 }
 const summaryKeys = [
   "source",
@@ -695,6 +841,13 @@ export async function finalize(state: InsideState, seam: Seam): Promise<number> 
       if (receipt.owned_loopback_port_closed !== true)
         cleanupErrors.push("owned-loopback-port-closure-unconfirmed");
     } else cleanupErrors.push("owned loopback port never observed; retirement remains unqualified");
+    const sink = state.sink;
+    if (sink !== undefined) {
+      const stopped = await attempt("smtp-sink-stop-failed", () => stopAuthSink(sink));
+      receipt.auth_smtp_sink = stopped;
+      if (stopped === null || stopped.exit !== -15 || stopped.forced || !stopped.listenerAbsent)
+        cleanupErrors.push("owned-smtp-sink-retirement-unconfirmed");
+    }
     try {
       const after = await seam.postInputs();
       write(join(run, "source-inputs-after.json"), after);
@@ -858,16 +1011,22 @@ export async function inside(lane: Lane, run: string): Promise<number> {
     FVOCI_REALTIME_MODE: flow,
   };
   if (current.manifest.purpose === "equal-work") serverEnv.METRICS_ALLOW_IPS = "127.0.0.1";
-  for (const [file, body] of [
-    [join(run, "environment.private.json"), JSON.stringify(serverEnv)],
-    [
-      join(run, "environment.private.sh"),
-      Object.entries(serverEnv)
-        .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`)
-        .join(""),
-    ],
-  ] as const)
-    privateText(file, body);
+  const auth = current.manifest.purpose === "auth-session";
+  if (auth) Object.assign(serverEnv, authServerEnvironment(null));
+  const environmentFiles = () => {
+    for (const [file, body] of [
+      [join(run, "environment.private.json"), JSON.stringify(serverEnv)],
+      [
+        join(run, "environment.private.sh"),
+        Object.entries(serverEnv)
+          .map(([key, value]) => `export ${key}=${shellQuote(value)}\n`)
+          .join(""),
+      ],
+    ] as const)
+      privateText(file, body);
+  };
+  // The auth files wait for the owned sink, which finalize then retires.
+  if (!auth) environmentFiles();
   const bundleHashes = Object.fromEntries(
     Object.entries(lane.binaries).map(([path, record]) => [path, record.sha256]),
   );
@@ -931,6 +1090,11 @@ export async function inside(lane: Lane, run: string): Promise<number> {
   };
   trapInterrupts();
   try {
+    if (auth) {
+      state.sink = await startAuthSink(run, lane.bun);
+      Object.assign(serverEnv, authServerEnvironment(state.sink));
+      environmentFiles();
+    }
     await body(lane, state, seam, { role, masterKey, ownerUrl, serverEnv, pgPort: pg.port });
   } catch (error) {
     failureCheckpoint(receipt, run, receipt.browser_exit ?? null, {
@@ -1151,6 +1315,8 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   const equal = current.manifest.purpose === "equal-work";
   const measurements = join(run, "equal-work-samples");
   if (equal) browserEnv.FVOCI_E2E_EQUAL_WORK_DIR = measurements;
+  const sink = state.sink;
+  if (sink !== undefined) Object.assign(browserEnv, authBrowserEnvironment(head, lane.tree, sink));
   if (process.env.PLAYWRIGHT_BROWSERS_PATH)
     browserEnv.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH;
   const chromium = (
@@ -1174,6 +1340,10 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
   // Bun itself, without bunx's node shim, for both selected flows.
   const args = browserArgs(lane.bun, playwrightCli, lane.spec);
   if (equal) args[args.indexOf("--config") + 1] = "e2e-pending/equal-work-playwright.config.ts";
+  if (sink !== undefined) args[args.indexOf("--config") + 1] = authConfig;
+  // Read-only event observation through the owned fixture connection.
+  const eventsBefore =
+    sink === undefined ? null : authEventRows(await seam.pgSql(authEventsQuery, false), "postgres");
   receipt.phase = "browser";
   Object.assign(receipt, {
     browser_command: args,
@@ -1226,6 +1396,31 @@ async function body(lane: Lane, state: InsideState, seam: Seam, secrets: Secrets
     assert.ok(deepEquals(roles, [role]));
     Object.assign(receipt, {
       actual_browser_tests: 1,
+      retries: 0,
+      ignored: 0,
+      actual_open_client_roles: roles,
+    });
+    return;
+  }
+  if (eventsBefore !== null) {
+    if (code !== 0) return;
+    const after = authEventRows(await seam.pgSql(authEventsQuery, false), "postgres");
+    const binding = { backend: "postgres", flow, source: head, tree: lane.tree } as const;
+    const verdict = authLaneVerdict(read(reportPath), binding, eventsBefore, after);
+    privateWrite(join(run, "auth-session-verdict.private.json"), verdict);
+    const roles = await seam.pgSql(
+      "SELECT coalesce(jsonb_agg(DISTINCT usename),'[]') FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()",
+      false,
+    );
+    assert.ok(deepEquals(roles, [role]));
+    Object.assign(receipt, {
+      purpose: "auth-session",
+      auth_session: {
+        cases: verdict.cases,
+        events: verdict.events,
+        verdict_sha256: sha(join(run, "auth-session-verdict.private.json")),
+      },
+      actual_browser_tests: 3,
       retries: 0,
       ignored: 0,
       actual_open_client_roles: roles,

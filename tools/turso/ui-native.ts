@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import { root as checkout, sha } from "../selected-backend-ci/io.ts";
 import { baselineFailureDiagnostic, OFF, ON, RESTORE } from "./ui-audit.ts";
+import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import {
   fixtureInput,
@@ -285,9 +286,14 @@ export async function browser(
   config = "collab-playwright.config.ts",
   heavy?: string,
 ): Promise<unknown> {
-  require(config === "collab-playwright.config.ts" ||
-    (spec === RESTORE &&
-      config === "turso-restore-playwright.config.ts"), "UI_BROWSER_CONFIG_REFUSED");
+  const flow = environment.FVOCI_E2E_SELECTED_FLOW;
+  // The dedicated auth spec has its own config and exactly its three cases.
+  require((config === "collab-playwright.config.ts" && spec !== AUTH_SPEC) ||
+    (spec === RESTORE && config === "turso-restore-playwright.config.ts") ||
+    (spec === AUTH_SPEC &&
+      config === "auth-session-playwright.config.ts" &&
+      grep === undefined &&
+      (flow === "on" || flow === "off")), "UI_BROWSER_CONFIG_REFUSED");
   const report = join(directory, "playwright.private.json");
   const env: Record<string, string> = {
     ...cleanEnv(),
@@ -363,7 +369,7 @@ export async function browser(
           chmodSync(report, 0o600);
           failedReport = privateRead(report, 64 * 1024 * 1024);
         }
-        if ([ON, OFF].includes(spec))
+        if ([ON, OFF, AUTH_SPEC].includes(spec))
           source = readFileSync(join(workspace, "apps/web/e2e-pending", spec), "utf8");
       } catch {
         // Malformed private input never supplies invented details.
@@ -374,7 +380,11 @@ export async function browser(
             browserFailureDiagnostic(
               failedReport,
               spec,
-              spec === OFF ? "off" : grep === "selected normal main restart:" ? "restart" : "on",
+              spec === OFF || (spec === AUTH_SPEC && flow === "off")
+                ? "off"
+                : grep === "selected normal main restart:"
+                  ? "restart"
+                  : "on",
               source,
             ),
           ),

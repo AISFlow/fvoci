@@ -17,6 +17,7 @@ import { join } from "node:path";
 import process from "node:process";
 import { sha, write } from "../selected-backend-ci/io.ts";
 import { OFF, ON } from "./ui-audit.ts";
+import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import { failureCode, UiError, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
@@ -478,6 +479,64 @@ describe("browser", () => {
       ]);
       expect(statSync(join(inputs.run, "browser.private.log")).mode & 0o777).toBe(0o600);
       expect(statSync(join(inputs.run, "playwright.private.json")).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test("the dedicated auth spec runs only with its own config and keeps the actual flow", async () => {
+    for (const flow of ["on", "off"] as const) {
+      const inputs = browserInputs();
+      const output = new Captured();
+      const { scope, calls } = fakeScope({ spawn: () => exitedChild(1), output });
+      expect(
+        await failureOf(
+          browser(
+            scope,
+            inputs.manifest,
+            inputs.run,
+            { FVOCI_E2E_SELECTED_FLOW: flow },
+            AUTH_SPEC,
+            undefined,
+            inputs.workspace,
+            "auth-session-playwright.config.ts",
+          ),
+        ),
+      ).toBe("UI_ACTUAL_BROWSER_FAILED");
+      const [args] = must(calls.spawn[0]);
+      expect(args.slice(-4)).toEqual([
+        "--config",
+        "e2e-pending/auth-session-playwright.config.ts",
+        "--reporter=line,json",
+        "e2e-pending/" + AUTH_SPEC,
+      ]);
+      const diagnostic = JSON.parse(
+        must(output.stderr.find((line) => line.includes("browserFailure"))),
+      ) as { browserFailure: { stage: string } };
+      expect(diagnostic.browserFailure.stage).toBe(flow);
+    }
+    for (const [spec, config, flow] of [
+      [AUTH_SPEC, "collab-playwright.config.ts", "on"],
+      [ON, "auth-session-playwright.config.ts", "on"],
+      [OFF, "auth-session-playwright.config.ts", "off"],
+      [AUTH_SPEC, "auth-session-playwright.config.ts", "restart"],
+      [AUTH_SPEC, "auth-session-playwright.config.ts", undefined],
+    ] as const) {
+      const inputs = browserInputs();
+      const { scope, calls } = fakeScope({ spawn: () => exitedChild(0) });
+      expect(
+        await failureOf(
+          browser(
+            scope,
+            inputs.manifest,
+            inputs.run,
+            flow === undefined ? {} : { FVOCI_E2E_SELECTED_FLOW: flow },
+            spec,
+            undefined,
+            inputs.workspace,
+            config,
+          ),
+        ),
+      ).toBe("UI_BROWSER_CONFIG_REFUSED");
+      expect(calls.spawn).toHaveLength(0);
     }
   });
 

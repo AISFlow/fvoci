@@ -926,10 +926,21 @@ describe("local lease", () => {
 describe("lease order", () => {
   const entry = "scripts/run-selected-backend-e2e.ts";
   const edited = "tools/selected-backend-ci/drivers/common.ts";
-  test("the CLI's static import closure is the registered runner, without a lane driver", () => {
+  // Loaded only by the lane drivers (the auth-session lane purpose); the SMTP
+  // sink is spawned by them, not imported.
+  const laneOnly = [
+    "apps/web/e2e-pending/auth-session-contract.ts",
+    "tools/turso/ui-audit.ts",
+    "tools/turso/ui-auth-session.ts",
+    "tools/turso/ui-common.ts",
+    "tools/web-e2e/compat.ts",
+    "tools/web-e2e/smtp-sink.ts",
+  ];
+  const sink = "tools/web-e2e/smtp-sink.ts";
+  function closure(entries: string[]): string[] {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
     const seen = new Set<string>(),
-      queue = [join(root, entry)];
+      queue = entries.map((name) => join(root, name));
     for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
       if (seen.has(file)) continue;
       seen.add(file);
@@ -939,9 +950,23 @@ describe("lease order", () => {
           queue.push(Bun.resolveSync(item.path, dirname(file)));
         }
     }
-    const closure = [...seen].map((path) => relative(root, path)).sort();
-    expect(closure.filter((name) => name.includes("/drivers/"))).toEqual([]);
-    expect(closure).toEqual(registeredModules.filter((name) => !name.includes("/drivers/")).sort());
+    return [...seen].map((path) => relative(root, path)).sort();
+  }
+  test("the CLI's static import closure is the registered runner, without a lane driver", () => {
+    const runner = closure([entry]);
+    expect(runner.filter((name) => name.includes("/drivers/"))).toEqual([]);
+    expect(runner).toEqual(
+      registeredModules
+        .filter((name) => !name.includes("/drivers/") && !laneOnly.includes(name))
+        .sort(),
+    );
+  });
+  test("the registry is exactly the runner and lane driver closures with the spawned sink", () => {
+    const lanes = closure(registeredModules.filter((name) => name.includes("/drivers/")));
+    expect([...new Set([...closure([entry]), ...lanes, sink])].sort()).toEqual(
+      [...registeredModules].sort(),
+    );
+    expect(laneOnly.filter((name) => name !== sink && !lanes.includes(name))).toEqual([]);
   });
   test.skipIf(!linux)("an edited driver's top level never runs before the lease check", () => {
     const base = realpathSync(directory()),
@@ -952,6 +977,10 @@ describe("lease order", () => {
     copyRunnerModules(join(checkout, "tools/selected-backend-ci"));
     mkdirSync(join(checkout, "scripts"));
     copyFileSync(join(root, entry), join(checkout, entry));
+    for (const name of laneOnly) {
+      mkdirSync(dirname(join(checkout, name)), { recursive: true });
+      copyFileSync(join(root, name), join(checkout, name));
+    }
     const issued = sha(join(checkout, edited));
     appendFileSync(
       join(checkout, edited),

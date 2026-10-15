@@ -5,9 +5,9 @@
 // No reset/restore cleanup exists.
 import process from "node:process";
 import { executionMode, stdio, UiError, type Output } from "./ui-common.ts";
-import { localTursoUiAllocation } from "../selected-backend-ci/admission.ts";
+import { localTursoUiAllocation, localTursoUiRun } from "../selected-backend-ci/admission.ts";
 import { lease } from "./ui-container.ts";
-import { actor } from "./ui-flow.ts";
+import { actor, localAuth } from "./ui-flow.ts";
 import { withProcesses } from "./ui-processes.ts";
 import { freeze, recordBefore } from "./ui-record.ts";
 
@@ -22,9 +22,20 @@ export async function main(argv: string[], output: Output = stdio): Promise<numb
     else if (mode === "--freeze") freeze(lease.load);
     else if (mode === "--actor") await withProcesses((scope) => actor(scope));
     else if (mode === "--local-restore") {
+      // A dedicated auth grant never runs the restore consumer.
+      localTursoUiRun("--local-restore");
       await (await import("./ui-restore-local.ts")).localRestore();
       output.out(
         "TURSO_LOCAL_RESTORE_PASS cases=6 source=official-local-libsql destination=sqlite hosted=NOTRUN",
+      );
+    } else if (mode === "--local-auth") {
+      const result = await localAuth();
+      output.out(
+        "TURSO_LOCAL_AUTH_PASS on=" +
+          String(result.counts.on) +
+          " off=" +
+          String(result.counts.off) +
+          " retries=0 ignored=0 source=official-local-libsql hosted=NOT_CONNECTED",
       );
     } else throw new UiError("UI_EXPLICIT_MODE_REQUIRED");
     return 0;

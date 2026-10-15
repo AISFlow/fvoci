@@ -86,6 +86,26 @@ describe("CLI contract", () => {
     });
     expect(readdirSync(join(directory, "turso-ui"))).toEqual([]);
   });
+
+  test("the local consumers run only under their exact local allocation", async () => {
+    for (const mode of ["--local-auth", "--local-restore"]) {
+      const environments: Record<string, string>[] = [
+        {},
+        { FVOCI_SELECTED_EXECUTION_MODE: "orca-local", RUNNER_TEMP: directory },
+      ];
+      for (const env of environments)
+        expect(await cli([mode], env)).toEqual({
+          stdout: "",
+          stderr: "UI_CONSUMER_FAILED\n",
+          code: 78,
+        });
+      expect(await cli([mode, "extra"], {})).toMatchObject({
+        stderr: "UI_EXPLICIT_MODE_REQUIRED\n",
+        code: 78,
+      });
+    }
+    expect(readdirSync(directory)).toEqual([]);
+  });
 });
 
 describe.skipIf(process.platform !== "linux")("guard hand-off", () => {
