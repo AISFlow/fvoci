@@ -792,6 +792,7 @@ async function runPreparedBrowser(
       signal.throwIfAborted();
       throw error;
     });
+    await serving;
     signal.throwIfAborted();
     if (result.code === 0 && binding.group === "failures")
       require(checkpointTaken, "Keycloak prepared before-unlink checkpoint missing");
