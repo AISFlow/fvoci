@@ -1322,7 +1322,10 @@ function caseList(): MutationCase[] {
       within(
         "  fast:\n",
         "  native-arm64:\n",
-        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+        swap(
+          "--no-install-recommends --no-remove gcc ",
+          "--no-install-recommends --no-remove python3 gcc ",
+        ),
       ),
       "rust: fast " + NOT_PYTHON,
     ],
