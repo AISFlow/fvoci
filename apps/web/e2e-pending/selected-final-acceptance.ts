@@ -185,8 +185,10 @@ if (binding.suite === "products") {
     await owner.page.keyboard.type("프로젝트 본문 한글😀");
     await owner.page.keyboard.press("Enter");
     await owner.page.keyboard.type(`/${reference.displayId}`);
-    await expect(owner.page.locator(".fvoci-suggestion")).toBeVisible();
-    await owner.page.keyboard.press("Enter");
+    await owner.page
+      .locator(".fvoci-suggestion")
+      .getByRole("option", { name: `임베드 ${reference.displayId}`, exact: true })
+      .click();
     await expect(owner.page.locator(".afn-embed-ref")).toHaveText("selected 참조 대상");
     const bytes = Buffer.from("project attachment bytes\n한글😀\n");
     await insertSlashAttachment(owner.page, {
