@@ -11,7 +11,6 @@ export const PLAN_JOB_ID = "ci-plan";
 export const WORKFLOW_JOBS = {
   web: [
     "web-static",
-    "web-builder",
     "web-checks",
     "web-native-checks",
     "workspace-browser-build",
@@ -147,14 +146,6 @@ export function validatePlanSchema(plan: unknown, workflow: Workflow): string | 
       selected("collaboration-test-build") !== selected("collaboration-build"))
   )
     return "PLAN_COLLABORATION_PREPARATION_SELECTION";
-  if (
-    workflow === "web" &&
-    selected("web-builder") !==
-      WORKFLOW_JOBS.web.some(
-        (job) => job !== "web-static" && job !== "web-builder" && selected(job),
-      )
-  )
-    return "PLAN_WEB_BUILDER_SELECTION";
   // Both container smokes run the image that install-image builds.
   if (
     workflow === "install" &&

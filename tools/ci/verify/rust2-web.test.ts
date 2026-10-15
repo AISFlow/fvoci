@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   chmodSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   utimesSync,
@@ -28,7 +26,6 @@ import {
   verifyNoRunScopedCacheKeys,
   verifyWebHostInputsJobs,
   WEB_SQLITE_JOBS,
-  verifyWebBuilderJobs,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 import { SQLITE_PACKAGES, verifySqlitePrefixCache } from "./rust-sqlite.ts";
@@ -54,155 +51,21 @@ const runOf = (step: Mapping): string => {
   return run;
 };
 
-test("baked browser preparation makes the complete sidecar closure publicly readable without changing bytes", () => {
-  const recipe = readFileSync(join(ROOT, "docker/ci-base/Dockerfile"), "utf8");
-  const web = recipe.slice(recipe.indexOf("FROM ci-base AS ci-web"));
-  const preparation = web.match(/&& (chmod [^\n]+) \/opt\/playwright \\/);
-  if (!preparation?.[1]) throw new Error("baked browser public-read preparation missing");
-  const install = web.indexOf("playwright install --with-deps chromium");
-  expect(install).toBeGreaterThan(0);
-  expect(web.indexOf(preparation[0])).toBeGreaterThan(install);
-  const args = preparation[1].trim().split(/\s+/).slice(1);
-  const directory = mkdtempSync(join(tmpdir(), "web-browser-cache-preflight-"));
-  const inventory = (path: string): Mapping => {
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        "-e",
-        'import {browserInventory} from "./tools/selected-backend-ci/admission.ts"; process.stdout.write(JSON.stringify(browserInventory(process.argv[1], undefined, true)));',
-        path,
-      ],
-      { cwd: ROOT, stdout: "pipe", stderr: "pipe" },
-    );
-    expect(result.exitCode).toBe(0);
-    const value: unknown = JSON.parse(result.stdout.toString());
-    if (!isMapping(value)) throw new Error("browser inventory must be a mapping");
-    return value;
-  };
-  const prepared = (value: Mapping): boolean =>
-    Object.values(value).every((entry) => {
-      if (!isMapping(entry) || typeof entry["mode"] !== "number") return false;
-      const required = entry["directory"] === true ? 0o555 : 0o444;
-      return (entry["mode"] & required) === required && (entry["mode"] & 0o022) === 0;
-    });
-  try {
-    for (const [variant, flags, accepted] of [
-      ["current", args, true],
-      ["no-recursion", args.filter((arg) => arg !== "-R"), false],
-      ["no-public-read", args.map((arg) => arg.replace("a+rX,", "")), false],
-      ["nonroot-writable", args.map((arg) => arg.replace("go-w", "go+w")), false],
-    ] as const) {
-      const cache = join(directory, variant),
-        nested = join(cache, "chromium", "chrome-linux64");
-      mkdirSync(nested, { recursive: true, mode: 0o700 });
-      writeFileSync(join(nested, "deb.deps"), "private sidecar bytes", { mode: 0o600 });
-      writeFileSync(join(nested, "chrome"), "executable fixture", { mode: 0o755 });
-      const before = inventory(cache);
-      expect(prepared(before)).toBe(false);
-      expect(
-        Bun.spawnSync(["chmod", ...flags, cache], { stdout: "pipe", stderr: "pipe" }).exitCode,
-      ).toBe(0);
-      const after = inventory(cache);
-      expect(prepared(after)).toBe(accepted);
-      expect(Object.keys(after)).toEqual(Object.keys(before));
-      for (const key of Object.keys(before)) {
-        const prior = before[key],
-          current = after[key];
-        if (!isMapping(prior) || !isMapping(current)) throw new Error("invalid inventory entry");
-        expect(current["sha256"]).toBe(prior["sha256"]);
-      }
-      expect(statSync(join(nested, "chrome")).mode & 0o777).toBe(
-        variant === "nonroot-writable" ? 0o777 : 0o755,
-      );
-      expect(statSync(join(nested, "deb.deps")).mode & 0o111).toBe(0);
-      if (accepted) {
-        const copied = join(directory, "private-owned-copy");
-        mkdirSync(copied, { mode: 0o700 });
-        for (const name of readdirSync(cache))
-          cpSync(join(cache, name), join(copied, name), {
-            recursive: true,
-            preserveTimestamps: true,
-            force: false,
-            errorOnExist: true,
-          });
-        expect(inventory(copied)).toEqual({ ...after, ".": { directory: true, mode: 0o700 } });
-        expect(inventory(cache)).toEqual(after);
-      }
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("bootstrap queries the pinned manager only after copying its installed toolchain home", () => {
-  const admit = runOf(stepWith(realJobs("web.yml"), "web-checks", byId("builder")));
-  const start = admit.indexOf('test "$(id -u):$(id -g)"');
-  const end = admit.indexOf('mkdir -p "$CARGO_HOME/bin"', start);
-  expect(start).toBeGreaterThan(0);
-  expect(end).toBeGreaterThan(start);
-  const prefix = admit.slice(start, end);
-  const directory = mkdtempSync(join(tmpdir(), "web-rustup-order-preflight-"));
-  const immutable = join(directory, "immutable"),
-    owned = join(directory, "owned");
-  mkdirSync(immutable);
-  writeFileSync(join(immutable, "installed-fixture"), "no network required");
-  const manager = join(directory, "manager");
-  writeFileSync(
-    manager,
-    '#!/bin/bash\n[[ "$1" == --version && -f "$RUSTUP_HOME/installed-fixture" ]] || exit 9\nprintf "rustup 1.29.1 fixture\\n"\n',
-    { mode: 0o755 },
-  );
-  const evaluate = (body: string) => {
-    rmSync(owned, { recursive: true, force: true });
-    mkdirSync(owned);
-    return Bun.spawnSync(
-      [
-        "bash",
-        "--noprofile",
-        "--norc",
-        "-e",
-        "-u",
-        "-o",
-        "pipefail",
-        "-c",
-        'id() { printf "1001"; }\n' +
-          body
-            .replaceAll("/opt/rustup/.", '"$IMMUTABLE"/.')
-            .replaceAll("/opt/cargo/bin/rustup", '"$MANAGER"'),
-      ],
-      {
-        env: {
-          PATH: process.env["PATH"],
-          RUSTUP_HOME: owned,
-          IMMUTABLE: immutable,
-          MANAGER: manager,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-  };
-  try {
-    expect(evaluate(prefix).exitCode).toBe(0);
-    const version = prefix.split("\n").find((line) => line.includes("rustup --version"));
-    if (!version) throw new Error("manager version assertion missing");
-    const beforeCopy = version + "\n" + prefix.replace(version, "");
-    expect(evaluate(beforeCopy).exitCode).not.toBe(0);
-    expect(existsSync(join(owned, "installed-fixture"))).toBe(false);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("every Web SQLite caller captures complete actual fixed userspace inputs without relaxing refusal", () => {
+test("every Web SQLite caller upgrades complete host inputs before capture without relaxing refusal", () => {
   const jobs = realJobs("web.yml");
   expect(verifyWebHostInputsJobs(jobs)).toEqual([]);
   for (const name of WEB_SQLITE_JOBS) {
     for (const [before, after] of [
+      ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
+      ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
+      ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
+      ["--with-new-pkgs", ""],
+      ["--no-remove", ""],
+      [" linux-libc-dev", ""],
+      [" libcrypt-dev", ""],
+      ["libclang-18-dev=1:18.1.8-20ubuntu8", "libclang-18-dev"],
       ["dpkg-query -W >", "dpkg-query -W gcc >"],
-      ["= 1.99.0", "= 1.98.1"],
-      ["= 1.4.3", "= 1.4.2"],
-      ['test -f "$LIBCLANG_PATH/libclang.so"', ":"],
+      ["Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", "Trusted: yes"],
     ] as const) {
       const bad = clone(jobs);
       const prep = stepWith(bad, name, byId("sqlite"));
@@ -222,7 +85,10 @@ test("every Web SQLite caller captures complete actual fixed userspace inputs wi
     const capture = 'dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"\n';
     prep["run"] = runOf(prep)
       .replace(capture, "")
-      .replace("test -f", capture + "test -f");
+      .replace(
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+        capture + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+      );
     expect(verifyWebHostInputsJobs(reordered).join("\n")).toContain(
       "complete unmasked host preparation",
     );
@@ -265,248 +131,6 @@ test("Rust native handoff callers align host inputs before existing qualified SQ
     const masked = clone(jobs);
     stepWith(masked, name, byId("sqlite"))["continue-on-error"] = true;
     expect(verifySqlitePrefixCache(masked).join("\n")).toContain("exact preflight/restore/verify");
-  }
-});
-
-test("the same-run builder refuses publication, substituted userspace and host execution fallback", () => {
-  const jobs = realJobs("web.yml");
-  expect(verifyWebBuilderJobs(jobs)).toEqual([]);
-  for (const [before, after] of [
-    ["web-export", "summary"],
-    ["--platform linux/amd64", "--platform linux/arm64"],
-    ["revision=$GITHUB_SHA", "revision=old"],
-    ["*NEEDED*", "*NEVER*"],
-    ["*INTERP*", "*NEVER*"],
-    ["test -s /etc/ssl/certs/ca-certificates.crt", ":"],
-    ["--dump-dom about:blank", "--version"],
-    ["browserInventory(baked, undefined, true)", "{}"],
-    ["facts.uid, 0", "facts.uid, 1000"],
-    ["facts.gid, 0", "facts.gid, 1000"],
-    ["facts.mode & 0o022", "facts.mode & 0"],
-    ["facts.mode & readable", "readable"],
-    [
-      "33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4",
-      "0000000000000000000000000000000000000000000000000000000000000000",
-    ],
-    ["--to-stdout --no-recursion --occurrence=1", "--directory /tmp"],
-    ["Docker version 29.9.0,", "Docker version 29.8.0,"],
-  ] as const) {
-    const bad = clone(jobs),
-      build = stepWith(bad, "web-builder", byId("builder"));
-    expect(runOf(build)).toContain(before);
-    build["run"] = runOf(build).replace(before, after);
-    expect(verifyWebBuilderJobs(bad).join("\n")).toContain(
-      "source-scanned native image/static client",
-    );
-  }
-  const publish = clone(jobs);
-  stepWith(publish, "web-builder", byId("publish_builder"))["if"] = "always()";
-  expect(verifyWebBuilderJobs(publish).join("\n")).toContain(
-    "source-scanned native image/static client",
-  );
-  for (const name of WEB_SQLITE_JOBS) {
-    for (const [before, after] of [
-      ["web-admit", "summary"],
-      ["docker load", "echo skipped-load"],
-      ["web-loaded", "summary"],
-      ["= 1.29.1", "= 1.28.0"],
-      ["--env RUSTUP_AUTO_INSTALL=0", "--env RUSTUP_AUTO_INSTALL=1"],
-      ["--env RUSTUP_TOOLCHAIN=1.99.0", "--env RUSTUP_TOOLCHAIN=1.98.0"],
-      ["rustup component remove rustfmt", "echo ignored"],
-      [
-        "cpSync(join(baked, name), join(cache, name)",
-        "cpSync(join(baked, name), join(baked, name)",
-      ],
-      ["browserInventory(cache, [1001, 1001], true)", "browserInventory(cache, undefined, true)"],
-      ["deepEquals(browserInventory(baked, undefined, true), before)", "true"],
-    ] as const) {
-      const bad = clone(jobs),
-        admit = stepWith(bad, name, byId("builder"));
-      expect(runOf(admit)).toContain(before);
-      admit["run"] = runOf(admit).replace(before, after);
-      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("admit/load this run builder");
-    }
-    for (const [before, after] of [
-      ["--network host", "--network bridge"],
-      ["--pid host", "--pid private"],
-      ["--env TINI_KILL_PROCESS_GROUP=1", ""],
-      [
-        "PLAYWRIGHT_BROWSERS_PATH=${{ runner.temp }}/fvoci-web-builder-state/browser",
-        "PLAYWRIGHT_BROWSERS_PATH=/opt/playwright",
-      ],
-      ["--env PRODUCER_RESULT", ""],
-      ["--env PRODUCER_ARTIFACT", ""],
-      ["--env PRODUCER_DIGEST", ""],
-      ["--user 1001:1001", "--user 1000:1000"],
-      ["--env SQLITE3_NO_PKG_CONFIG", ""],
-      ["/usr/local/bin/docker,readonly", "/usr/bin/docker"],
-      ["--mount type=bind", "--mount type=bind,source=/usr,target=/host/usr --mount type=bind"],
-    ] as const) {
-      const bad = clone(jobs),
-        prep = stepWith(bad, name, byId("sqlite"));
-      const shell = prep["shell"];
-      if (typeof shell !== "string") throw new Error("builder shell missing");
-      expect(shell).toContain(before);
-      prep["shell"] = shell.replace(before, after);
-      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("exact fixed userspace");
-    }
-    const host = clone(jobs);
-    delete stepWith(host, name, byId("sqlite"))["shell"];
-    expect(verifyWebBuilderJobs(host).join("\n")).toContain("exact fixed userspace");
-  }
-});
-
-test("producer smoke passes the literal dpkg format through actual Bash caller quoting", () => {
-  const producer = runOf(stepWith(realJobs("web.yml"), "web-builder", byId("builder")));
-  const marker = "docker run --rm --network none ";
-  const position = producer.indexOf(marker);
-  expect(position).toBeGreaterThan(0);
-  const smoke = producer.slice(position);
-  const directory = mkdtempSync(join(tmpdir(), "web-producer-quote-"));
-  const capture = join(directory, "docker-argument");
-  const caller = (body: string, hostVersion?: string) => {
-    rmSync(capture, { force: true });
-    return Bun.spawnSync(
-      [
-        "bash",
-        "--noprofile",
-        "--norc",
-        "-e",
-        "-u",
-        "-o",
-        "pipefail",
-        "-c",
-        'docker() { [[ "$#" == 15 && "${14}" == -c ]] || return 1; printf "%s" "${15}" > "$CAPTURE"; }\n' +
-          body,
-      ],
-      {
-        env: {
-          PATH: process.env["PATH"],
-          ref: "source-fixture",
-          CAPTURE: capture,
-          GITHUB_WORKSPACE: directory,
-          Version: hostVersion,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-  };
-  const canary = "FVOCI_HOST_VERSION_MUST_NOT_REACH_CONTAINER";
-  try {
-    for (const hostVersion of [undefined, canary]) {
-      const actual = caller(smoke, hostVersion);
-      expect(actual.exitCode).toBe(0);
-      const inner = readFileSync(capture, "utf8");
-      expect(inner).not.toContain(canary);
-      const checks = inner.split("\n").filter((line) => line.includes("dpkg-query -W"));
-      expect(checks).toHaveLength(1);
-      const check = checks[0];
-      if (!check) throw new Error("actual Clang check was not passed to Docker");
-      for (const [version, exit] of [
-        ["1:18.1.8-20ubuntu8", 0],
-        ["1:18.1.7-20ubuntu8", 1],
-      ] as const) {
-        const stub =
-          'dpkg-query() { [[ "$#" == 3 && "$1" == -W && "$2" == \'-f=${Version}\' && "$3" == libclang-18-dev ]] || return 1; printf "%s" "$FIXTURE_VERSION"; }\n';
-        const result = Bun.spawnSync(
-          ["bash", "--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", stub + check],
-          {
-            env: { PATH: process.env["PATH"], FIXTURE_VERSION: version, Version: hostVersion },
-            stdout: "pipe",
-            stderr: "pipe",
-          },
-        );
-        expect(result.exitCode).toBe(exit);
-        expect(result.stdout.toString() + result.stderr.toString()).not.toContain(canary);
-        if (exit === 0) {
-          const wrongFormat = smoke.replace(
-            'dpkg-query -W -f="\\${Version}"',
-            'dpkg-query -W -f="FVOCI_WRONG_DPKG_FORMAT"',
-          );
-          expect(wrongFormat).not.toBe(smoke);
-          expect(caller(wrongFormat, hostVersion).exitCode).toBe(0);
-          const wrongCheck = readFileSync(capture, "utf8")
-            .split("\n")
-            .find((line) => line.includes("dpkg-query -W"));
-          if (!wrongCheck) throw new Error("wrong-format caller did not reach Docker");
-          const refusal = Bun.spawnSync(
-            [
-              "bash",
-              "--noprofile",
-              "--norc",
-              "-e",
-              "-u",
-              "-o",
-              "pipefail",
-              "-c",
-              stub + wrongCheck,
-            ],
-            {
-              env: { PATH: process.env["PATH"], FIXTURE_VERSION: version, Version: hostVersion },
-              stdout: "pipe",
-              stderr: "pipe",
-            },
-          );
-          expect(refusal.exitCode).toBe(1);
-          expect(refusal.stdout.toString()).toBe("");
-        }
-      }
-    }
-    const regressed = smoke.replace(
-      'dpkg-query -W -f="\\${Version}"',
-      "dpkg-query -W -f='${Version}'",
-    );
-    expect(regressed).not.toBe(smoke);
-    expect(caller(regressed).exitCode).toBe(1);
-    expect(existsSync(capture)).toBe(false);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("actual browser consumers forward every explicit step input and refuse live dependency installation", () => {
-  const jobs = realJobs("web.yml");
-  for (const name of WEB_SQLITE_JOBS) {
-    for (const step of steps(jobs, name)) {
-      if (typeof step["run"] !== "string" || typeof step["shell"] !== "string") continue;
-      const env = step["env"];
-      if (isMapping(env))
-        for (const key of Object.keys(env)) expect(step["shell"]).toContain("--env " + key);
-    }
-    const wrongCache = clone(jobs);
-    const sqlite = stepWith(wrongCache, name, byId("sqlite"));
-    sqlite["run"] = runOf(sqlite) + "\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/playwright\n";
-    expect(verifyWebBuilderJobs(wrongCache).join("\n")).toContain(
-      "cannot override its owned source-bound browser cache",
-    );
-    const preparations = steps(jobs, name).filter(
-      (step) => step["name"] === "Prepare Chromium and system libraries",
-    );
-    for (const prep of preparations) {
-      expect(runOf(prep)).toContain("Version 1.64.0");
-      expect(runOf(prep)).toContain("chromium.executablePath()");
-      expect(runOf(prep)).toContain('ldd "$chromium"');
-      for (const [before, after] of [
-        ["Version 1.64.0", "Version 1.63.0"],
-        ['ldd "$chromium"', "echo guessed"],
-        ["test -x", "# test -x"],
-      ] as const) {
-        const bad = clone(jobs);
-        const mutated = stepWith(
-          bad,
-          name,
-          (step) => step["name"] === "Prepare Chromium and system libraries",
-        );
-        mutated["run"] = runOf(mutated).replace(before, after);
-        expect(verifyWebBuilderJobs(bad).join("\n")).toContain("verify pinned baked Chromium");
-      }
-      const bad = clone(jobs);
-      stepWith(bad, name, (step) => step["name"] === "Prepare Chromium and system libraries")[
-        "run"
-      ] = "bun --bun x --no-install playwright install --with-deps chromium\n";
-      expect(verifyWebBuilderJobs(bad).join("\n")).toContain("verify pinned baked Chromium");
-    }
   }
 });
 
@@ -566,7 +190,7 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
     wrapper_sha256: "a".repeat(64),
     os_release: canary,
     architecture: canary,
-    packages,
+    libclang_files: { private: canary },
     libclang_path: canary,
     libclang_sha256: "b".repeat(64),
     build_environment_sha256: "c".repeat(64),
@@ -576,11 +200,18 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
   };
   const base = mkdtempSync(join(tmpdir(), "web-input-hashes-"));
   try {
-    const invoke = (name: string, contents: string | null, occupied = false) => {
+    const invoke = (
+      name: string,
+      contents: string | null,
+      occupied = false,
+      packageText: string | null = packages,
+    ) => {
       const parent = join(base, name);
       mkdirSync(join(parent, "fvoci-sqlite"), { recursive: true });
       if (contents !== null)
         writeFileSync(join(parent, "fvoci-sqlite/consumer-inputs.json"), contents);
+      if (packageText !== null)
+        writeFileSync(join(parent, "fvoci-sqlite/build-packages.txt"), packageText);
       const output = join(parent, "github-output");
       writeFileSync(output, "");
       if (occupied) {
@@ -636,21 +267,36 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
     );
     const changed = invoke(
       "changed",
-      JSON.stringify({ ...input, packages: packages + "last-package\t9.0\n" }),
+      JSON.stringify(input),
+      false,
+      packages + "last-package\t9.0\n",
     );
     expect(parseDiagnostic(changed.text).packages_sha256).not.toBe(diagnostic.packages_sha256);
     for (const [index, contents] of [
       null,
       canary,
       JSON.stringify({ ...input, cache_identity: [input.cache_identity] }),
-      JSON.stringify({ ...input, packages: "" }),
-      JSON.stringify({ ...input, packages: "duplicate\t1\nduplicate\t1\n" }),
-      JSON.stringify({ ...input, packages: canary }),
+      JSON.stringify({ ...input, libclang_files: null }),
       " ".repeat(4 * 1024 * 1024 + 1),
     ].entries()) {
       const unavailable = invoke(`missing-${String(index)}`, contents);
       expect(parseDiagnostic(unavailable.text)).toEqual({ schema: 1, status: "unavailable" });
       expect(unavailable.output).toBe("written=true\n");
+    }
+    for (const [index, packageText] of [
+      null,
+      "",
+      "duplicate\t1\nduplicate\t1\n",
+      canary,
+      " ".repeat(4 * 1024 * 1024 + 1),
+    ].entries()) {
+      const unavailable = invoke(
+        `packages-${String(index)}`,
+        JSON.stringify(input),
+        false,
+        packageText,
+      );
+      expect(parseDiagnostic(unavailable.text)).toEqual({ schema: 1, status: "unavailable" });
     }
     const occupied = invoke("occupied", JSON.stringify(input), true);
     expect(occupied.text).toBe(canary);

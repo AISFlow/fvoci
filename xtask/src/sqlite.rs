@@ -2,6 +2,112 @@
 //! This module is the single owner of the version, source ID and hashes.
 
 use crate::host::sha256_hex;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+/// Record physical bytes and symlink resolution, including the dynamic ELF
+/// closure. Package names/versions are diagnostic, never a substitute for this.
+pub fn native_files(paths: &[&Path]) -> Result<Value, String> {
+    fn add(
+        path: &Path,
+        files: &mut Map<String, Value>,
+        visited: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        let resolved = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if resolved.is_dir() {
+            files.insert(
+                path.to_string_lossy().into_owned(),
+                json!({"resolved": resolved, "kind": "directory"}),
+            );
+            // Follow SDK directory symlinks as well as ordinary directories.
+            if !visited.insert(resolved.clone()) {
+                return Ok(());
+            }
+            let mut entries = fs::read_dir(path)
+                .map_err(|e| e.to_string())?
+                .map(|entry| entry.map(|e| e.path()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            entries.sort();
+            for entry in entries {
+                add(&entry, files, visited)?;
+            }
+            return Ok(());
+        }
+        if !resolved.is_file() {
+            return Err(format!(
+                "native input is not a regular file: {}",
+                path.display()
+            ));
+        }
+        let bytes = fs::read(&resolved).map_err(|e| e.to_string())?;
+        files.insert(
+            path.to_string_lossy().into_owned(),
+            json!({"resolved": resolved, "sha256": sha256_hex(&bytes)}),
+        );
+        if !visited.insert(resolved.clone()) || !bytes.starts_with(b"\x7fELF") {
+            return Ok(());
+        }
+        let mut command = Command::new("/usr/bin/ldd");
+        command
+            .arg(&resolved)
+            .env_clear()
+            .envs(crate::sqlite_build::ENV);
+        let done = crate::process::run_owned(&mut command, Duration::from_secs(30))
+            .map_err(|e| e.to_string())?;
+        let output = String::from_utf8(done.stdout).map_err(|e| e.to_string())?
+            + &String::from_utf8(done.stderr).map_err(|e| e.to_string())?;
+        let deps = elf_dependencies(crate::process::returncode(done.status), &output)?;
+        for dependency in deps {
+            add(Path::new(&dependency), files, visited)?;
+        }
+        Ok(())
+    }
+    let mut files = Map::new();
+    let mut visited = BTreeSet::new();
+    for path in paths {
+        add(path, &mut files, &mut visited)?;
+    }
+    Ok(Value::Object(files))
+}
+
+fn elf_dependencies(code: i64, output: &str) -> Result<Vec<String>, String> {
+    // glibc's loader has no DT_NEEDED entries and reports this terminal trace
+    // with exit 0. Its bytes have already been recorded before reaching here.
+    if ((code == 0 || code == 1) && output.trim() == "statically linked")
+        || (code == 1 && output.trim() == "not a dynamic executable")
+    {
+        return Ok(Vec::new());
+    }
+    if code != 0 {
+        return Err(format!("native dependency inspection failed: {output}"));
+    }
+    let mut paths = Vec::new();
+    for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let words: Vec<_> = line.split_whitespace().collect();
+        let path = if words.get(1) == Some(&"=>") {
+            words.get(2).copied().filter(|p| p.starts_with('/'))
+        } else if words[0].starts_with('/') {
+            Some(words[0])
+        } else if words[0].starts_with("linux-vdso.") || words[0].starts_with("linux-gate.") {
+            continue;
+        } else {
+            None
+        };
+        paths.push(
+            path.ok_or_else(|| format!("unresolved native dependency: {line}"))?
+                .to_owned(),
+        );
+    }
+    if paths.is_empty() {
+        return Err("dynamic native input has no resolved loader/dependencies".to_owned());
+    }
+    Ok(paths)
+}
 
 pub const ARCHIVE_HASH: &str = "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d";
 pub const C_HASH: &str = "67f423e9ebbbdc473cbc4772c872ee6b89f31fde4ed0279a5c25d5f65c043a16";
@@ -155,6 +261,52 @@ pub fn wrapper_sha256() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_native_inputs_change_for_tool_header_library_and_symlink_bytes() {
+        let root = crate::host::mkdtemp("sqlite-native-files-", &std::env::temp_dir()).unwrap();
+        for name in ["cc1", "as", "ld", "crt.o", "header.h", "libclang.so"] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        let first = native_files(&[&root]).unwrap();
+        assert_eq!(first, native_files(&[&root]).unwrap());
+        for name in ["cc1", "as", "ld", "crt.o", "header.h", "libclang.so"] {
+            std::fs::write(root.join(name), "changed without package version change").unwrap();
+            assert_ne!(first, native_files(&[&root]).unwrap(), "{name}");
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        std::os::unix::fs::symlink("missing", root.join("bad-sdk")).unwrap();
+        assert!(native_files(&[&root]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dynamic_dependency_output_requires_concrete_paths_on_both_native_architectures() {
+        assert_eq!(elf_dependencies(0, "linux-vdso.so.1 (0x1)\nlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x2)\n/lib/ld-linux-aarch64.so.1 (0x3)\n").unwrap(), vec!["/lib/aarch64-linux-gnu/libc.so.6", "/lib/ld-linux-aarch64.so.1"]);
+        assert_eq!(elf_dependencies(0, "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x2)\n/lib64/ld-linux-x86-64.so.2 (0x3)\n").unwrap().len(), 2);
+        assert!(elf_dependencies(0, "libclang.so => not found\n").is_err());
+        assert!(elf_dependencies(0, "unexpected output\n").is_err());
+        assert!(elf_dependencies(2, "statically linked").is_err());
+        assert!(elf_dependencies(1, "not a dynamic executable")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn hashed_glibc_loader_terminal_trace_accepts_exit_zero_without_hiding_errors() {
+        assert!(elf_dependencies(0, "\tstatically linked\n")
+            .unwrap()
+            .is_empty());
+        for output in [
+            "libmissing.so => not found\nstatically linked",
+            "unknown\nstatically linked",
+            "not a dynamic executable",
+        ] {
+            assert!(elf_dependencies(0, output).is_err(), "{output}");
+        }
+        assert!(elf_dependencies(1, "unknown\nstatically linked").is_err());
+        assert!(elf_dependencies(2, "statically linked").is_err());
+    }
 
     #[test]
     fn identity_sources_cover_every_module() {

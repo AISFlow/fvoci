@@ -389,48 +389,6 @@ fn contract(root: &Path) -> Check {
         ensure(actual == wanted, || {
             format!("{workflow}: SQLite jobs {actual:?} != {wanted:?}")
         })?;
-        if workflow == "web" {
-            let builder = job(&text, "web-builder").ok_or("missing web-builder")?;
-            contains(
-                builder,
-                "--file docker/ci-base/Dockerfile --target ci-web",
-                "web-builder",
-            )?;
-            ensure(has_line(builder, "          bun tools/ci/ci-base-image.ts web-export \"$packet\" \"$GITHUB_OUTPUT\""), || "web-builder: actual archive scan/export required".into())?;
-            let first = job(&text, "web-checks").ok_or("missing web-checks")?;
-            let first_steps = blocks(first);
-            let admission = first_steps
-                .iter()
-                .map(|(s, e)| &first[*s..*e])
-                .find(|step| has_line(step, "        id: builder"))
-                .ok_or("missing builder admission")?;
-            ensure(!masked(admission), || {
-                "Web builder admission cannot be masked".into()
-            })?;
-            let admit = find(admission, "bun tools/ci/ci-base-image.ts web-admit ")?;
-            let load = find(admission, "docker load --input ")?;
-            let loaded = find(admission, "bun tools/ci/ci-base-image.ts web-loaded ")?;
-            less(admit, load, "Web builder archive admission before load")?;
-            less(load, loaded, "Web builder actual loaded inspection")?;
-            contains(
-                admission,
-                "cp -a --no-preserve=ownership /opt/rustup/.",
-                "owned Rustup copy",
-            )?;
-            contains(
-                admission,
-                "rustup component remove rustfmt --toolchain 1.99.0",
-                "exact owned components",
-            )?;
-            contains(first, "--user 1001:1001", "Web builder identity")?;
-            contains(first, "--network host", "Web Docker loopback topology")?;
-            let recipe = fs::read_to_string(root.join("docker/ci-base/Dockerfile"))
-                .map_err(|e| e.to_string())?;
-            ensure(
-                has_line(&recipe, "      libclang-18-dev=1:18.1.8-20ubuntu8 \\"),
-                || "Web builder real Clang recipe argument missing".into(),
-            )?;
-        }
         for name in expected {
             let body = job(&text, name).ok_or_else(|| format!("missing job {name}"))?;
             let what = format!("{workflow}/{name}");
@@ -456,11 +414,7 @@ fn contract(root: &Path) -> Check {
                 less(download, unpack, what)?;
             } else if workflow == "web" && *name == "workspace-browser-shard" {
                 excludes(body, "path: target", what)?;
-                contains(
-                    body,
-                    "needs: [ci-plan, workspace-browser-build, web-builder]",
-                    what,
-                )?;
+                contains(body, "needs: [ci-plan, workspace-browser-build]", what)?;
                 contains(
                     body,
                     "artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}",
@@ -477,15 +431,11 @@ fn contract(root: &Path) -> Check {
                 excludes(body, "path: target", what)?;
                 excludes(body, "path: crates/collab-engine/target", what)?;
                 if *name == "collaboration-install-on" {
-                    contains(
-                        body,
-                        "needs: [ci-plan, collaboration-build, web-builder]\n",
-                        what,
-                    )?;
+                    contains(body, "needs: [ci-plan, collaboration-build]\n", what)?;
                 } else {
                     contains(
                         body,
-                        "needs: [ci-plan, collaboration-build, collaboration-install-on, web-builder]\n",
+                        "needs: [ci-plan, collaboration-build, collaboration-install-on]\n",
                         what,
                     )?;
                 }
@@ -562,9 +512,7 @@ fn contract(root: &Path) -> Check {
                 "--github-env \"$GITHUB_ENV\" --github-output \"$GITHUB_OUTPUT\"",
                 what,
             )?;
-            if workflow != "web" {
-                contains(body, "libclang-18-dev=1:18.1.8-20ubuntu8", what)?;
-            }
+            contains(body, "libclang-18-dev=1:18.1.8-20ubuntu8", what)?;
             // Every root output cache and compilation must follow usable
             // preparation; source-download caches do not contain build output.
             let steps = blocks(body);
@@ -574,30 +522,6 @@ fn contract(root: &Path) -> Check {
                 .find(|b| has_line(text_of(**b), "        id: sqlite"))
                 .ok_or("missing preparation block")?;
             let mut ready = prepare;
-            if workflow == "web" {
-                ensure(
-                    has_line(text_of(prepare), "        shell: *web_builder_shell"),
-                    || format!("{what}: SQLite must use admitted builder shell"),
-                )?;
-                ensure(
-                    has_line(
-                        text_of(prepare),
-                        r#"          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8"#,
-                    ),
-                    || format!("{what}: actual image Clang version assertion required"),
-                )?;
-                let admissions: Vec<_> = steps
-                    .iter()
-                    .filter(|block| {
-                        has_line(text_of(**block), "      - *admit_web_builder")
-                            || has_line(text_of(**block), "        id: builder")
-                    })
-                    .collect();
-                ensure(admissions.len() == 1, || {
-                    format!("{what}: exact builder admission required")
-                })?;
-                less_equal(admissions[0].1, prepare.0, what)?;
-            }
             if workflow == "rust" {
                 let verified: Vec<_> = steps
                     .iter()
@@ -745,11 +669,6 @@ fn contract(root: &Path) -> Check {
                     let root_work = !step.contains("working-directory: crates/")
                         && step.lines().any(root_work_line);
                     if root_work {
-                        if workflow == "web" {
-                            ensure(has_line(step, "        shell: *web_builder_shell"), || {
-                                format!("{what}: root work cannot fall back to host")
-                            })?;
-                        }
                         less_equal(ready.1, block.0, what)?;
                     }
                 }
@@ -815,7 +734,6 @@ fn contract_copy() -> (TempDir, PathBuf) {
     let root = temp.0.clone();
     fs::create_dir_all(root.join(".github/workflows")).unwrap();
     fs::create_dir_all(root.join("infra/rust")).unwrap();
-    fs::create_dir_all(root.join("docker/ci-base")).unwrap();
     for workflow in ["rust", "web", "documents", "collab-engine", "install"] {
         let name = format!(".github/workflows/{workflow}.yml");
         fs::copy(repo().join(&name), root.join(&name)).unwrap();
@@ -823,11 +741,6 @@ fn contract_copy() -> (TempDir, PathBuf) {
     fs::copy(
         repo().join("infra/rust/Dockerfile"),
         root.join("infra/rust/Dockerfile"),
-    )
-    .unwrap();
-    fs::copy(
-        repo().join("docker/ci-base/Dockerfile"),
-        root.join("docker/ci-base/Dockerfile"),
     )
     .unwrap();
     (temp, root)
@@ -963,26 +876,6 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 None,
             ));
         } else {
-            changes.push((
-                "missing admitted builder".into(),
-                replace_once(body, "      - *admit_web_builder\n", ""),
-                Some("exact builder admission"),
-            ));
-            changes.push((
-                "SQLite preparation falls back to host".into(),
-                replace_once(
-                    body,
-                    text_of(prep),
-                    &replace_once(text_of(prep), "shell: *web_builder_shell", "shell: bash"),
-                ),
-                Some("admitted builder shell"),
-            ));
-            changes.push((
-                "comment-only Clang assertion".into(),
-                replace_once(body, r#"          test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8"#,
-                    r#"          # test "$(dpkg-query -W -f='${Version}' libclang-18-dev)" = 1:18.1.8-20ubuntu8"#),
-                Some("actual image Clang version assertion"),
-            ));
             let save = *steps
                 .iter()
                 .find(|b| {
@@ -1006,19 +899,6 @@ fn new_producer_mutations_fail_same_wiring_contract() {
         }
         assert_mutations_fail(&path, &root, &original, span, changes);
     }
-    let recipe_path = root.join("docker/ci-base/Dockerfile");
-    let recipe = fs::read_to_string(&recipe_path).unwrap();
-    let pin = "      libclang-18-dev=1:18.1.8-20ubuntu8 \\";
-    assert!(has_line(&recipe, pin));
-    fs::write(
-        &recipe_path,
-        replace_once(&recipe, pin, &format!("# {pin}")),
-    )
-    .unwrap();
-    assert!(contract(&root)
-        .unwrap_err()
-        .contains("real Clang recipe argument"));
-    fs::write(&recipe_path, recipe).unwrap();
 }
 
 #[test]

@@ -32,32 +32,16 @@ import {
 
 test("collaboration preparation and packet producer must be selected together", () => {
   const complete = {
-    "web-builder": true,
     "collaboration-main-build": true,
     "collaboration-test-build": true,
     "collaboration-build": true,
   };
   expect(validatePlanSchema(plan("web", complete), "web")).toBeNull();
-  for (const name of [
-    "collaboration-main-build",
-    "collaboration-test-build",
-    "collaboration-build",
-  ]) {
+  for (const name of Object.keys(complete)) {
     expect(validatePlanSchema(plan("web", { ...complete, [name]: false }), "web")).toBe(
       "PLAN_COLLABORATION_PREPARATION_SELECTION",
     );
   }
-});
-test("a selected Web native consumer requires its builder and an unused builder is not selected", () => {
-  expect(
-    validatePlanSchema(plan("web", { "web-checks": true, "web-builder": true }), "web"),
-  ).toBeNull();
-  expect(validatePlanSchema(plan("web", { "web-checks": true }), "web")).toBe(
-    "PLAN_WEB_BUILDER_SELECTION",
-  );
-  expect(validatePlanSchema(plan("web", { "web-builder": true }), "web")).toBe(
-    "PLAN_WEB_BUILDER_SELECTION",
-  );
 });
 import { isBlank, strip } from "./text.ts";
 
@@ -224,14 +208,10 @@ describe("GateSchemaTest", () => {
     expect(code(gate(p, "rust", ok, { omit: ["postgres"] }))).toBe(1);
   });
 
-  test("web budget lanes require their builder and both selected successes", () => {
-    const selected = { "web-checks": true, "web-native-checks": true, "web-builder": true };
+  test("web budget lanes require both selected success", () => {
+    const selected = { "web-checks": true, "web-native-checks": true };
     const p = plan("web", selected);
-    const ok = {
-      "web-checks": "success",
-      "web-native-checks": "success",
-      "web-builder": "success",
-    };
+    const ok = { "web-checks": "success", "web-native-checks": "success" };
     expect(code(gate(p, "web", ok))).toBe(0);
     for (const job of Object.keys(selected)) {
       for (const result of ["failure", "cancelled", "skipped"]) {
