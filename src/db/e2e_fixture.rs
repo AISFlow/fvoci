@@ -332,6 +332,40 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
         Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
         _ => return Ok(Value::Null),
     };
+    // Instance generic OIDC link/unlink producers use a link target, not a
+    // user target. Retain both actual IDs without exporting their email.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked" || verb == "identity.unlinked")
+    {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Text(kind), Cell::Blob(actor))
+                if channel == "web" && kind == "identity_link" && actor.len() == 16 =>
+            {
+                Uuid::from_slice(actor).map_err(|_| refused())?
+            }
+            _ => return Ok(Value::Null),
+        };
+        let Some(email) = payload
+            .get("email")
+            .filter(|email| email.is_null() || email.is_string())
+        else {
+            return Ok(Value::Null);
+        };
+        if payload != json!({"userId":actor.to_string(),"provider":"generic","email":email}) {
+            return Ok(Value::Null);
+        }
+        let class = if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked") {
+            "actor-identity-linked"
+        } else {
+            "actor-identity-unlinked"
+        };
+        return Ok(json!({"class":class,"sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor.as_bytes()),"target":hex::encode(target.as_bytes())}));
+    }
     let class = match (
         cell("verb")?,
         cell("channel")?,
@@ -352,6 +386,20 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             && payload == json!({"userId":target.to_string(),"method":"password"}) =>
         {
             "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if verb == "auth.login"
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string(),"method":"oidc:generic"}) =>
+        {
+            "actor-oidc-login"
         }
         (
             Cell::Text(verb),
@@ -441,7 +489,7 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
         } else if name == "id"
             && matches!(
                 table,
-                "users" | "workspaces" | "events" | "documents" | "tasks"
+                "users" | "workspaces" | "events" | "documents" | "tasks" | "identity_links"
             )
         {
             let bytes = cell.bytes()?;
@@ -937,6 +985,7 @@ struct SerialChecks {
     relay_completion: RelayCompletion,
     outbox: Vec<RelayObservation>,
     owners: BTreeMap<&'static str, Vec<Vec<Value>>>,
+    room_closure_binding: &'static str,
     background: Vec<BackgroundFact>,
     revision_candidates: Vec<RevisionObservation>,
     automatic_revision_ranks: Vec<Vec<Value>>,
@@ -1146,7 +1195,10 @@ fn revision_due(
     Ok(policy.revision_snapshot_interval_hours != 0 && candidate.snapshot_due(cutoff))
 }
 
-async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+async fn serial_native_cells(
+    f: &mut FamilyTx,
+    sql: &'static str,
+) -> Result<Vec<Vec<Cell>>, sqlx::Error> {
     let rows = f.query(sql, &[]).await?;
     if rows.len() > 10000 {
         return Err(refused());
@@ -1157,10 +1209,49 @@ async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Val
                 return Err(refused());
             };
             (0..remote.column_count())
-                .map(|i| row.cell(i as usize).map(exact))
+                .map(|i| row.cell(i as usize))
                 .collect()
         })
         .collect()
+}
+
+fn serial_exact_cells(rows: &[Vec<Cell>]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| row.iter().cloned().map(exact).collect())
+        .collect()
+}
+
+async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+    Ok(serial_exact_cells(&serial_native_cells(f, sql).await?))
+}
+
+fn serial_room_owner_fact(
+    kind: &'static str,
+    now: i64,
+    rows: &[Vec<Cell>],
+) -> Result<BackgroundFact, sqlx::Error> {
+    if !matches!(kind, "document-room-owners" | "task-room-owners") || rows.len() > 10000 {
+        return Err(refused());
+    }
+    serial_horizon(now)?;
+    let mut live = 0;
+    for row in rows {
+        if row.len() != 5 {
+            return Err(refused());
+        }
+        row[0].id()?;
+        row[1].id()?;
+        row[2].id()?;
+        if row[3].integer()? <= 0 {
+            return Err(refused());
+        }
+        let expires_at = row[4].datetime()?.timestamp_micros();
+        live += i64::from(expires_at > now);
+    }
+    // Every currently live owner overlaps the forward coverage, even if its
+    // lease expires inside it. Expired raw lineage is retained, never a normal
+    // release or process-retirement receipt: the parent must bind both.
+    BackgroundFact::observe(kind, "live-owner-overlaps-coverage", live, live)
 }
 
 // Readonly counterparts of the current scheduler leaves. Retention durations
@@ -1192,9 +1283,6 @@ const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
     ("webhook-retention", "eligible", "SELECT count(*) FROM webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<?1-?2"),
     ("github-retention", "eligible", "SELECT count(*) FROM github_deliveries WHERE processed_at<?1-?2"),
     ("maintenance-owners", "owner", "SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NOT NULL"),
-    // TTL expiry alone is not a normal owner-release receipt.
-    ("document-room-owners", "owner", "SELECT count(*) FROM collab_room_fences WHERE owner_token IS NOT NULL"),
-    ("task-room-owners", "owner", "SELECT count(*) FROM task_collab_room_fences WHERE owner_token IS NOT NULL"),
 ];
 
 async fn serial_checks(
@@ -1242,13 +1330,22 @@ async fn serial_checks(
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     let mut owners = BTreeMap::new();
+    let mut room_facts = Vec::new();
     for (name, sql) in UI_OPERATION_READS.iter().filter(|(name, _)| {
         matches!(
             *name,
             "maintenance_job_claims" | "collab_room_fences" | "task_collab_room_fences"
         )
     }) {
-        owners.insert(*name, serial_cells(f, sql).await?);
+        let rows = serial_native_cells(f, sql).await?;
+        if let Some(kind) = match *name {
+            "collab_room_fences" => Some("document-room-owners"),
+            "task_collab_room_fences" => Some("task-room-owners"),
+            _ => None,
+        } {
+            room_facts.push(serial_room_owner_fact(kind, now, &rows)?);
+        }
+        owners.insert(*name, serial_exact_cells(&rows));
     }
     let mut background = Vec::new();
     for (kind, interpretation, sql) in SERIAL_BACKGROUND_READS {
@@ -1300,6 +1397,7 @@ async fn serial_checks(
             counts[1],
         )?);
     }
+    background.extend(room_facts);
     let mut revision_candidates = Vec::new();
     for (kind, sql) in [
         ("document", "SELECT s.workspace_id,s.document_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='document' AND r.target_id=s.document_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM document_states s INNER JOIN documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id AND d.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.document_id LIMIT 10001"),
@@ -1361,6 +1459,7 @@ async fn serial_checks(
         relay_completion: relay_completion(head_seq, &outbox),
         outbox,
         owners,
+        room_closure_binding: "required-normal-release-and-parent-retirement",
         background,
         revision_candidates,
         automatic_revision_ranks,
@@ -1559,6 +1658,98 @@ mod serial_tests {
         for (now, future) in [(-1, 0), (0, -1), (2, 1), (0, 100001)] {
             assert!(BackgroundFact::observe("missing", "pending", now, future).is_err());
         }
+    }
+
+    #[test]
+    fn serial_room_live_eligibility_retains_expired_lineage_without_closure_proof() {
+        let now = 9_007_199_254_740_993;
+        let rows = [now - 1, now, now + 1, now + 20 * 60 * 1_000_000]
+            .into_iter()
+            .map(|expiry| {
+                vec![
+                    Cell::uuid(Uuid::from_u128(1)),
+                    Cell::uuid(Uuid::from_u128(2)),
+                    Cell::uuid(Uuid::from_u128(3)),
+                    Cell::Integer(7),
+                    Cell::Integer(expiry),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let raw = serial_exact_cells(&rows);
+        for kind in ["document-room-owners", "task-room-owners"] {
+            let retained = serial_room_owner_fact(kind, now, &rows[..2]).unwrap();
+            assert_eq!((retained.now, retained.through_horizon), (0, 0));
+            assert_eq!(retained.eligibility, Eligibility::Clear);
+            let mixed = serial_room_owner_fact(kind, now, &rows).unwrap();
+            assert_eq!((mixed.now, mixed.through_horizon), (2, 2));
+            assert_eq!(mixed.eligibility, Eligibility::Blocked);
+            assert_eq!(mixed.interpretation, "live-owner-overlaps-coverage");
+            // A lease ending within the horizon still overlaps coverage and
+            // cannot become Clear by testing only its state at horizon end.
+            let inside = serial_room_owner_fact(kind, now, &rows[3..]).unwrap();
+            assert_eq!((inside.now, inside.through_horizon), (1, 1));
+            assert_eq!(inside.eligibility, Eligibility::Blocked);
+            assert_eq!(serial_exact_cells(&rows), raw);
+            let output = serde_json::to_value(retained).unwrap();
+            assert!(output.get("ready").is_none());
+            assert!(output.get("released").is_none());
+        }
+        assert_eq!(raw.len(), 4);
+        assert_eq!(
+            Value::Array(raw[0].clone()),
+            json!([
+                ["blob", hex::encode(Uuid::from_u128(1).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(2).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(3).as_bytes())],
+                ["integer", "7"],
+                ["integer", (now - 1).to_string()]
+            ])
+        );
+    }
+
+    #[test]
+    fn serial_room_owner_observation_refuses_wrong_native_shape_type_clock_and_cap() {
+        let now = 1_700_000_000_000_000;
+        let row = vec![
+            Cell::uuid(Uuid::from_u128(1)),
+            Cell::uuid(Uuid::from_u128(2)),
+            Cell::uuid(Uuid::from_u128(3)),
+            Cell::Integer(1),
+            Cell::Integer(now),
+        ];
+        let kind = "document-room-owners";
+        for at in [0, -1, i64::MAX] {
+            assert!(serial_room_owner_fact(kind, at, std::slice::from_ref(&row)).is_err());
+        }
+        for (column, value) in [
+            (0, Cell::Null),
+            (1, Cell::Blob(vec![0; 15])),
+            (2, Cell::text("not-a-native-owner")),
+            (2, Cell::Null),
+            (3, Cell::Integer(0)),
+            (3, Cell::Integer(-1)),
+            (3, Cell::text("1")),
+            (4, Cell::Null),
+            (4, Cell::text(now.to_string())),
+            (4, Cell::Integer(i64::MAX)),
+        ] {
+            let mut wrong = row.clone();
+            wrong[column] = value;
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        let mut missing = row.clone();
+        missing.pop();
+        let mut extra = row.clone();
+        extra.push(Cell::Null);
+        for wrong in [missing, extra] {
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        assert!(serial_room_owner_fact("unknown-room", now, &[]).is_err());
+        assert!(serial_room_owner_fact(kind, now, &vec![row; 10001]).is_err());
+        assert_eq!(
+            serial_room_owner_fact(kind, now, &[]).unwrap().eligibility,
+            Eligibility::Clear
+        );
     }
 
     #[test]
@@ -1926,6 +2117,377 @@ mod tests {
                 .1 = Cell::uuid(workspace);
             assert_eq!(event_witness(&wrong).unwrap(), Value::Null);
         }
+    }
+
+    fn keycloak_event(verb: &str, email: Value) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let identity = verb != "auth.login";
+        let mut columns = auth_event(verb);
+        for (name, value) in [
+            ("seq", Cell::Integer(9_007_199_254_740_993)),
+            (
+                "target_id",
+                Cell::uuid(if identity { Uuid::from_u128(3) } else { actor }),
+            ),
+            (
+                "target_type",
+                Cell::text(if identity { "identity_link" } else { "user" }),
+            ),
+            (
+                "payload",
+                Cell::json(&if identity {
+                    json!({"userId":actor.to_string(),"provider":"generic","email":email})
+                } else {
+                    json!({"userId":actor.to_string(),"method":"oidc:generic"})
+                })
+                .unwrap(),
+            ),
+        ] {
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+        }
+        columns
+    }
+
+    #[test]
+    fn keycloak_login_witness_matches_exact_generic_session_producer() {
+        assert_eq!(
+            event_witness(&keycloak_event("auth.login", Value::Null)).unwrap(),
+            json!({"class":"actor-oidc-login","sequence":["integer","9007199254740993"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())})
+        );
+    }
+
+    #[test]
+    fn keycloak_identity_witness_matches_global_link_and_unlink_without_private_values() {
+        for (verb, class) in [
+            ("identity.linked", "actor-identity-linked"),
+            ("identity.unlinked", "actor-identity-unlinked"),
+        ] {
+            for email in [Value::Null, json!("PRIVATE_EVENT_EMAIL_CANARY")] {
+                let witness = event_witness(&keycloak_event(verb, email)).unwrap();
+                assert_eq!(
+                    witness,
+                    json!({"class":class,
+                    "sequence":["integer","9007199254740993"],
+                    "actor":hex::encode(Uuid::from_u128(1).as_bytes()),
+                    "target":hex::encode(Uuid::from_u128(3).as_bytes())})
+                );
+                for private in [
+                    "PRIVATE_", "email", "provider", "payload", "issuer", "token",
+                ] {
+                    assert!(!witness.to_string().contains(private), "{verb} {private}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keycloak_witness_refuses_unrecognized_or_mismatched_producer_fields() {
+        let actor = Uuid::from_u128(1);
+        let wrong = Uuid::from_u128(2);
+        for verb in ["auth.login", "identity.linked", "identity.unlinked"] {
+            let identity = verb != "auth.login";
+            let original = keycloak_event(verb, Value::Null);
+            for (name, value) in [
+                ("verb", Cell::text("identity.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1; 15])),
+                ("actor_user_id", Cell::uuid(wrong)),
+                ("target_id", Cell::Null),
+                ("target_id", Cell::Blob(vec![1; 15])),
+                ("target_id", Cell::text(actor.to_string())),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == name)
+                    .unwrap()
+                    .1 = value;
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} {name}"
+                );
+            }
+            for payload in if identity {
+                vec![
+                    json!({"userId":wrong.to_string(),"provider":"generic","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"google","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"generic"}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":7}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":null,"extra":"PRIVATE_CANARY"}),
+                ]
+            } else {
+                vec![
+                    json!({"userId":wrong.to_string(),"method":"oidc:generic"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:google"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic:unknown"}),
+                    json!({"userId":actor.to_string(),"method":null}),
+                    json!({"userId":actor.to_string()}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic","extra":"PRIVATE_CANARY"}),
+                ]
+            } {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "payload")
+                    .unwrap()
+                    .1 = Cell::json(&payload).unwrap();
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} payload"
+                );
+            }
+            for name in [
+                "seq",
+                "verb",
+                "channel",
+                "workspace_id",
+                "actor_user_id",
+                "target_id",
+                "target_type",
+                "payload",
+            ] {
+                let mut columns = original.clone();
+                columns.retain(|(column, _)| column != name);
+                assert!(event_witness(&columns).is_err(), "{verb} missing {name}");
+            }
+            if !identity {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "target_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "login target differs from actor"
+                );
+            }
+        }
+        // Invitation events already carry both allocation dimensions. They
+        // must not gain a redundant global-event exception.
+        for verb in ["invitation.created", "invitation.accepted"] {
+            let mut columns = auth_event(verb);
+            for (name, value) in [
+                ("workspace_id", Cell::uuid(wrong)),
+                ("target_id", Cell::uuid(Uuid::from_u128(3))),
+                ("target_type", Cell::text("invitation")),
+                ("payload", Cell::json(&if verb == "invitation.created" {
+                    json!({"workspaceId":wrong.to_string(),"email":"PRIVATE_CANARY","invitationId":Uuid::from_u128(3).to_string()})
+                } else {
+                    json!({"workspaceId":wrong.to_string(),"userId":actor.to_string(),"email":"PRIVATE_CANARY"})
+                }).unwrap()),
+            ] {
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+            }
+            assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb}");
+        }
+    }
+
+    // Registration is not execution authority. ROOT must qualify the exact
+    // source/ELF, CA and fresh startLocalLibsql allocation before selecting it,
+    // and owns that fixture's normal process/port retirement after this test.
+    #[tokio::test]
+    #[ignore = "ROOT-owned strict-TLS disposable remote allocation only"]
+    async fn root_owned_serial_remote_roundtrip_and_eligibility() -> Result<(), &'static str> {
+        collab_engine::process::make_process_non_dumpable().map_err(|_| "NON_DUMPABLE_FAILED")?;
+        if !cfg!(target_os = "linux") {
+            return Err("NON_DUMPABLE_PLATFORM_REQUIRED");
+        }
+        const NAME: &str =
+            "db::e2e_fixture::tests::root_owned_serial_remote_roundtrip_and_eligibility";
+        let args = std::env::args().collect::<Vec<_>>();
+        if ![NAME, "--exact", "--ignored"]
+            .iter()
+            .all(|expected| args.iter().any(|arg| arg.as_str() == *expected))
+            || [
+                ("FVOCI_E2E_SERIAL_REMOTE_SELECTED", "1"),
+                ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+                ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+            ]
+            .iter()
+            .any(|(name, expected)| std::env::var(name).as_deref() != Ok(*expected))
+        {
+            return Err("ROOT_EXACT_SELECTION_REQUIRED");
+        }
+        let endpoint = std::env::var("FVOCI_LIBSQL_URL").map_err(|_| "LOCAL_ENDPOINT_REQUIRED")?;
+        let token = std::env::var("FVOCI_LIBSQL_AUTH_TOKEN").map_err(|_| "LOCAL_TOKEN_REQUIRED")?;
+        let ca = std::env::var("SSL_CERT_FILE").map_err(|_| "LOCAL_CA_REQUIRED")?;
+        let parsed = url::Url::parse(&endpoint).map_err(|_| "LOCAL_ENDPOINT_REFUSED")?;
+        let loopback = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if parsed.scheme() != "https"
+            || !loopback
+            || parsed.port().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !std::fs::metadata(ca).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err("ROOT_LOCAL_TLS_ALLOCATION_REQUIRED");
+        }
+        let remote = super::super::backend::RemoteDatabase::connect(endpoint, token, 1)
+            .await
+            .map_err(|_| "LOCAL_CONNECT_FAILED")?;
+        let backend = Backend::LibsqlRemote(remote);
+        let result = async {
+            for consumer in [
+                crate::notifications::NOTIFICATIONS_CONSUMER,
+                crate::mail::MAIL_CONSUMER,
+                crate::push::consumer::PUSH_CONSUMER,
+                crate::integrations::webhooks::WEBHOOKS_CONSUMER,
+                crate::integrations::github::GITHUB_CONSUMER,
+            ] {
+                super::super::outbox::ensure_consumer_backend(&backend, consumer)
+                    .await
+                    .map_err(|_| "RELAY_ENSURE_FAILED")?;
+            }
+            let policy = SerialPolicy {
+                revision_keep: std::num::NonZeroU32::new(200).ok_or("POLICY_REFUSED")?,
+                revision_snapshot_interval_hours: 24,
+            };
+            let before = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            let serial = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            let after = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            // Never use assert_eq!/Debug with private native snapshots.
+            if before != serial.dataset || before != after {
+                return Err("READONLY_FULL_DATASET_CHANGED");
+            }
+            let now = serial
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            if serial.checks.coverage_micros != SERIAL_HORIZON_MICROS.to_string()
+                || serial.checks.horizon_end_micros
+                    != serial_horizon(now)
+                        .map_err(|_| "HORIZON_REFUSED")?
+                        .to_string()
+                || serial.checks.event_head != "0"
+                || serial.checks.relay_completion != RelayCompletion::Complete
+                || serial.checks.background.len() != SERIAL_BACKGROUND_READS.len() + 3
+                || serial
+                    .checks
+                    .background
+                    .iter()
+                    .any(|fact| fact.eligibility != Eligibility::Clear)
+            {
+                return Err("FRESH_SERIAL_NOT_CLEAR");
+            }
+            let consumer = crate::notifications::NOTIFICATIONS_CONSUMER;
+            let owner = Uuid::now_v7();
+            let owner_id = owner.to_string();
+            if !super::super::outbox::lease_consumer_backend(&backend, consumer, owner, 60)
+                .await
+                .map_err(|_| "RELAY_LEASE_FAILED")?
+            {
+                return Err("RELAY_LEASE_NOT_ACQUIRED");
+            }
+            let held = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if held.checks.relay_completion != RelayCompletion::Incomplete
+                || !held.checks.outbox.iter().any(|relay| {
+                    relay.consumer == consumer
+                        && relay.lease_owner.as_deref() == Some(owner_id.as_str())
+                        && relay.lease_until_micros.is_some()
+                })
+            {
+                return Err("HELD_LEASE_NOT_BLOCKED");
+            }
+            if !super::super::outbox::release_consumer_backend(&backend, consumer, owner)
+                .await
+                .map_err(|_| "RELAY_RELEASE_FAILED")?
+            {
+                return Err("RELAY_RELEASE_NOT_CONFIRMED");
+            }
+            let released = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if released.checks.relay_completion != RelayCompletion::Complete {
+                return Err("RELEASED_RELAY_NOT_COMPLETE");
+            }
+            let now = released
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            for (hash, expiry, expected_now, expected_horizon) in [
+                ("a".repeat(64), now.checked_add(20 * 60 * 1_000_000), 0, 1),
+                ("b".repeat(64), now.checked_sub(1), 1, 2),
+            ] {
+                let expiry = expiry
+                    .and_then(chrono::DateTime::from_timestamp_micros)
+                    .ok_or("EXPIRY_REFUSED")?;
+                super::super::oidc::issue_state_backend(
+                    &backend,
+                    &hash,
+                    "root-owned-opaque-state",
+                    expiry,
+                )
+                .await
+                .map_err(|_| "OIDC_STATE_ISSUE_FAILED")?;
+                let observed = capture_serial_observation(&backend, policy)
+                    .await
+                    .map_err(|_| "SERIAL_FAILED")?;
+                let fact = observed
+                    .checks
+                    .background
+                    .iter()
+                    .find(|fact| fact.kind == "oidc-expiry")
+                    .ok_or("OIDC_EXPIRY_FACT_MISSING")?;
+                if fact.now != expected_now
+                    || fact.through_horizon != expected_horizon
+                    || fact.eligibility != Eligibility::Blocked
+                {
+                    return Err("OIDC_CURRENT_OR_FORWARD_EXPIRY_NOT_BLOCKED");
+                }
+            }
+            Ok(())
+        }
+        .await;
+        // No follow-up mutation/reconciliation after an uncertain operation.
+        // Always await SDK cleanup, retaining operation and drain categories.
+        let close = backend.close().await;
+        let zero = backend
+            .connection_stats()
+            .is_ok_and(|stats| stats.size == 0);
+        println!(
+            "FVOCI_SERIAL_REMOTE_RESULT operation={} close={} leases={}",
+            result.as_ref().err().copied().unwrap_or("OK"),
+            if close.is_ok() { "OK" } else { "FAILED" },
+            if zero { "ZERO" } else { "UNCONFIRMED" }
+        );
+        result?;
+        if close.is_err() || !zero {
+            return Err("LOCAL_DRAIN_UNCONFIRMED");
+        }
+        Ok(())
     }
 
     #[test]
