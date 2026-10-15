@@ -1167,19 +1167,22 @@ function sqlitePreparedRecords() {
 test("prepared-only original document or actor mutation cannot be hidden by final restoration", async () => {
   const { assertSqlitePreparedPreserved } = await import("./ui-audit.ts");
   const valid = sqlitePreparedRecords();
-  expect(() => { assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit); },
-  ).not.toThrow();
+  expect(() => {
+    assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit);
+  }).not.toThrow();
   for (const table of ["documents", "users"]) {
     const changed = sqlitePreparedRecords(),
       prints = record(changed.prepared, "fingerprints", table);
     const original = Object.keys(record(changed.before, "fingerprints", table))[0] as string;
     Reflect.deleteProperty(prints, original);
     prints["9".repeat(64)] = 1;
-    expect(() => { assertSqlitePreparedPreserved(changed.before, changed.prepared, changed.audit); },
-    ).toThrow("UI_PREEXISTING_ROW_CHANGED");
+    expect(() => {
+      assertSqlitePreparedPreserved(changed.before, changed.prepared, changed.audit);
+    }).toThrow("UI_PREEXISTING_ROW_CHANGED");
     // A restored final observation cannot erase that observed prepared failure.
-    expect(() => { assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit); },
-    ).not.toThrow();
+    expect(() => {
+      assertSqlitePreparedPreserved(valid.before, valid.prepared, valid.audit);
+    }).not.toThrow();
   }
 });
 
@@ -1198,9 +1201,9 @@ test("readback actor non-login namespace events refuse in prepared and final eve
     ["blob", f.reader],
   ]);
   record(f.prepared, "operations").event_sequence = [[number(1), number(4)]];
-  expect(() => { assertSqlitePreparedPreserved(f.before, f.prepared, f.audit); }).toThrow(
-    "UI_SQLITE_PREPARATION_EFFECT_REFUSED",
-  );
+  expect(() => {
+    assertSqlitePreparedPreserved(f.before, f.prepared, f.audit);
+  }).toThrow("UI_SQLITE_PREPARATION_EFFECT_REFUSED");
   expect(() => allocatedRows(f.before, f.prepared, f.audit)).toThrow(
     "UI_SQLITE_PREPARATION_EFFECT_REFUSED",
   );
