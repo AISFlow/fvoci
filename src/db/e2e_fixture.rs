@@ -985,6 +985,7 @@ struct SerialChecks {
     relay_completion: RelayCompletion,
     outbox: Vec<RelayObservation>,
     owners: BTreeMap<&'static str, Vec<Vec<Value>>>,
+    room_closure_binding: &'static str,
     background: Vec<BackgroundFact>,
     revision_candidates: Vec<RevisionObservation>,
     automatic_revision_ranks: Vec<Vec<Value>>,
@@ -1194,7 +1195,10 @@ fn revision_due(
     Ok(policy.revision_snapshot_interval_hours != 0 && candidate.snapshot_due(cutoff))
 }
 
-async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+async fn serial_native_cells(
+    f: &mut FamilyTx,
+    sql: &'static str,
+) -> Result<Vec<Vec<Cell>>, sqlx::Error> {
     let rows = f.query(sql, &[]).await?;
     if rows.len() > 10000 {
         return Err(refused());
@@ -1205,10 +1209,49 @@ async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Val
                 return Err(refused());
             };
             (0..remote.column_count())
-                .map(|i| row.cell(i as usize).map(exact))
+                .map(|i| row.cell(i as usize))
                 .collect()
         })
         .collect()
+}
+
+fn serial_exact_cells(rows: &[Vec<Cell>]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| row.iter().cloned().map(exact).collect())
+        .collect()
+}
+
+async fn serial_cells(f: &mut FamilyTx, sql: &'static str) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+    Ok(serial_exact_cells(&serial_native_cells(f, sql).await?))
+}
+
+fn serial_room_owner_fact(
+    kind: &'static str,
+    now: i64,
+    rows: &[Vec<Cell>],
+) -> Result<BackgroundFact, sqlx::Error> {
+    if !matches!(kind, "document-room-owners" | "task-room-owners") || rows.len() > 10000 {
+        return Err(refused());
+    }
+    serial_horizon(now)?;
+    let mut live = 0;
+    for row in rows {
+        if row.len() != 5 {
+            return Err(refused());
+        }
+        row[0].id()?;
+        row[1].id()?;
+        row[2].id()?;
+        if row[3].integer()? <= 0 {
+            return Err(refused());
+        }
+        let expires_at = row[4].datetime()?.timestamp_micros();
+        live += i64::from(expires_at > now);
+    }
+    // Every currently live owner overlaps the forward coverage, even if its
+    // lease expires inside it. Expired raw lineage is retained, never a normal
+    // release or process-retirement receipt: the parent must bind both.
+    BackgroundFact::observe(kind, "live-owner-overlaps-coverage", live, live)
 }
 
 // Readonly counterparts of the current scheduler leaves. Retention durations
@@ -1240,9 +1283,6 @@ const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
     ("webhook-retention", "eligible", "SELECT count(*) FROM webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<?1-?2"),
     ("github-retention", "eligible", "SELECT count(*) FROM github_deliveries WHERE processed_at<?1-?2"),
     ("maintenance-owners", "owner", "SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NOT NULL"),
-    // TTL expiry alone is not a normal owner-release receipt.
-    ("document-room-owners", "owner", "SELECT count(*) FROM collab_room_fences WHERE owner_token IS NOT NULL"),
-    ("task-room-owners", "owner", "SELECT count(*) FROM task_collab_room_fences WHERE owner_token IS NOT NULL"),
 ];
 
 async fn serial_checks(
@@ -1290,13 +1330,22 @@ async fn serial_checks(
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     let mut owners = BTreeMap::new();
+    let mut room_facts = Vec::new();
     for (name, sql) in UI_OPERATION_READS.iter().filter(|(name, _)| {
         matches!(
             *name,
             "maintenance_job_claims" | "collab_room_fences" | "task_collab_room_fences"
         )
     }) {
-        owners.insert(*name, serial_cells(f, sql).await?);
+        let rows = serial_native_cells(f, sql).await?;
+        if let Some(kind) = match *name {
+            "collab_room_fences" => Some("document-room-owners"),
+            "task_collab_room_fences" => Some("task-room-owners"),
+            _ => None,
+        } {
+            room_facts.push(serial_room_owner_fact(kind, now, &rows)?);
+        }
+        owners.insert(*name, serial_exact_cells(&rows));
     }
     let mut background = Vec::new();
     for (kind, interpretation, sql) in SERIAL_BACKGROUND_READS {
@@ -1348,6 +1397,7 @@ async fn serial_checks(
             counts[1],
         )?);
     }
+    background.extend(room_facts);
     let mut revision_candidates = Vec::new();
     for (kind, sql) in [
         ("document", "SELECT s.workspace_id,s.document_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='document' AND r.target_id=s.document_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM document_states s INNER JOIN documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id AND d.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.document_id LIMIT 10001"),
@@ -1409,6 +1459,7 @@ async fn serial_checks(
         relay_completion: relay_completion(head_seq, &outbox),
         outbox,
         owners,
+        room_closure_binding: "required-normal-release-and-parent-retirement",
         background,
         revision_candidates,
         automatic_revision_ranks,
@@ -1607,6 +1658,98 @@ mod serial_tests {
         for (now, future) in [(-1, 0), (0, -1), (2, 1), (0, 100001)] {
             assert!(BackgroundFact::observe("missing", "pending", now, future).is_err());
         }
+    }
+
+    #[test]
+    fn serial_room_live_eligibility_retains_expired_lineage_without_closure_proof() {
+        let now = 9_007_199_254_740_993;
+        let rows = [now - 1, now, now + 1, now + 20 * 60 * 1_000_000]
+            .into_iter()
+            .map(|expiry| {
+                vec![
+                    Cell::uuid(Uuid::from_u128(1)),
+                    Cell::uuid(Uuid::from_u128(2)),
+                    Cell::uuid(Uuid::from_u128(3)),
+                    Cell::Integer(7),
+                    Cell::Integer(expiry),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let raw = serial_exact_cells(&rows);
+        for kind in ["document-room-owners", "task-room-owners"] {
+            let retained = serial_room_owner_fact(kind, now, &rows[..2]).unwrap();
+            assert_eq!((retained.now, retained.through_horizon), (0, 0));
+            assert_eq!(retained.eligibility, Eligibility::Clear);
+            let mixed = serial_room_owner_fact(kind, now, &rows).unwrap();
+            assert_eq!((mixed.now, mixed.through_horizon), (2, 2));
+            assert_eq!(mixed.eligibility, Eligibility::Blocked);
+            assert_eq!(mixed.interpretation, "live-owner-overlaps-coverage");
+            // A lease ending within the horizon still overlaps coverage and
+            // cannot become Clear by testing only its state at horizon end.
+            let inside = serial_room_owner_fact(kind, now, &rows[3..]).unwrap();
+            assert_eq!((inside.now, inside.through_horizon), (1, 1));
+            assert_eq!(inside.eligibility, Eligibility::Blocked);
+            assert_eq!(serial_exact_cells(&rows), raw);
+            let output = serde_json::to_value(retained).unwrap();
+            assert!(output.get("ready").is_none());
+            assert!(output.get("released").is_none());
+        }
+        assert_eq!(raw.len(), 4);
+        assert_eq!(
+            Value::Array(raw[0].clone()),
+            json!([
+                ["blob", hex::encode(Uuid::from_u128(1).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(2).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(3).as_bytes())],
+                ["integer", "7"],
+                ["integer", (now - 1).to_string()]
+            ])
+        );
+    }
+
+    #[test]
+    fn serial_room_owner_observation_refuses_wrong_native_shape_type_clock_and_cap() {
+        let now = 1_700_000_000_000_000;
+        let row = vec![
+            Cell::uuid(Uuid::from_u128(1)),
+            Cell::uuid(Uuid::from_u128(2)),
+            Cell::uuid(Uuid::from_u128(3)),
+            Cell::Integer(1),
+            Cell::Integer(now),
+        ];
+        let kind = "document-room-owners";
+        for at in [0, -1, i64::MAX] {
+            assert!(serial_room_owner_fact(kind, at, std::slice::from_ref(&row)).is_err());
+        }
+        for (column, value) in [
+            (0, Cell::Null),
+            (1, Cell::Blob(vec![0; 15])),
+            (2, Cell::text("not-a-native-owner")),
+            (2, Cell::Null),
+            (3, Cell::Integer(0)),
+            (3, Cell::Integer(-1)),
+            (3, Cell::text("1")),
+            (4, Cell::Null),
+            (4, Cell::text(now.to_string())),
+            (4, Cell::Integer(i64::MAX)),
+        ] {
+            let mut wrong = row.clone();
+            wrong[column] = value;
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        let mut missing = row.clone();
+        missing.pop();
+        let mut extra = row.clone();
+        extra.push(Cell::Null);
+        for wrong in [missing, extra] {
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        assert!(serial_room_owner_fact("unknown-room", now, &[]).is_err());
+        assert!(serial_room_owner_fact(kind, now, &vec![row; 10001]).is_err());
+        assert_eq!(
+            serial_room_owner_fact(kind, now, &[]).unwrap().eligibility,
+            Eligibility::Clear
+        );
     }
 
     #[test]
@@ -2247,7 +2390,7 @@ mod tests {
                         .to_string()
                 || serial.checks.event_head != "0"
                 || serial.checks.relay_completion != RelayCompletion::Complete
-                || serial.checks.background.len() != SERIAL_BACKGROUND_READS.len() + 1
+                || serial.checks.background.len() != SERIAL_BACKGROUND_READS.len() + 3
                 || serial
                     .checks
                     .background
