@@ -2,9 +2,10 @@
 //! Uses the existing test-only barrier; no production switch or HTTP test route.
 use super::{
     arm_append_revoke_barrier, auth_and_join, connect_member, disarm_append_revoke_barrier,
-    expect_persisted, pending_tiptap_u1_json, room_key, start_test_server, stateless_frame,
-    sync_update_frame, test_collab_config, tiptap_xml_pending_u1, try_connect_member,
-    HelperChildCapacityHold, TestServer, FIXTURE_PASSWORD, PEPPER, PUBLIC_ORIGIN,
+    engine_expectations, engine_fixture, expect_persisted, room_key, start_test_server,
+    stateless_frame, sync_step1_frame, sync_update_frame, test_collab_config,
+    tiptap_xml_pending_u1, try_connect_member, DocumentMessage, HelperChildCapacityHold,
+    SyncMessage, SyncStep, TestServer, WireFrame, FIXTURE_PASSWORD, PEPPER, PUBLIC_ORIGIN,
 };
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use fvoci_server::auth::{password::Keyring, AuthService};
@@ -188,6 +189,58 @@ async fn app(backend: Backend, directory: &std::path::Path) -> TestServer {
     start_test_server(state, Some(hold)).await
 }
 
+async fn reader_sync_fence(
+    reader: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    routing: &str,
+    reject_updates: bool,
+) -> Vec<u8> {
+    reader
+        .send(super::Message::Binary(
+            sync_step1_frame(routing, &[0, 0]).into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = reader.next().await {
+            match frame.expect("native reader fence frame") {
+                super::Message::Binary(bytes) => {
+                    let WireFrame::Document {
+                        routing_key,
+                        message,
+                        ..
+                    } = fvoci_server::collab::wire::decode(&bytes)
+                        .expect("valid native reader fence codec")
+                    else {
+                        panic!("unexpected native reader fence frame");
+                    };
+                    assert_eq!(routing_key, routing, "reader fence changed document");
+                    match message {
+                        DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Update,
+                            ..
+                        }) if reject_updates => {
+                            panic!("rejected update reached the healthy reader before its fence")
+                        }
+                        DocumentMessage::Sync(SyncMessage {
+                            step: SyncStep::Step2,
+                            y_protocol,
+                        }) => return y_protocol,
+                        _ => {}
+                    }
+                }
+                super::Message::Ping(_) | super::Message::Pong(_) => {}
+                super::Message::Close(_) => panic!("healthy reader closed before its fence"),
+                _ => panic!("unexpected native reader websocket frame"),
+            }
+        }
+        panic!("missing native reader Step2 fence");
+    })
+    .await
+    .expect("native reader Step2 fence did not arrive")
+}
+
 async fn case(server: &TestServer, readback: &Readback) {
     let initial = api(server, Method::GET, "/api/v1/setup", None, None).await;
     assert_eq!(initial.status(), StatusCode::OK);
@@ -263,6 +316,9 @@ async fn case(server: &TestServer, readback: &Readback) {
     auth_and_join(&mut reader, &routing, 361).await;
     let mut writer = connect_member(server.addr, &ending).await;
     auth_and_join(&mut writer, &routing, 362).await;
+    // Authenticated alone sends no client Step1. Drain startup traffic through
+    // our first Step2 so no old response can satisfy the post-rejection fence.
+    let initial_reader_state = reader_sync_fence(&mut reader, &routing, false).await;
     let (reached, release) = arm_append_revoke_barrier(document).await;
     let rejected = tiptap_xml_pending_u1();
     writer
@@ -331,9 +387,19 @@ async fn case(server: &TestServer, readback: &Readback) {
         .status(),
         StatusCode::OK
     );
+    let rejected_reader_state = reader_sync_fence(&mut reader, &routing, true).await;
+    assert_eq!(
+        rejected_reader_state, initial_reader_state,
+        "rejected update changed the native state exposed to the healthy reader"
+    );
+    // A distinct complete fixture keeps a leaked rejected payload from being
+    // mistaken for the subsequent authorized update or its fresh readback.
+    let healthy = engine_fixture("marks_link_bold.v1");
+    let healthy_body = engine_expectations()["marks_link_bold"]["prosemirror_json"].clone();
+    assert_ne!(healthy, rejected);
     reader
         .send(super::Message::Binary(
-            sync_update_frame(&routing, &rejected).into(),
+            sync_update_frame(&routing, &healthy).into(),
         ))
         .await
         .unwrap();
@@ -366,7 +432,7 @@ async fn case(server: &TestServer, readback: &Readback) {
     assert_eq!(body.status(), StatusCode::OK);
     assert_eq!(
         body.json::<Value>().await.unwrap()["contentJson"],
-        pending_tiptap_u1_json()
+        healthy_body
     );
     assert_ne!(
         readback.snapshot(workspace, document).await,
