@@ -11,7 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as runner from "./run.ts";
 import type { PreparedSnapshot } from "../../apps/web/e2e-keycloak/observer.ts";
 import type { PreparedOperationContext, PreparedPrimary } from "./run.ts";
@@ -256,7 +256,9 @@ const rejectionCases: Array<[string, (context: PreparedOperationContext) => void
   [
     "foreign log file",
     (c) => {
-      c.logPath = join(tmpdir(), "foreign-missing-log");
+      const foreign = join(dirname(c.logPath), "foreign.log");
+      writeFileSync(foreign, readFileSync(c.logPath), { mode: 0o600 });
+      c.logPath = foreign;
     },
   ],
   [
