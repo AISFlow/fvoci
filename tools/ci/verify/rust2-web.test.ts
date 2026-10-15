@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   utimesSync,
@@ -51,6 +53,146 @@ const runOf = (step: Mapping): string => {
   if (typeof run !== "string") throw new Error("step has no run script");
   return run;
 };
+
+test("baked browser preparation makes the complete sidecar closure publicly readable without changing bytes", () => {
+  const recipe = readFileSync(join(ROOT, "docker/ci-base/Dockerfile"), "utf8");
+  const web = recipe.slice(recipe.indexOf("FROM ci-base AS ci-web"));
+  const preparation = web.match(/&& (chmod [^\n]+) \/opt\/playwright \\/);
+  if (!preparation?.[1]) throw new Error("baked browser public-read preparation missing");
+  const install = web.indexOf("playwright install --with-deps chromium");
+  expect(install).toBeGreaterThan(0);
+  expect(web.indexOf(preparation[0])).toBeGreaterThan(install);
+  const args = preparation[1].trim().split(/\s+/).slice(1);
+  const directory = mkdtempSync(join(tmpdir(), "web-browser-cache-preflight-"));
+  const inventory = (path: string): Mapping => {
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "-e",
+        'import {browserInventory} from "./tools/selected-backend-ci/admission.ts"; process.stdout.write(JSON.stringify(browserInventory(process.argv[1], undefined, true)));',
+        path,
+      ],
+      { cwd: ROOT, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode).toBe(0);
+    const value: unknown = JSON.parse(result.stdout.toString());
+    if (!isMapping(value)) throw new Error("browser inventory must be a mapping");
+    return value;
+  };
+  const prepared = (value: Mapping): boolean =>
+    Object.values(value).every((entry) => {
+      if (!isMapping(entry) || typeof entry["mode"] !== "number") return false;
+      const required = entry["directory"] === true ? 0o555 : 0o444;
+      return (entry["mode"] & required) === required && (entry["mode"] & 0o022) === 0;
+    });
+  try {
+    for (const [variant, flags, accepted] of [
+      ["current", args, true],
+      ["no-recursion", args.filter((arg) => arg !== "-R"), false],
+      ["no-public-read", args.map((arg) => arg.replace("a+rX,", "")), false],
+      ["nonroot-writable", args.map((arg) => arg.replace("go-w", "go+w")), false],
+    ] as const) {
+      const cache = join(directory, variant),
+        nested = join(cache, "chromium", "chrome-linux64");
+      mkdirSync(nested, { recursive: true, mode: 0o700 });
+      writeFileSync(join(nested, "deb.deps"), "private sidecar bytes", { mode: 0o600 });
+      writeFileSync(join(nested, "chrome"), "executable fixture", { mode: 0o755 });
+      const before = inventory(cache);
+      expect(prepared(before)).toBe(false);
+      expect(
+        Bun.spawnSync(["chmod", ...flags, cache], { stdout: "pipe", stderr: "pipe" }).exitCode,
+      ).toBe(0);
+      const after = inventory(cache);
+      expect(prepared(after)).toBe(accepted);
+      expect(Object.keys(after)).toEqual(Object.keys(before));
+      for (const key of Object.keys(before)) {
+        const prior = before[key],
+          current = after[key];
+        if (!isMapping(prior) || !isMapping(current)) throw new Error("invalid inventory entry");
+        expect(current["sha256"]).toBe(prior["sha256"]);
+      }
+      expect(statSync(join(nested, "chrome")).mode & 0o777).toBe(
+        variant === "nonroot-writable" ? 0o777 : 0o755,
+      );
+      expect(statSync(join(nested, "deb.deps")).mode & 0o111).toBe(0);
+      if (accepted) {
+        const copied = join(directory, "private-owned-copy");
+        mkdirSync(copied, { mode: 0o700 });
+        for (const name of readdirSync(cache))
+          cpSync(join(cache, name), join(copied, name), {
+            recursive: true,
+            preserveTimestamps: true,
+            force: false,
+            errorOnExist: true,
+          });
+        expect(inventory(copied)).toEqual({ ...after, ".": { directory: true, mode: 0o700 } });
+        expect(inventory(cache)).toEqual(after);
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap queries the pinned manager only after copying its installed toolchain home", () => {
+  const admit = runOf(stepWith(realJobs("web.yml"), "web-checks", byId("builder")));
+  const start = admit.indexOf('test "$(id -u):$(id -g)"');
+  const end = admit.indexOf('mkdir -p "$CARGO_HOME/bin"', start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const prefix = admit.slice(start, end);
+  const directory = mkdtempSync(join(tmpdir(), "web-rustup-order-preflight-"));
+  const immutable = join(directory, "immutable"),
+    owned = join(directory, "owned");
+  mkdirSync(immutable);
+  writeFileSync(join(immutable, "installed-fixture"), "no network required");
+  const manager = join(directory, "manager");
+  writeFileSync(
+    manager,
+    '#!/bin/bash\n[[ "$1" == --version && -f "$RUSTUP_HOME/installed-fixture" ]] || exit 9\nprintf "rustup 1.29.1 fixture\\n"\n',
+    { mode: 0o755 },
+  );
+  const evaluate = (body: string) => {
+    rmSync(owned, { recursive: true, force: true });
+    mkdirSync(owned);
+    return Bun.spawnSync(
+      [
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-e",
+        "-u",
+        "-o",
+        "pipefail",
+        "-c",
+        'id() { printf "1001"; }\n' +
+          body
+            .replaceAll("/opt/rustup/.", '"$IMMUTABLE"/.')
+            .replaceAll("/opt/cargo/bin/rustup", '"$MANAGER"'),
+      ],
+      {
+        env: {
+          PATH: process.env["PATH"],
+          RUSTUP_HOME: owned,
+          IMMUTABLE: immutable,
+          MANAGER: manager,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+  };
+  try {
+    expect(evaluate(prefix).exitCode).toBe(0);
+    const version = prefix.split("\n").find((line) => line.includes("rustup --version"));
+    if (!version) throw new Error("manager version assertion missing");
+    const beforeCopy = version + "\n" + prefix.replace(version, "");
+    expect(evaluate(beforeCopy).exitCode).not.toBe(0);
+    expect(existsSync(join(owned, "installed-fixture"))).toBe(false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("every Web SQLite caller captures complete actual fixed userspace inputs without relaxing refusal", () => {
   const jobs = realJobs("web.yml");
@@ -137,6 +279,11 @@ test("the same-run builder refuses publication, substituted userspace and host e
     ["*INTERP*", "*NEVER*"],
     ["test -s /etc/ssl/certs/ca-certificates.crt", ":"],
     ["--dump-dom about:blank", "--version"],
+    ["browserInventory(baked, undefined, true)", "{}"],
+    ["facts.uid, 0", "facts.uid, 1000"],
+    ["facts.gid, 0", "facts.gid, 1000"],
+    ["facts.mode & 0o022", "facts.mode & 0"],
+    ["facts.mode & readable", "readable"],
     [
       "33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4",
       "0000000000000000000000000000000000000000000000000000000000000000",
@@ -163,6 +310,8 @@ test("the same-run builder refuses publication, substituted userspace and host e
       ["docker load", "echo skipped-load"],
       ["web-loaded", "summary"],
       ["= 1.29.1", "= 1.28.0"],
+      ["--env RUSTUP_AUTO_INSTALL=0", "--env RUSTUP_AUTO_INSTALL=1"],
+      ["--env RUSTUP_TOOLCHAIN=1.99.0", "--env RUSTUP_TOOLCHAIN=1.98.0"],
       ["rustup component remove rustfmt", "echo ignored"],
       [
         "cpSync(join(baked, name), join(cache, name)",
@@ -209,7 +358,7 @@ test("the same-run builder refuses publication, substituted userspace and host e
 
 test("producer smoke passes the literal dpkg format through actual Bash caller quoting", () => {
   const producer = runOf(stepWith(realJobs("web.yml"), "web-builder", byId("builder")));
-  const marker = 'docker run --rm --network none "$ref" bash -e -o pipefail -c ';
+  const marker = "docker run --rm --network none ";
   const position = producer.indexOf(marker);
   expect(position).toBeGreaterThan(0);
   const smoke = producer.slice(position);
@@ -227,7 +376,7 @@ test("producer smoke passes the literal dpkg format through actual Bash caller q
         "-o",
         "pipefail",
         "-c",
-        'docker() { [[ "$#" == 11 && "${10}" == -c ]]; printf "%s" "${11}" > "$CAPTURE"; }\n' +
+        'docker() { [[ "$#" == 15 && "${14}" == -c ]] || return 1; printf "%s" "${15}" > "$CAPTURE"; }\n' +
           body,
       ],
       {
@@ -235,6 +384,7 @@ test("producer smoke passes the literal dpkg format through actual Bash caller q
           PATH: process.env["PATH"],
           ref: "source-fixture",
           CAPTURE: capture,
+          GITHUB_WORKSPACE: directory,
           Version: hostVersion,
         },
         stdout: "pipe",
