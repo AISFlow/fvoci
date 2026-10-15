@@ -141,17 +141,33 @@ if (binding.suite === "products") {
     const key = `F${randomUUID().replaceAll("-", "").slice(0, 6).toUpperCase()}`;
     const projects = `/api/v1/workspaces/${binding.workspaceId}/projects`;
     const projectRes = await owner.page.request.post(projects, {
-      data: { key, name: "private selected final", visibility: "private" },
+      data: {
+        key,
+        name: "private selected final",
+        visibility: "private",
+      } satisfies Schema["CreateProjectBody"],
     });
     expect(projectRes.status()).toBe(201);
     const project = (await projectRes.json()) as Schema["ProjectOutput"];
+    expect(project.rootDocumentId).toMatch(UUID_RE);
     const documents = `${projects}/${project.id}/documents`;
     const create = async (title: string) => {
       const res = await owner.page.request.post(documents, {
-        data: { title, parentId: project.rootDocumentId, commandId: randomUUID() },
+        data: {
+          title,
+          parentId: project.rootDocumentId,
+        } satisfies Schema["CreateProjectDocumentBody"],
       });
       expect(res.status()).toBe(201);
-      return (await res.json()) as Schema["DocumentMetaResponse"];
+      const document = (await res.json()) as Schema["DocumentMetaResponse"];
+      expect(document.id).toMatch(UUID_RE);
+      expect(document).toMatchObject({
+        workspaceId: binding.workspaceId,
+        projectId: project.id,
+        parentId: project.rootDocumentId,
+      });
+      if (!document.displayId) throw new Error("SELECTED_FINAL_PROJECT_DISPLAY_ID_MISSING");
+      return document;
     };
     const doc = await create("project actual body"),
       reference = await create("selected 참조 대상");
@@ -159,7 +175,7 @@ if (binding.suite === "products") {
       id: doc.id,
       workspaceId: binding.workspaceId,
       path: `${documents}/${doc.id}`,
-      url: `/w/${binding.workspaceSlug}/${key}-${String(doc.number)}`,
+      url: `/w/${binding.workspaceSlug}/${doc.displayId}`,
     };
     for (const actor of [member, outsider])
       expect((await actor.page.request.get(`${target.path}/body`)).status()).toBe(404);
@@ -168,7 +184,7 @@ if (binding.suite === "products") {
     await editor.click();
     await owner.page.keyboard.type("프로젝트 본문 한글😀");
     await owner.page.keyboard.press("Enter");
-    await owner.page.keyboard.type(`/${key}-${String(reference.number)}`);
+    await owner.page.keyboard.type(`/${reference.displayId}`);
     await expect(owner.page.locator(".fvoci-suggestion")).toBeVisible();
     await owner.page.keyboard.press("Enter");
     await expect(owner.page.locator(".afn-embed-ref")).toHaveText("selected 참조 대상");
@@ -193,7 +209,10 @@ if (binding.suite === "products") {
     if (!attachment) throw new Error("SELECTED_FINAL_ATTACHMENT_MISSING");
     expect(attachment.attachmentId).toMatch(UUID_RE);
     const grant = await owner.page.request.post(`${projects}/${project.id}/members`, {
-      data: { userId: binding.member.userId, role: "member" },
+      data: {
+        userId: binding.member.userId,
+        role: "member",
+      } satisfies Schema["AddProjectMemberBody"],
     });
     expect(grant.status()).toBe(201);
     await mount(member, target, "on");
@@ -229,9 +248,13 @@ if (binding.suite === "products") {
     await mount(member, target, "on");
     await expectConverged(owner.page, member.page);
     const membership = `/api/v1/workspaces/${binding.workspaceId}/members/${binding.member.userId}`;
-    expect((await owner.page.request.patch(membership, { data: { role: "guest" } })).status()).toBe(
-      200,
-    );
+    expect(
+      (
+        await owner.page.request.patch(membership, {
+          data: { role: "guest" } satisfies Schema["MemberRoleBody"],
+        })
+      ).status(),
+    ).toBe(200);
     await expect(
       member.page.locator('.fvoci-editor .ProseMirror[contenteditable="true"]'),
     ).toHaveCount(0);
@@ -242,7 +265,7 @@ if (binding.suite === "products") {
     const revisions: unknown = await history.json();
     // This is the normal authorized endpoint, not a fabricated browser ACK.
     const denied = async (contentMd: string) => {
-      const data = { contentMd };
+      const data = { contentMd } satisfies Schema["PutDocumentBodyInput"];
       const response = await member.page.request.put(`${target.path}/body`, { data });
       expect(response.status()).toBe(404);
       actors.denials.push({
