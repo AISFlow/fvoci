@@ -711,6 +711,19 @@ fn revalidate_native_files(value: &Value) -> Result<(), Failure> {
         .as_object()
         .filter(|entries| !entries.is_empty())
         .ok_or("missing image native file inventory")?;
+    // Refuse changed bytes/resolution before asking ldd to inspect any ELF.
+    for (path, expected) in entries {
+        let path = Path::new(path);
+        let resolved = fs::canonicalize(path)?;
+        if expected.get("resolved") != Some(&json!(resolved))
+            || (resolved.is_dir() && expected.get("kind") != Some(&json!("directory")))
+            || (!resolved.is_dir()
+                && (!resolved.is_file()
+                    || expected.get("sha256") != Some(&json!(sha256_hex(&fs::read(&resolved)?)))))
+        {
+            return Err("image SDK native file hash/resolution differs".into());
+        }
+    }
     let paths: Vec<_> = entries.keys().map(Path::new).collect();
     if paths.iter().any(|path| !path.is_absolute())
         || crate::sqlite::native_files(&paths)? != *value
@@ -901,25 +914,6 @@ fn adopt_image(
     if sealed.get("rustc_path") != Some(&json!(fs::canonicalize(rustc)?)) {
         return Err("image SDK actual Rust compiler path differs".into());
     }
-    for (arguments, field) in [
-        (&["-vV"][..], "rustc"),
-        (&["--print", "sysroot"][..], "rust_sysroot"),
-    ] {
-        let mut inspection =
-            Command::new(context.var_text("RUSTC").unwrap_or_else(|| "rustc".into()));
-        inspection.args(arguments).env_clear().envs(&context.env);
-        let result = process::run(&mut inspection, RUSTC_BUDGET, true)
-            .map_err(|_| "image SDK Rust inspection failed")?;
-        let actual = utf8(result.stdout)?;
-        let actual = if field == "rust_sysroot" {
-            json!(fs::canonicalize(actual.trim())?)
-        } else {
-            json!(actual)
-        };
-        if !result.status.success() || sealed.get(field) != Some(&actual) {
-            return Err("image SDK effective Rust compiler/sysroot differs".into());
-        }
-    }
     let clang = context
         .var_text("LIBCLANG_PATH")
         .ok_or("image SDK requires LIBCLANG_PATH")?;
@@ -945,6 +939,29 @@ fn adopt_image(
             .get("rust_files")
             .ok_or("image SDK Rust files missing")?,
     )?;
+    for (arguments, field) in [
+        (&["-vV"][..], "rustc"),
+        (&["--print", "sysroot"][..], "rust_sysroot"),
+    ] {
+        let mut inspection =
+            Command::new(context.var_text("RUSTC").unwrap_or_else(|| "rustc".into()));
+        inspection
+            .args(arguments)
+            .env_clear()
+            .envs(&context.env)
+            .env("RUSTUP_AUTO_INSTALL", "0");
+        let result = process::run(&mut inspection, RUSTC_BUDGET, true)
+            .map_err(|_| "image SDK Rust inspection failed")?;
+        let actual = utf8(result.stdout)?;
+        let actual = if field == "rust_sysroot" {
+            json!(fs::canonicalize(actual.trim())?)
+        } else {
+            json!(actual)
+        };
+        if !result.status.success() || sealed.get(field) != Some(&actual) {
+            return Err("image SDK effective Rust compiler/sysroot differs".into());
+        }
+    }
     let prefix = sdk.join(target);
     let manifest: Value = serde_json::from_slice(&fs::read(prefix.join("manifest.json"))?)
         .map_err(|_| "invalid image SDK manifest")?;
