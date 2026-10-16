@@ -1933,6 +1933,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
           .catch(() => undefined);
         await context.close();
       } finally {
+        console.log(`task-admission-wire ${schedule} ${JSON.stringify(wire)}`);
         await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
           body: JSON.stringify({ ...coherence, wire }),
           contentType: "application/json",
