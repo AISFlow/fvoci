@@ -59,15 +59,17 @@ PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 
 network_args=()
 remove_args=(--rm)
+publish_args=(-p 127.0.0.1:0:5432)
 if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
   network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-pg --cpus=1 --memory=2g --pids-limit=256)
   remove_args=()
+  publish_args=()
 fi
 cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
   --name "$CONTAINER" \
   --label "fvoci.test-run=${RUN_ID}" \
   --env-file "$ENV_FILE" \
-  -p 127.0.0.1:0:5432 \
+  "${publish_args[@]}" \
   "$IMAGE" \
   postgres -c "max_connections=${PG_MAX_CONNECTIONS}")"
 
@@ -86,8 +88,12 @@ if [[ ! "$server_version_num" =~ ^${PG_MAJOR}[0-9]{4}$ ]]; then
   exit 1
 fi
 
-port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
-export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"
+if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+  export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@fvoci-pg:5432/postgres"
+else
+  port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
+  export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"
+fi
 export FVOCI_TEST_PG_CONTAINER="$CONTAINER"
 
 # Keep this shell alive so EXIT cleans up after both successful and failed commands.

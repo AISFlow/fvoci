@@ -49,9 +49,11 @@ fvoci_test_meili_start() {
 
   local -a network_args=()
   local -a remove_args=(--rm)
+  local -a publish_args=(-p 127.0.0.1:0:7700)
   if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
     network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-meili --cpus=1 --memory=2g --pids-limit=256)
     remove_args=()
+    publish_args=()
   fi
   cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
     --name "$FVOCI_TEST_MEILI_CONTAINER" \
@@ -59,7 +61,7 @@ fvoci_test_meili_start() {
     -e "MEILI_MASTER_KEY=${master_key}" \
     -e MEILI_NO_ANALYTICS=true \
     -e MEILI_ENV=production \
-    -p 127.0.0.1:0:7700 \
+    "${publish_args[@]}" \
     "$FVOCI_TEST_MEILI_IMAGE")" || return 1
 
   deadline=$((SECONDS + 30))
@@ -72,12 +74,16 @@ fvoci_test_meili_start() {
     sleep 1
   done
 
-  port="$(docker port "$cid" 7700 | head -1 | awk -F: '{print $NF}')" || return 1
-  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-    echo "meilisearch published no host port for 7700" >&2
-    return 1
+  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+    export FVOCI_MEILI_URL="http://fvoci-meili:7700"
+  else
+    port="$(docker port "$cid" 7700 | head -1 | awk -F: '{print $NF}')" || return 1
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+      echo "meilisearch published no host port for 7700" >&2
+      return 1
+    fi
+    export FVOCI_MEILI_URL="http://127.0.0.1:${port}"
   fi
-  export FVOCI_MEILI_URL="http://127.0.0.1:${port}"
   export FVOCI_MEILI_KEY="$master_key"
   export MEILI_MASTER_KEY="$master_key"
 }
