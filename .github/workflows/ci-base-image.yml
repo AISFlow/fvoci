@@ -4,10 +4,15 @@ on:
   pull_request:
     paths: &image-paths
       - docker/ci-base/**
-      - tools/ci/**
+      - .dockerignore
+      - tools/ci/ci-base-image.ts
+      - tools/ci/ci-base-image.test.ts
       - .github/workflows/ci-base-image.yml
       - rust-toolchain.toml
-      - xtask/**
+      - xtask/Cargo.toml
+      - xtask/Cargo.lock
+      - xtask/src/**
+      - xtask/*.tsv
       - tests/support/official_sqld.rs
       - .bun-version
       - apps/web/package.json
