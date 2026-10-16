@@ -650,6 +650,135 @@ type ProjectionTargets = {
   identityLinks: Map<string, string>;
   removedIdentityLinks: Set<string>;
 };
+
+function sqliteExtractedEvent(
+  refs: Record_,
+  audit: Audit,
+  targets: ProjectionTargets,
+  sha: string,
+  count: unknown,
+  before: unknown,
+  after: unknown,
+): unknown[] | null {
+  const selected = audit.sqlitePreparation,
+    witness = record(refs, "eventWitness"),
+    cells = list(witness, "cells"),
+    target = witness.target;
+  if (
+    !selected ||
+    audit.serial?.expectedBackend !== "sqlite" ||
+    get(before, "backend") !== "sqlite" ||
+    get(after, "backend") !== "sqlite" ||
+    count !== 1 ||
+    !same(Object.keys(witness).sort(), ["cells", "class", "columns", "sequence", "target"]) ||
+    !same(witness.columns, [
+      "id",
+      "seq",
+      "workspace_id",
+      "actor_user_id",
+      "verb",
+      "target_type",
+      "target_id",
+      "payload",
+      "channel",
+      "created_at",
+    ]) ||
+    cells.length !== 10 ||
+    rowHash(cells) !== sha ||
+    !same(cells[0], ["blob", refs.self]) ||
+    !/^[a-f0-9]{32}$/.test(String(refs.self)) ||
+    !same(cells[1], witness.sequence) ||
+    integer(cells[1]) <= 0n ||
+    !same(cells[2], ["blob", get(refs, "workspaces", 0)]) ||
+    list(refs, "workspaces").length !== 1 ||
+    list(refs, "actors").length !== 0 ||
+    !same(cells[3], ["null"]) ||
+    !same(cells[4], ["text", "attachment.extracted"]) ||
+    !same(cells[5], ["text", "attachment"]) ||
+    !same(cells[6], ["blob", target]) ||
+    typeof target !== "string" ||
+    !/^[a-f0-9]{32}$/.test(target) ||
+    !same(cells[8], ["text", "web"])
+  )
+    return null;
+  const uuid = target.replace(/^(........)(....)(....)(....)(............)$/, "$1-$2-$3-$4-$5");
+  if (!same(cells[7], ["text", JSON.stringify({ attachmentId: uuid, status: "ok" })])) return null;
+  const attachments = Object.entries(record(after, "allocations", "attachments")).filter(
+    ([, row]) => get(row, "self") === target,
+  );
+  if (
+    attachments.length !== 1 ||
+    attachments[0] === undefined ||
+    Object.values(record(before, "allocations", "attachments")).some(
+      (row) => get(row, "self") === target,
+    )
+  )
+    return null;
+  const [attachmentHash, attachment] = attachments[0],
+    extraction = record(attachment, "extraction"),
+    fields = list(extraction, "cells"),
+    workspace = text(cells, 2, 1),
+    uploader = text(fields, 4, 1),
+    document = text(fields, 2, 1);
+  if (
+    get(after, "fingerprints", "attachments", attachmentHash) !== 1 ||
+    Object.hasOwn(record(before, "fingerprints", "attachments"), attachmentHash) ||
+    extraction.sha256 !== attachmentHash ||
+    !same(Object.keys(extraction).sort(), ["cells", "columns", "sha256"]) ||
+    !same(extraction.columns, [
+      "id",
+      "workspace_id",
+      "document_id",
+      "task_id",
+      "uploader_id",
+      "status",
+      "extract_status",
+      "extract_attempts",
+      "extract_lease_token",
+      "extract_lease_expires_at",
+      "completed_at",
+    ]) ||
+    fields.length !== 11 ||
+    !same(fields[0], ["blob", target]) ||
+    !same(fields[1], ["blob", workspace]) ||
+    !same(fields[2], ["blob", document]) ||
+    !/^[a-f0-9]{32}$/.test(document) ||
+    !same(fields[3], ["null"]) ||
+    !same(fields[4], ["blob", uploader]) ||
+    !Object.hasOwn(audit.actors, uploader) ||
+    uploader === selected.preparationActor.id ||
+    uploader === selected.readbackActor.id ||
+    !Object.hasOwn(audit.workspaces, workspace) ||
+    targets.documents.get(document) !== workspace ||
+    !same(get(attachment, "workspaces"), [workspace]) ||
+    !same(get(attachment, "actors"), [uploader]) ||
+    !same(get(attachment, "events"), []) ||
+    !same(fields[5], ["text", "stored"]) ||
+    !same(fields[6], ["text", "ok"]) ||
+    integer(fields[7]) < 1n ||
+    integer(fields[7]) > 2n ||
+    !same(fields[8], ["null"]) ||
+    !same(fields[9], ["null"])
+  )
+    return null;
+  const completed = integer(fields[10]),
+    created = integer(cells[9]),
+    operation = [cells[1], cells[2], cells[3]];
+  if (
+    completed < decimal(selected.prepared.checks.clockMicros) ||
+    created < completed ||
+    created > decimal(audit.serial.after.checks.clockMicros) + 999n ||
+    list(after, "operations", "events").filter((row) => same(row, operation)).length !== 1 ||
+    Object.values(record(after, "allocations", "events")).filter(
+      (row) =>
+        get(row, "eventWitness", "class") === "sqlite-attachment-extracted" &&
+        get(row, "eventWitness", "target") === target,
+    ).length !== 1
+  )
+    return null;
+  return operation;
+}
+
 function witnessedEventOperation(
   refs: unknown,
   audit: Audit,
@@ -657,6 +786,8 @@ function witnessedEventOperation(
   targets: ProjectionTargets,
   sha: string,
   count: unknown,
+  before: unknown,
+  after: unknown,
 ): unknown[] | null {
   if (!isRecord(refs) || !isRecord(refs.eventWitness)) return null;
   const witness = refs.eventWitness;
@@ -693,6 +824,8 @@ function witnessedEventOperation(
   if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
   const sequence = witness.sequence;
   if (integer(sequence) <= 0n) return null;
+  if (witness.class === "sqlite-attachment-extracted")
+    return sqliteExtractedEvent(refs, audit, targets, sha, count, before, after);
   if (witness.class === "actor-invitation-login") {
     const selected = audit.sqlitePreparation;
     return count === 1 &&
@@ -1215,6 +1348,8 @@ export function allocatedRows(
           targets,
           sha,
           get(after, "fingerprints", "events", sha),
+          before,
+          after,
         ) !== null, "UI_FOREIGN_EVENT");
       events.add(get(refs, "self") as string);
     }
@@ -1849,6 +1984,8 @@ function auditEventAndFenceCounters(
               targets,
               hash,
               get(after, "fingerprints", "events", hash),
+              before,
+              after,
             );
         return row === null ? [] : [canonical(row)];
       }),

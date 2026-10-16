@@ -587,6 +587,86 @@ fn sqlite_invitation_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::E
         "acceptedAt":exact(cell("accepted_at")?.clone()),"expiresAt":exact(cell("expires_at")?.clone())}))
 }
 
+// Only the selected SQLite PRODUCT4 document upload producer is witnessed.
+// Its system transaction deliberately stores a NULL actor and channel `web`.
+fn sqlite_attachment_extracted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    if !matches!(cell("verb")?, Cell::Text(verb) if verb == "attachment.extracted") {
+        return Ok(Value::Null);
+    }
+    let target = match cell("target_id")? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    if !matches!(cell("id")?, Cell::Blob(id) if id.len() == 16)
+        || !matches!(cell("seq")?, Cell::Integer(seq) if *seq > 0)
+        || !matches!(cell("workspace_id")?, Cell::Blob(id) if id.len() == 16)
+        || !matches!(cell("actor_user_id")?, Cell::Null)
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "attachment")
+        || !matches!(cell("created_at")?, Cell::Integer(time) if *time > 0)
+        || cell("payload")?.value()? != json!({"attachmentId":target.to_string(),"status":"ok"})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"sqlite-attachment-extracted","sequence":exact(cell("seq")?.clone()),
+        "target":hex::encode(target.as_bytes()),
+        "columns":columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
+        "cells":columns.iter().map(|(_,cell)| exact(cell.clone())).collect::<Vec<_>>()}),
+    )
+}
+
+fn sqlite_extracted_attachment_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    for name in ["id", "workspace_id", "document_id", "uploader_id"] {
+        if !matches!(cell(name)?, Cell::Blob(id) if id.len() == 16) {
+            return Ok(Value::Null);
+        }
+    }
+    if !matches!(cell("task_id")?, Cell::Null)
+        || !matches!(cell("status")?, Cell::Text(status) if status == "stored")
+        || !matches!(cell("extract_status")?, Cell::Text(status) if status == "ok")
+        || !matches!(cell("extract_attempts")?, Cell::Integer(attempt) if (1..=i64::from(super::attachment_extract::EXTRACT_MAX_ATTEMPTS)).contains(attempt))
+        || !matches!(cell("extract_lease_token")?, Cell::Null)
+        || !matches!(cell("extract_lease_expires_at")?, Cell::Null)
+        || !matches!(cell("completed_at")?, Cell::Integer(time) if *time > 0)
+    {
+        return Ok(Value::Null);
+    }
+    // Never export storage keys, names, extracted text or a live lease token.
+    let names = [
+        "id",
+        "workspace_id",
+        "document_id",
+        "task_id",
+        "uploader_id",
+        "status",
+        "extract_status",
+        "extract_attempts",
+        "extract_lease_token",
+        "extract_lease_expires_at",
+        "completed_at",
+    ];
+    let cells = names
+        .iter()
+        .map(|name| cell(name).map(|value| exact(value.clone())))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"columns":names,"cells":cells}))
+}
+
 fn row_allocation(
     table: &str,
     row: &FamilyRow,
@@ -602,7 +682,7 @@ fn row_allocation(
     for (i, name) in columns.into_iter().enumerate() {
         let cell = row.cell(i)?;
         if table == "events"
-            || (selected_sqlite && matches!(table, "notifications" | "invitations"))
+            || (selected_sqlite && matches!(table, "notifications" | "invitations" | "attachments"))
         {
             event_columns.push((name.to_string(), cell.clone()));
         }
@@ -623,10 +703,10 @@ fn row_allocation(
                 _ => return Err(refused()),
             }
         } else if name == "id"
-            && matches!(
+            && (matches!(
                 table,
                 "users" | "workspaces" | "events" | "documents" | "tasks" | "identity_links"
-            )
+            ) || (selected_sqlite && table == "attachments"))
         {
             let bytes = cell.bytes()?;
             if bytes.len() != 16 {
@@ -647,10 +727,19 @@ fn row_allocation(
             if allocation["eventWitness"].is_null() {
                 allocation["eventWitness"] = sqlite_invitation_accepted_witness(&event_columns)?;
             }
+            if allocation["eventWitness"].is_null() {
+                allocation["eventWitness"] = sqlite_attachment_extracted_witness(&event_columns)?;
+            }
         }
     }
     if selected_sqlite && table == "invitations" {
         allocation["invitation"] = sqlite_invitation_fields(&event_columns)?;
+    }
+    if selected_sqlite && table == "attachments" {
+        allocation["extraction"] = sqlite_extracted_attachment_fields(&event_columns)?;
+        if !allocation["extraction"].is_null() {
+            allocation["extraction"]["sha256"] = json!(row_hash(row)?);
+        }
     }
     if selected_sqlite && table == "notifications" {
         allocation["notification"] = json!({"columns":event_columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
@@ -2278,6 +2367,111 @@ mod tests {
                 .unwrap(),
             ),
         ]
+    }
+
+    #[test]
+    fn sqlite_extraction_witness_requires_exact_producer_and_closed_document_attachment() {
+        let id = Uuid::from_u128(1);
+        let event = vec![
+            ("id".into(), Cell::uuid(Uuid::from_u128(2))),
+            ("seq".into(), Cell::Integer(9)),
+            ("workspace_id".into(), Cell::uuid(Uuid::from_u128(3))),
+            ("actor_user_id".into(), Cell::Null),
+            ("verb".into(), Cell::text("attachment.extracted")),
+            ("target_type".into(), Cell::text("attachment")),
+            ("target_id".into(), Cell::uuid(id)),
+            (
+                "payload".into(),
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"ok"})).unwrap(),
+            ),
+            ("channel".into(), Cell::text("web")),
+            ("created_at".into(), Cell::Integer(50)),
+        ];
+        assert_eq!(event_witness(&event).unwrap(), Value::Null);
+        let witness = sqlite_attachment_extracted_witness(&event).unwrap();
+        assert_eq!(witness["class"], "sqlite-attachment-extracted");
+        assert_eq!(witness["cells"].as_array().unwrap().len(), 10);
+        for (name, value) in [
+            ("id", Cell::Blob(vec![1; 15])),
+            ("seq", Cell::text("9")),
+            ("workspace_id", Cell::Null),
+            ("actor_user_id", Cell::uuid(id)),
+            ("channel", Cell::text("system")),
+            ("verb", Cell::text("attachment.created")),
+            ("target_type", Cell::text("task")),
+            ("target_id", Cell::uuid(Uuid::from_u128(4))),
+            ("created_at", Cell::text("50")),
+            (
+                "payload",
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"pending"})).unwrap(),
+            ),
+            (
+                "payload",
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"ok","extra":true}))
+                    .unwrap(),
+            ),
+        ] {
+            let mut changed = event.clone();
+            changed
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_attachment_extracted_witness(&changed).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+        let attachment = vec![
+            ("id".into(), Cell::uuid(id)),
+            ("workspace_id".into(), Cell::uuid(Uuid::from_u128(3))),
+            ("document_id".into(), Cell::uuid(Uuid::from_u128(4))),
+            ("task_id".into(), Cell::Null),
+            ("uploader_id".into(), Cell::uuid(Uuid::from_u128(5))),
+            ("status".into(), Cell::text("stored")),
+            ("extract_status".into(), Cell::text("ok")),
+            ("extract_attempts".into(), Cell::Integer(1)),
+            ("extract_lease_token".into(), Cell::Null),
+            ("extract_lease_expires_at".into(), Cell::Null),
+            ("completed_at".into(), Cell::Integer(40)),
+            (
+                "storage_key".into(),
+                Cell::text("PRIVATE_EXTRACTION_CANARY"),
+            ),
+            (
+                "extract_text".into(),
+                Cell::text("PRIVATE_EXTRACTION_CANARY"),
+            ),
+        ];
+        let fields = sqlite_extracted_attachment_fields(&attachment).unwrap();
+        assert_eq!(fields["cells"].as_array().unwrap().len(), 11);
+        assert!(!fields.to_string().contains("PRIVATE_EXTRACTION_CANARY"));
+        for (name, value) in [
+            ("document_id", Cell::Null),
+            ("task_id", Cell::uuid(id)),
+            ("uploader_id", Cell::Blob(vec![1; 15])),
+            ("status", Cell::text("uploading")),
+            ("extract_status", Cell::text("pending")),
+            ("extract_attempts", Cell::Integer(0)),
+            ("extract_attempts", Cell::Integer(3)),
+            ("extract_attempts", Cell::text("1")),
+            ("extract_lease_token", Cell::uuid(id)),
+            ("extract_lease_expires_at", Cell::Integer(100)),
+            ("completed_at", Cell::Null),
+        ] {
+            let mut changed = attachment.clone();
+            changed
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_extracted_attachment_fields(&changed).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -1508,6 +1508,210 @@ test("SQLite invitation login is bound to one exact prepared new-actor row in bo
   }
 });
 
+test("SQLite extraction events bind one new closed document attachment and its exact producer row", async () => {
+  const { allocatedRows } = await import("./ui-audit.ts");
+  const fixture = () => {
+    const f = sqlitePreparedRecords(),
+      after = structuredClone(f.prepared),
+      uploader = Object.keys(f.audit.actors)[0] as string,
+      document = "a".repeat(32),
+      target = "b".repeat(32),
+      eventId = "e".repeat(32),
+      attachmentHash = f.h("complete-private-attachment-row"),
+      cells: unknown[][] = [
+        ["blob", eventId],
+        number(4),
+        ["blob", f.workspace],
+        ["null"],
+        ["text", "attachment.extracted"],
+        ["text", "attachment"],
+        ["blob", target],
+        [
+          "text",
+          JSON.stringify({ attachmentId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", status: "ok" }),
+        ],
+        ["text", "web"],
+        number(50),
+      ],
+      sha = f.h(cells),
+      fields: unknown[][] = [
+        ["blob", target],
+        ["blob", f.workspace],
+        ["blob", document],
+        ["null"],
+        ["blob", uploader],
+        ["text", "stored"],
+        ["text", "ok"],
+        number(1),
+        ["null"],
+        ["null"],
+        number(45),
+      ],
+      extraction = {
+        columns: [
+          "id",
+          "workspace_id",
+          "document_id",
+          "task_id",
+          "uploader_id",
+          "status",
+          "extract_status",
+          "extract_attempts",
+          "extract_lease_token",
+          "extract_lease_expires_at",
+          "completed_at",
+        ],
+        cells: fields,
+        sha256: attachmentHash,
+      },
+      attachment = { ...f.refs([f.workspace], [uploader], target), extraction },
+      event = {
+        ...f.refs([f.workspace], [], eventId),
+        eventWitness: {
+          class: "sqlite-attachment-extracted",
+          sequence: number(4),
+          target,
+          columns: [
+            "id",
+            "seq",
+            "workspace_id",
+            "actor_user_id",
+            "verb",
+            "target_type",
+            "target_id",
+            "payload",
+            "channel",
+            "created_at",
+          ],
+          cells,
+        },
+      };
+    record(after, "fingerprints").attachments = { [attachmentHash]: 1 };
+    record(after, "allocations").attachments = { [attachmentHash]: attachment };
+    record(after, "fingerprints", "events")[sha] = 1;
+    record(after, "allocations", "events")[sha] = event;
+    (get(after, "operations", "events") as unknown[]).push([
+      number(4),
+      ["blob", f.workspace],
+      ["null"],
+    ]);
+    record(after, "operations").event_sequence = [[number(1), number(4)]];
+    f.audit.documents = { [document]: f.workspace };
+    must(f.audit.serial).after = {
+      ...must(f.audit.sqlitePreparation).prepared,
+      dataset: after,
+      checks: { ...must(f.audit.sqlitePreparation).prepared.checks, clockMicros: "60" },
+    };
+    return {
+      ...f,
+      after,
+      fields,
+      cells,
+      event,
+      extraction,
+      attachmentHash,
+      sha,
+      attachment,
+      target,
+    };
+  };
+  expect(() => {
+    const f = fixture();
+    allocatedRows(f.before, f.after, f.audit);
+  }).not.toThrow();
+  const mutations: ((f: ReturnType<typeof fixture>) => void)[] = [
+    (f) => {
+      f.cells[7] = ["text", "{}"];
+    },
+    (f) => {
+      f.cells[8] = ["text", "system"];
+    },
+    (f) => {
+      f.event.eventWitness.target = "f".repeat(32);
+    },
+    (f) => {
+      f.fields[1] = ["blob", "f".repeat(32)];
+    },
+    (f) => {
+      f.fields[2] = ["blob", "f".repeat(32)];
+    },
+    (f) => {
+      f.fields[3] = ["blob", "a".repeat(32)];
+    },
+    (f) => {
+      f.fields[4] = ["blob", f.reader];
+      f.attachment.actors = [f.reader];
+    },
+    (f) => {
+      f.fields[5] = ["text", "uploading"];
+    },
+    (f) => {
+      f.fields[6] = ["text", "pending"];
+    },
+    (f) => {
+      f.fields[7] = number(3);
+    },
+    (f) => {
+      f.fields[8] = ["blob", "f".repeat(32)];
+    },
+    (f) => {
+      f.fields[9] = number(100);
+    },
+    (f) => {
+      f.fields[10] = number(51);
+    },
+    (f) => {
+      f.extraction.sha256 = "f".repeat(64);
+    },
+    (f) => {
+      record(f.after, "fingerprints", "attachments")[f.attachmentHash] = 2;
+    },
+    (f) => {
+      record(f.after, "fingerprints", "events")[f.sha] = 2;
+    },
+    (f) => {
+      record(f.before, "allocations").attachments = { old: f.attachment };
+    },
+    (f) => {
+      record(f.after, "allocations", "attachments").duplicate = f.attachment;
+    },
+    (f) => {
+      record(f.after, "allocations", "events").duplicate = f.event;
+    },
+    (f) => {
+      (get(f.after, "operations", "events") as unknown[]).push([
+        number(4),
+        ["blob", f.workspace],
+        ["null"],
+      ]);
+    },
+    (f) => {
+      f.after.backend = "libsql-remote";
+    },
+    (f) => {
+      f.audit.sqlitePreparation = undefined;
+    },
+  ];
+  for (const mutate of mutations) {
+    const f = fixture();
+    mutate(f);
+    // Changed producer rows get their honest new fingerprint too; refusal
+    // must bind the tuple/payload rather than rely only on a stale hash.
+    const changedHash = f.h(f.cells);
+    if (changedHash !== f.sha) {
+      record(f.after, "fingerprints", "events")[changedHash] = record(
+        f.after,
+        "fingerprints",
+        "events",
+      )[f.sha];
+      record(f.after, "allocations", "events")[changedHash] = f.event;
+      Reflect.deleteProperty(record(f.after, "fingerprints", "events"), f.sha);
+      Reflect.deleteProperty(record(f.after, "allocations", "events"), f.sha);
+    }
+    expect(() => allocatedRows(f.before, f.after, f.audit)).toThrow();
+  }
+});
+
 test("same sealed readback publication rows explain allocation and event counters without admitting other old-reader effects", async () => {
   const { assertSqlitePreparedPreserved, allocatedRows } = await import("./ui-audit.ts");
   const fixture = (product = false) => {
