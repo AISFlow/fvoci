@@ -18,6 +18,9 @@ import { expect, test as base, type Page, type Route } from "@playwright/test";
 import { z } from "zod";
 import { createE2eUser, login } from "./helpers";
 import { isoToDatetimeLocalInTimeZone } from "../src/lib/datetime";
+import { freshSyncWitness } from "../e2e-pending/turso-restore-helpers";
+import { restoreStateDigest, verifyRestoreStage } from "../../../tools/turso/ui-restore";
+import { expectMatchingPersistAck, persistBody } from "../e2e-pending/collab-helpers";
 
 const credentials = { email: "timer@example.com", password: "supersecret1" };
 const identityShape = z.object({ userId: z.string(), sessionId: z.string() });
@@ -4830,6 +4833,9 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         updatedAt: z.string(),
         tail: z.string(),
         updates: z.number(),
+        state: z.string(),
+        payloads: z.array(z.object({ seq: z.string(), hex: z.string() })),
+        contentJson: z.unknown(),
         receipts: z.array(
           z
             .object({
@@ -4850,11 +4856,29 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       .parse(
         JSON.parse(
           diagnosticSql(
-            `SELECT jsonb_build_object('estimate',t.estimate::text,'unit',t.estimate_unit,'updatedAt',to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),'tail',(SELECT tail_seq::text FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'updates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'receipts',(SELECT coalesce(jsonb_agg(to_jsonb(r)||jsonb_build_object('seq',r.seq::text) ORDER BY r.seq,r.op_id),'[]'::jsonb) FROM fvoci.task_collab_op_receipts r WHERE r.workspace_id=t.workspace_id AND r.task_id=t.id),'identity',jsonb_build_object('task',t.id,'project',t.project_id,'origins',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.workspace_id,o.task_id) FROM fvoci.task_origins o WHERE o.workspace_id=t.workspace_id AND o.task_id=t.id))) FROM fvoci.tasks t WHERE t.workspace_id='${fixture.workspaceId}' AND t.id='${goal.taskId}'`,
+            `SELECT jsonb_build_object('estimate',t.estimate::text,'unit',t.estimate_unit,'updatedAt',to_char(t.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),'tail',(SELECT tail_seq::text FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'updates',(SELECT count(*) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'receipts',(SELECT coalesce(jsonb_agg(to_jsonb(r)||jsonb_build_object('seq',r.seq::text) ORDER BY r.seq,r.op_id),'[]'::jsonb) FROM fvoci.task_collab_op_receipts r WHERE r.workspace_id=t.workspace_id AND r.task_id=t.id),'state',(SELECT encode(state,'hex') FROM fvoci.task_states WHERE workspace_id=t.workspace_id AND task_id=t.id),'payloads',(SELECT coalesce(jsonb_agg(jsonb_build_object('seq',seq::text,'hex',encode(payload,'hex')) ORDER BY seq,op_id),'[]'::jsonb) FROM fvoci.task_collab_updates WHERE workspace_id=t.workspace_id AND task_id=t.id),'contentJson',t.content_json,'identity',jsonb_build_object('task',t.id,'project',t.project_id,'origins',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.workspace_id,o.task_id) FROM fvoci.task_origins o WHERE o.workspace_id=t.workspace_id AND o.task_id=t.id))) FROM fvoci.tasks t WHERE t.workspace_id='${fixture.workspaceId}' AND t.id='${goal.taskId}'`,
           ),
         ),
       ),
   });
+  const collabState = (state: ReturnType<typeof readState>) => {
+    const tail = Number(state.tail);
+    expect(Number.isSafeInteger(tail)).toBe(true);
+    expect(BigInt(tail)).toBe(BigInt(state.tail));
+    return {
+      state: state.state,
+      updates: state.payloads,
+      content: state.contentJson,
+      tail,
+      receipts: state.receipts.map((receipt) => ({
+        seq: Number(receipt.seq),
+        op: receipt.op_id,
+        actor: receipt.actor_user_id,
+        len: receipt.payload_len,
+        sha: receipt.payload_sha256.slice(2),
+      })),
+    };
+  };
   const history = async () => {
     const response = await page.request.get(base + "/revisions");
     expect(response.ok()).toBe(true);
@@ -5074,15 +5098,61 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   page.on("request", observeRequest);
   page.on("response", observeResponse);
   let phasePrimaryFailed = false;
+  let reloadObservation: Record<string, unknown> | undefined;
   try {
     // Capture E0 after the peer commit. The restore alone must retire its exact
     // microsecond timestamp; no-op persist must not manufacture that conflict.
+    const beforeReload = readState();
+    const reloadSync = freshSyncWitness(
+      page,
+      `${fixture.workspaceId}:task:${goal.taskId}`,
+      collabState(beforeReload),
+    );
+    reloadObservation = {
+      before: jointRestorePhaseState(beforeReload),
+      beforeFullStateSha256: restoreStateDigest(collabState(beforeReload)),
+      sync: reloadSync.sync,
+      wire: reloadSync.wire,
+    };
     await page.reload();
     await expect(widget.getByTestId("timer-state")).toHaveText("일시정지");
+    // Connected/synced can precede a durable, no-effect SyncStep2 receipt.
+    // Bind E0 to the current room's real ACK before measuring restore alone.
+    await persistBody(page);
+    const reloadAck = await expectMatchingPersistAck(page, reloadSync.wire);
+    expect(reloadSync.valid(reloadAck)).toBe(true);
     const current = await page.request.get(timerUrl);
     expect(current.ok()).toBe(true);
     const e0 = z.object({ estimate: estimateShape }).parse(await current.json()).estimate;
     const beforeRestore = readState();
+    Object.assign(reloadObservation, {
+      baseline: jointRestorePhaseState(beforeRestore),
+      baselineFullStateSha256: restoreStateDigest(collabState(beforeRestore)),
+      ack: { requestId: reloadAck, matched: true },
+      socket: reloadSync.facts(),
+    });
+    verifyRestoreStage(
+      collabState(beforeReload),
+      collabState(beforeRestore),
+      {
+        document: goal.taskId,
+        actor: fixture.actor.userId,
+        beforeTail: beforeReload.tail,
+        finalTail: beforeRestore.tail,
+        fullStateSha256: restoreStateDigest(collabState(beforeReload)),
+        ack: { requestId: reloadAck, matched: true },
+        sync: reloadSync.sync,
+      },
+      goal.taskId,
+      fixture.actor.userId,
+    );
+    assertJointTimerEstimatePreserved(beforeReload, beforeRestore);
+    expect(beforeRestore.updatedAt, "no-effect reload/persist preserves exact E0").toBe(
+      beforeReload.updatedAt,
+    );
+    expect(beforeRestore.receipts.slice(0, beforeReload.receipts.length)).toEqual(
+      beforeReload.receipts,
+    );
     phaseStates.push({ phase: "beforeRestore", state: jointRestorePhaseState(beforeRestore) });
     expect(e0.value).toBe("15");
     expect(e0.unit).toBe("minutes");
@@ -5176,6 +5246,9 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       assertJointTimerEstimatePreserved(beforeRestore, afterRestore);
       expect(afterRestore.updatedAt).not.toBe(beforeRestore.updatedAt);
       assertJointRestoreAppend(beforeRestore, afterRestore, fixture.actor.userId);
+      const confirmedRestores = phaseNetwork.filter((row) => row.phase === "restore");
+      expect(confirmedRestores).toHaveLength(1);
+      expect(confirmedRestores[0]?.expectedTailSeq).toBe(beforeRestore.tail);
       const restoreDetail = await page.request.get(base + "/revisions/" + restored.revisionId);
       expect(restoreDetail.ok()).toBe(true);
       z.object({
@@ -5340,11 +5413,12 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         scenario: phasePrimaryFailed ? "failed" : "completed",
         states: phaseStates,
         network: phaseNetwork,
+        reload: reloadObservation,
         storedRestoresAfterScenarioCleanup: storedRestores,
         observationErrors: phaseErrors,
       });
       await testInfo.attach("joint-restore-phase-observation", {
-        path: output,
+        body: readFileSync(output),
         contentType: "application/json",
       });
     } catch {
