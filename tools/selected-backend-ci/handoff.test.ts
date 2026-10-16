@@ -34,6 +34,7 @@ import {
   browserStage,
   buildInputs,
   consume,
+  context,
   distFiles,
   exportPacket,
   inputDiagnostics,
@@ -834,6 +835,12 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
+
+  test("a local job name cannot reassign the actual GitHub browser job", () => {
+    process.env.FVOCI_WEB_CONTAINER_JOB = "workspace-browser-shard";
+    expect(context("workspace-browser-build", f.host).source).toBe(SHA);
+    expect(() => context("workspace-browser-shard", f.host)).toThrow(/wrong handoff job/);
+  });
 
   test("local container packet retains full admission and rejects another image or GitHub identity", async () => {
     for (const key of Object.keys(process.env))

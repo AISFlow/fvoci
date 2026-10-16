@@ -97,7 +97,10 @@ function ldd(path: string): { exitCode: number; stdout: string; stderr: string }
 }
 const distOf = (h: HostFacts) => join(h.checkout, "apps/web/dist");
 
-const browserJob = () => process.env.FVOCI_WEB_CONTAINER_JOB ?? process.env.GITHUB_JOB ?? "";
+const browserJob = () =>
+  (process.env.FVOCI_WEB_CONTAINER_LOCAL === "1"
+    ? process.env.FVOCI_WEB_CONTAINER_JOB
+    : process.env.GITHUB_JOB) ?? "";
 export const browser = () =>
   ["workspace-browser-build", "workspace-browser-shard"].includes(browserJob());
 const stages = (): readonly string[] => (browser() ? browserStages : collaborationStages);
