@@ -1254,7 +1254,7 @@ test("native image CLI interrupt during direct scan settles tar then retires its
       ".bun-version",
       "apps/web/package.json",
     ])
-      await writeFile(join(checkout, path), await readFile(path));
+      await writeFile(join(checkout, path), await readFile(join(import.meta.dir, "../..", path)));
     // A fixture checkout executes the production CLI and scanner. Its unit
     // prerequisite is a bounded stand-in, avoiding recursive execution of this test.
     await writeFile(
