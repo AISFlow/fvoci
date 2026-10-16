@@ -523,7 +523,7 @@ if (import.meta.main) {
         await publishImageManifest();
         break;
       case "smoke":
-        await smokeImage(operand(args, 0), operand(args, 1));
+        await smokeImage(operand(args, 0), operand(args, 1), operand(args, 2));
         break;
       case "scan":
         await scanImage(operand(args, 0), operand(args, 1), operand(args, 2));
@@ -572,7 +572,7 @@ if (import.meta.main) {
       "ci-base check failed:",
       error instanceof PolicyError ? error.message : "archive/tool failure; content withheld",
     );
-    process.exitCode = 1;
+    process.exitCode ||= 1;
   }
 }
 
@@ -635,32 +635,36 @@ export function imageBuildPlan(env: Record<string, string | undefined>, architec
 
 // Image-only argv execution. Signals terminate and await the owned CLI child;
 // nativeImageBuild then removes its owned BuildKit worker in finally.
-async function imageCommand(
+export async function imageCommand(
   argv: string[],
   options: { log?: string; input?: string } = {},
 ): Promise<string> {
   const environment = { ...process.env };
   delete environment.GHCR_TOKEN;
   delete environment.GITHUB_TOKEN;
-  const child = Bun.spawn(argv, {
-    env: environment,
-    stdin: options.input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const interrupt = () => child.kill("SIGTERM");
-  process.once("SIGINT", interrupt);
-  process.once("SIGTERM", interrupt);
-  const input = child.stdin;
-  if (
-    options.input !== undefined &&
-    input !== undefined &&
-    input !== null &&
-    typeof input !== "number"
-  ) {
-    input.write(options.input);
-    input.end();
-  }
+  const stage = imageStage(argv);
+  let interrupted = false;
+  const child = (() => {
+    try {
+      return Bun.spawn(argv, {
+        env: environment,
+        stdin: options.input === undefined ? "ignore" : "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (cause) {
+      throw new PolicyError("image stage=" + stage + " spawn failed", { cause });
+    }
+  })();
+  const interrupt = (code: number) => {
+    interrupted = true;
+    process.exitCode = code;
+    child.kill("SIGTERM");
+  };
+  const onInt = () => interrupt(130),
+    onTerm = () => interrupt(143);
+  process.once("SIGINT", onInt);
+  process.once("SIGTERM", onTerm);
   let output = "",
     bytes = 0;
   async function drain(stream: ReadableStream<Uint8Array>, stdout: boolean) {
@@ -677,19 +681,37 @@ async function imageCommand(
     }
   }
   try {
+    const input = child.stdin;
+    if (
+      options.input !== undefined &&
+      input !== undefined &&
+      input !== null &&
+      typeof input !== "number"
+    ) {
+      await input.write(options.input);
+      await input.end();
+    }
     const drained = await Promise.allSettled([
       drain(child.stdout, true),
       drain(child.stderr, false),
     ]);
     const code = await child.exited;
     check(
-      drained.every((result) => result.status === "fulfilled") && code === 0 && !child.signalCode,
-      "image command failed; retained build diagnostics describe the stage",
+      !interrupted &&
+        drained.every((result) => result.status === "fulfilled") &&
+        code === 0 &&
+        !child.signalCode,
+      `image stage=${stage} exit=${String(code)} signal=${child.signalCode ?? "none"} interrupted=${String(interrupted)} failed`,
     );
     return output.trim();
+  } catch (cause) {
+    if (cause instanceof PolicyError) throw cause;
+    throw new PolicyError(`image stage=${stage} I/O failed interrupted=${String(interrupted)}`, {
+      cause,
+    });
   } finally {
-    process.off("SIGINT", interrupt);
-    process.off("SIGTERM", interrupt);
+    process.off("SIGINT", onInt);
+    process.off("SIGTERM", onTerm);
     if (child.exitCode === null) child.kill("SIGTERM");
     await child.exited;
   }
@@ -734,35 +756,68 @@ try { const identity=new Bun.CryptoHasher("sha256").update(fs.readFileSync("/opt
 } finally { fs.rmSync(parent,{recursive:true,force:true}); }
 `;
 }
-export async function smokeImage(ref: string, target: string) {
+export async function smokeImage(ref: string, target: string, name: string) {
   check(
     sha256Digest.test(ref) && (target === "ci-base" || target === "ci-web"),
     "smoke requires exact local image digest and target",
   );
-  await imageCommand([
-    "docker",
-    "run",
-    "--rm",
-    "--network",
-    "none",
-    "--read-only",
-    "--cpus",
-    "2",
-    "--memory",
-    "16g",
-    "--tmpfs",
-    "/tmp:rw,mode=1777",
-    "--tmpfs",
-    "/home/ci/.cargo:rw,uid=1000,gid=1000,mode=0755",
-    "--env",
-    `FVOCI_SDK_IMAGE_REF=${ref}`,
-    "--env",
-    `FVOCI_IMAGE_TARGET=${target}`,
-    ref,
-    "bun",
-    "-e",
-    imageSmokeScript(),
-  ]);
+  ownedImageName(name);
+  check(
+    (await namedContainer(name)) === null,
+    "image smoke name already exists; refusing adoption",
+  );
+  let failure: unknown;
+  try {
+    await imageCommand([
+      "docker",
+      "run",
+      "--rm",
+      "--name",
+      name,
+      "--label",
+      "org.fvoci.ci.smoke-owner=" + name,
+      "--network",
+      "none",
+      "--read-only",
+      "--cpus",
+      "2",
+      "--memory",
+      "16g",
+      "--tmpfs",
+      "/tmp:rw,mode=1777",
+      "--tmpfs",
+      "/home/ci/.cargo:rw,uid=1000,gid=1000,mode=0755",
+      "--env",
+      `FVOCI_SDK_IMAGE_REF=${ref}`,
+      "--env",
+      `FVOCI_IMAGE_TARGET=${target}`,
+      ref,
+      "bun",
+      "-e",
+      imageSmokeScript(),
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  const cleanupErrors: unknown[] = [];
+  try {
+    const container = await namedContainer(name);
+    if (container !== null) {
+      check(
+        at(container, "Name") === "/" + name &&
+          at(container, "Image") === ref &&
+          at(container, "Config", "Labels", "org.fvoci.ci.smoke-owner") === name,
+        "refusing to retire an unowned image smoke container",
+      );
+      await imageCommand(["docker", "container", "rm", "--force", name]);
+      if (!failure)
+        cleanupErrors.push(new PolicyError("image smoke container outlived successful CLI"));
+    }
+    check((await namedContainer(name)) === null, "image smoke container retirement unconfirmed");
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  imageOutcome("smoke", failure, cleanupErrors);
 }
 async function nativeImageBuild() {
   const plan = imageBuildPlan(process.env, process.arch);
@@ -777,22 +832,7 @@ async function nativeImageBuild() {
     await imageCommand([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
     await imageCommand([process.execPath, "test", "tools/ci/ci-base-image.test.ts"]);
     await imageCommand(["docker", "buildx", "version"]);
-    await imageCommand([
-      "docker",
-      "buildx",
-      "create",
-      "--name",
-      plan.builder,
-      "--driver",
-      "docker-container",
-      "--use",
-      "--driver-opt",
-      "memory=16g",
-      "--driver-opt",
-      "cpu-period=100000",
-      "--driver-opt",
-      "cpu-quota=200000",
-    ]);
+    await allocateImageBuilder(plan.builder);
     builderOwned = true;
     await imageCommand(["docker", "buildx", "inspect", "--bootstrap"]);
     const started = performance.now();
@@ -822,7 +862,7 @@ async function nativeImageBuild() {
     await scanImage(join(work, "image.tar"), inspection, plan.arch);
     const id = at(metadata, "Id");
     check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
-    await smokeImage(id, plan.target);
+    await smokeImage(id, plan.target, plan.builder + "-smoke");
     if (process.env.PUBLISH === "true") {
       const started = performance.now();
       await imageCommand(["docker", "push", plan.ref]);
@@ -858,7 +898,7 @@ async function nativeImageBuild() {
     }
     if (builderOwned)
       try {
-        await imageCommand(["docker", "buildx", "rm", plan.builder]);
+        await retireImageBuilder(plan.builder);
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -878,11 +918,7 @@ async function nativeImageBuild() {
         cleanupErrors.push(error);
       }
   }
-  if (failure || cleanupErrors.length)
-    throw new AggregateError(
-      [...(failure ? [failure] : []), ...cleanupErrors],
-      "image build or normal cleanup failed",
-    );
+  imageOutcome("build", failure, cleanupErrors);
 }
 async function publishImageManifest() {
   check(imageEnv("GITHUB_REF") === "refs/heads/main", "manifest publication requires main");
@@ -970,9 +1006,140 @@ async function publishImageManifest() {
         cleanupErrors.push(error);
       }
   }
-  if (failure || cleanupErrors.length)
-    throw new AggregateError(
-      [...(failure ? [failure] : []), ...cleanupErrors],
-      "image manifest or normal cleanup failed",
+  imageOutcome("manifest", failure, cleanupErrors);
+}
+
+function imageStage(argv: string[]): string {
+  if (argv[0] !== "docker")
+    return argv[1] === "test"
+      ? "image-unit"
+      : argv[2] === "inputs"
+        ? "image-inputs"
+        : "image-child";
+  const known = new Set([
+    "buildx",
+    "create",
+    "inspect",
+    "version",
+    "build",
+    "rm",
+    "imagetools",
+    "image",
+    "save",
+    "container",
+    "ls",
+    "run",
+    "login",
+    "logout",
+    "push",
+  ]);
+  return ["docker", ...argv.slice(1, 4).filter((part) => known.has(part))].join("-");
+}
+function imageOutcome(
+  stage: "build" | "manifest" | "smoke" | "builder-allocation" | "builder-retirement",
+  failure: unknown,
+  cleanup: unknown[],
+): void {
+  if (!failure && cleanup.length === 0) return;
+  const safe = (error: unknown): string =>
+    error instanceof PolicyError
+      ? error.message
+      : error instanceof AggregateError
+        ? error.errors.map(safe).join("; ")
+        : "image operation failed; details withheld";
+  throw new AggregateError(
+    [...(failure ? [failure] : []), ...cleanup],
+    `image ${stage} first=${failure ? safe(failure) : "none"}; cleanup=${cleanup.map(safe).join("; ") || "none"}`,
+  );
+}
+function ownedImageName(name: string): void {
+  check(
+    /^[a-z0-9][a-z0-9-]{0,120}$/.test(name),
+    "deterministic run-owned image resource name required",
+  );
+}
+async function namedContainer(name: string): Promise<unknown | null> {
+  const ids = await imageCommand([
+    "docker",
+    "container",
+    "ls",
+    "--all",
+    "--filter",
+    `name=^/${name}$`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  if (!ids) return null;
+  check(/^[a-f0-9]{12,64}$/.test(ids), "image resource lookup is ambiguous");
+  return JSON.parse(
+    await imageCommand(["docker", "container", "inspect", name, "--format", "{{json .}}"]),
+  );
+}
+async function builderPresent(name: string): Promise<boolean> {
+  const names = await imageCommand(["docker", "buildx", "ls", "--format", "{{.Name}}"]);
+  return names.split("\n").includes(name);
+}
+export async function allocateImageBuilder(name: string): Promise<void> {
+  ownedImageName(name);
+  check(
+    !(await builderPresent(name)) && (await namedContainer(`buildx_buildkit_${name}0`)) === null,
+    "image builder name already exists; refusing adoption",
+  );
+  // The positively absent name is claimed before create can partially allocate.
+  try {
+    await imageCommand([
+      "docker",
+      "buildx",
+      "create",
+      "--name",
+      name,
+      "--driver",
+      "docker-container",
+      "--use",
+      "--driver-opt",
+      "memory=16g",
+      "--driver-opt",
+      "cpu-period=100000",
+      "--driver-opt",
+      "cpu-quota=200000",
+      "--driver-opt",
+      `env.FVOCI_CI_BUILDER_OWNER=${name}`,
+    ]);
+  } catch (failure) {
+    const cleanup: unknown[] = [];
+    try {
+      await retireImageBuilder(name);
+    } catch (error) {
+      cleanup.push(error);
+    }
+    imageOutcome("builder-allocation", failure, cleanup);
+  }
+}
+export async function retireImageBuilder(name: string): Promise<void> {
+  ownedImageName(name);
+  const cleanup: unknown[] = [];
+  try {
+    if (await builderPresent(name)) await imageCommand(["docker", "buildx", "rm", name]);
+  } catch (error) {
+    cleanup.push(error);
+  }
+  const worker = `buildx_buildkit_${name}0`;
+  try {
+    const container = await namedContainer(worker);
+    if (container !== null) {
+      const env = list(at(container, "Config", "Env"));
+      check(
+        at(container, "Name") === "/" + worker && env?.includes(`FVOCI_CI_BUILDER_OWNER=${name}`),
+        "refusing to retire an unowned BuildKit worker",
+      );
+      await imageCommand(["docker", "container", "rm", "--force", worker]);
+    }
+    check(
+      !(await builderPresent(name)) && (await namedContainer(worker)) === null,
+      "image builder retirement unconfirmed",
     );
+  } catch (error) {
+    cleanup.push(error);
+  }
+  imageOutcome("builder-retirement", undefined, cleanup);
 }
