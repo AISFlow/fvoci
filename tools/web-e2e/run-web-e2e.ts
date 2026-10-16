@@ -1089,7 +1089,7 @@ export function groupInvocations(argv: string[], env: NodeJS.ProcessEnv): string
   );
   if (
     timer.length !== 1 ||
-    argv.some((arg) => arg.endsWith(".spec.ts") && !timer.includes(arg)) ||
+    argv.some((arg) => arg.endsWith(".spec.ts") && !timer.some((spec) => spec === arg)) ||
     argv.some(
       (arg) =>
         ["--grep", "--grep-invert", "--shard", "--list", "--", "-g"].includes(arg) ||
@@ -1182,14 +1182,16 @@ export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<nu
     error("create-directory");
     return 1;
   }
-  attempt("chmod-directory", () => chmodSync(retained, 0o700));
+  attempt("chmod-directory", () => {
+    chmodSync(retained, 0o700);
+  });
   if (env.GITHUB_OUTPUT)
-    attempt("github-output", () =>
+    attempt("github-output", () => {
       appendFileSync(
         env.GITHUB_OUTPUT as string,
         `failure-artifacts=${retained}\nfailure-group=${label}\n`,
-      ),
-    );
+      );
+    });
   attempt("copy-playwright-output", () => {
     const from = join(run, "playwright-output");
     if (existsSync(from) && readdirSync(from).length)
@@ -1199,12 +1201,12 @@ export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<nu
       });
   });
   if (env.SERVER_LOG && existsSync(env.SERVER_LOG))
-    attempt("redact-server-log", () =>
+    attempt("redact-server-log", () => {
       writeFileSync(
         join(retained, "server.log"),
         redactGroupLog(readFileSync(env.SERVER_LOG as string, "utf8")),
-      ),
-    );
+      );
+    });
   attempt("create-owned-server-directory", () =>
     mkdirSync(join(retained, "owned-server"), { recursive: true }),
   );
@@ -1228,12 +1230,12 @@ export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<nu
     "find-owned-server-logs",
   );
   for (const log of logs)
-    attempt(`redact-owned-server-log (${log})`, () =>
+    attempt(`redact-owned-server-log (${log})`, () => {
       writeFileSync(
         join(retained, "owned-server", basename(dirname(log)) + ".log"),
         redactGroupLog(readFileSync(log, "utf8")),
-      ),
-    );
+      );
+    });
   const net = [env.NET_MONITOR_LOG, env.NET_MARKS_LOG].filter(
     (path): path is string => !!path && existsSync(path),
   );
@@ -1280,15 +1282,25 @@ export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<nu
         child.exited,
       ]);
       if (status !== 0) {
-        attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+        attempt("remove-partial-summary", () => {
+          rmSync(dest, { force: true });
+        });
         error(
           `trace-summary (${basename(dirname(trace))}/trace.zip, exit ${String(status)})`,
           redactGroupLog(stderr).trimEnd().split("\n").slice(-5).join(" "),
         );
-      } else if (!attempt("write-trace-summary", () => writeFileSync(dest, stdout)))
-        attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+      } else if (
+        !attempt("write-trace-summary", () => {
+          writeFileSync(dest, stdout);
+        })
+      )
+        attempt("remove-partial-summary", () => {
+          rmSync(dest, { force: true });
+        });
     } catch {
-      attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+      attempt("remove-partial-summary", () => {
+        rmSync(dest, { force: true });
+      });
       error(`trace-summary (${basename(dirname(trace))}/trace.zip)`);
     }
   }
@@ -1305,7 +1317,7 @@ export async function groupWrapper(argv: string[]): Promise<number> {
   for (const args of groupInvocations(argv, process.env)) {
     const run = mkdtempSync(join(tmpdir(), "fvoci-web-e2e."));
     const env = groupEnvironment(run, args, process.env),
-      label = env.GROUP_LABEL;
+      label = env.GROUP_LABEL ?? "default-suite";
     let status = 0,
       interrupted = 0;
     type Child = ReturnType<typeof Bun.spawn>;
