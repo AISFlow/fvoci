@@ -847,17 +847,8 @@ describe.serial("browser build packet", () => {
       "local-container",
     );
     expect(() => context("workspace-browser-build", f.host)).toThrow(/wrong handoff job/);
-    exportPacket(f.host);
-    expect(
-      (JSON.parse(readFileSync(join(f.packet, "handoff.json"), "utf8")) as Manifest).producer_job,
-    ).toBe("workspace-browser-container-build");
-    for (const path of [f.target, f.dist, join(f.root, "crates/collab-engine/target")])
-      rmSync(path, { recursive: true, force: true });
-    Object.assign(process.env, {
-      GITHUB_JOB: "workspace-browser-shard",
-      FVOCI_WEB_BUILD_PHASE: "consume",
-      FVOCI_WEB_BUILD_HANDOFF_SHA256: sha(join(f.packet, "handoff.json")),
-    });
+    const manifest = transfer("workspace-browser-shard");
+    expect(manifest.producer_job).toBe("workspace-browser-container-build");
     const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
     process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "c".repeat(64);
     await assert.rejects(consume(f.host), /foreign\/stale producer/);
