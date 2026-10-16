@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -543,24 +544,11 @@ function diagnosticDatabase() {
   };
 }
 function diagnosticSql(sql: string): string {
-  const { container, database } = diagnosticDatabase();
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      database,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-qAt",
-    ],
-    { input: sql, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-  ).trim();
+  return execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+    input: sql,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  }).trim();
 }
 const witnessRows = z.array(
   z.object({

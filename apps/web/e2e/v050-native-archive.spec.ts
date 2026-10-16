@@ -16,6 +16,7 @@ import type { Editor } from "@tiptap/core";
 import JSZip from "jszip";
 import * as Y from "yjs";
 import { z } from "zod";
+import { fixtureDatabaseUrl, fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { ownedServerChildEnv } from "../e2e-pending/collab-restart";
 import { createE2eUser, login, watchCspViolations } from "./helpers";
 import {
@@ -352,42 +353,24 @@ type EditorElement = HTMLElement & { editor: Editor };
 
 /** Restricted app-role read in one READ ONLY transaction under the given tenant. */
 function appRoleRead(connection: string, tenant: string, select: string): unknown {
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!container?.startsWith("fvoci-rust-test-pg-")) throw new Error("owned PG fixture missing");
   const app = new URL(connection);
-  if (
-    app.hostname !== "127.0.0.1" ||
-    !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
-    !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname) ||
-    !UUID.test(tenant)
-  )
-    throw new Error("Refusing a non-fixture DB connection");
-  const result = spawnSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-X",
-      "-qAt",
-      "-U",
-      app.username,
-      "-d",
-      app.pathname.slice(1),
-    ],
-    {
-      input: `\\set ON_ERROR_STOP 1
-BEGIN READ ONLY;
+  if (!UUID.test(tenant)) throw new Error("Refusing a non-fixture tenant");
+  const result = spawnSync(process.execPath, fixtureQueryArgs("owned-app"), {
+    env: {
+      ...process.env,
+      DB_NAME: app.pathname.slice(1),
+      ROLE_NAME: app.username,
+      DATABASE_APP_URL: connection,
+    },
+    input: `BEGIN READ ONLY;
 SET LOCAL app.tenant_id = '${tenant}';
 SELECT jsonb_build_object('role', current_user, 'superuser', r.rolsuper, 'bypassRls', r.rolbypassrls,
   'value', (${select})) FROM pg_roles r WHERE r.rolname = current_user;
 ROLLBACK;`,
-      encoding: "utf8",
-      timeout: 15000,
-    },
-  );
-  if (result.status !== 0) throw new Error(`app-role read failed: ${result.stderr}`);
+    encoding: "utf8",
+    timeout: 15000,
+  });
+  if (result.status !== 0) throw new Error("app-role read failed (credentials omitted)");
   const witness = z
     .object({
       role: z.string(),
@@ -892,7 +875,6 @@ class Installation {
   /** Only resources this installation actually created are ever removed. */
   protected readonly created = { storage: false, database: false, role: false };
   private readonly admin: URL;
-  private readonly container: string;
   constructor(
     readonly dir: string,
     pepper?: { keys: string; active: string },
@@ -900,12 +882,7 @@ class Installation {
   ) {
     this.pepper = pepper?.keys ?? JSON.stringify({ dst: randomBytes(32).toString("hex") });
     this.pepperId = pepper?.active ?? "dst";
-    const admin = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
-    const container = process.env.FVOCI_TEST_PG_CONTAINER;
-    if (!admin || !container?.startsWith("fvoci-rust-test-pg-"))
-      throw new Error("isolated PG fixture missing");
-    this.admin = new URL(admin);
-    this.container = container;
+    this.admin = new URL(fixtureDatabaseUrl("admin", process.env));
   }
   get adminUrl(): string {
     const url = new URL(this.admin.toString());
@@ -920,25 +897,19 @@ class Installation {
     return url.toString();
   }
   protected psql(database: string, sql: string): void {
+    if (database !== "postgres" && database !== this.database)
+      throw new Error("Refusing a foreign installation database");
     const result = spawnSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        this.container,
-        "psql",
-        "-X",
-        "-q",
-        "-U",
-        "postgres",
-        "-d",
-        database,
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      { input: sql, encoding: "utf8", timeout: 30000 },
+      process.execPath,
+      fixtureQueryArgs(database === "postgres" ? "owned-maintenance" : "owned-admin"),
+      {
+        env: { ...process.env, DB_NAME: this.database, ROLE_NAME: this.role },
+        input: sql,
+        encoding: "utf8",
+        timeout: 30000,
+      },
     );
-    if (result.status !== 0) throw new Error(`psql failed: ${result.stderr}`);
+    if (result.status !== 0) throw new Error("installation SQL failed (credentials omitted)");
   }
   private tool(args: string[], env: Record<string, string>): string {
     const serverBin = process.env.FVOCI_E2E_SERVER_BIN;

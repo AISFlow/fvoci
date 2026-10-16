@@ -39,6 +39,60 @@ test("fixture app URL is bound to the generated admin database and same service"
     expect(() => fixtureDatabaseUrl("app", { ...env, ...change })).toThrow(DatabaseUrlError);
 });
 
+describe("explicit owned archive destinations", () => {
+  const owned = "fvoci_e2e_abcdef0123456789";
+  const role = `fvoci_app_${owned}`;
+  const env = {
+    FVOCI_TEST_PG_CONTAINER: "fvoci-rust-test-pg-" + "a".repeat(32),
+    FVOCI_E2E_ADMIN_DATABASE_URL: `postgres://postgres:${SECRET}@fvoci-pg:5432/${DB}`,
+    DATABASE_APP_URL: `postgres://${role}:${PASSWORD}@fvoci-pg:5432/${owned}`,
+    DB_NAME: owned,
+    ROLE_NAME: role,
+  };
+  test("binds the separate generated pair to the group service and fixed maintenance database", () => {
+    expect(fixtureDatabaseUrl("owned-app", env)).toBe(env.DATABASE_APP_URL);
+    expect(new URL(fixtureDatabaseUrl("owned-admin", env)).pathname).toBe(`/${owned}`);
+    expect(new URL(fixtureDatabaseUrl("owned-maintenance", env)).pathname).toBe("/postgres");
+    expect(new URL(fixtureDatabaseUrl("owned-admin", env)).username).toBe("postgres");
+    expect(() => fixtureDatabaseUrl("app", env)).toThrow(DatabaseUrlError);
+    expect(fixtureDatabaseUrl("admin", env)).toBe(env.FVOCI_E2E_ADMIN_DATABASE_URL);
+  });
+  test("refuses foreign pairs, service identities and app destinations without disclosing inputs", () => {
+    for (const mode of ["owned-app", "owned-admin", "owned-maintenance"])
+      for (const change of [
+        { DB_NAME: "postgres" },
+        { DB_NAME: owned + '"; DROP DATABASE postgres;--' },
+        { ROLE_NAME: "postgres" },
+        { ROLE_NAME: ROLE },
+        { FVOCI_TEST_PG_CONTAINER: "foreign" },
+        { FVOCI_E2E_ADMIN_DATABASE_URL: env.FVOCI_E2E_ADMIN_DATABASE_URL.replace(DB, "postgres") },
+        { FVOCI_E2E_ADMIN_DATABASE_URL: "PRIVATE_invalid_connection" },
+      ]) {
+        expect(() => fixtureDatabaseUrl(mode, { ...env, ...change })).toThrow(
+          "owned PostgreSQL fixture role and database required",
+        );
+      }
+    for (const url of [
+      env.DATABASE_APP_URL.replace(role, "postgres"),
+      env.DATABASE_APP_URL.replace("fvoci-pg", "foreign"),
+      env.DATABASE_APP_URL.replace(":5432/", ":5433/"),
+      env.DATABASE_APP_URL.replace(`/${owned}`, `/${DB}`),
+      env.DATABASE_APP_URL.replace("postgres:", "https:"),
+      "PRIVATE_invalid_connection",
+    ])
+      expect(() => fixtureDatabaseUrl("owned-app", { ...env, DATABASE_APP_URL: url })).toThrow(
+        "owned PostgreSQL fixture role and database required",
+      );
+    for (const name of ["DB_NAME", "ROLE_NAME"])
+      expect(() =>
+        fixtureDatabaseUrl(
+          "owned-maintenance",
+          Object.fromEntries(Object.entries(env).filter(([key]) => key !== name)),
+        ),
+      ).toThrow(DatabaseUrlError);
+  });
+});
+
 describe("owned group database operations", () => {
   const env = { DB_NAME: DB, ROLE_NAME: ROLE, ROLE_PASSWORD: PASSWORD };
   test("the app role is explicitly restricted and retirement is limited to the same generated pair", () => {

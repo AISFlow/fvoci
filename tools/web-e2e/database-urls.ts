@@ -74,7 +74,9 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
 }
 
 /** Native Bun child argv; SQL stays on stdin and credentials stay in env. */
-export function fixtureQueryArgs(role: "admin" | "app", commandTag = false): string[] {
+type FixtureQueryRole = "admin" | "app" | "owned-admin" | "owned-app" | "owned-maintenance";
+
+export function fixtureQueryArgs(role: FixtureQueryRole, commandTag = false): string[] {
   return [
     "--no-env-file",
     import.meta.path,
@@ -96,9 +98,22 @@ export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv): string
     )
       throw new Error();
     if (role === "admin") return admin.toString();
+    if (["owned-admin", "owned-app", "owned-maintenance"].includes(role)) {
+      // Archive installations own another generated pair on this same fixture
+      // service. Maintenance never accepts an arbitrary database destination.
+      const database = required(env, "DB_NAME");
+      if (
+        !/^fvoci_e2e_[a-f0-9]{16}$/.test(database) ||
+        required(env, "ROLE_NAME") !== `fvoci_app_${database}`
+      )
+        throw new Error();
+      admin.pathname = role === "owned-maintenance" ? "/postgres" : `/${database}`;
+      if (role !== "owned-app") return admin.toString();
+    }
     const app = new URL(required(env, "DATABASE_APP_URL"));
     if (
-      role !== "app" ||
+      !["app", "owned-app"].includes(role) ||
+      !["postgres:", "postgresql:"].includes(app.protocol) ||
       app.username !== "fvoci_app_" + admin.pathname.slice(1) ||
       app.pathname !== admin.pathname ||
       app.hostname !== admin.hostname ||
@@ -248,7 +263,9 @@ if (import.meta.main) {
   if (process.argv[2] === "fixture-query") {
     try {
       if (
-        !["admin", "app"].includes(process.argv[3] ?? "") ||
+        !["admin", "app", "owned-admin", "owned-app", "owned-maintenance"].includes(
+          process.argv[3] ?? "",
+        ) ||
         process.argv.length > 5 ||
         (process.argv[4] !== undefined && process.argv[4] !== "command-tag")
       )
