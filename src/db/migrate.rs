@@ -689,7 +689,7 @@ pub async fn apply_app_role_grants(pool: &PgPool, role: &str) -> Result<(), Gran
             "role {role:?} owns or inherits ownership of fvoci objects; use a separate app role"
         )));
     }
-    sqlx::raw_sql(&app_role_grant_sql(role))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(app_role_grant_sql(role)))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1853,7 +1853,9 @@ async fn verify_sqlite_objects(
                 }
                 SqliteSchemaMode::SdkRendered => {
                     for statement in sdk_rendered_statements(step.sql)? {
-                        sqlx::raw_sql(&statement).execute(&mut reference).await?;
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+                            .execute(&mut reference)
+                            .await?;
                     }
                 }
             }

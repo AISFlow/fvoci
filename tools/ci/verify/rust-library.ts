@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { type Mapping, type VerifyContext, field, rustJobs, same, steps } from "./rust-common.ts";
 import { RUST_XTASK } from "./rust-shared.ts";
 
-export const RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (54 exact tests)";
+export const RUST_SELECTED_LIBRARY_STEP = "Selected SQLite library controls (56 exact tests)";
 // The list `xtask selected-library` runs, one exact libtest name per LF-terminated
 // line. Order is part of the contract: the slice pins below bind each accepted cohort.
 export const RUST_SELECTED_LIBRARY_FILTERS_FILE = "xtask/selected-library-filters.txt";
@@ -44,6 +44,8 @@ export const RUST_SELECTED_LIBRARY_SLICE_PINS: readonly (readonly [
   ["original44", 0, 44, "b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1"],
   ["member10", 44, 54, "a77024442b3b63a39a70012a251fe5ed4948543b8a10156a09ace6d31d7ff09c"],
   ["all54", 0, 54, "aa10daa88b6f9860b43bfb628edb535f185cd4dacd7f1faad27f7d2178ab7498"],
+  ["libdebt2", 54, 56, "f96c0d28ca5812888251184cb0ad351b73a4fe53d2429856b4fb228a0512687f"],
+  ["all56", 0, 56, "ce3e66dd3ca82ab6ac3cbf843fac0e6bab4f06a911c097ab45f0244a27de8afb"],
 ];
 
 // The maintained step body, byte-exact (the YAML block scalar adds the final newline).
@@ -57,20 +59,20 @@ export const RUST_DEFAULT_LIBRARY_STEP: Mapping = {
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
-/** True when the filters keep all 54 unique entries and every slice pin. */
+/** True when the filters keep all 56 unique entries and every slice pin. */
 export function selectedLibraryRegistryIntact(
   filters: readonly string[] = RUST_SELECTED_LIBRARY_FILTERS,
 ): boolean {
   return (
-    filters.length === 54 &&
-    new Set(filters).size === 54 &&
+    filters.length === 56 &&
+    new Set(filters).size === 56 &&
     RUST_SELECTED_LIBRARY_SLICE_PINS.every(
       ([, start, end, pin]) => sha256(filters.slice(start, end).join("\n")) === pin,
     )
   );
 }
 
-/** Bind the maintained step, its environment and the exact 54-filter cohort. */
+/** Bind the maintained step, its environment and the exact 56-filter cohort. */
 export function verifySelectedLibraryExecution(
   jobs: Mapping,
   filters: readonly string[] = RUST_SELECTED_LIBRARY_FILTERS,
@@ -78,7 +80,7 @@ export function verifySelectedLibraryExecution(
   const errors: string[] = [];
   if (!selectedLibraryRegistryIntact(filters)) {
     errors.push(
-      "rust: selected library registry must retain all54 exact filters (original44 prefix and member10)",
+      "rust: selected library registry must retain all56 exact filters (all54 prefix and libdebt2)",
     );
   }
   for (const name of ["fast", "fast-sqlite"]) {

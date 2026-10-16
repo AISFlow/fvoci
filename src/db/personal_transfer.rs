@@ -2353,7 +2353,7 @@ async fn admit_native_copy(
     let (mut native_bytes, mut graph_bytes, mut rows) = (0i64, 0i64, 0i64);
     for inventory in native {
         let (tables, id_column) = native_tables(inventory.kind);
-        let (bytes, graph, count): (i64, i64, i64) = sqlx::query_as(&format!(
+        let (bytes, graph, count): (i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             r#"SELECT
                  coalesce((SELECT octet_length(state) FROM fvoci.{states} WHERE workspace_id=$1 AND {id_column}=$2),0)::bigint
                  + coalesce((SELECT sum(octet_length(payload)) FROM fvoci.{updates} WHERE workspace_id=$1 AND {id_column}=$2),0)::bigint
@@ -2366,7 +2366,7 @@ async fn admit_native_copy(
             states = tables.states,
             updates = tables.updates,
             receipts = tables.receipts,
-        ))
+        )))
         .bind(source)
         .bind(inventory.target_id)
         .bind(collab_kind_name(inventory.kind))
@@ -2411,10 +2411,10 @@ async fn take_native_rows(
     }
     set_tenant(tx, source).await?;
     for table in &tables {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE TEMPORARY TABLE {} (LIKE fvoci.{table}) ON COMMIT DROP",
             staged(table)
-        ))
+        )))
         .execute(&mut **tx)
         .await?;
     }
@@ -2423,50 +2423,50 @@ async fn take_native_rows(
         let kind = collab_kind_name(inventory.kind);
         let id = inventory.target_id;
         for table in [group.states, group.updates, group.receipts] {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO {} SELECT * FROM fvoci.{table} WHERE workspace_id=$1 AND {id_column}=$2",
                 staged(table)
-            ))
+            )))
             .bind(source)
             .bind(id)
             .execute(&mut **tx)
             .await?;
         }
-        let revisions = sqlx::query(&format!(
+        let revisions = sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO {} SELECT * FROM fvoci.revisions WHERE workspace_id=$1 AND target_kind=$2 AND target_id=$3",
             staged("revisions")
-        ))
+        )))
         .bind(source)
         .bind(kind)
         .bind(id)
         .execute(&mut **tx)
         .await?
         .rows_affected();
-        let cut: Option<(i64, i64)> = sqlx::query_as(&format!(
+        let cut: Option<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT snapshot_cutoff_seq, tail_seq FROM {} WHERE {id_column}=$1",
             staged(group.states)
-        ))
+        )))
         .bind(id)
         .fetch_optional(&mut **tx)
         .await?;
-        let tail: Vec<(i64, Uuid)> = sqlx::query_as(&format!(
+        let tail: Vec<(i64, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT seq, op_id FROM {} WHERE {id_column}=$1 ORDER BY seq",
             staged(group.updates)
-        ))
+        )))
         .bind(id)
         .fetch_all(&mut **tx)
         .await?;
-        let mut receipts: Vec<(Uuid, i64, Uuid)> = sqlx::query_as(&format!(
+        let mut receipts: Vec<(Uuid, i64, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT op_id, seq, actor_user_id FROM {} WHERE {id_column}=$1",
             staged(group.receipts)
-        ))
+        )))
         .bind(id)
         .fetch_all(&mut **tx)
         .await?;
-        let revision_ids: Vec<Uuid> = sqlx::query_scalar(&format!(
+        let revision_ids: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM {} WHERE target_kind=$1 AND target_id=$2 ORDER BY created_at, id",
             staged("revisions")
-        ))
+        )))
         .bind(kind)
         .bind(id)
         .fetch_all(&mut **tx)
@@ -2507,23 +2507,29 @@ async fn restore_native_rows(
     set_tenant(tx, dst).await?;
     for table in tables {
         let staged = staged(table);
-        sqlx::query(&format!("UPDATE {staged} SET workspace_id=$1"))
-            .bind(dst)
-            .execute(&mut **tx)
-            .await?;
-        let staged_rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {staged}"))
-            .fetch_one(&mut **tx)
-            .await?;
-        let inserted = sqlx::query(&format!("INSERT INTO fvoci.{table} SELECT * FROM {staged}"))
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {staged} SET workspace_id=$1"
+        )))
+        .bind(dst)
+        .execute(&mut **tx)
+        .await?;
+        let staged_rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {staged}"
+        )))
+        .fetch_one(&mut **tx)
+        .await?;
+        let inserted = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO fvoci.{table} SELECT * FROM {staged}"
+        )))
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
         if inserted as i64 != staged_rows {
             return Err(sqlx::Error::Protocol(
                 "personal transfer native history restore incomplete".into(),
             ));
         }
-        sqlx::query(&format!("DROP TABLE {staged}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {staged}")))
             .execute(&mut **tx)
             .await?;
     }

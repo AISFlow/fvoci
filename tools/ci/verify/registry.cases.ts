@@ -1,3 +1,4 @@
+import { RUST_COLLAB_INTEGRATION_RUN } from "./rust-shared.ts";
 // Workflow mutations shared by the registry tests. Each case edits one real
 // workflow text and names a message the verifier must report for it.
 
@@ -27,7 +28,7 @@ function within(start: string, end: string | null, edit: Edit): Edit {
 
 const GATED = ["rust", "web", "install", "documents", "collab-engine"] as const;
 const PHASES =
-  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]";
+  "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth, ui-final]";
 const TARGET_INIT = `          printf 'CARGO_TARGET_DIR=%s/turso-target\\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"\n`;
 const UNIT =
   "      - name: Credential-free frozen diagnostic unit (exactly one test)\n" +
@@ -39,7 +40,8 @@ const WEB_GATE =
 const PLAN_LINE = "          bun tools/ci/plan.ts \\\n";
 const PIP =
   "          python3 -m pip install --disable-pip-version-check --user --break-system-packages -r scripts/ci_selection_requirements.txt\n";
-const CHECKOUT = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n";
+const CHECKOUT =
+  "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n";
 const SETUP_BUN_PIN = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
 const OTHER_PIN = "oven-sh/setup-bun@" + "1".repeat(40);
 const SETUP_BUN =
@@ -599,7 +601,12 @@ function caseList(): MutationCase[] {
     ["default: connection", "default: migration", "fixed phase inputs"],
     ["default: false", "default: true", "fixed phase inputs"],
     [
-      "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED",
+      " && github.event.inputs.phase != 'restore'",
+      "",
+      "runtime needs successful trusted admission",
+    ],
+    [
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore, main-only ui-auth and main-only ui-final require both destructive gates; others NOT IMPLEMENTED",
       "All phases implemented",
       "fixed phase inputs",
     ],
@@ -648,9 +655,14 @@ function caseList(): MutationCase[] {
       "maintained pinned compiler/native preparation",
     ],
     [
-      TARGET_INIT + "          rustup toolchain install 1.98.1 --profile minimal\n",
-      "          rustup toolchain install 1.98.1 --profile minimal\n" + TARGET_INIT,
+      TARGET_INIT + "          rustup toolchain install 1.99.0 --profile minimal\n",
+      "          rustup toolchain install 1.99.0 --profile minimal\n" + TARGET_INIT,
       "maintained pinned compiler/native preparation",
+    ],
+    [
+      " && github.event.inputs.phase != 'ui-auth'",
+      "",
+      "runtime needs successful trusted admission",
     ],
   ];
   turso.forEach(([old, replacement, needle], index) => {
@@ -664,6 +676,11 @@ function caseList(): MutationCase[] {
     "          FVOCI_TEST_TURSO_ENCRYPTION_KEYS: ${{ secrets.FVOCI_TEST_TURSO_ENCRYPTION_KEYS }}\n";
   const ui: [string, string][] = [
     ["    needs: admission\n", "    needs: []\n"],
+    [
+      "(github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'restore'",
+    ],
+    ["github.event.inputs.phase == 'restore'", "github.event.inputs.phase != 'restore'"],
     ["github.event.inputs.phase == 'ui-ack'", "github.event.inputs.phase != 'ui-ack'"],
     ["github.repository == 'AISFlow/fvoci'", "github.repository == 'attacker/fvoci'"],
     ["github.ref == 'refs/heads/main'", "startsWith(github.ref, 'refs/heads/')"],
@@ -709,13 +726,23 @@ function caseList(): MutationCase[] {
     ["--features worker --jobs 2", "--jobs 2"],
     ["          bun --no-env-file tools/turso/ui.ts --freeze\n", ""],
     [
-      "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n",
-      "      - name: Actual current primary UI baseline or guarded ON restart OFF consumer\n        if: false\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer\n",
+      "      - name: Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer\n        if: false\n",
     ],
     ["${{ vars.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE }}", "true"],
     ["${{ secrets.FVOCI_TEST_TURSO_AUTH_TOKEN }}", "${{ secrets.PRODUCTION_TOKEN }}"],
     [CONSUME, "        run: bun --no-env-file tools/turso/ui.ts --actor\n"],
     [uiKeyring, ""],
+    [
+      "(github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'ui-auth'",
+    ],
+    ["github.event.inputs.phase == 'ui-auth'", "github.event.inputs.phase != 'ui-auth'"],
+    [
+      "(github.event.inputs.phase == 'ui-final' && github.ref == 'refs/heads/main')",
+      "github.event.inputs.phase == 'ui-final'",
+    ],
+    ["chromium firefox webkit", "chromium"],
   ];
   ui.forEach(([old, replacement], index) => {
     add(
@@ -948,6 +975,8 @@ function caseList(): MutationCase[] {
     [PHASES, PHASES.replace("reset", "unapproved-phase")],
     [PHASES, PHASES.replace("reset", "reset, reset")],
     [PHASES, PHASES.replace("reset", "reset, unapproved-phase")],
+    [PHASES, PHASES.replace(", ui-auth", "")],
+    [PHASES, PHASES.replace(", ui-final", "")],
   ];
   inputs.forEach(([old, replacement], index) => {
     add(
@@ -1036,7 +1065,7 @@ function caseList(): MutationCase[] {
     "unpinned-uses",
     "documents.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "uses: actions/checkout@v4",
     ),
     "must pin a full commit SHA",
@@ -1045,8 +1074,8 @@ function caseList(): MutationCase[] {
     "short-sha-uses",
     "release.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-      "uses: actions/checkout@11d5960",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "uses: actions/checkout@3d3c42e",
     ),
     "must pin a full commit SHA",
   );
@@ -1054,7 +1083,7 @@ function caseList(): MutationCase[] {
     "local-uses",
     "install.yml",
     swap(
-      "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "uses: ./.github/actions/checkout",
     ),
     "must pin a full commit SHA",
@@ -1092,7 +1121,7 @@ function caseList(): MutationCase[] {
   const aptLine =
     "          sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
   const rustup =
-    "      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy\n";
+    "      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy\n";
   const thinNeedle =
     "documents.yml: native-extraction must check the process client's cargo metadata";
   const pythonNeedle = "documents.yml: native-extraction must not run or install Python";
@@ -1311,8 +1340,8 @@ function caseList(): MutationCase[] {
         "  collaboration:\n",
         "  rust-ci-gate:\n",
         swap(
-          "      - run: cargo fetch --locked\n",
-          "      - uses: actions/setup-python@v5\n      - run: cargo fetch --locked\n",
+          "      - uses: oven-sh/setup-bun@",
+          "      - uses: actions/setup-python@v5\n      - uses: oven-sh/setup-bun@",
         ),
       ),
       "rust: collaboration " + NOT_PYTHON,
@@ -1334,15 +1363,18 @@ function caseList(): MutationCase[] {
       within(
         "  postgres:\n",
         "  collaboration:\n",
-        swap("--no-install-recommends gcc ", "--no-install-recommends python3 gcc "),
+        swap(
+          "--no-install-recommends --no-remove gcc ",
+          "--no-install-recommends --no-remove python3 gcc ",
+        ),
       ),
       "rust: postgres " + NOT_PYTHON,
     ],
     [
       "shell",
       swap(
-        "        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
-        "        shell: python\n        run: bash scripts/run-rust-collaboration-ci-tests.sh\n",
+        "        run: " + RUST_COLLAB_INTEGRATION_RUN + "\n",
+        "        shell: python\n        run: " + RUST_COLLAB_INTEGRATION_RUN + "\n",
       ),
       "rust: collaboration " + NOT_PYTHON,
     ],
@@ -1438,8 +1470,8 @@ function caseList(): MutationCase[] {
     'python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"';
   const SQLITE_STEP = "      - name: Prepare pinned SQLite root build inputs\n";
   const APT_NO_PYTHON =
-    "sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8\n";
-  const APT_PYTHON = APT_NO_PYTHON.replace("recommends gcc", "recommends python3 gcc");
+    "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev\n";
+  const APT_PYTHON = APT_NO_PYTHON.replace(" gcc", " python3 gcc");
   const helper = (job: string) => `web: ${job} Rustup metadata must build and run the locked xtask`;
   const order = (job: string) => `web: ${job} Rustup metadata must follow the toolchain install`;
   const once = (job: string) => `web: ${job} requires exactly one Rustup metadata step`;

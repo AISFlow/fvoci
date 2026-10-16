@@ -1065,7 +1065,7 @@ pub(crate) mod selected_task_detail_tests {
                 _ => task,
             };
             let sql = format!("UPDATE {table} SET {column}=1 WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(id.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -1079,7 +1079,7 @@ pub(crate) mod selected_task_detail_tests {
                 assert!(matches!(denied, Err(ProjectDbError::NotFound)));
             }
             let sql = format!("UPDATE {table} SET {column}=NULL WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(id.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -1112,13 +1112,28 @@ pub(crate) mod selected_task_detail_tests {
         .fetch_one(&f.pool)
         .await
         .unwrap();
+        // tasks_keep_collection_scope refuses a scope change while the created
+        // task item exists: detach, move, then attach to the target's task collection.
+        let mut moved = f.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("DELETE FROM collection_items WHERE workspace_id=?1 AND task_id=?2")
+            .bind(f.workspace.as_bytes().as_slice())
+            .bind(task.as_bytes().as_slice())
+            .execute(&mut *moved)
+            .await
+            .unwrap();
         sqlx::query("UPDATE tasks SET project_id=?1,status_id=?2 WHERE id=?3")
             .bind(target.as_bytes().as_slice())
             .bind(&status)
             .bind(task.as_bytes().as_slice())
-            .execute(&f.pool)
+            .execute(&mut *moved)
             .await
             .unwrap();
+        let attached = sqlx::query("INSERT INTO collection_items(id,workspace_id,collection_id,task_id) SELECT ?1,workspace_id,id,?2 FROM collections WHERE workspace_id=?3 AND project_id=?4 AND kind='task'")
+            .bind(Uuid::now_v7().as_bytes().as_slice()).bind(task.as_bytes().as_slice())
+            .bind(f.workspace.as_bytes().as_slice()).bind(target.as_bytes().as_slice())
+            .execute(&mut *moved).await.unwrap();
+        assert_eq!(attached.rows_affected(), 1);
+        moved.commit().await.unwrap();
         assert!(
             matches!(read_other().await.unwrap(), Err(ProjectDbError::NotFound)),
             "old project grant cannot authorize current affiliation"
@@ -2581,11 +2596,12 @@ struct TaskScalarProfile {
     runtime_checked: std::sync::OnceLock<Result<(), &'static str>>,
 }
 
-// Immutable PG18 reference plus the exact canonical x86_64 runtime receipt.
-// Admission remains bound to the exact GNU version and locale archive; other
-// archives and architectures require separate qualification, never a fallback.
+// Immutable PG18 reference plus one native CI bootstrap receipt per admitted
+// architecture. Admission remains bound to the exact GNU version and locale
+// archive; other archives and architectures require separate qualification,
+// never a fallback.
 const TASK_SCALAR_PROFILE_SHA256: &str =
-    "daf54180e0a5fc1444752e6f8bcf7fbe8f67067d7e5ae27fbbc40cd6061255c9";
+    "6966d501849130ea718997a96509daa4bc0a1553116fe5aef65c0cc3deae2e1c";
 
 impl TaskScalarProfile {
     fn decode_sealed(raw: &str, expected: &str) -> Result<Self, &'static str> {
@@ -2607,9 +2623,9 @@ impl TaskScalarProfile {
             || r.lc_collate != "en_US.utf8"
             || r.lc_ctype != "en_US.utf8"
             || r.collation_version != "2.41"
-            || r.tzdata_version != "2026a"
+            || r.tzdata_version != "2026c"
             || r.image_digest
-                != "sha256:7e32e9833a6fb1c92c32552794cb6ed569d51b445a54907d35fc112ef39684db"
+                != "sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336"
             || r.names_sha256 != "104662bf43ab373bc83f5999f5a18bc5ac094baeeca996e1a8f761fad8279c8c"
         {
             return Err("Task scalar reference profile mismatch");
@@ -3789,7 +3805,7 @@ async fn list_tasks_in_scope(
             "#,
             due_sql = due_date_sql("t", "$4"),
         );
-        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(&anchor_sql)
+        let anchor: Option<TaskListCursorAnchor> = sqlx::query_as(sqlx::AssertSqlSafe(anchor_sql))
             .bind(workspace_id)
             .bind(scope_bind)
             .bind(cursor.id)
@@ -3874,7 +3890,9 @@ async fn list_tasks_in_scope(
         LIMIT {limit}
         "#
     );
-    let mut list_query = sqlx::query(&list_sql).bind(workspace_id).bind(scope_bind);
+    let mut list_query = sqlx::query(sqlx::AssertSqlSafe(list_sql))
+        .bind(workspace_id)
+        .bind(scope_bind);
     for value in &binds {
         list_query = list_query.bind(value);
     }
@@ -3888,7 +3906,7 @@ async fn list_tasks_in_scope(
         GROUP BY t.status_id
         "#
     );
-    let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(&count_sql)
+    let mut count_query = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(count_sql))
         .bind(workspace_id)
         .bind(scope_bind);
     for value in &base_binds {
@@ -4064,7 +4082,7 @@ async fn workspace_row_exists(
 ) -> Result<bool, sqlx::Error> {
     let sql =
         format!("SELECT EXISTS (SELECT 1 FROM fvoci.{table} WHERE workspace_id = $1 AND id = $2)");
-    sqlx::query_scalar(&sql)
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(id)
         .fetch_one(&mut **tx)
@@ -4092,9 +4110,9 @@ async fn load_custom_sort_tokens(
     let mut out = Vec::with_capacity(fields.len());
     for (field_id, column) in fields {
         let expr = scalar_value_sql(RootKind::Task, "t", "$3", column);
-        let value: Option<Option<String>> = sqlx::query_scalar(&format!(
+        let value: Option<Option<String>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT ({expr})::text FROM fvoci.tasks t WHERE t.workspace_id = $1 AND t.id = $2"
-        ))
+        )))
         .bind(workspace_id)
         .bind(task_id)
         .bind(field_id.to_string())
@@ -4985,7 +5003,9 @@ pub async fn patch_task_meta(
             "#,
             sets.join(", ")
         );
-        let mut query = sqlx::query(&sql).bind(workspace_id).bind(task_id);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(workspace_id)
+            .bind(task_id);
         if let Some(title) = bind_title {
             query = query.bind(title);
         }
@@ -8488,7 +8508,7 @@ mod selected_task_projection_tests {
         assert_eq!(profile.zones.len(), 487);
         assert_eq!(
             profile.data_identity,
-            "87c748703be14b07e96a29ee04e031bca7c2f1f60267c9760af76b8de40bad71"
+            "f129f6e7a3d2017f4b39601916a94113b6452c9522c588ae554a15bb461fe585"
         );
         for name in ["UTC", "localtime", "posixrules"] {
             assert!(profile.zones.iter().any(|zone| zone.name == name));

@@ -1,4 +1,4 @@
-# FVOCI 0.6.0 — 현재 계획과 수락 경계
+# FVOCI 0.6.0 — 범위와 수락 경계
 
 이 문서는 승인된 범위, 사용자 흐름별 남은 수락과 다음 소유권의 정본이다.
 역할·권한은 [AGENTS.md](../AGENTS.md), 설치·복구는 [RUNNING.md](../RUNNING.md),
@@ -27,6 +27,7 @@
 PASS·FAIL·CANCELLED·NOTRUN·SKIP·MISSING을 구분한다. 실행 시작·준비·0개 검사·ignored·재시도·조건부 skip을 PASS로 세지 않는다.
 
 실제 결과·수락은 PR #347 체크포인트와 #331이 정본이다. 폐기된 로컬 evidence root에만 근거가 있던 수락은 현재 head에서 다시 검증하기 전에는 쓰지 않는다. 아래 절의 기존 PASS 보존·반복 생략도 #331이나 PR 체크포인트에 근거가 남은 수락에만 적용한다.
+로컬 candidate 수락은 최신 main·hosted 수락이 아니다. 로컬 AMD64 결과로 ARM64 실제 producer/consumer 대조나 main push CI를 대신하지 않는다.
 
 ## 2. 구현 원칙과 신규 설치 계약
 
@@ -88,53 +89,56 @@ Nuxt Dashboard `57e8a76e85ac382f2dd75946aa450afb1b3e4b0d`, Editor `60886bda14425
 Nuxt MIT copyright는 `Copyright (c) 2025 Nuxt UI Templates`, LICENSE SHA256은 `e40f408c466e72a3b02eabe846ef35cfab210c14daff782a072dd4903d911f93`다.
 manifest/lock 전체 복사·Zod 버전 차이에 따른 제품 schema 변경 없이 dependency·폰트·아이콘 고지와 실제 image HTTP의 full NOTICE를 확인한다.
 
-## 3. 남은 흐름별 수락 단위
+## 3. 흐름별 필수 수락 단위
 
 각 단위는 세 승인 backend의 **UI → Rust 인가 → 선택 DB commit → matching ACK → 새 client**를 연결한다.
 backend/실행 입력을 고정한다.
 SOURCE/compile/unit PASS로 실제 DB/browser/image 수락을 대신하지 않고 실패·거부·유실·경합까지 검사한다.
 이슈의 기존 실제 수락을 먼저 대조하고 입력·조건이 같은 흐름은 반복하지 않는다. 다른 SHA/DB/feature/이미지의 결과를 합산하지 않는다.
+최종 실제 수락은 같은 primary의 전체 snapshot과 부모 snapshot을 대조하고, 해당 쓰기의 인과관계·matching ACK·다른 리소스 행 보존을 확인한다. 실행별 충족 여부는 PR #347 체크포인트와 #331에 기록한다.
+hosted 파괴적 검사의 human flag는 사람이 실제 실행 직전에 true로 설정하고 실행 뒤 false로 되돌린다. credential은 부모 프로세스에만 둔다.
 
 ### 3.1 인증·로그아웃·철회·계정
 
 사용자 보장: 로그인·계정 변경·logout/revoke 후 접근과 쓰기/room이 현재 세션 권한을 따르고 거부된 쓰기는 무효과다.
-남은 실제 검사: SQLite/libSQL logout·비밀번호 변경/재설정의 PG-only gate 후보를 실제 AuthService/Axum·HTTP/DB로 확인하고, 브라우저 세션·재접속·철회 경합을 해당 후보에서 연결한다; 현재 NOTRUN이다.
+필수 실제 검사: SQLite/libSQL logout·비밀번호 변경/재설정의 PG-only gate 후보를 실제 AuthService/Axum·HTTP/DB로 확인하고, 브라우저 세션·재접속·철회 경합을 연결한다.
 수락/근거/재사용: 현재 권한·원자성·fresh client 거부를 검증하고 [#331](https://github.com/AISFlow/fvoci/issues/331)에 기록한다. 기존 auth Rust·Keycloak 범위만 재사용하며 static finding을 수정·해결 또는 서버 데이터 손실로 선언하지 않는다.
 
 ### 3.2 개인 입력·프로젝트 문서·멤버 변경
 
 사용자 보장: 개인 task 입력, project/wiki 본문·참조·첨부가 올바른 리소스에 저장되고 멤버 삭제·역할 변경 직후 접근/쓰기·활성 room이 현재 권한을 따른다.
-남은 실제 검사: 원 실패 개인 입력·프로젝트 문서·멤버 삭제를 PG/SQLite ON/OFF 및 hosted Turso UI의 실제 commit/ACK/readback·거부 경합에 연결한다; 해당 새 통합 흐름 NOTRUN이다.
+필수 실제 검사: 원 실패 개인 입력·프로젝트 문서·멤버 삭제를 PG/SQLite ON/OFF 및 hosted Turso UI의 실제 commit/ACK/readback·거부 경합에 연결한다.
 수락/근거/재사용: 새 client 본문·ID/ref·권한과 거부 시 데이터/이벤트 무효과를 확인한다. [#331](https://github.com/AISFlow/fvoci/issues/331)·[#335](https://github.com/AISFlow/fvoci/issues/335), 기존 PG 흐름 수락은 불변 입력의 범위만 재사용한다.
 
 ### 3.3 ON 회귀·OFF CAS·충돌·초안
 
 사용자 보장: ON 협업·개인 undo/IME/재접속 회귀를 보존하고 OFF 저장은 expected head CAS로 경합을 거부한다; 충돌 표시는 최신 head와 일치하며 미확정 초안이 조용히 소실되지 않는다.
-남은 실제 검사: OFF stale CAS·동시 client·권한 철회·저장 실패/재접속·draft retire를 actual HTTP/DB/browser로 연결한다. dirty retire 삭제 기대는 정책 미확정이며 문서로 fix/resolve하지 않는다.
+필수 실제 검사: OFF stale CAS·동시 client·권한 철회·저장 실패/재접속·draft retire를 actual HTTP/DB/browser로 연결한다. dirty retire 삭제 기대는 정책 미확정이며 문서로 fix/resolve하지 않는다.
 수락/근거/재사용: 실제 OffWikiDraft 기존15 PASS·최소 반례1 PASS/2 FAIL을 보존한다. synthetic 클래스 결과와 server CAS source의 head 보호를 구분한다. [#335](https://github.com/AISFlow/fvoci/issues/335)의 기존 ON/OFF 근거만 해당 입력에서 재사용한다.
 
 ### 3.4 응답 유실·중복 command·과거 ACK
 
 사용자 보장: lost response는 durable 여부 UNKNOWN으로 처리하고 같은 command 재시도는 중복 mutation을 만들지 않는다; 오래된 receipt가 새 head/충돌을 확정 저장으로 지우지 않는다.
-남은 실제 검사: commit 직후 응답 유실·duplicate/retry·historical ACK·fresh readback·권한 변경을 DB/browser에서 연결한다; 현재 새 통합 runtime NOTRUN이다.
+필수 실제 검사: commit 직후 응답 유실·duplicate/retry·historical ACK·fresh readback·권한 변경을 DB/browser에서 연결한다.
 수락/근거/재사용: command/revision 식별과 matching ACK·head/충돌 표시·DB 단일 효과를 대조한다. Grok의 real client 클래스 historical receipt 충돌-clearing FAIL과 server CAS source 보호를 함께 보존하되 서버 덮어쓰기 확정으로 확대하지 않는다. [#335](https://github.com/AISFlow/fvoci/issues/335)에 기록하며 Turso migration COMMIT UNKNOWN 증거는 그 migration 범위만 재사용한다.
 
 ### 3.5 현재 데이터·리비전·ID·참조·첨부·정밀도
 
 사용자 보장: 현재 본문·revision/UUIDv7·범위 번호·리소스 참조·첨부 bytes/권한·JSON 숫자/시간 의미가 저장·새 client·복원 후 유지된다.
-남은 실제 검사: personal/project/task-origin·revision/history/native reader·첨부참조와 컬렉션 숫자/날짜 정밀도를 세 backend에서 검증한다.
+필수 실제 검사: personal/project/task-origin·revision/history/native reader·첨부참조와 컬렉션 숫자/날짜 정밀도를 세 backend에서 검증한다.
 수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342)의 exact oracle/거부 controls를 유지한다. locale/TZif·codec/ABI·source/command 입력을 고정하고 차이를 정규화로 숨기지 않는다. 현재 archive reader의 tamper/missing 거부·원 실패/봉인은 보존한다.
 
 ### 3.6 재시작·반출·별도 설치본 복원
 
 사용자 보장: durable 저장은 정상/실패 후 재시작에도 남으며 현재 archive를 다른 격리 설치본에 복원한 뒤 새 client/native reader가 현재 데이터·권한·리비전·참조·첨부를 확인한다.
-남은 실제 검사: SQLite 정상 기동 observer 실증 → 실제 UI 저장/ON-OFF → restart → 현재 반출/별도 설치 restore → restart/fresh client; hosted Turso의 해당 UI 흐름은 NOTRUN이다.
+필수 실제 검사: SQLite 정상 기동 observer 실증 → 실제 UI 저장/ON-OFF → restart → 현재 반출/별도 설치 restore → restart/fresh client를 연결하고 hosted Turso의 해당 UI 흐름도 확인한다.
 수락/근거/재사용: [#342](https://github.com/AISFlow/fvoci/issues/342). 이미 독립 수락한 PostgreSQL image 흐름은 입력 불변이면 반복하지 않는다. image/compile/readback 범위를 SQLite/Turso에 전용하지 않고 현재 schema12·rollback/close/drain·failure cleanup을 실제 확인한다.
 
 ### 3.7 동등 작업량 ON/OFF 자원 비교
 
 사용자 보장: 같은 사용자 작업·저장/ACK·실패 조건에서 ON/OFF 비용을 비교하며 기능/검사를 줄여 더 빠르다고 하지 않는다.
-남은 실제 검사: 같은 backend/data/이미지·작업량·준비/warm 조건을 고정하고 CPU/RSS·ACK latency·DB/room 자원과 정상 종료를 측정한다. non-dumpable 제품 보호를 유지하고 권한 확대 없이 observer/sample 권한을 입증한다.
+필수 실제 검사: 같은 backend/data/이미지·작업량·준비/warm 조건을 고정하고 CPU/RSS·ACK latency·DB/room 자원과 정상 종료를 측정한다. non-dumpable 제품 보호를 유지하고 권한 확대 없이 observer/sample 권한을 입증한다.
+native clock으로 40분 serial coverage와 background/relay 동작을 확인하고, 실제 정상 room release와 PID retirement를 확인한다. native ready boolean이나 TTL만으로 종료를 수락하지 않는다.
 수락/근거/재사용: sealed pair-policy/sampler·정상 launch receipt·raw samples·input hash로 판정한다. 순수 controls PASS·다른 환경 성능은 실제 equal-work 비용 수락이 아니다. 남은 측정은 [#335](https://github.com/AISFlow/fvoci/issues/335)에 연결한다.
 
 ## 4. 현재 소유권·다음 행동·승인
@@ -151,8 +155,8 @@ AGENTS.md의 통합 역할이 하는 PR 작업 브랜치 일반 push·Draft PR �
 ## 5. 미결 정책·지원 한계·로드맵
 
 Grok A/B/C/D의20영역 보안 감사는 **SOURCE 표본 감사**이며 보안·runtime 수락으로 쓰지 않는다.
-실제 OFF 클래스15 PASS·반례1 PASS/2 FAIL, dirty retire 정책 미확정·historical receipt UI conflict-clearing,
-SQLite/libSQL logout PG gate static 후보·actual HTTP/DB NOTRUN을 유지한다. 문서로 결함 수정·정책 확정·issue 종결을 선언하지 않는다.
+과거 실제 OFF 클래스15 PASS·반례1 PASS/2 FAIL과 historical receipt UI conflict-clearing FAIL, 당시 SQLite/libSQL logout PG gate static 후보·actual HTTP/DB NOTRUN 근거를 보존한다.
+dirty retire 정책은 미확정이며 이후 실제 검증·해결 여부는 PR #347 체크포인트와 #331에서 확인한다. 문서로 결함 수정·정책 확정·issue 종결을 선언하지 않는다.
 
 ### 5.1 보존하는 정책·운영 한계
 
@@ -161,7 +165,7 @@ SQLite/libSQL logout PG gate static 후보·actual HTTP/DB NOTRUN을 유지한�
 - PATCH dueAt은 browser millisecond 비교여서 같은 ms의 sub-ms 충돌을 검출하지 않는다. Gantt DST 막대 하루 차이/overlap rail과 새 Calendar version 계약을 구분한다. 숫자/날짜 정밀도 소스 후보는 실제 검증 전 해결하지 않는다.
 - presigned part900초/download60초는 철회·mode전환·삭제 뒤 만료까지 유효하다. 게시 전 권한 재검사·S3 key회전/NTP·HAR 서명 URL 노출·오류 메시지 한계를 유지한다. 운영 지정 GitHub API host DNS pin 차이·remote DB error log 후보를 새 실제 침해로 단정하지 않는다.
 - room fence PG 연결·pool reserve10/maintenance claim·receipt/event/audit 보존 정책 부재, import 큰 요청 버퍼/동시 admission, HWP 대기+실행 timeout 최대 약2배를 유지한다. parser child의 rlimit/envclear/종료/non-dumpable 보호를 파일/네트워크 namespace sandbox로 주장하지 않는다.
-- 메일 수신자는 최근64 event process memory라 재시작/lease 인계 재발송 가능하며 digest15분/실패 streak가 다음 날 반복 종료돼 뒤 수신자를 굶길 수 있다. SQLx0.8.6 BEGIN 취소는 기존 acquire 검사로 막으며 sqlx0.9/acquire 제거·try_acquire/try_begin은 승인 없이 적용하지 않는다.
+- 메일 수신자는 최근64 event process memory라 재시작/lease 인계 재발송 가능하며 digest15분/실패 streak가 다음 날 반복 종료돼 뒤 수신자를 굶길 수 있다. SQLx0.9.0에서도 BEGIN 취소는 기존 acquire 검사로 막으며 acquire 검사 제거·try_acquire/try_begin은 승인 없이 적용하지 않는다.
 - 긴 purge의 xmin/SSE/outbox 지연·SSE64 poll·Meili chunk backlog/처리량·memory ledger mutex 안 /proc 조회·AppArmor OOM backstop 재측정 없음은 측정 한계다. non-dumpable과 sampler 충돌은 권한을 넓혀 우회하지 않는다.
 - 설치 보안·복귀는 RUNNING.md가 정본이다. 환경값을 Docker 사용자/root/exec가 읽을 수 있음·정상 서버 준비 credential 부재·같은 uid helper 파일/검색키 공유·PG log_statement>=ddl의 CREATE ROLE PASSWORD 노출을 유지한다. 옛0.1→0.2 schema044 downgrade 거부·0.2→0.3 FILE/backup/미완료 presigned 복귀 위험은 역사적 한계이며 현재 신규 설치 upgrade gate가 아니다.
 - BOOT-NETWORK 빈 화면의 원인 UNKNOWN, #237 완화/앱 chunk retry 없음·과거 reconnect afterDestroy 실패/후속 dispose 수락·Dependabot Bun lockfileVersion2/compose recreate 오류는 고정 역사 근거를 보존하고 관련 새 delta에서만 대조한다.

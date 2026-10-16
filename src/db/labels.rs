@@ -186,13 +186,14 @@ pub async fn list_workspace_labels(
         ORDER BY l.name, l.id
         "#
     );
-    let rows =
-        sqlx::query_as::<_, (Uuid, Uuid, String, String, DateTime<Utc>, DateTime<Utc>)>(&sql)
-            .bind(workspace_id)
-            .bind(guest)
-            .bind(actor_user_id)
-            .fetch_all(&mut *tx)
-            .await?;
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, DateTime<Utc>, DateTime<Utc>)>(
+        sqlx::AssertSqlSafe(sql),
+    )
+    .bind(workspace_id)
+    .bind(guest)
+    .bind(actor_user_id)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Ok(rows
         .into_iter()

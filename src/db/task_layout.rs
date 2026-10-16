@@ -116,7 +116,9 @@ pub async fn get_project_task_layout(
         LIMIT 501
         "#
     );
-    let mut q = sqlx::query(&list_sql).bind(workspace_id).bind(project_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(list_sql))
+        .bind(workspace_id)
+        .bind(project_id);
     for v in &base_binds {
         q = q.bind(v);
     }

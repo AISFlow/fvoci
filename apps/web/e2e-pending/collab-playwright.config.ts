@@ -1,4 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
+import { isAbsolute } from "node:path";
+import { lstatSync } from "node:fs";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:5173";
 
@@ -10,6 +12,35 @@ if (process.env.CI && !process.versions.bun) {
 // A selected normal-server run has an allocated migrate --start lifecycle.
 // The pending runner instead starts its test servers per spec.
 const selectedBackend = process.env.FVOCI_E2E_SELECTED_BACKEND;
+
+/** Selection only. The admitted parent verifies this executable's full seal. */
+export function finalChromiumLaunch() {
+  const executablePath = process.env.FVOCI_E2E_FINAL_BROWSER_BIN;
+  if (executablePath === undefined) return undefined;
+  const restoreDestination =
+    selectedBackend === "sqlite" &&
+    isAbsolute(process.env.FVOCI_E2E_RESTORE_INPUT ?? "") &&
+    isAbsolute(process.env.FVOCI_E2E_RESTORE_SQLITE_ROOT ?? "");
+  if (
+    process.env.FVOCI_TURSO_UI_FINAL !== "1" ||
+    (selectedBackend !== "libsql-remote" && !restoreDestination) ||
+    !isAbsolute(executablePath)
+  )
+    throw new Error("selected final Chromium requires the admitted final allocation");
+  const file = lstatSync(executablePath);
+  if (!file.isFile() || file.isSymbolicLink())
+    throw new Error("selected final Chromium must be a regular executable");
+  return {
+    executablePath,
+    env: Object.fromEntries(
+      ["PATH", "LANG", "TZ", "TMPDIR"].flatMap((name) => {
+        const value = process.env[name];
+        return value === undefined ? [] : [[name, value]];
+      }),
+    ),
+  };
+}
+const finalLaunch = finalChromiumLaunch();
 const selectedFlow = process.env.FVOCI_E2E_SELECTED_FLOW ?? "on";
 if (selectedFlow !== "on" && selectedFlow !== "off") {
   throw new Error("selected normal-server flow must be on or off");
@@ -42,6 +73,7 @@ export default defineConfig({
       ? [
           /workspace-(wiki|off)-selected-backend\.spec\.ts/,
           /v060-sqlite-revision-restore\.spec\.ts/,
+          /v060-equal-work\.spec\.ts/,
         ]
       : [],
   metadata: {
@@ -56,6 +88,7 @@ export default defineConfig({
   use: {
     ...devices["Desktop Chrome"],
     baseURL,
+    ...(finalLaunch ? { launchOptions: finalLaunch } : {}),
     trace: selectedBackend === "libsql-remote" ? "off" : "retain-on-failure",
   },
 });

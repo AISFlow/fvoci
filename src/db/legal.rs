@@ -67,9 +67,9 @@ pub fn is_legal_kind(kind: &str) -> bool {
 }
 
 pub async fn latest_legal(pool: &PgPool, kind: &str) -> Result<Option<LegalDocument>, sqlx::Error> {
-    let row: Option<LegalScan> = sqlx::query_as(&format!(
+    let row: Option<LegalScan> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {LEGAL_COLUMNS} FROM fvoci.legal_documents WHERE kind = $1 ORDER BY version DESC LIMIT 1"
-    ))
+    )))
     .bind(kind)
     .fetch_optional(pool)
     .await?;
@@ -117,9 +117,9 @@ pub async fn legal_version(
     kind: &str,
     version: i32,
 ) -> Result<Option<LegalDocument>, sqlx::Error> {
-    let row: Option<LegalScan> = sqlx::query_as(&format!(
+    let row: Option<LegalScan> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {LEGAL_COLUMNS} FROM fvoci.legal_documents WHERE kind = $1 AND version = $2"
-    ))
+    )))
     .bind(kind)
     .bind(version)
     .fetch_optional(pool)
@@ -156,9 +156,9 @@ pub async fn list_legal_versions(
     pool: &PgPool,
     kind: &str,
 ) -> Result<Vec<LegalDocument>, sqlx::Error> {
-    let rows: Vec<LegalScan> = sqlx::query_as(&format!(
+    let rows: Vec<LegalScan> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {LEGAL_COLUMNS} FROM fvoci.legal_documents WHERE kind = $1 ORDER BY version DESC"
-    ))
+    )))
     .bind(kind)
     .fetch_all(pool)
     .await?;
@@ -265,7 +265,7 @@ pub async fn publish_legal(
             .fetch_one(&mut *tx)
             .await?;
     let version = latest.unwrap_or(0) + 1;
-    let row: LegalScan = sqlx::query_as(&format!(
+    let row: LegalScan = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
         INSERT INTO fvoci.legal_documents (
             id, kind, version, title, body_markdown, body_html, required, effective_at,
@@ -273,7 +273,7 @@ pub async fn publish_legal(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
         RETURNING {LEGAL_COLUMNS}
         "#
-    ))
+    )))
     .bind(Uuid::now_v7())
     .bind(&input.kind)
     .bind(version)

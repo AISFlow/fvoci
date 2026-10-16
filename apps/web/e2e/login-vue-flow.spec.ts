@@ -136,8 +136,20 @@ test("password login reaches the Vue home; a wrong password stays on Vue /login"
 }) => {
   const csp = watchCspViolations(page);
   const icons = watchIconRequests(page);
+  // Chromium reports a blocked eval as a securitypolicyviolation event without
+  // a console message, so watchCspViolations cannot see it.
+  await page.addInitScript(() => {
+    const events: string[] = [];
+    Object.defineProperty(window, "fvociCspEvents", { value: events });
+    document.addEventListener("securitypolicyviolation", (event) => {
+      events.push(`${event.effectiveDirective} ${event.blockedURI}`);
+    });
+  });
+  const cspEvents = () =>
+    page.evaluate(() => (window as Window & { fvociCspEvents?: string[] }).fvociCspEvents);
   await page.goto("/login");
   await expectVueLogin(page);
+  expect(await cspEvents()).toEqual([]);
 
   await page.getByLabel("이메일").fill(admin.email);
   await page.getByLabel("비밀번호").fill("wrong-password-1");
@@ -151,6 +163,7 @@ test("password login reaches the Vue home; a wrong password stays on Vue /login"
   await expect(vueRoot(page)).toHaveCount(1);
   await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
 
+  expect(await cspEvents()).toEqual([]);
   expect(csp).toEqual([]);
   expect(icons).toEqual([]);
 });

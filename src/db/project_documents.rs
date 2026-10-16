@@ -2947,7 +2947,7 @@ pub(crate) mod selected_create_backend_tests {
         .await
         .unwrap();
         for table in ["events", "audit_log"] {
-            sqlx::query(&format!("CREATE TRIGGER project_create_refuse AFTER INSERT ON {table} WHEN NEW.verb='document.created' BEGIN INSERT INTO project_create_fk_probe(id) VALUES(zeroblob(16)); END;")).execute(&f.pool).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER project_create_refuse AFTER INSERT ON {table} WHEN NEW.verb='document.created' BEGIN INSERT INTO project_create_fk_probe(id) VALUES(zeroblob(16)); END;"))).execute(&f.pool).await.unwrap();
             let error = create(&f, credential, project, Some(f.document))
                 .await
                 .unwrap_err();
@@ -3034,7 +3034,7 @@ mod selected_metadata_backend_tests {
         (f, credential, project)
     }
 
-    async fn update(f: &Fixture, sql: &str, id: Uuid) {
+    async fn update(f: &Fixture, sql: &'static str, id: Uuid) {
         assert_eq!(
             sqlx::query(sql)
                 .bind(id.as_bytes().as_slice())

@@ -5,23 +5,27 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const bodySchema = z
-  .object({ id: z.string(), contentJson: z.unknown(), archivedAt: z.string().nullable() })
-  .passthrough();
+  .object({
+    id: z.string(),
+    contentJson: z.unknown().optional(),
+    archivedAt: z.string().nullable(),
+  })
+  .loose();
 const documentBodySchema = z
   .object({
     content: z
       .array(
-        z.object({ attrs: z.object({ id: z.unknown() }).passthrough().optional() }).passthrough(),
+        z.object({ attrs: z.object({ id: z.unknown().optional() }).loose().optional() }).loose(),
       )
       .optional(),
   })
-  .passthrough();
+  .loose();
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
-const errorSchema = z.object({ code: z.string() }).passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
+const errorSchema = z.object({ code: z.string() }).loose();
 
 test.describe.configure({ mode: "serial" });
 

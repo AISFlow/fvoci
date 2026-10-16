@@ -1455,7 +1455,7 @@ pub async fn get_document_body(
     workspace_id: Uuid,
     document_id: Uuid,
 ) -> Value {
-    let client = reqwest::Client::builder()
+    let client = fvoci_server::http_client::builder()
         .cookie_store(true)
         .build()
         .expect("client");

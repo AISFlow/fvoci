@@ -10,7 +10,7 @@ use crate::args::{self, Outcome, Parsed};
 use crate::host::utc_timestamp;
 use crate::rust_binaries_archive::{file_sha256, pack, unpack};
 use crate::rust_binaries_cohort::{
-    self as cohort, entry, expectation, Entry, Kind, HELPER, SCHEMA,
+    self as cohort, entry, expectation, Entry, Kind, HELPER, LIBRARY, SCHEMA,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
 
-const USAGE: &str = "usage: xtask rust-binaries [-h] {build,pack,unpack,run} --directory DIRECTORY [--sqlite-identity SQLITE_IDENTITY] [--cohort {postgres,helper}] [--test TEST] [--nocapture]";
+const USAGE: &str = "usage: xtask rust-binaries [-h] {build,pack,unpack,run,collaboration} --directory DIRECTORY [--sqlite-identity SQLITE_IDENTITY] [--cohort {postgres,helper}] [--test TEST] [--nocapture]";
 const HELP: &str = "\
 Rust workflow's PostgreSQL executable handoff (never rebuilds consumers)
 
@@ -30,6 +30,7 @@ actions:
   pack      seal postgres.tar and helper.tar from tests/schema/helper.jsonl
   unpack    validate <cohort>.tar and restore it into the workspace
   run       execute restored test executables (no test filters)
+  collaboration  execute all ten sealed collaboration suites and admission gate
 
 options:
   -h, --help                show this help message and exit
@@ -39,7 +40,7 @@ options:
   --test TEST               test executable to run (repeatable)
   --nocapture               pass --nocapture to libtest
 ";
-const PINNED_RUSTC: &str = "rustc 1.98.1 ";
+const PINNED_RUSTC: &str = "rustc 1.99.0 ";
 const PROFILE: &str = "dev-test-nodebug";
 const BUILD_ENVIRONMENT: [&str; 6] = [
     "CARGO_INCREMENTAL",
@@ -56,6 +57,7 @@ enum Action {
     Pack,
     Unpack,
     Run,
+    Collaboration,
 }
 
 /// Shell-style exit status of a finished child: its code, or 128+N for signal
@@ -157,7 +159,7 @@ fn workspace() -> Result<PathBuf, String> {
         .map_err(|e| format!("workspace: {e}"))
 }
 
-fn host(workspace: &Path) -> Result<Host, String> {
+pub(crate) fn host(workspace: &Path) -> Result<Host, String> {
     Ok(Host {
         head: output_text("git", &["rev-parse", "HEAD"])?
             .trim()
@@ -210,6 +212,12 @@ pub fn product_binaries(workspace: &Path) -> Result<Vec<String>, String> {
 /// `cargo test --no-run` of every test target, Cargo JSON on stdout into a new
 /// `tests.jsonl`; returns Cargo's status.
 fn build(directory: &Path, names: &[String]) -> Result<i32, String> {
+    let mut names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+    names.extend(
+        cohort::collaboration_suites(cohort::COLLABORATION_SUITES)?
+            .into_iter()
+            .map(|(_, name)| name),
+    );
     let path = directory.join("tests.jsonl");
     let output = OpenOptions::new()
         .write(true)
@@ -225,6 +233,7 @@ fn build(directory: &Path, names: &[String]) -> Result<i32, String> {
             "--features",
             "db-tests",
             "--no-run",
+            "--lib",
             "--message-format=json",
         ])
         .stdout(output);
@@ -278,13 +287,18 @@ fn pack_cohorts(
     names: &[String],
     products: &[String],
 ) -> Result<(), String> {
-    let helper = entries_for(
+    let mut helper = entries_for(
         &directory.join("helper.jsonl"),
         &[HELPER.to_owned()],
         products,
         root,
     )?;
-    let tests_and_products: Vec<String> = names.iter().chain(products).cloned().collect();
+    let tests_and_products: Vec<String> = names
+        .iter()
+        .chain(products)
+        .cloned()
+        .chain([LIBRARY.to_owned()])
+        .collect();
     let mut postgres = entries_for(
         &directory.join("tests.jsonl"),
         &tests_and_products,
@@ -298,6 +312,19 @@ fn pack_cohorts(
         root,
     )?);
     postgres.extend(helper.clone());
+    for name in [LIBRARY, "fvoci-server"] {
+        helper.insert(name.to_owned(), postgres[name].clone());
+    }
+    let collaboration: Vec<String> = cohort::collaboration_suites(cohort::COLLABORATION_SUITES)?
+        .into_iter()
+        .map(|(_, name)| name.to_owned())
+        .collect();
+    helper.extend(entries_for(
+        &directory.join("tests.jsonl"),
+        &collaboration,
+        products,
+        root,
+    )?);
     let helper_tar = directory.join("helper.tar");
     pack(&helper_tar, context, root, &helper)?;
     pack(&directory.join("postgres.tar"), context, root, &postgres).inspect_err(|_| {
@@ -314,13 +341,24 @@ fn unpack_cohort(
     products: &[String],
 ) -> Result<(), String> {
     let expected: BTreeSet<String> = if cohort == "helper" {
-        [HELPER.to_owned()].into()
+        let mut expected: BTreeSet<String> = [
+            HELPER.to_owned(),
+            LIBRARY.to_owned(),
+            "fvoci-server".to_owned(),
+        ]
+        .into();
+        expected.extend(
+            cohort::collaboration_suites(cohort::COLLABORATION_SUITES)?
+                .into_iter()
+                .map(|(_, name)| name.to_owned()),
+        );
+        expected
     } else {
         names
             .iter()
             .chain(products)
             .cloned()
-            .chain([SCHEMA.to_owned(), HELPER.to_owned()])
+            .chain([SCHEMA.to_owned(), HELPER.to_owned(), LIBRARY.to_owned()])
             .collect()
     };
     let manifest = unpack(
@@ -426,6 +464,152 @@ fn run_restored(directory: &Path, root: &Path, parsed: &Parsed) -> Result<i32, S
     run_tests(&manifest, parsed.all("test"), libtest)
 }
 
+const ADMISSION_TEST: &str = "collab_primary_huge_varint_memory_rejected_1008";
+
+fn verify_native_admission(stdout: &str) -> Result<(), String> {
+    let prefix = format!("test {ADMISSION_TEST} ... ");
+    let mut passed = 0;
+    for line in stdout.split('\n') {
+        if let Some(result) = line.strip_prefix(&prefix) {
+            if result.starts_with("FAILED") || result.starts_with("ignored") {
+                return Err(
+                    "native admission test failed or was ignored in captured output".into(),
+                );
+            }
+            passed += usize::from(result == "ok");
+        }
+    }
+    if passed != 1 {
+        return Err(format!(
+            "expected exactly one passing run of {ADMISSION_TEST}, found {passed}"
+        ));
+    }
+    Ok(())
+}
+
+/// Execute the shared inventory with default libtest scheduling for the first
+/// nine targets, then the serial seed suite, retaining Cargo no-fail-fast and
+/// first-nonzero semantics without invoking Cargo in the consumer.
+fn run_collaboration(manifest: &Value, root: &Path, logs: &Path) -> Result<i32, String> {
+    use crate::native_library::checked_entry;
+    use crate::process::{run_owned_streaming, streaming_signal_status};
+    let suites = cohort::collaboration_suites(cohort::COLLABORATION_SUITES)?;
+    let products = ["fvoci-server".to_owned()];
+    // Refuse missing/changed sealed inputs before starting any suite.
+    for name in suites
+        .iter()
+        .map(|(_, name)| *name)
+        .chain([HELPER, LIBRARY, "fvoci-server"])
+    {
+        checked_entry(manifest, name, root, &products)?;
+    }
+    fs::create_dir_all(logs).map_err(|e| format!("collaboration logs: {e}"))?;
+    let mut status = 0;
+    let mut admission_stdout = String::new();
+    for (mode, label) in [
+        ("parallel", "parallel-suites"),
+        ("serial", "task_collab_integration"),
+    ] {
+        let stdout_path = logs.join(format!("{label}.stdout.log"));
+        let stderr_path = logs.join(format!("{label}.stderr.log"));
+        let stdout = fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
+        let stderr = fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
+        let mut group_status = 0;
+        for (_, name) in suites.iter().filter(|(scheduling, _)| *scheduling == mode) {
+            if let Some(code) = streaming_signal_status() {
+                return Ok(code);
+            }
+            let result = (|| {
+                let path = checked_entry(manifest, name, root, &products)?;
+                checked_entry(manifest, HELPER, root, &products)?;
+                checked_entry(manifest, "fvoci-server", root, &products)?;
+                let mut command = Command::new(path);
+                command.current_dir(root);
+                if mode == "serial" {
+                    command.arg("--test-threads=1");
+                }
+                run_owned_streaming(
+                    &mut command,
+                    [
+                        stdout.try_clone().map_err(|e| e.to_string())?,
+                        stderr.try_clone().map_err(|e| e.to_string())?,
+                    ],
+                )
+                .map_err(|e| e.to_string())
+            })();
+            if let Some(code) = streaming_signal_status() {
+                return Ok(code);
+            }
+            let code = match result {
+                Ok(done) => {
+                    admission_stdout.push_str(&String::from_utf8_lossy(&done.stdout));
+                    status_code(done.status)
+                }
+                Err(error) => {
+                    eprintln!("collaboration: {name}: {error}");
+                    1
+                }
+            };
+            if code != 0 && group_status == 0 {
+                group_status = code;
+            }
+        }
+        if group_status != 0 {
+            eprintln!(
+                "collaboration: {label} exited {group_status}; logs: {} {}",
+                stdout_path.display(),
+                stderr_path.display()
+            );
+            if status == 0 {
+                status = group_status;
+            }
+        }
+    }
+    let admission = verify_native_admission(&admission_stdout);
+    if let Some(code) = streaming_signal_status() {
+        return Ok(code);
+    }
+    if status != 0 {
+        return Ok(status);
+    }
+    admission?;
+    Ok(0)
+}
+
+fn run_collaboration_restored(
+    directory: &Path,
+    root: &Path,
+    parsed: &Parsed,
+) -> Result<i32, String> {
+    if !parsed.all("test").is_empty() || parsed.has("nocapture") || parsed.get("cohort").is_some() {
+        return Err("collaboration does not allow target, filter or scheduling overrides".into());
+    }
+    let manifest: Value = serde_json::from_str(&read(&directory.join("helper-manifest.json"))?)
+        .map_err(|e| format!("helper-manifest.json: {e}"))?;
+    crate::native_library::validate_context(
+        &manifest,
+        &context(&host(root)?, parsed.get("sqlite-identity"))?,
+    )?;
+    let helper = crate::native_library::checked_entry(&manifest, HELPER, root, &[])?;
+    if std::env::var_os("FVOCI_COLLAB_ENGINE").as_deref() != Some(helper.as_os_str()) {
+        return Err("collaboration sealed helper input mismatch".into());
+    }
+    let server = crate::native_library::checked_entry(
+        &manifest,
+        "fvoci-server",
+        root,
+        &["fvoci-server".to_owned()],
+    )?;
+    if std::env::var_os("FVOCI_IMPORT_TEST_SERVER_BIN").as_deref() != Some(server.as_os_str()) {
+        return Err("collaboration sealed server input mismatch".into());
+    }
+    let logs = std::env::var_os("RUNNER_TEMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| directory.to_owned())
+        .join("rust-collaboration-logs");
+    run_collaboration(&manifest, root, &logs)
+}
+
 fn execute(action: Action, parsed: &Parsed) -> Result<i32, String> {
     let directory = Path::new(parsed.get("directory").unwrap_or_default());
     let root = workspace()?;
@@ -434,6 +618,7 @@ fn execute(action: Action, parsed: &Parsed) -> Result<i32, String> {
     match action {
         Action::Build => return build(directory, &names),
         Action::Run => return run_restored(directory, &root, parsed),
+        Action::Collaboration => return run_collaboration_restored(directory, &root, parsed),
         Action::Pack | Action::Unpack => {}
     }
     let context = context(&host(&root)?, parsed.get("sqlite-identity"))?;
@@ -461,6 +646,7 @@ pub fn main(argv: Vec<OsString>) -> i32 {
         Some("pack") => Action::Pack,
         Some("unpack") => Action::Unpack,
         Some("run") => Action::Run,
+        Some("collaboration") => Action::Collaboration,
         Some("-h" | "--help") => {
             print!("{USAGE}\n\n{HELP}");
             return 0;
@@ -515,7 +701,7 @@ mod tests {
             runner_arch: Some("X64".into()),
             run_id: Some("42".into()),
             run_attempt: Some("1".into()),
-            rustc: "rustc 1.98.1 (48a229cea 2026-09-01)\nhost: x86_64-unknown-linux-gnu\n".into(),
+            rustc: "rustc 1.99.0 (b940084d7 2026-09-28)\nhost: x86_64-unknown-linux-gnu\n".into(),
             workspace: "/w".into(),
             os_release: "ID=ubuntu\n".into(),
             build_environment: vec![("CARGO_INCREMENTAL", Some("0".into())), ("RUSTFLAGS", None)],
@@ -586,7 +772,7 @@ mod tests {
                 "toolchain mismatch",
             ),
             (
-                Box::new(|h| h.rustc = h.rustc.replace("1.98.1", "1.98.0")),
+                Box::new(|h| h.rustc = h.rustc.replace("1.99.0", "1.98.1")),
                 Some(&sqlite),
                 "toolchain mismatch",
             ),

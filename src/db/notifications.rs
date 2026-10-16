@@ -405,7 +405,7 @@ async fn list_page(
         "#
     );
     let fetch_limit = (limit as i64) + 1;
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(user_id)
         .bind(cursor.map(|c| c.ca))
@@ -629,7 +629,7 @@ pub async fn unread_count(
           AND n.archived_at IS NULL
         "#
     );
-    let count: (i64,) = sqlx::query_as(&sql)
+    let count: (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(user_id)
         .fetch_one(&mut *tx)
@@ -695,7 +695,7 @@ pub async fn set_flags(
         RETURNING n.id
         "#
     );
-    let updated: Option<(Uuid,)> = sqlx::query_as(&sql)
+    let updated: Option<(Uuid,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(user_id)
         .bind(notification_id)
@@ -741,7 +741,7 @@ pub async fn read_all(
         RETURNING n.id
         "#
     );
-    let rows: Vec<(Uuid,)> = sqlx::query_as(&sql)
+    let rows: Vec<(Uuid,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(user_id)
         .fetch_all(&mut *tx)

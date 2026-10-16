@@ -47,9 +47,11 @@ function tree(files: Record<string, string>): string {
 function withRepoInputs(dir: string): string {
   mkdirSync(join(dir, "tests"));
   mkdirSync(join(dir, "scripts"));
+  mkdirSync(join(dir, "xtask"));
   const rel = [
     "Cargo.toml",
-    "scripts/run-rust-collaboration-ci-tests.sh",
+    "xtask/native-library-cohorts.tsv",
+    "xtask/collaboration-suites.tsv",
     "scripts/collab-capacity-probe.sh",
     ...readdirSync(join(root, "tests"))
       .filter((name) => name.endsWith(".rs"))
@@ -126,6 +128,23 @@ describe("turso-test.yml literal text", () => {
 
   test("the real workflow passes every literal check", () => {
     expect(verifyTursoWorkflowText(text)).toEqual([]);
+  });
+
+  test("restore cannot lose its source or observed dataset and target inputs", () => {
+    for (const key of ["ui_source_sha", "ui_baseline_sha256", "ui_target_sha256"]) {
+      const parsed = parseWorkflow("turso-test.yml", text);
+      if (parsed.error) throw new Error("Actual Turso workflow must parse");
+      const data = parsed.data;
+      if (!data) throw new Error("Actual Turso workflow mapping required");
+      const dispatch = get(triggersOf(data), "workflow_dispatch");
+      const inputs = get(dispatch, "inputs");
+      if (!inputs || typeof inputs !== "object" || Array.isArray(inputs))
+        throw new Error("Actual dispatch input mapping required");
+      Reflect.deleteProperty(inputs, key);
+      expect(verifyTursoWorkflow(data)).toContain(
+        "turso-test.yml: fixed phase inputs and non-destructive default",
+      );
+    }
   });
 
   test("the connection target is published before preparation, for later steps", () => {
@@ -267,8 +286,8 @@ describe("registry boundaries beyond the mutation table", () => {
 
   test("a cache step whose with is not a mapping is reported, not skipped", () => {
     const collab = String(texts["collab-engine.yml"]).replace(
-      "# v4\n        with:\n          path: ~/.cargo/registry\n          key: ",
-      "# v4\n        with:\n        x-key: ",
+      "# v6.1.0\n        with:\n          path: ~/.cargo/registry\n          key: ",
+      "# v6.1.0\n        with:\n        x-key: ",
     );
     expect(errors({ "collab-engine.yml": collab })).toContain(
       "collab-engine.yml: native-collab-engine cache with must be a mapping",

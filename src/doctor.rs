@@ -280,7 +280,7 @@ fn check_ooxml(bytes: &[u8], parts: &[&str], name: &str) -> Result<(), String> {
     if !bytes.starts_with(b"PK\x03\x04") {
         return Err(format!("{name} export lacks a ZIP signature"));
     }
-    let mut archive = docx_zip::ZipArchive::new(Cursor::new(bytes))
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|_| format!("{name} export is not a ZIP archive"))?;
     for part in parts {
         let entry = archive

@@ -1,6 +1,8 @@
 #![cfg(feature = "db-tests")]
 #![allow(dead_code)]
 
+#[path = "support/libsql_finish_fixture.rs"]
+mod libsql_fixture;
 #[path = "support/project_harness.rs"]
 mod project_harness;
 
@@ -1709,6 +1711,61 @@ mod sqlite_port {
     use fvoci_server::db::{backend::Backend, migrate, pool, Db};
     use fvoci_server::http::{router, state::AppState};
     use std::sync::Arc;
+    fn state(backend: Backend, root: &std::path::Path) -> AppState {
+        let auth = Arc::new(AuthService {
+            db: Db::from_backend(backend),
+            password_keys: Keyring::parse(
+                r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                "test",
+            )
+            .unwrap(),
+        });
+        AppState {
+            realtime_mode: fvoci_server::config::RealtimeMode::Off,
+            native_engine: None,
+            auth,
+            branding_name: "FVOCI".into(),
+            public_origin: "http://localhost".into(),
+            cookie_secure: false,
+            rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
+            storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
+            upload: fvoci_server::attachments::UploadLimits {
+                part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
+                max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
+                create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
+                part_put_slots: fvoci_server::attachments::PartPutSlots::new(
+                    fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
+                ),
+            },
+            collab: None,
+            meili: None,
+            search_embedder: None,
+            streams: AppState::fresh_streams(),
+            mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
+            quota: Default::default(),
+            markdown: None,
+            import_wake: None,
+            import_extractor_available: false,
+            preview_extract: None,
+        }
+    }
+    /// First-instance setup through the product route; returns the session cookie.
+    async fn setup_owner(app: &axum::Router) -> String {
+        let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
+        assert_eq!(status, StatusCode::CREATED);
+        headers
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string()
+    }
     struct Fixture {
         root: std::path::PathBuf,
         path: std::path::PathBuf,
@@ -1728,51 +1785,8 @@ mod sqlite_port {
             migrate::run_sqlite_migrations(&path).await.unwrap();
             let sqlite = pool::connect_sqlite_app(&path, 4).await.unwrap();
             let backend = Backend::Sqlite(sqlite.clone());
-            let auth=Arc::new(AuthService{db:Db::from_backend(backend.clone()),password_keys:Keyring::parse(r#"{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,"test").unwrap()});
-            let state = AppState {
-                realtime_mode: fvoci_server::config::RealtimeMode::Off,
-                native_engine: None,
-                auth,
-                branding_name: "FVOCI".into(),
-                public_origin: "http://localhost".into(),
-                cookie_secure: false,
-                rate_limiter: fvoci_server::http::rate_limit::RateLimiter::new(),
-                storage: fvoci_server::attachments::LocalStorage::new(root.join("storage")).into(),
-                upload: fvoci_server::attachments::UploadLimits {
-                    part_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_PART_SIZE_BYTES,
-                    max_file_size_bytes: fvoci_server::config::DEFAULT_UPLOAD_MAX_FILE_SIZE_BYTES,
-                    create_rate_per_5min: fvoci_server::config::DEFAULT_UPLOAD_CREATE_RATE_PER_5MIN,
-                    part_put_slots: fvoci_server::attachments::PartPutSlots::new(
-                        fvoci_server::config::DEFAULT_UPLOAD_MAX_CONCURRENT_PARTS,
-                    ),
-                },
-                collab: None,
-                meili: None,
-                search_embedder: None,
-                streams: AppState::fresh_streams(),
-                mailer: Arc::new(fvoci_server::mail::Mailer::disabled()),
-                quota: Default::default(),
-                markdown: None,
-                import_wake: None,
-                import_extractor_available: false,
-                preview_extract: None,
-            };
-
-            let app = router(state, None);
-            let (status,_,headers)=project_harness::http_request(app.clone(),"POST","/api/v1/setup",Some(json!({"email":"owner@example.invalid","password":"Synthetic-Group-2026!","givenName":"Owner","workspaceSlug":"groups","workspaceName":"Groups"}).to_string().into_bytes()),Some("application/json"),None,&[]).await;
-            assert_eq!(status, StatusCode::CREATED);
-            let cookie = headers
-                .get(axum::http::header::SET_COOKIE)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .split_once('=')
-                .unwrap()
-                .1
-                .to_string();
+            let app = router(state(backend.clone(), &root), None);
+            let cookie = setup_owner(&app).await;
             let bytes: Vec<u8> =
                 sqlx::query_scalar("SELECT id FROM workspaces WHERE slug='groups'")
                     .fetch_one(&sqlite)
@@ -1860,10 +1874,11 @@ mod sqlite_port {
         }
         async fn count(&self, table: &str) -> i64 {
             let fresh = pool::connect_sqlite_app(&self.path, 1).await.unwrap();
-            let n = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-                .fetch_one(&fresh)
-                .await
-                .unwrap();
+            let n =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                    .fetch_one(&fresh)
+                    .await
+                    .unwrap();
             fresh.close().await;
             n
         }
@@ -2008,6 +2023,699 @@ mod sqlite_port {
         );
         assert_eq!(f.count("groups").await, 0);
         f.close().await;
+    }
+
+    /// Writes that have no NUL input validator; PostgreSQL refuses each one at
+    /// its text bind (SQLSTATE 22021).
+    fn nul_text_requests(ws: Uuid) -> [(&'static str, String, Value); 3] {
+        [
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws}/groups"),
+                json!({"name": "Team\u{0}A"}),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/workspaces/{ws}"),
+                json!({"name": "Renamed\u{0}A"}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/workspaces/{ws}/api-tokens"),
+                json!({"name": "token\u{0}A", "scopes": ["tasks.read"]}),
+            ),
+        ]
+    }
+
+    /// What PostgreSQL 16-18 answers today for each refusal these tests pin.
+    fn postgres_internal_error() -> (StatusCode, Value) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"type":"about:blank","title":"internal error","status":500,"code":"internal_error"}),
+        )
+    }
+
+    #[tokio::test]
+    async fn nul_text_without_validator_matches_postgres_and_stores_nothing() {
+        type Stored = (i64, i64, i64, i64, String);
+        async fn pg_stored(admin: &sqlx::PgPool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.groups),(SELECT count(*) FROM fvoci.api_tokens),(SELECT count(*) FROM fvoci.events),(SELECT count(*) FROM fvoci.audit_log),(SELECT name FROM fvoci.workspaces WHERE id=$1)")
+                .bind(ws)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_stored(pool: &sqlx::SqlitePool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM groups),(SELECT count(*) FROM api_tokens),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT name FROM workspaces WHERE id=?1)")
+                .bind(ws.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, _, ws) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let refused = sqlx::query_scalar::<_, String>("SELECT $1::text")
+            .bind("a\u{0}b")
+            .fetch_one(&admin)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused
+                .as_database_error()
+                .and_then(|e| e.code())
+                .as_deref(),
+            Some("22021")
+        );
+        let before = pg_stored(&admin, ws).await;
+        let mut postgres = Vec::new();
+        for (method, path, body) in nul_text_requests(ws) {
+            postgres
+                .push(json_request(app.clone(), method, &path, Some(body), Some(&cookie)).await);
+        }
+        assert_eq!(pg_stored(&admin, ws).await, before);
+        assert!(
+            postgres.iter().all(|r| *r == postgres_internal_error()),
+            "{postgres:?}"
+        );
+        admin.close().await;
+        harness.cleanup().await;
+
+        let f = Fixture::start().await;
+        let before = sqlite_stored(&f.pool, f.ws).await;
+        let mut sqlite = Vec::new();
+        for (method, path, body) in nul_text_requests(f.ws) {
+            sqlite.push(f.owner(method, &path, Some(body)).await);
+        }
+        assert_eq!(sqlite, postgres);
+        assert_eq!(sqlite_stored(&f.pool, f.ws).await, before);
+        f.close().await;
+    }
+
+    /// A schema-current app over the remote libSQL driver against the pinned
+    /// official sqld, with the first owner signed in.
+    struct Remote {
+        root: std::path::PathBuf,
+        driver: libsql_fixture::LibsqlFinishFixture,
+        connection: libsql::Connection,
+        backend: Backend,
+        app: axum::Router,
+        cookie: String,
+        ws: Uuid,
+    }
+    impl Remote {
+        async fn start(label: &str) -> Self {
+            use fvoci_server::db::backend::RemoteDatabase;
+            let sqld = std::path::PathBuf::from(
+                std::env::var_os("FVOCI_TEST_SQLD")
+                    .expect("explicit pinned official sqld required"),
+            );
+            let root = std::env::temp_dir().join(format!("fvoci-{label}-sqld-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            let driver = libsql_fixture::LibsqlFinishFixture::start(&sqld, &root.join("sqld"))
+                .await
+                .unwrap();
+            let connection = driver.database().await.unwrap().connect().unwrap();
+            for step in migrate::compiled_sqlite_steps() {
+                let tx = connection
+                    .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                    .await
+                    .unwrap();
+                tx.execute_batch(step.sql).await.unwrap();
+                tx.execute("INSERT INTO schema_migrations(version,lineage,sql_sha256,applied_at) VALUES(?1,?2,?3,unixepoch()*1000000)",
+                    libsql::params![i64::from(step.version), migrate::SQLITE_LINEAGE, step.sha256]).await.unwrap();
+                tx.commit().await.unwrap();
+            }
+            let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+                driver.database().await.unwrap(),
+                std::num::NonZeroU32::new(4).unwrap(),
+            )));
+            migrate::assert_sqlite_schema_current(&backend)
+                .await
+                .unwrap();
+            let app = router(state(backend.clone(), &root), None);
+            let cookie = setup_owner(&app).await;
+            let mut rows = connection
+                .query("SELECT id FROM workspaces WHERE slug='groups'", ())
+                .await
+                .unwrap();
+            let id: Vec<u8> = rows.next().await.unwrap().unwrap().get(0).unwrap();
+            Self {
+                root,
+                driver,
+                connection,
+                backend,
+                app,
+                cookie,
+                ws: Uuid::from_slice(&id).unwrap(),
+            }
+        }
+        async fn row(&self, sql: &str) -> libsql::Row {
+            let mut rows = self.connection.query(sql, ()).await.unwrap();
+            rows.next().await.unwrap().unwrap()
+        }
+        async fn finish(self) {
+            let Self {
+                root,
+                driver,
+                connection,
+                backend,
+                app,
+                ..
+            } = self;
+            drop(app);
+            drop(connection);
+            backend.close().await.unwrap();
+            let receipt = driver.finish().await.unwrap();
+            assert!(receipt.sqld_reaped && receipt.proxy_joined);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// The same requests through the remote libSQL driver against the pinned
+    /// official sqld: the PostgreSQL response, and nothing stored remotely.
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn remote_nul_text_without_validator_matches_postgres_and_stores_nothing() {
+        async fn stored(r: &Remote) -> (Vec<i64>, String) {
+            let row = r
+                .row("SELECT (SELECT count(*) FROM groups),(SELECT count(*) FROM api_tokens),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT name FROM workspaces WHERE slug='groups')")
+                .await;
+            let counts = (0..4).map(|i| row.get::<i64>(i).unwrap()).collect();
+            (counts, row.get(4).unwrap())
+        }
+        let r = Remote::start("nul-text").await;
+        let before = stored(&r).await;
+        for (method, path, body) in nul_text_requests(r.ws) {
+            let response = project_harness::json_request(
+                r.app.clone(),
+                method,
+                &path,
+                Some(body),
+                Some(&r.cookie),
+            )
+            .await;
+            assert_eq!(response, postgres_internal_error(), "{method} {path}");
+        }
+        assert_eq!(stored(&r).await, before);
+        r.finish().await;
+    }
+
+    /// A timer record correction keeps its note only in the audit and receipt
+    /// JSON, and no validator refuses NUL there. PostgreSQL stores both as
+    /// jsonb, so the note is refused with SQLSTATE 22P05. Creates the manual
+    /// record and returns the correction request (path, body).
+    async fn timer_note_correction(app: &axum::Router, cookie: &str, ws: Uuid) -> (String, Value) {
+        let project = create_project(app.clone(), cookie, ws, "JSONNUL", "workspace").await;
+        let (status, task) = json_request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{ws}/projects/{}/tasks",
+                project["id"].as_str().unwrap()
+            ),
+            Some(json!({"title": "Timer"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{task}");
+        let base = format!(
+            "/api/v1/workspaces/{ws}/tasks/{}",
+            task["id"].as_str().unwrap()
+        );
+        let (status, me) =
+            json_request(app.clone(), "GET", "/api/v1/auth/me", None, Some(cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        let context = |mut body: Value| {
+            body["expectedActorId"] = me["userId"].clone();
+            body["expectedSessionId"] = me["sessionId"].clone();
+            body
+        };
+        let (status, created) = json_request(
+            app.clone(),
+            "POST",
+            &format!("{base}/timer/history"),
+            Some(context(json!({"requestId": Uuid::now_v7(), "startedAt": "2026-09-30T10:00:00Z", "endedAt": "2026-09-30T10:00:02Z", "note": "manual", "reason": "Manual entry"}))),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let record = &created["record"];
+        (
+            format!(
+                "{base}/timer/records/{}/correct",
+                record["id"].as_str().unwrap()
+            ),
+            context(
+                json!({"requestId": Uuid::now_v7(), "kind": "manual", "expectedRevision": record["revision"], "expectedStartedAt": record["startedAt"], "expectedEndedAt": record["endedAt"], "expectedNote": record["note"], "startedAt": "2026-09-30T10:00:00Z", "endedAt": "2026-09-30T10:00:01Z", "note": "fixed\u{0}note", "reason": "Shorter range"}),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn json_nul_without_validator_matches_postgres_and_stores_nothing() {
+        type Stored = (i64, i64, i64, i64, i64);
+        async fn pg_stored(admin: &sqlx::PgPool) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM fvoci.task_timer_audit),(SELECT count(*) FROM fvoci.task_timer_commands),(SELECT count(*) FROM fvoci.time_entries),(SELECT count(*) FROM fvoci.events),(SELECT count(*) FROM fvoci.audit_log)")
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_stored(pool: &sqlx::SqlitePool) -> Stored {
+            sqlx::query_as("SELECT (SELECT count(*) FROM task_timer_audit),(SELECT count(*) FROM task_timer_commands),(SELECT count(*) FROM time_entries),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log)")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, _, ws) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        // jsonb refuses U+0000 in a string or a key, however the text escapes
+        // it, and keeps the six characters of a literal `\u0000`.
+        for (value, code) in [
+            (json!({"note": "a\u{0}b"}), Some("22P05")),
+            (json!({"k\u{0}": 1}), Some("22P05")),
+            (json!({"note": "\\u0000"}), None),
+        ] {
+            let stored = sqlx::query_scalar::<_, Value>("SELECT $1::jsonb")
+                .bind(value.clone())
+                .fetch_one(&admin)
+                .await;
+            assert_eq!(
+                stored
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.as_database_error())
+                    .and_then(|e| e.code())
+                    .as_deref(),
+                code,
+                "{value}"
+            );
+        }
+        let (path, body) = timer_note_correction(&app, &cookie, ws).await;
+        let before = pg_stored(&admin).await;
+        let postgres = json_request(app.clone(), "POST", &path, Some(body), Some(&cookie)).await;
+        assert_eq!(postgres, postgres_internal_error());
+        assert_eq!(pg_stored(&admin).await, before);
+        admin.close().await;
+        harness.cleanup().await;
+
+        let f = Fixture::start().await;
+        let (path, body) = timer_note_correction(&f.app, &f.cookie, f.ws).await;
+        let before = sqlite_stored(&f.pool).await;
+        assert_eq!(f.owner("POST", &path, Some(body)).await, postgres);
+        assert_eq!(sqlite_stored(&f.pool).await, before);
+        f.close().await;
+    }
+
+    /// 321 characters: the request route sets no length limit, and
+    /// PostgreSQL's app_user_update_email refuses it when the link is used.
+    fn overlong_email() -> String {
+        format!("{}@example.com", "a".repeat(309))
+    }
+    /// 320 characters, the longest address app_user_update_email accepts.
+    fn longest_email() -> String {
+        format!("{}@example.com", "b".repeat(308))
+    }
+    /// Requests an email change and returns a token for its link. The mailer
+    /// is off in these apps, so the caller stores this token's hash on it.
+    async fn request_email_change(
+        app: &axum::Router,
+        cookie: &str,
+        email: &str,
+    ) -> fvoci_server::auth::token::SessionToken {
+        let (status, body) = json_request(
+            app.clone(),
+            "PATCH",
+            "/api/v1/auth/email",
+            Some(json!({"newEmail": email})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        fvoci_server::auth::token::new_token()
+    }
+    async fn confirm_email_change(app: &axum::Router, token: &str) -> (StatusCode, Value) {
+        json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/email/confirm",
+            Some(json!({"token": token})),
+            None,
+        )
+        .await
+    }
+    /// The SQLSTATE each backend's email change raises for a multibyte address
+    /// (172 characters, 332 bytes) and for the 321-character one.
+    async fn email_refusal_codes(
+        backend: &Backend,
+        user: Uuid,
+        generation: i32,
+    ) -> Vec<Option<String>> {
+        use fvoci_server::db::magic::{MagicPayload, MAGIC_KIND_EMAIL_CHANGE};
+        let mut codes = Vec::new();
+        for email in [format!("{}@example.com", "é".repeat(160)), overlong_email()] {
+            let payload = MagicPayload {
+                kind: MAGIC_KIND_EMAIL_CHANGE.into(),
+                user_id: user,
+                generation,
+                new_email: Some(email),
+            };
+            let error =
+                fvoci_server::db::account::complete_email_change_backend(backend, &payload, None)
+                    .await
+                    .err()
+                    .expect("email change refused");
+            codes.push(
+                error
+                    .as_database_error()
+                    .and_then(|e| e.code())
+                    .map(|code| code.into_owned()),
+            );
+        }
+        codes
+    }
+
+    /// (response, address changed, auth generation step, email_changed events
+    /// added, links left) for the 321- then the 320-character address.
+    type EmailOutcome = (StatusCode, Value, bool, i64, i64, i64);
+
+    #[tokio::test]
+    async fn overlong_email_change_matches_postgres_and_changes_nothing() {
+        type Stored = (String, i64, i64, i64);
+        async fn pg_stored(admin: &sqlx::PgPool, user: Uuid) -> Stored {
+            sqlx::query_as("SELECT email,auth_generation::bigint,(SELECT count(*) FROM fvoci.events WHERE verb='user.email_changed'),(SELECT count(*) FROM fvoci.magic_tokens WHERE kind='email_change') FROM fvoci.users WHERE id=$1")
+                .bind(user)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_stored(pool: &sqlx::SqlitePool, user: Uuid) -> Stored {
+            sqlx::query_as("SELECT email,auth_generation,(SELECT count(*) FROM events WHERE verb='user.email_changed'),(SELECT count(*) FROM magic_tokens WHERE kind='email_change') FROM users WHERE id=?1")
+                .bind(user.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        fn outcome(response: (StatusCode, Value), before: &Stored, after: &Stored) -> EmailOutcome {
+            (
+                response.0,
+                response.1,
+                after.0 != before.0,
+                after.1 - before.1,
+                after.2 - before.2,
+                after.3,
+            )
+        }
+
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, user, _) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let mut postgres = Vec::new();
+        for email in [overlong_email(), longest_email()] {
+            let before = pg_stored(&admin, user).await;
+            let token = request_email_change(&app, &cookie, &email).await;
+            sqlx::query("UPDATE fvoci.magic_tokens SET token_hash=$1 WHERE kind='email_change'")
+                .bind(&token.hash)
+                .execute(&admin)
+                .await
+                .unwrap();
+            let response = confirm_email_change(&app, &token.token).await;
+            postgres.push(outcome(response, &before, &pg_stored(&admin, user).await));
+        }
+        assert_eq!(
+            postgres,
+            [
+                {
+                    let (status, body) = postgres_internal_error();
+                    (status, body, false, 0, 0, 0)
+                },
+                (StatusCode::OK, json!({"ok": true}), true, 1, 1, 0),
+            ]
+        );
+        let changed = pg_stored(&admin, user).await;
+        assert_eq!(changed.0, longest_email());
+        let pool = app_pool(&harness).await;
+        let postgres_codes = email_refusal_codes(
+            &Backend::Postgres(pool.clone()),
+            user,
+            i32::try_from(changed.1).unwrap(),
+        )
+        .await;
+        project_harness::close_pool(pool).await;
+        assert_eq!(
+            postgres_codes,
+            [Some("P0001".to_string()), Some("P0001".to_string())]
+        );
+        assert_eq!(pg_stored(&admin, user).await, changed);
+        admin.close().await;
+        harness.cleanup().await;
+
+        let f = Fixture::start().await;
+        let mut sqlite = Vec::new();
+        for email in [overlong_email(), longest_email()] {
+            let before = sqlite_stored(&f.pool, f.actor).await;
+            let token = request_email_change(&f.app, &f.cookie, &email).await;
+            sqlx::query("UPDATE magic_tokens SET token_hash=?1 WHERE kind='email_change'")
+                .bind(&token.hash)
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let response = confirm_email_change(&f.app, &token.token).await;
+            sqlite.push(outcome(
+                response,
+                &before,
+                &sqlite_stored(&f.pool, f.actor).await,
+            ));
+        }
+        assert_eq!(sqlite, postgres);
+        let changed = sqlite_stored(&f.pool, f.actor).await;
+        assert_eq!(changed.0, longest_email());
+        assert_eq!(
+            email_refusal_codes(&f.backend, f.actor, i32::try_from(changed.1).unwrap()).await,
+            postgres_codes
+        );
+        assert_eq!(sqlite_stored(&f.pool, f.actor).await, changed);
+        f.close().await;
+    }
+
+    /// A private project led only by the workspace owner's user grant.
+    async fn private_project(app: &axum::Router, cookie: &str, ws: Uuid) -> String {
+        let project = create_project(app.clone(), cookie, ws, "PRIV", "private").await;
+        project["id"].as_str().unwrap().to_string()
+    }
+    async fn group_lead(app: &axum::Router, cookie: &str, ws: Uuid, project: &str) {
+        let (status, group) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/groups"),
+            Some(json!({"name": "Leads"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{group}");
+        let (status, grant) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/projects/{project}/groups"),
+            Some(json!({"groupId": group["id"], "role": "lead"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{grant}");
+    }
+    async fn trash(app: &axum::Router, cookie: &str, ws: Uuid, slug: &str) -> (StatusCode, Value) {
+        json_request(
+            app.clone(),
+            "DELETE",
+            &format!("/api/v1/workspaces/{ws}"),
+            Some(json!({"confirmSlug": slug})),
+            Some(cookie),
+        )
+        .await
+    }
+
+    /// Another team workspace of the same owner with a private project led by
+    /// the owner and a group.
+    async fn other_workspace(app: &axum::Router, cookie: &str) -> Uuid {
+        let (status, ws) = json_request(
+            app.clone(),
+            "POST",
+            "/api/v1/workspaces",
+            Some(json!({"slug": "other-trash", "name": "Other"})),
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{ws}");
+        let ws: Uuid = ws["id"].as_str().unwrap().parse().unwrap();
+        let project = create_project(app.clone(), cookie, ws, "OTHR", "private").await;
+        group_lead(app, cookie, ws, project["id"].as_str().unwrap()).await;
+        ws
+    }
+    /// (live, memberships, project grants, live projects, projects)
+    type Other = (bool, i64, i64, i64, i64);
+
+    /// Trash tombstones every live project with the workspace stamp before the
+    /// memberships delete cascades every user grant, so PostgreSQL's deferred
+    /// project_members_private_lead_check_del passes for a private project led
+    /// only by its creator. While the workspace is live that lead stays required.
+    /// The tombstone and the memberships delete stay inside the trashed
+    /// workspace: the owner's other workspace does not change.
+    #[tokio::test]
+    async fn trash_with_user_led_private_project_matches_postgres() {
+        /// (trashed, memberships, project grants, workspace.deleted events,
+        /// live projects, projects stamped with the workspace stamp)
+        type Stored = (bool, i64, i64, i64, i64, i64);
+        async fn pg_stored(admin: &sqlx::PgPool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM fvoci.workspaces WHERE id=$1),(SELECT count(*) FROM fvoci.memberships WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.project_members WHERE workspace_id=$1),(SELECT count(*) FROM fvoci.events WHERE verb='workspace.deleted'),(SELECT count(*) FROM fvoci.projects WHERE workspace_id=$1 AND deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p JOIN fvoci.workspaces w ON w.id=p.workspace_id WHERE w.id=$1 AND p.deleted_at=w.deleted_at)")
+                .bind(ws)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_stored(pool: &sqlx::SqlitePool, ws: Uuid) -> Stored {
+            sqlx::query_as("SELECT (SELECT deleted_at IS NOT NULL FROM workspaces WHERE id=?1),(SELECT count(*) FROM memberships WHERE workspace_id=?1),(SELECT count(*) FROM project_members WHERE workspace_id=?1),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects WHERE workspace_id=?1 AND deleted_at IS NULL),(SELECT count(*) FROM projects p JOIN workspaces w ON w.id=p.workspace_id WHERE w.id=?1 AND p.deleted_at=w.deleted_at)")
+                .bind(ws.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        async fn pg_other(admin: &sqlx::PgPool, ws: Uuid) -> Other {
+            sqlx::query_as("SELECT w.deleted_at IS NULL,(SELECT count(*) FROM fvoci.memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM fvoci.project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id) FROM fvoci.workspaces w WHERE w.id=$1")
+                .bind(ws)
+                .fetch_one(admin)
+                .await
+                .unwrap()
+        }
+        async fn sqlite_other(pool: &sqlx::SqlitePool, ws: Uuid) -> Other {
+            sqlx::query_as("SELECT w.deleted_at IS NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id) FROM workspaces w WHERE w.id=?1")
+                .bind(ws.as_bytes().as_slice())
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        async fn drop_lead(
+            app: &axum::Router,
+            cookie: &str,
+            ws: Uuid,
+            project: &str,
+            user: Uuid,
+        ) -> (StatusCode, Value) {
+            json_request(
+                app.clone(),
+                "DELETE",
+                &format!("/api/v1/workspaces/{ws}/projects/{project}/members/{user}"),
+                None,
+                Some(cookie),
+            )
+            .await
+        }
+
+        let harness = TestDb::bootstrap().await;
+        let (app, cookie, owner, ws) = setup_session(&harness).await;
+        let admin = admin_pool(&harness).await;
+        let led = private_project(&app, &cookie, ws).await;
+        let grouped = create_project(app.clone(), &cookie, ws, "GRP", "private").await;
+        let grouped = grouped["id"].as_str().unwrap().to_string();
+        group_lead(&app, &cookie, ws, &grouped).await;
+        let other = other_workspace(&app, &cookie).await;
+        let other_before = pg_other(&admin, other).await;
+        assert_eq!(other_before, (true, 1, 2, 1, 1));
+        let mut postgres = vec![pg_stored(&admin, ws).await];
+        let kept = drop_lead(&app, &cookie, ws, &led, owner).await;
+        postgres.push(pg_stored(&admin, ws).await);
+        let trashed = trash(&app, &cookie, ws, "acme").await;
+        postgres.push(pg_stored(&admin, ws).await);
+        assert_eq!(kept.0, StatusCode::CONFLICT, "{kept:?}");
+        assert_eq!(trashed, (StatusCode::OK, json!({"ok": true})));
+        assert_eq!(
+            postgres,
+            [
+                (false, 1, 3, 0, 2, 0),
+                (false, 1, 3, 0, 2, 0),
+                (true, 0, 1, 1, 0, 2)
+            ]
+        );
+        assert_eq!(pg_other(&admin, other).await, other_before);
+        admin.close().await;
+        harness.cleanup().await;
+
+        let f = Fixture::start().await;
+        let led = private_project(&f.app, &f.cookie, f.ws).await;
+        let grouped = create_project(f.app.clone(), &f.cookie, f.ws, "GRP", "private").await;
+        let grouped = grouped["id"].as_str().unwrap().to_string();
+        group_lead(&f.app, &f.cookie, f.ws, &grouped).await;
+        let other = other_workspace(&f.app, &f.cookie).await;
+        assert_eq!(sqlite_other(&f.pool, other).await, other_before);
+        let mut sqlite = vec![sqlite_stored(&f.pool, f.ws).await];
+        assert_eq!(
+            drop_lead(&f.app, &f.cookie, f.ws, &led, f.actor).await,
+            kept
+        );
+        sqlite.push(sqlite_stored(&f.pool, f.ws).await);
+        assert_eq!(trash(&f.app, &f.cookie, f.ws, "groups").await, trashed);
+        sqlite.push(sqlite_stored(&f.pool, f.ws).await);
+        assert_eq!(sqlite, postgres);
+        assert_eq!(sqlite_other(&f.pool, other).await, other_before);
+        f.close().await;
+    }
+
+    /// The JSON NUL and overlong email refusals through the remote libSQL
+    /// driver: the PostgreSQL responses, and nothing stored. Trash with a
+    /// user-led private project succeeds and tombstones it with the workspace;
+    /// the owner's other workspace does not change.
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld fixture via FVOCI_TEST_SQLD"]
+    async fn remote_json_nul_email_refusals_and_trash_match_postgres() {
+        let r = Remote::start("parity").await;
+        let ints = |row: libsql::Row, n: i32| -> Vec<i64> {
+            (0..n).map(|i| row.get::<i64>(i).unwrap()).collect()
+        };
+
+        let (path, body) = timer_note_correction(&r.app, &r.cookie, r.ws).await;
+        let timer = "SELECT (SELECT count(*) FROM task_timer_audit),(SELECT count(*) FROM task_timer_commands),(SELECT count(*) FROM time_entries)";
+        let before = ints(r.row(timer).await, 3);
+        assert_eq!(
+            json_request(r.app.clone(), "POST", &path, Some(body), Some(&r.cookie)).await,
+            postgres_internal_error()
+        );
+        assert_eq!(ints(r.row(timer).await, 3), before);
+
+        let account = "SELECT (SELECT count(*) FROM users WHERE email='owner@example.invalid'),(SELECT max(auth_generation) FROM users),(SELECT count(*) FROM events WHERE verb='user.email_changed')";
+        let before = ints(r.row(account).await, 3);
+        let token = request_email_change(&r.app, &r.cookie, &overlong_email()).await;
+        r.connection
+            .execute(
+                "UPDATE magic_tokens SET token_hash=?1 WHERE kind='email_change'",
+                libsql::params![token.hash.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            confirm_email_change(&r.app, &token.token).await,
+            postgres_internal_error()
+        );
+        assert_eq!(ints(r.row(account).await, 3), before);
+
+        private_project(&r.app, &r.cookie, r.ws).await;
+        other_workspace(&r.app, &r.cookie).await;
+        let other = "SELECT w.deleted_at IS NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id) FROM workspaces w WHERE w.slug='other-trash'";
+        assert_eq!(ints(r.row(other).await, 5), [1, 1, 2, 1, 1]);
+        let workspace = "SELECT w.deleted_at IS NOT NULL,(SELECT count(*) FROM memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM events WHERE verb='workspace.deleted'),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM projects p WHERE p.workspace_id=w.id AND p.deleted_at=w.deleted_at) FROM workspaces w WHERE w.slug='groups'";
+        let before = ints(r.row(workspace).await, 6);
+        assert_eq!((before[0], before[5]), (0, 0));
+        assert_eq!(
+            trash(&r.app, &r.cookie, r.ws, "groups").await,
+            (StatusCode::OK, json!({"ok": true}))
+        );
+        assert_eq!(
+            ints(r.row(workspace).await, 6),
+            [1, 0, 0, before[3] + 1, 0, before[4]]
+        );
+        assert_eq!(ints(r.row(other).await, 5), [1, 1, 2, 1, 1]);
+        r.finish().await;
     }
 
     // This binary runs in PostgreSQL shard b, which supplies FVOCI_COLLAB_ENGINE.

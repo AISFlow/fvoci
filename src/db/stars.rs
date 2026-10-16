@@ -163,7 +163,7 @@ async fn select_stars(
         ORDER BY created_at DESC, id DESC
         "#
     );
-    let rows: Vec<StarRow> = sqlx::query_as(&sql)
+    let rows: Vec<StarRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(&acl.project_ids)
         .bind(acl.include_wiki)
@@ -351,7 +351,7 @@ pub async fn add_star(
                 RETURNING id
                 "#
             );
-            sqlx::query_as(&sql)
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
                 .bind(workspace_id)
                 .bind(&acl.project_ids)
                 .bind(acl.include_wiki)
@@ -553,7 +553,7 @@ pub async fn list_recent(
         LIMIT $5
         "#
     );
-    let rows: Vec<RecentRow> = sqlx::query_as(&sql)
+    let rows: Vec<RecentRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(&acl.project_ids)
         .bind(acl.include_wiki)

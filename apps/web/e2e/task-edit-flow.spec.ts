@@ -5,8 +5,8 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const lookupSchema = z
   .object({
     items: z.array(
@@ -17,10 +17,10 @@ const lookupSchema = z
           displayId: z.string(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const taskSchema = z
   .object({
     title: z.string(),
@@ -31,15 +31,13 @@ const taskSchema = z
     dueAt: z.string().nullable(),
     statusId: z.string(),
   })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -51,10 +49,10 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 

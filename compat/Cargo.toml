@@ -17,5 +17,8 @@ path = "src/extract_probe.rs"
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-yrs = "=0.23.5"
+# Version and features of crates/collab-engine, from the registry archive rather
+# than its patched source. small-client keeps the 32-bit updateV1 client ids that
+# 0.23.5 read and Yjs 13.6.33 writes; state-vector ids above u32 now truncate.
+yrs = { version = "=0.28.0", default-features = false, features = ["small-client"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

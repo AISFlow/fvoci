@@ -102,10 +102,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
         migrate::run_migrations(&join_db_url(&server_url, &db_name))
             .await
@@ -124,10 +127,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -198,24 +201,30 @@ impl TestDb {
             .await
             .map_err(|e| format!("connect admin for cleanup: {e}"))?;
         let mut errors = Vec::new();
-        if let Err(error) = sqlx::query(&format!(
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
             self.db_name
-        ))
+        )))
         .execute(&pool)
         .await
         {
             errors.push(format!("terminate backends for {}: {error}", self.db_name));
         }
-        if let Err(error) = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-            .execute(&pool)
-            .await
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{}\"",
+            self.db_name
+        )))
+        .execute(&pool)
+        .await
         {
             errors.push(format!("drop database {}: {error}", self.db_name));
         }
-        if let Err(error) = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-            .execute(&pool)
-            .await
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP ROLE IF EXISTS \"{}\"",
+            self.role_name
+        )))
+        .execute(&pool)
+        .await
         {
             errors.push(format!("drop role {}: {error}", self.role_name));
         }
@@ -234,10 +243,12 @@ async fn clone_template(server_url: &str, db_name: &str) {
     let mut lock = PgConnection::connect(server_url)
         .await
         .expect("connect admin for template lock");
-    sqlx::query(&format!("SET lock_timeout = '{TEMPLATE_LOCK_TIMEOUT}'"))
-        .execute(&mut lock)
-        .await
-        .expect("bound template lock wait");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET lock_timeout = '{TEMPLATE_LOCK_TIMEOUT}'"
+    )))
+    .execute(&mut lock)
+    .await
+    .expect("bound template lock wait");
     let server_version: String = sqlx::query_scalar("SHOW server_version_num")
         .fetch_one(&mut lock)
         .await
@@ -266,9 +277,9 @@ async fn clone_template(server_url: &str, db_name: &str) {
         )
         .await;
     }
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
-    ))
+    )))
     .execute(&mut lock)
     .await
     .expect("clone template database");
@@ -282,7 +293,7 @@ async fn clone_template(server_url: &str, db_name: &str) {
 
 async fn build_template(lock: &mut PgConnection, server_url: &str, template: &str) {
     let build = format!("{template}_b{}", Uuid::now_v7().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{build}\""))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{build}\"")))
         .execute(&mut *lock)
         .await
         .expect("create template build database");
@@ -296,15 +307,15 @@ async fn build_template(lock: &mut PgConnection, server_url: &str, template: &st
         .execute(&mut *lock)
         .await
         .expect("terminate template build sessions");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER DATABASE \"{build}\" WITH ALLOW_CONNECTIONS false"
-    ))
+    )))
     .execute(&mut *lock)
     .await
     .expect("close template to connections");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER DATABASE \"{build}\" RENAME TO \"{template}\""
-    ))
+    )))
     .execute(&mut *lock)
     .await
     .expect("publish template database");
@@ -316,9 +327,9 @@ async fn build_template(lock: &mut PgConnection, server_url: &str, template: &st
 /// template lock, so no fixture is building or cloning from them; failures are
 /// reported and do not fail the test.
 async fn drop_templates(lock: &mut PgConnection, filter: &str, current: &str) {
-    let stale: Vec<String> = match sqlx::query_scalar(&format!(
+    let stale: Vec<String> = match sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT datname FROM pg_database WHERE left(datname, $1) = $2 AND datname <> $4 AND {filter}"
-    ))
+    )))
     .bind(TEMPLATE_PREFIX.len() as i32)
     .bind(TEMPLATE_PREFIX)
     .bind(TEMPLATE_NAME_LEN as i32)
@@ -333,9 +344,11 @@ async fn drop_templates(lock: &mut PgConnection, filter: &str, current: &str) {
         }
     };
     for name in stale {
-        if let Err(error) = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
-            .execute(&mut *lock)
-            .await
+        if let Err(error) = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+        )))
+        .execute(&mut *lock)
+        .await
         {
             eprintln!("test_db: dropping stale template {name} failed: {error}");
         }

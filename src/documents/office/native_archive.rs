@@ -1,12 +1,12 @@
 //! All untrusted container work runs in the existing credential-free child.
-use docx_zip::{
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Cursor, Read, Write};
+use zip::{
     read::{read_zipfile_from_stream, HasZipMetadata},
     write::SimpleFileOptions,
     CompressionMethod, ZipArchive, ZipWriter,
 };
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Write};
 
 use crate::native_archive::{self as model, Archive, ArchiveError, EntryDigest, Graph, Manifest};
 
@@ -135,14 +135,9 @@ pub(crate) fn read_archive(bytes: &[u8]) -> Result<Archive, ArchiveError> {
         return Err(ArchiveError::Limit);
     }
     let mut zip = ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
-    // The locked reader exposes this deprecated nonstandard trailer accessor;
-    // we use it solely to refuse that trailer, never to support its format.
-    #[allow(deprecated)]
-    let has_zip64_comment = zip.zip64_comment().is_some();
     if zip.offset() != 0
         || zip.len() > model::MAX_ENTRIES
         || zip.raw_zip64_extensible_data_sector().is_some()
-        || has_zip64_comment
         || !zip.comment().is_empty()
     {
         return Err(invalid());
@@ -155,18 +150,13 @@ pub(crate) fn read_archive(bytes: &[u8]) -> Result<Archive, ArchiveError> {
     for index in 0..zip.len() {
         let mut file = zip.by_index(index).map_err(|_| invalid())?;
         let metadata = file.get_metadata();
-        let name = file.name().to_string();
+        let name = file.name().map_err(|_| invalid())?.into_owned();
         if file.encrypted()
             || metadata.large_file
-            || metadata.using_data_descriptor
+            || file.flags().is_using_data_descriptor()
             || !file.comment().is_empty()
             || file.extra_data_fields().next().is_some()
             || !file.extra_data().unwrap_or_default().is_empty()
-            || !metadata
-                .central_extra_field
-                .as_deref()
-                .unwrap_or_default()
-                .is_empty()
             || file.is_dir()
             || file.is_symlink()
             || file
@@ -187,6 +177,16 @@ pub(crate) fn read_archive(bytes: &[u8]) -> Result<Archive, ArchiveError> {
             return Err(invalid());
         }
         let data_start = file.data_start().ok_or_else(invalid)?;
+        // The reader rebuilds `extra_data()` from the extra fields it parsed,
+        // so a local extra field it skips is not visible there: the fixed
+        // 30-byte local header and the central name must end at the data.
+        if file
+            .header_start()
+            .checked_add(30 + file.name_raw().len() as u64)
+            != Some(data_start)
+        {
+            return Err(invalid());
+        }
         local_spans.push((
             file.header_start(),
             data_start
@@ -292,14 +292,14 @@ fn verify_record_inventory(
     let mut cursor = Cursor::new(bytes);
     let mut seen = BTreeSet::new();
     while let Some(mut file) = read_zipfile_from_stream(&mut cursor).map_err(|_| invalid())? {
-        let name = file.name().to_owned();
+        let name = file.name().map_err(|_| invalid())?.into_owned();
         let expected = entries.get(&name).ok_or_else(invalid)?;
-        if !seen.insert(name)
-            || file.name_raw() != file.name().as_bytes()
+        if file.name_raw() != name.as_bytes()
+            || !seen.insert(name)
             || file.size() != expected.len() as u64
             || file.encrypted()
             || file.get_metadata().large_file
-            || file.get_metadata().using_data_descriptor
+            || file.flags().is_using_data_descriptor()
             || !file.extra_data().unwrap_or_default().is_empty()
             || file.extra_data_fields().next().is_some()
         {
@@ -379,7 +379,7 @@ mod tests {
         let mut entries = Vec::new();
         for index in 0..original.len() {
             let mut file = original.by_index(index).unwrap();
-            let name = file.name().to_string();
+            let name = file.name().unwrap().into_owned();
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
             if name == "manifest.json" {
@@ -405,7 +405,7 @@ mod tests {
         let mut manifest = Vec::new();
         for index in 0..original.len() {
             let mut file = original.by_index(index).unwrap();
-            let name = file.name().to_string();
+            let name = file.name().unwrap().into_owned();
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
             if name == "manifest.json" {
@@ -427,6 +427,65 @@ mod tests {
                 bytes[offset + 12] = b'n';
             }
         }
+        assert!(read_archive(&bytes).is_err());
+    }
+
+    /// A 2-byte local extra field is too short for the reader to parse, so
+    /// `extra_data()` and `extra_data_fields()` stay empty for it.
+    #[test]
+    fn native_archive_container_denies_unparsed_local_extra_field() {
+        let archive = crate::native_archive::tests::policy_fixture();
+        let valid = pack_archive(&archive).unwrap();
+        read_archive(&valid).unwrap();
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        // Deliberately malformed fixture only: the first local header (at 0)
+        // grows by an extra field and every later offset moves with it, so
+        // names, sizes, CRCs and digests all still agree.
+        let header_end = 30 + u16_at(&valid, 26);
+        let mut bytes = valid[..header_end].to_vec();
+        bytes[28..30].copy_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xCA, 0xFE]);
+        bytes.extend_from_slice(&valid[header_end..]);
+        let end = bytes.len() - 22;
+        let central = u32_at(&bytes, end + 16) + 2;
+        bytes[end + 16..end + 20].copy_from_slice(&central.to_le_bytes());
+        let mut record = central as usize;
+        while record < end {
+            let local = u32_at(&bytes, record + 42);
+            if local != 0 {
+                bytes[record + 42..record + 46].copy_from_slice(&(local + 2).to_le_bytes());
+            }
+            record += 46 + u16_at(&bytes, record + 28);
+        }
+        assert_eq!(record, end);
+        assert!(read_archive(&bytes).is_err());
+    }
+
+    /// The same field in a central record is invisible to the reader too; the
+    /// fixed 46-byte central span leaves a gap that the tiling refuses.
+    #[test]
+    fn native_archive_container_denies_unparsed_central_extra_field() {
+        let archive = crate::native_archive::tests::policy_fixture();
+        let valid = pack_archive(&archive).unwrap();
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        // Deliberately malformed fixture only: the first central record grows
+        // by an extra field and the end record's directory size with it.
+        let end = valid.len() - 22;
+        let record = u32_at(&valid, end + 16) as usize;
+        let name_end = record + 46 + u16_at(&valid, record + 28);
+        let mut bytes = valid[..name_end].to_vec();
+        bytes[record + 30..record + 32].copy_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xCA, 0xFE]);
+        bytes.extend_from_slice(&valid[name_end..]);
+        let end = bytes.len() - 22;
+        let size = u32_at(&bytes, end + 12) + 2;
+        bytes[end + 12..end + 16].copy_from_slice(&size.to_le_bytes());
+        let mut zip = ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        let file = zip.by_index(0).unwrap();
+        assert!(file.extra_data_fields().next().is_none());
+        assert!(file.extra_data().unwrap_or_default().is_empty());
         assert!(read_archive(&bytes).is_err());
     }
 }

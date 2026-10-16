@@ -303,6 +303,29 @@ export function files(directory: string, skipDangling = false): string[] {
 export function inventory(directory: string): Record<string, string> {
   return Object.fromEntries(files(directory).map((path) => [relative(directory, path), sha(path)]));
 }
+/** No TCP listener on `port` in this network namespace, from the kernel's own
+ * socket tables. A loopback connect probe is not this proof: on WSL mirrored
+ * networking it still reaches the mirrored listener for a few milliseconds
+ * after the owned one closed. */
+export function listenerAbsent(port: number): boolean {
+  assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, "listener port refused");
+  const local = ":" + port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text: string;
+    try {
+      text = readFileSync(table, "utf8");
+    } catch (error) {
+      // Without the IPv6 table no IPv6 listener exists; the IPv4 table is required.
+      if (table.endsWith("6") && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields[3] === "0A" && fields[1]?.endsWith(local)) return false;
+    }
+  }
+  return true;
+}
 export function observedExit(result: { exitCode: number; signalCode?: string }): number {
   if (result.signalCode) {
     const number = osConstants.signals[result.signalCode as keyof typeof osConstants.signals];

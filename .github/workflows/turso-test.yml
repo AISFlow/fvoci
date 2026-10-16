@@ -6,26 +6,27 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED
+        description: Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore, main-only ui-auth and main-only ui-final require both destructive gates; others NOT IMPLEMENTED
         type: choice
         default: connection
-        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]
+        # prettier-ignore
+        options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth, ui-final]
       destructive:
         description: Explicit isolated test DB mutation confirmation (connection, inventory and ui-baseline must be false)
         type: boolean
         default: false
       ui_source_sha:
-        description: ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)
+        description: ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore, ui-auth and ui-final only)
         type: string
-        default: ''
+        default: ""
       ui_baseline_sha256:
-        description: ROOT verified just-observed current dataset digest (ui-ack only)
+        description: ROOT verified just-observed current dataset digest (ui-ack, restore, ui-auth and ui-final only)
         type: string
-        default: ''
+        default: ""
       ui_target_sha256:
-        description: ROOT verified just-observed primary target digest (ui-ack only)
+        description: ROOT verified just-observed primary target digest (ui-ack, restore, ui-auth and ui-final only)
         type: string
-        default: ''
+        default: ""
 
 permissions:
   contents: read
@@ -44,7 +45,7 @@ jobs:
     outputs:
       environment_id: ${{ steps.admit.outputs.environment_id }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -60,7 +61,7 @@ jobs:
 
   turso-connection:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore' && github.event.inputs.phase != 'ui-auth' && github.event.inputs.phase != 'ui-final' && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -71,7 +72,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -83,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           printf 'CARGO_TARGET_DIR=%s/turso-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          rustup toolchain install 1.98.1 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
@@ -108,19 +109,20 @@ jobs:
 
   turso-ui:
     needs: admission
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack') && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-final' && github.ref == 'refs/heads/main')) && github.repository == 'AISFlow/fvoci' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fvoci/v060-turso-verified-connection' || github.ref == 'refs/heads/fvoci/v060-product-integration-20261005') && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''
     environment: fvoci-turso-test
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
       FVOCI_BUILD_SHA: ${{ github.sha }}
+      FVOCI_TURSO_UI_FINAL: ${{ github.event.inputs.phase == 'ui-final' && '1' || '0' }}
       LIBCLANG_PATH: /usr/lib/llvm-18/lib
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -132,7 +134,7 @@ jobs:
             printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\n' "$RUNNER_TEMP"
             printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\n' "$RUNNER_TEMP"
           } >> "$GITHUB_ENV"
-          rustup toolchain install 1.98.1 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
@@ -149,7 +151,11 @@ jobs:
         run: |
           set -euo pipefail
           bun install --frozen-lockfile
-          bun --bun x playwright install --with-deps chromium
+          if [ "$FVOCI_TURSO_UI_FINAL" = 1 ]; then
+            bun --bun x playwright install --with-deps chromium firefox webkit
+          else
+            bun --bun x playwright install --with-deps chromium
+          fi
           bun --no-env-file tools/turso/ui.ts --record-before
           bun --bun run --cwd apps/web build
       - name: Credential-free current native UI cohort and freeze
@@ -158,7 +164,7 @@ jobs:
           cargo build --locked --offline --features api-schema,db-tests --jobs 2 --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture --message-format=json > "$RUNNER_TEMP/ui-compile.json"
           cargo build --locked --offline --manifest-path crates/collab-engine/Cargo.toml --features worker --jobs 2 --bin collab-engine --message-format=json > "$RUNNER_TEMP/ui-engine-compile.json"
           bun --no-env-file tools/turso/ui.ts --freeze
-      - name: Actual current primary UI baseline or guarded ON restart OFF consumer
+      - name: Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer
         env:
           FVOCI_DATABASE_BACKEND: libsql-remote
           FVOCI_LIBSQL_URL: ${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}

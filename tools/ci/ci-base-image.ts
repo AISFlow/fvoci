@@ -231,7 +231,7 @@ export function verifyWorkflow(data: unknown) {
       check(!step["continue-on-error"], "steps must fail closed");
       if (step.uses)
         check(
-          step.uses === "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          step.uses === "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
           "no new actions allowed",
         );
       const run = step.run ?? "";
@@ -485,13 +485,13 @@ if (import.meta.main) {
       case "inputs": {
         const rust = Bun.TOML.parse(await text("rust-toolchain.toml"));
         check(
-          at(rust, "toolchain", "channel") === "1.98.1" &&
+          at(rust, "toolchain", "channel") === "1.99.0" &&
             (await text(".bun-version")).trim() === "1.4.3",
           "tool versions differ from recipe",
         );
         check(
           at(await json("apps/web/package.json"), "devDependencies", "@playwright/test") ===
-            "1.63.0",
+            "1.64.0",
           "Playwright pin differs from recipe",
         );
         verifyWorkflow(Bun.YAML.parse(await text(".github/workflows/ci-base-image.yml")));

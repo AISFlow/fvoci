@@ -120,7 +120,7 @@ test("arm64 restores and saves only the exact versioned package cache", () => {
   const config = get(restore, "with");
   expect(get(config, "path")).toBe("${{ runner.temp }}/fvoci-clang18-arm64");
   expect(get(config, "key")).toBe(
-    "v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.98.1-18.1.8-20ubuntu8-arm64",
+    "v1-clang18-debs-ubuntu-26.04-${{ runner.arch }}-1.99.0-18.1.8-20ubuntu8-arm64",
   );
   expect(get(config, "restore-keys")).toBeUndefined();
   const saveAt = list.findIndex(

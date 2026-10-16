@@ -223,9 +223,7 @@ async fn run_scheduled_snapshots(
                     let next = scheduled_revision_cursor(&candidate);
                     target_cursor = Some(next);
                     cursor = Some(next);
-                    if candidate.anchor_at >= cutoff
-                        || candidate.state_updated_at <= candidate.anchor_at
-                    {
+                    if !candidate.snapshot_due(cutoff) {
                         stats.snapshots_skipped += 1;
                         continue;
                     }
@@ -675,9 +673,7 @@ impl FamilyRevisionConsumer<'_> {
                         let next = scheduled_revision_cursor(&candidate);
                         target_cursor = Some(next);
                         cursor = Some(next);
-                        if candidate.anchor_at >= cutoff
-                            || candidate.state_updated_at <= candidate.anchor_at
-                        {
+                        if !candidate.snapshot_due(cutoff) {
                             stats.snapshots_skipped += 1;
                             continue;
                         }

@@ -12,7 +12,10 @@ type RequestOptions = {
 const source = readFileSync(new URL("./document-api.ts", import.meta.url), "utf8")
   .replace(/^import[^\n]+\n/gm, "")
   .replace(/export /g, "");
-const script = ts.transpile(source, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = ts.transpile(source, {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+});
 test("from-draft transport keeps source and destination distinct and replays exact captured body", async () => {
   const calls: { path: string; options: RequestOptions }[] = [];
   const adapter = runInNewContext(`${script}\ncreateDocumentFromDraft`, {

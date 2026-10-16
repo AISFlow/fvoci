@@ -1,6 +1,6 @@
 [package]
 name = "fvoci-server"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 publish = false
 
@@ -34,7 +34,7 @@ required-features = ["extract-native-tests"]
 [dependencies]
 argon2 = "0.6"
 axum = { version = "0.8", default-features = false, features = ["macros", "json", "form", "query", "matched-path", "original-uri", "tokio", "http1", "ws"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 base64 = "0.23"
 collab-engine = { path = "crates/collab-engine", default-features = false }
 document-extract-client = { path = "crates/document-extract-client" }
@@ -54,12 +54,21 @@ rand = "0.10"
 regex = "1"
 ring = "0.17"
 spki = { version = "=0.8.1", features = ["pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# reqwest 0.13 `rustls` means aws-lc-rs and the platform verifier; FVOCI keeps
+# 0.12's ring and bundled Mozilla roots by handing every client the config
+# src/http_client.rs builds (`rustls-no-provider`, so no second provider).
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tar = { version = "=0.4.46", default-features = false }
-sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite-unbundled", "json", "uuid", "chrono"] }
+# 0.9 removed `runtime-tokio-rustls`; `runtime-tokio` + `tls-rustls-ring-webpki`
+# is the same ring provider and webpki-roots pair. Its optional SQLite APIs are
+# opt-in now: 0.8.6 always used unlock_notify, so that one stays on;
+# load_extension and serialize/deserialize are unused.
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "sqlite-unbundled", "sqlite-unlock-notify", "json", "uuid", "chrono"] }
 libc = "=0.2.190"
 libsql = { version = "=0.9.30", default-features = false, features = ["remote", "tls"] }
 # The remote SQLite-family schema gate feeds its reference engine the exact rendering the
@@ -67,15 +76,17 @@ libsql = { version = "=0.9.30", default-features = false, features = ["remote", 
 libsql-sqlite3-parser = { version = "=0.13.0", default-features = false }
 fallible-iterator = "=0.3.0"
 # SQLx's public locked native handle: inspect autocommit before idle reuse.
-# Exactly the SQLx0.8.6 transitive ABI, without bundled SQLite.
-libsqlite3-sys = { version = "=0.30.1", default-features = false }
+# The one libsqlite3-sys sqlx-sqlite links (0.9.0 accepts >=0.30.1, <0.38,
+# so 0.37.0 is its newest), without bundled SQLite. Bindings come from the
+# pinned sqlite3.h at build time (sqlite-unbundled: buildtime_bindgen).
+libsqlite3-sys = { version = "=0.37.0", default-features = false }
 thiserror = "2"
 time = "0.3"
 totp-rs = { version = "=6.0.0", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "fs", "io-util", "io-std", "process", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "fs", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "fs", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "=0.1.25"
@@ -85,17 +96,23 @@ url = "2"
 html5gum = { version = "=0.8.4", default-features = false }
 uuid = { version = "1", features = ["v7", "serde"] }
 bytes = "1"
-infer = "0.19"
+infer = "0.22"
 # Image previews (source magick-wasm preview set: PNG/APNG, JPEG, GIF, TIFF,
 # BMP, WebP), decoded only in the rlimited `--internal-image-preview` child.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "tiff", "bmp", "webp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 utoipa = { version = "=6.0.0", optional = true, default-features = false, features = ["macros", "uuid", "chrono"] }
-rusty-s3 = "0.8"
-# Same features rusty-s3 already enables: only used to call its signing
-# primitive (ListMultipartUploads) and to parse/serialize S3 XML.
+# SigV4 signing (RustCrypto hmac/sha2) and the multipart XML actions; `full`
+# adds only DeleteObjects, GetBucketPolicy and EC2 credentials, unused here.
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
+# jiff: the features rusty-s3 enables, only to call its signing primitive
+# (ListMultipartUploads). quick-xml reads and writes the S3 XML rusty-s3 has
+# no action for (ListMultipartUploads, the CompleteMultipartUpload body and
+# error documents); rusty-s3 itself parses with instant-xml since 0.10.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-quick-xml = { version = "0.38", features = ["serialize"] }
+# S3 XML bodies (serde) and the office child's OOXML/ODF reader. The
+# rhwp helper links the same 0.42.
+quick-xml = { version = "0.42", features = ["serialize"] }
 # Office import / attachment text: PDF text, parsed only in the rlimited
 # `--internal-office-extract` child (OOXML/ODF use zip + quick-xml above).
 pdf-extract = "0.12"
@@ -106,9 +123,10 @@ markdown = { version = "=1.0.0", default-features = false }
 # rlimited `--internal-markdown` child (`tiptap-to-docx`). MIT. No default
 # features: `image` stays off while exports carry attachment names only.
 docx-rs = { version = "=0.4.22", default-features = false }
-# docx-rs stores its parts uncompressed; the writer re-deflates the package
-# with the zip version docx-rs already links (no further crates). MIT.
-docx-zip = { package = "zip", version = "=8.6.0", default-features = false, features = ["deflate"] }
+# Untrusted native archives are read with it, docx-rs's stored package is
+# re-deflated with it, and PPTX is written with it (tests read with it too).
+# docx-rs 0.4.22 still links its own zip 8.6. MIT.
+zip = { version = "=9.0.2", default-features = false, features = ["deflate"] }
 # Tiptap -> PDF (source @react-pdf/renderer), written only in the rlimited
 # `--internal-markdown` child (`tiptap-to-pdf`): krilla writes the PDF and
 # subsets the embedded Noto fonts, rustybuzz shapes each run, and
@@ -128,10 +146,9 @@ prometheus-client = { version = "=0.25.1", default-features = false }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "form", "json", "rustls-no-provider"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "test-util"] }
-mailparse = "0.16"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+mailparse = "0.18"
 # Loopback TLS server for the vendored libsql connector tests: the rustls
 # version and features vendor/libsql-0.9.30 already builds (no aws-lc-rs).
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }

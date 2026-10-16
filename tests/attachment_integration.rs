@@ -66,10 +66,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -80,10 +83,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -111,18 +114,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
     }
@@ -408,7 +417,7 @@ async fn session_id_for_cookie(harness: &TestDb, cookie: &str) -> Uuid {
 }
 
 async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str) {
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE OR REPLACE FUNCTION fvoci.{fn_name}()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -417,17 +426,17 @@ async fn install_insert_fail_trigger(admin: &PgPool, target: &str, fn_name: &str
         END;
         $$;
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         CREATE TRIGGER fvoci_{fn_name}
         BEFORE INSERT ON fvoci.{target}
         FOR EACH ROW EXECUTE FUNCTION fvoci.{fn_name}()
         "#,
-    ))
+    )))
     .execute(admin)
     .await
     .unwrap();
@@ -869,6 +878,46 @@ async fn hwp_upload_sets_pending_extract_status() {
     assert_eq!(row.0, "pending");
     assert_eq!(row.1, "");
     admin.close().await;
+    harness.cleanup().await;
+}
+
+/// `infer` reads an AutoCAD header as `image/vnd.dwg` and `%PDF` anywhere in
+/// the first KiB as a PDF; both uploads keep the download MIME, not an image.
+#[tokio::test]
+async fn drawing_and_late_pdf_signature_upload_as_downloads() {
+    // AutoCAD 2018 file header (`AC1032`, code page 30).
+    const DWG: &[u8] = b"AC1032\0\0\0\0\0\0\x01\x60\x01\0\0\x21\0\x1e\0\0\0\0\0\0\0\0\0";
+    let harness = TestDb::bootstrap().await;
+    let (app, cookie, _owner, workspace_id) = setup_session(&harness).await;
+    let document_id = create_document(&app, &cookie, workspace_id).await;
+    let mut late_pdf = vec![b'x'; 512];
+    late_pdf.extend_from_slice(b"%PDF-1.7\n");
+    for (name, bytes) in [("plan.dwg", DWG), ("scan.bin", &late_pdf[..])] {
+        let uploaded = upload_bytes(
+            &app,
+            &cookie,
+            workspace_id,
+            &document_id,
+            name,
+            bytes,
+            Some("application/octet-stream"),
+        )
+        .await;
+        let (status, meta, _) = json_request(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{workspace_id}/attachments/{}",
+                uploaded.attachment_id
+            ),
+            None,
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert_eq!(meta["mime"], "application/octet-stream", "{name}");
+        assert_eq!(meta["image"], false, "{name}");
+    }
     harness.cleanup().await;
 }
 
@@ -2695,7 +2744,7 @@ async fn start_capped_proxy(
 ) -> (CappedProxy, String, tokio::task::JoinHandle<()>) {
     let proxy = CappedProxy {
         upstream,
-        client: reqwest::Client::new(),
+        client: fvoci_server::http_client::client(),
         max_request_bytes,
         read_timeout: Arc::new(std::sync::Mutex::new(Duration::from_secs(30))),
         lose_next_response: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2863,7 +2912,7 @@ async fn proxy_capped_parts_round_trip_exact_bytes_through_413_and_524() {
     let document_id = create_document(&app, &cookie, workspace_id).await;
     let (origin, origin_task) = serve_on_loopback(app).await;
     let (proxy, edge, edge_task) = start_capped_proxy(origin, PROXY_CAP).await;
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
 
     // Larger than one proxied request can carry; not a multiple of the part size.
     let mut payload = vec![0u8; 4 * PART + 12_345];
@@ -3216,7 +3265,7 @@ async fn proxy_read_timeout_answers_524_without_publishing() {
 
     let (origin, origin_task) = serve_on_loopback(app.clone()).await;
     let (proxy, edge, edge_task) = start_capped_proxy(origin, 1024 * 1024).await;
-    let client = reqwest::Client::new();
+    let client = fvoci_server::http_client::client();
     let ws = format!("/api/v1/workspaces/{workspace_id}");
     let complete_path = format!("{ws}/attachments/{attachment_id}/complete");
 

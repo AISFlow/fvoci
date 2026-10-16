@@ -1476,7 +1476,7 @@ async fn prepare_postgres() -> Result<(), String> {
     .await
     .map_err(db)?;
     if let Some(statement) = create {
-        sqlx::raw_sql(&statement)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
             .execute(&mut conn)
             .await
             .map_err(|e| format!("create app role {}: {e}", names.app_role))?;
@@ -1558,7 +1558,7 @@ async fn wait_for_postgres(
 }
 
 async fn wait_for_meili(url: &str, deadline: tokio::time::Instant) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;

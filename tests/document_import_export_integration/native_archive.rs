@@ -409,9 +409,9 @@ async fn workspace_graph_counts(admin: &sqlx::PgPool, workspace: Uuid) -> Vec<i6
         "project_members",
     ] {
         counts.push(
-            sqlx::query_scalar::<_, i64>(&format!(
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
                 "SELECT count(*) FROM fvoci.{table} WHERE workspace_id = $1"
-            ))
+            )))
             .bind(workspace)
             .fetch_one(admin)
             .await
@@ -1161,13 +1161,13 @@ async fn locked_inventory_with(
 }
 
 async fn native_rows(admin: &sqlx::PgPool, table: &str, target: Uuid) -> Value {
-    sqlx::query_scalar(&format!(
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT jsonb_build_array(
             (SELECT to_jsonb(s)-'state' || jsonb_build_object('state',encode(s.state,'hex')) FROM fvoci.{table}_states s WHERE {table}_id=$1),
             (SELECT count(*) FROM fvoci.{table}_collab_updates WHERE {table}_id=$1),
             (SELECT count(*) FROM fvoci.{table}_collab_op_receipts WHERE {table}_id=$1),
             (SELECT count(*) FROM fvoci.revisions WHERE target_id=$1))"
-    ))
+    )))
     .bind(target)
     .fetch_one(admin)
     .await
@@ -2470,7 +2470,7 @@ async fn as_owner(
     pool: &sqlx::PgPool,
     workspace: Uuid,
     user: Uuid,
-    statements: &[(&str, Vec<Value>)],
+    statements: &[(&'static str, Vec<Value>)],
 ) {
     let mut tx = pool.begin().await.unwrap();
     fvoci_server::db::context::set_tenant(&mut tx, workspace)
@@ -2481,7 +2481,7 @@ async fn as_owner(
         .unwrap();
     for (sql, binds) in statements {
         // Values travel as one JSON array so each statement stays typed in SQL.
-        sqlx::query(sql)
+        sqlx::query(*sql)
             .bind(json!(binds))
             .execute(&mut *tx)
             .await
@@ -2490,7 +2490,7 @@ async fn as_owner(
     tx.commit().await.unwrap();
 }
 
-async fn owner_rows(pool: &sqlx::PgPool, workspace: Uuid, user: Uuid, sql: &str) -> Value {
+async fn owner_rows(pool: &sqlx::PgPool, workspace: Uuid, user: Uuid, sql: &'static str) -> Value {
     let mut tx = pool.begin().await.unwrap();
     fvoci_server::db::context::set_tenant(&mut tx, workspace)
         .await
@@ -3714,7 +3714,13 @@ async fn native_archive_carries_bodies_without_native_state() {
 /// Restricted app role in tenant + self-actor context (the 048 tables are
 /// actor-self); a labeled fixture writer for rows whose W5 writers are not in
 /// this tree. One JSON array parameter keeps each statement typed in SQL.
-async fn as_actor(pool: &sqlx::PgPool, workspace: Uuid, actor: Uuid, sql: &str, binds: Vec<Value>) {
+async fn as_actor(
+    pool: &sqlx::PgPool,
+    workspace: Uuid,
+    actor: Uuid,
+    sql: &'static str,
+    binds: Vec<Value>,
+) {
     let mut tx = pool.begin().await.unwrap();
     fvoci_server::db::context::set_tenant(&mut tx, workspace)
         .await
@@ -5320,10 +5326,10 @@ async fn restore_database_effects(admin: &sqlx::PgPool) -> Vec<(String, i64, Str
     let mut effects = Vec::new();
     for table in tables {
         let quoted = table.replace('"', "\"\"");
-        let (count, digest): (i64, String) = sqlx::query_as(&format!(
+        let (count, digest): (i64, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT count(*),coalesce(md5(string_agg(row_json::text,E'\\n' ORDER BY row_json::text)),md5(''))
              FROM (SELECT to_jsonb(t) AS row_json FROM fvoci.\"{quoted}\" t) q"
-        ))
+        )))
         .fetch_one(admin)
         .await
         .unwrap();
@@ -5409,10 +5415,10 @@ async fn restore_publication_graph(admin: &sqlx::PgPool) -> Value {
     ];
     let mut graph = serde_json::Map::new();
     for table in tables {
-        let rows: Value = sqlx::query_scalar(&format!(
+        let rows: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)
              FROM fvoci.{table} t"
-        ))
+        )))
         .fetch_one(admin)
         .await
         .unwrap();
@@ -5981,9 +5987,9 @@ async fn native_archive_retained_guard_cost_is_measured() {
             fvoci_server::db::context::set_self_user(&mut tx, fx.user_id)
                 .await
                 .unwrap();
-            let plan: Value = sqlx::query_scalar(&format!(
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {RETAINED_PROVENANCE_SQL}"
-            ))
+            )))
             .bind(fx.user_id)
             .bind(&ids)
             .bind(&ids)
@@ -7390,9 +7396,9 @@ async fn application_table_digests(
     .unwrap();
     let mut out = std::collections::BTreeMap::new();
     for table in tables {
-        let row: (i64, String) = sqlx::query_as(&format!(
+        let row: (i64, String) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT count(*)::bigint, coalesce(md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))), '') FROM fvoci.\"{table}\" t"
-        ))
+        )))
         .fetch_one(admin)
         .await
         .unwrap();
@@ -7596,7 +7602,7 @@ async fn native_archive_current55_collections_tags_and_command_guard_share_one_r
             "document_tags",
             "document_tag_assignments",
         ] {
-            let rows: Value = sqlx::query_scalar(&format!("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM fvoci.{table} t"))
+            let rows: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM fvoci.{table} t")))
                 .fetch_one(&admin).await.unwrap();
             assert!(graph
                 .as_object_mut()

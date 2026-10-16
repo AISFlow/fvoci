@@ -323,7 +323,7 @@ mod tests {
             let found = scope(OUTPUT, &mut fake).unwrap();
             assert_eq!(
                 found.root,
-                Path::new("/home/runner/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu")
+                Path::new("/home/runner/.rustup/toolchains/1.99.0-x86_64-unknown-linux-gnu")
             );
             assert_eq!(found.rustup, Path::new("/home/runner/.cargo/bin/rustup"));
             assert_eq!(found.context.source_head, "5".repeat(40));

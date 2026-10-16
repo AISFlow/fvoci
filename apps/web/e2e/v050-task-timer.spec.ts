@@ -2,11 +2,15 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:c
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -349,9 +353,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
       expect(new URL(origin).hostname).toBe("127.0.0.1");
       expect(origin).not.toBe(before.listeningOrigin);
       expect(current.witness.pid).not.toBe(before.pid);
-      expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(
-        binaryHash,
-      );
+      expect(serverBinarySha256(configuredBin)).toBe(binaryHash);
       const setup = await page.request.get(`${origin}/api/v1/setup`);
       expect(setup.status(), await setup.text()).toBe(200);
       expect(runtimeHash(inherited)).toBe(inheritedHash);
@@ -576,11 +578,48 @@ const witnessRows = z.array(
     ),
   }),
 );
+// The debug server binary is close to 1 GB; reading it whole for every witness
+// spent half of the restart test's budget. A digest is reused only while the
+// kernel-owned file identity is unchanged: a rebuild, replacement or in-place
+// write changes the inode or ctime. A digest is not kept when the identity moved
+// during the read or the last change is under a second old, so a write within
+// the same coarse ctime tick is still read again.
+const serverBinaryDigests = new Map<string, string>();
+function serverBinarySha256(file: string): string {
+  const identity = () => {
+    const stat = statSync(file, { bigint: true });
+    return {
+      key: `${String(stat.dev)}:${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeNs)}:${String(stat.ctimeNs)}`,
+      ctimeNs: stat.ctimeNs,
+    };
+  };
+  const before = identity();
+  const known = serverBinaryDigests.get(before.key);
+  if (known) return known;
+  const hash = createHash("sha256");
+  const fd = openSync(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(8 << 20);
+    for (
+      let read = readSync(fd, buffer, 0, buffer.length, null);
+      read > 0;
+      read = readSync(fd, buffer, 0, buffer.length, null)
+    )
+      hash.update(buffer.subarray(0, read));
+  } finally {
+    closeSync(fd);
+  }
+  const digest = hash.digest("hex");
+  const after = identity();
+  if (after.key === before.key && BigInt(Date.now()) * 1_000_000n - after.ctimeNs > 1_000_000_000n)
+    serverBinaryDigests.set(after.key, digest);
+  return digest;
+}
 function captureTimerNative(page: Page) {
   const serverBin = process.env.FVOCI_E2E_SERVER_BIN;
   if (!serverBin) throw new Error("own server binary missing");
   const configuredBin = realpathSync(serverBin);
-  const binaryHash = createHash("sha256").update(readFileSync(configuredBin)).digest("hex");
+  const binaryHash = serverBinarySha256(configuredBin);
   const native: TimerNative[] = [];
   const owned = restartedTimerServers.get(page);
   if (owned) {
@@ -663,7 +702,7 @@ function captureTimerNative(page: Page) {
       /* Processes can disappear between directory read and inspection. */
     }
   }
-  expect(createHash("sha256").update(readFileSync(configuredBin)).digest("hex")).toBe(binaryHash);
+  expect(serverBinarySha256(configuredBin)).toBe(binaryHash);
   return { native, configuredBin, binaryHash };
 }
 
@@ -1497,7 +1536,7 @@ test("captured timer GET cannot cache another actor run under a stale mounted id
     const body: unknown = await response.json();
     const observed = z
       .object({ run: z.object({ id: z.string() }).nullable().optional() })
-      .passthrough()
+      .loose()
       .parse(body);
     const authenticated = identity.parse(await (await page.request.get("/api/v1/auth/me")).json());
     expect(authenticated.userId).toBe(actorB.userId);
@@ -3696,7 +3735,7 @@ test("a native committed pause with its response lost replays one unchanged rece
     expect(timerDatabaseEffects(fixture.actor.userId, fixture.task.id)).toBe(committed);
     const capture = z
       .object({ requestId: z.string(), expectedActorId: z.string(), expectedSessionId: z.string() })
-      .passthrough()
+      .loose()
       .parse(attempts[0]);
     const changed = await page.request.post(fixture.timerUrl, {
       data: { ...capture, note: "different replay payload" },
@@ -4428,7 +4467,7 @@ test("native same-database restart preserves paused and running anchors for genu
   browser,
   restartTimerServer,
 }, testInfo) => {
-  const restartShape = timerShape.extend({ serverNow: z.string().datetime({ offset: true }) });
+  const restartShape = timerShape.extend({ serverNow: z.iso.datetime({ offset: true }) });
   const effectiveElapsed = (view: z.infer<typeof restartShape>) =>
     view.run
       ? view.run.elapsedMilliseconds +
@@ -4741,11 +4780,9 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     { data: { commandId: crypto.randomUUID(), parentId: null, title: "공동 복원·측정 연구 노트" } },
   );
   expect(notesResponse.status(), await notesResponse.text()).toBe(201);
-  const notes = z
-    .object({ id: z.string().uuid(), number: z.number() })
-    .parse(await notesResponse.json());
+  const notes = z.object({ id: z.guid(), number: z.number() }).parse(await notesResponse.json());
   const project = z
-    .object({ projectId: z.string().uuid() })
+    .object({ projectId: z.guid() })
     .parse(
       await (
         await page.request.get(`/api/v1/workspaces/${fixture.workspaceId}/tasks/${fixture.task.id}`)
@@ -4771,7 +4808,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   );
   await planner.getByRole("button", { name: "계획 저장", exact: true }).click();
   const goal = z
-    .object({ taskId: z.string().uuid(), number: z.number(), projectKey: z.string() })
+    .object({ taskId: z.guid(), number: z.number(), projectKey: z.string() })
     .parse(await (await createdGoal).json());
   await expect(planner.getByRole("status").filter({ hasText: "저장된 목표와 단계" })).toContainText(
     "4개 저장됨",
@@ -4797,19 +4834,17 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
           z
             .object({
               seq: z.string(),
-              op_id: z.string().uuid(),
-              actor_user_id: z.string().uuid(),
+              op_id: z.guid(),
+              actor_user_id: z.guid(),
               payload_len: z.number(),
               payload_sha256: z.string(),
             })
-            .passthrough(),
+            .loose(),
         ),
         identity: z.object({
-          task: z.string().uuid(),
-          project: z.string().uuid(),
-          origins: z.array(
-            z.object({ document_id: z.string().uuid(), task_id: z.string().uuid() }).passthrough(),
-          ),
+          task: z.guid(),
+          project: z.guid(),
+          origins: z.array(z.object({ document_id: z.guid(), task_id: z.guid() }).loose()),
         }),
       })
       .parse(
@@ -4824,13 +4859,14 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     const response = await page.request.get(base + "/revisions");
     expect(response.ok()).toBe(true);
     return z
-      .object({ items: z.array(z.object({ id: z.string().uuid() }).passthrough()) })
+      .object({ items: z.array(z.object({ id: z.guid() }).loose()) })
       .parse(await response.json()).items;
   };
   const body = async () => {
     const response = await page.request.get(base);
     expect(response.ok()).toBe(true);
-    return z.object({ contentJson: z.unknown() }).parse(await response.json()).contentJson;
+    return z.object({ contentJson: z.unknown().optional() }).parse(await response.json())
+      .contentJson;
   };
   await page.goto(detail);
   const widget = page.getByTestId(`task-stopwatch-${goal.taskId}`);
@@ -4856,11 +4892,13 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
   await page.getByTestId("revision-save").click();
   const savedResponse = await saved;
   expect(savedResponse.status()).toBe(201);
-  const source = z.object({ id: z.string().uuid() }).parse(await savedResponse.json());
+  const source = z.object({ id: z.guid() }).parse(await savedResponse.json());
   const sourceDetailResponse = await page.request.get(base + "/revisions/" + source.id);
   expect(sourceDetailResponse.ok()).toBe(true);
   const sourceDetail: unknown = await sourceDetailResponse.json();
-  const sourceBody = z.object({ contentJson: z.unknown() }).parse(sourceDetail).contentJson;
+  const sourceBody = z
+    .object({ contentJson: z.unknown().optional() })
+    .parse(sourceDetail).contentJson;
   await page.getByTestId("revision-history").click();
   await editor.click();
   await page.keyboard.press("ControlOrMeta+a");
@@ -4986,7 +5024,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
     restoreRequests.set(request, record);
     try {
       const intent = z
-        .object({ expectedTailSeq: z.string().regex(/^\d+$/), correlationId: z.string().uuid() })
+        .object({ expectedTailSeq: z.string().regex(/^\d+$/), correlationId: z.guid() })
         .parse(request.postDataJSON());
       record.expectedTailSeq = intent.expectedTailSeq;
       record.correlationId = intent.correlationId;
@@ -5021,7 +5059,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         if (phase === "restore") {
           if (response.status() === 200)
             record.revisionId = z
-              .object({ revisionId: z.string().uuid() })
+              .object({ revisionId: z.guid() })
               .parse(await response.json()).revisionId;
         } else if (response.status() === 200) {
           record.currentTailSeq = z
@@ -5073,9 +5111,9 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       release = resolve;
     });
     const commandShape = z.object({
-      requestId: z.string().uuid(),
-      expectedActorId: z.string().uuid(),
-      expectedSessionId: z.string().uuid(),
+      requestId: z.guid(),
+      expectedActorId: z.guid(),
+      expectedSessionId: z.guid(),
       expected: estimateShape,
       minutes: z.literal(25),
       reason: z.literal("복원 전 예상 의도"),
@@ -5126,9 +5164,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       await page.getByTestId("revision-restore-confirm").click();
       const restoredReply = await restoredResponse;
       expect(restoredReply.status()).toBe(200);
-      const restored = z
-        .object({ revisionId: z.string().uuid() })
-        .parse(await restoredReply.json());
+      const restored = z.object({ revisionId: z.guid() }).parse(await restoredReply.json());
       expect(restored.revisionId).not.toBe(source.id);
       await expect(editor).toContainText("원본 본문");
       expect(await body()).toEqual(sourceBody);
@@ -5145,7 +5181,7 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       z.object({
         reason: z.literal("restore"),
         restoredFromId: z.literal(source.id),
-        contentJson: z.unknown(),
+        contentJson: z.unknown().optional(),
       }).parse(await restoreDetail.json());
       expect(await (await page.request.get(base + "/revisions/" + source.id)).json()).toEqual(
         sourceDetail,
@@ -5192,7 +5228,8 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
         );
         const freshBody = await fresh.request.get(base);
         expect(
-          z.object({ contentJson: z.unknown() }).parse(await freshBody.json()).contentJson,
+          z.object({ contentJson: z.unknown().optional() }).parse(await freshBody.json())
+            .contentJson,
         ).toEqual(sourceBody);
         const freshHistory = await fresh.request.get(base + "/revisions");
         expect(
@@ -5272,10 +5309,10 @@ test("one ordinary task restore preserves paused timer and explicit estimate whi
       storedRestores = z
         .array(
           z.object({
-            id: z.string().uuid(),
-            actorId: z.string().uuid().nullable(),
-            sourceRevisionId: z.string().uuid().nullable(),
-            correlationId: z.string().uuid().nullable(),
+            id: z.guid(),
+            actorId: z.guid().nullable(),
+            sourceRevisionId: z.guid().nullable(),
+            correlationId: z.guid().nullable(),
             baseTailSeq: z.string().regex(/^\d+$/).nullable(),
             committedTailSeq: z.string().regex(/^\d+$/).nullable(),
           }),

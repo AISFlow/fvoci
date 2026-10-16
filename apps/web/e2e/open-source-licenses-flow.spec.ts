@@ -61,7 +61,7 @@ test("open-source-licenses.txt is discoverable, served verbatim, and linked from
   for (const forbidden of FORBIDDEN_NOTICE_PACKAGE_HEADINGS) {
     expect(distText).not.toMatch(new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
-  expect(distText).toMatch(/qrcode-generator - 1\.5\.2/);
+  expect(distText).toMatch(/qrcode-generator - 2\.0\.4/);
   expect(distText).toMatch(/Permission is hereby granted/);
   expect(distText).toMatch(/packages\/editor\/src\/fonts\/NotoSansKR-OFL\.txt/);
   // Every icon set in the bundle is in the notice (the Vue app bundles Lucide).

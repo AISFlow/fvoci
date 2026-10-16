@@ -925,11 +925,24 @@ describe("local lease", () => {
 // lease check refuses the edited hash before a driver process starts.
 describe("lease order", () => {
   const entry = "scripts/run-selected-backend-e2e.ts";
-  const edited = "tools/selected-backend-ci/drivers/common.ts";
-  test("the CLI's static import closure is the registered runner, without a lane driver", () => {
+  // Loaded only by the lane drivers (the auth-session lane purpose); the SMTP
+  // sink is spawned by them, not imported.
+  const laneOnly = [
+    "apps/web/e2e-pending/auth-session-contract.ts",
+    "apps/web/e2e-pending/collab-wire.ts",
+    "tools/turso/ui-selected-native-policy.ts",
+    "tools/turso/ui-processes.ts",
+    "tools/turso/ui-audit.ts",
+    "tools/turso/ui-auth-session.ts",
+    "tools/turso/ui-common.ts",
+    "tools/web-e2e/compat.ts",
+    "tools/web-e2e/smtp-sink.ts",
+  ];
+  const sink = "tools/web-e2e/smtp-sink.ts";
+  function closure(entries: string[]): string[] {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
     const seen = new Set<string>(),
-      queue = [join(root, entry)];
+      queue = entries.map((name) => join(root, name));
     for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
       if (seen.has(file)) continue;
       seen.add(file);
@@ -939,133 +952,171 @@ describe("lease order", () => {
           queue.push(Bun.resolveSync(item.path, dirname(file)));
         }
     }
-    const closure = [...seen].map((path) => relative(root, path)).sort();
-    expect(closure.filter((name) => name.includes("/drivers/"))).toEqual([]);
-    expect(closure).toEqual(registeredModules.filter((name) => !name.includes("/drivers/")).sort());
+    return [...seen].map((path) => relative(root, path)).sort();
+  }
+  test("the CLI's static import closure is the registered runner, without a lane driver", () => {
+    const runner = closure([entry]);
+    expect(runner.filter((name) => name.includes("/drivers/"))).toEqual([]);
+    expect(runner).toEqual(
+      registeredModules
+        .filter((name) => !name.includes("/drivers/") && !laneOnly.includes(name))
+        .sort(),
+    );
   });
-  test.skipIf(!linux)("an edited driver's top level never runs before the lease check", () => {
-    const base = realpathSync(directory()),
-      checkout = join(base, "checkout"),
-      output = join(base, "output"),
-      marker = join(base, "marker");
-    mkdirSync(output, { mode: 0o700 });
-    copyRunnerModules(join(checkout, "tools/selected-backend-ci"));
-    mkdirSync(join(checkout, "scripts"));
-    copyFileSync(join(root, entry), join(checkout, entry));
-    const issued = sha(join(checkout, edited));
-    appendFileSync(
-      join(checkout, edited),
-      '\nimport { writeFileSync as markerWrite } from "node:fs";\n' +
-        "markerWrite(" +
-        JSON.stringify(marker) +
-        ', "common.ts top-level ran\\n");\n',
+  test("the registry is exactly the runner and lane driver closures with the spawned sink", () => {
+    const lanes = closure(registeredModules.filter((name) => name.includes("/drivers/")));
+    expect([...new Set([...closure([entry]), ...lanes, sink])].sort()).toEqual(
+      [...registeredModules].sort(),
     );
-    const baseEnv = { PATH: join(process.execPath, "..") + ":/usr/bin:/bin", HOME: base };
-    const git = (...args: string[]) => {
-      const result = spawnSync(
-        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", ...args],
-        { cwd: checkout, env: { ...baseEnv, GIT_CONFIG_NOSYSTEM: "1" } },
-      );
-      expect(result.exitCode).toBe(0);
-      return result.stdout.toString().trim();
-    };
-    // Committed, so only the registration hash differs from the lease.
-    git("init", "-q");
-    git("add", "-A");
-    git("commit", "-q", "--no-verify", "--no-gpg-sign", "-m", "edited after the lease");
-    const grant: LocalGrant = {
-      schema: 1,
-      status: "GRANTED",
-      executionMode: "orca-local",
-      exclusiveLocalBatch: true,
-      currentDispatchConfirmed: true,
-      owner: "orca:fixture",
-      runId: "run_ab12",
-      dispatchId: "ctx_cd34",
-      taskId: "task_ef56",
-      workerTerminal: "fixture-worker",
-      rootTerminal: "fixture-root",
-      worktree: checkout,
-      uid: uid(),
-      gid: gid(),
-      source: git("rev-parse", "HEAD"),
-      tree: git("rev-parse", "HEAD^{tree}"),
-      allowedModes: ["record-before", "stage", "record-after", "run"],
-      expiresUtc: new Date(Date.now() + 3600000).toISOString(),
-      outputRoot: output,
-      registrationHashes: Object.fromEntries(
-        registeredModules.map((name) => [
-          name,
-          name === edited ? issued : sha(join(checkout, name)),
-        ]),
-      ),
-      stageCommands: {},
-    };
-    const path = join(base, "local.json");
-    write(path, grant);
-    const env = {
-      ...baseEnv,
-      FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
-      FVOCI_SELECTED_LOCAL_ALLOCATION: path,
-      FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: sha(path),
-      FVOCI_CI_OWNER: "orca:fixture",
-      FVOCI_ROOT_RUN_OWNER: "orca:fixture",
-      FVOCI_LOCAL_RUN_ID: "run_ab12",
-      FVOCI_LOCAL_DISPATCH_ID: "ctx_cd34",
-      FVOCI_LOCAL_TASK_ID: "task_ef56",
-      ORCA_TERMINAL_HANDLE: "fixture-worker",
-      FVOCI_LOCAL_ROOT_TERMINAL: "fixture-root",
-      FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
-    };
-    const cli = (...args: string[]) =>
-      spawnSync([process.execPath, join(checkout, entry), ...args], {
-        cwd: checkout,
-        env,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-    // Loading the entry alone, then each pre-lease mode, then run.
-    expect(cli("--help").exitCode).toBe(0);
-    expect(existsSync(marker)).toBe(false);
-    for (const mode of ["record-before", "config-list"]) {
-      expect(cli(mode, "--output", output).exitCode).toBe(1);
-      expect(existsSync(marker)).toBe(false);
-    }
-    const refused = cli("run", "--lane", "install/on", "--output", output);
-    expect(refused.exitCode).toBe(1);
-    expect(refused.stderr.toString()).toBe(
-      "selected backend admission failed; private inputs withheld\n",
-    );
-    expect(existsSync(marker)).toBe(false);
-    expect(readdirSync(output)).toEqual([]);
-    // The refusal is the stale driver hash, not an unrelated lease field. The
-    // probe sits outside the checkout and loads only its admission module.
-    const probe = join(base, "lease-probe.ts");
-    writeFileSync(
-      probe,
-      "import { localAllocation } from " +
-        JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts")) +
-        ';\ntry {\n  localAllocation("run", [' +
-        String(uid()) +
-        ", " +
-        String(gid()) +
-        ']);\n  console.log("accepted");\n} catch (error) {\n  console.log((error as Error).message);\n}\n',
-    );
-    const reason = spawnSync([process.execPath, probe], { cwd: checkout, env, stdout: "pipe" });
-    expect(reason.stdout.toString()).toBe("unregistered module " + edited + "\n");
-    expect(existsSync(marker)).toBe(false);
-    // The planted top level is live: loading the driver module writes it.
-    expect(
-      spawnSync(
-        [process.execPath, "-e", "await import(" + JSON.stringify(join(checkout, edited)) + ")"],
-        {
-          cwd: checkout,
-          env: baseEnv,
+    expect(laneOnly.filter((name) => name !== sink && !lanes.includes(name))).toEqual([]);
+  });
+  for (const edited of [
+    "tools/selected-backend-ci/drivers/common.ts",
+    "tools/turso/ui-selected-native-policy.ts",
+    "tools/turso/ui-processes.ts",
+  ])
+    for (const fault of ["changed", "missing"] as const)
+      test.skipIf(!linux)(
+        edited.endsWith("/common.ts") && fault === "changed"
+          ? "an edited driver's top level never runs before the lease check"
+          : `${edited} ${fault} hash refuses before its top level runs`,
+        () => {
+          const base = realpathSync(directory()),
+            checkout = join(base, "checkout"),
+            output = join(base, "output"),
+            marker = join(base, "marker");
+          mkdirSync(output, { mode: 0o700 });
+          copyRunnerModules(join(checkout, "tools/selected-backend-ci"));
+          mkdirSync(join(checkout, "scripts"));
+          copyFileSync(join(root, entry), join(checkout, entry));
+          for (const name of laneOnly) {
+            mkdirSync(dirname(join(checkout, name)), { recursive: true });
+            copyFileSync(join(root, name), join(checkout, name));
+          }
+          const issued = sha(join(checkout, edited));
+          appendFileSync(
+            join(checkout, edited),
+            '\nimport { writeFileSync as markerWrite } from "node:fs";\n' +
+              "markerWrite(" +
+              JSON.stringify(marker) +
+              ', "common.ts top-level ran\\n");\n',
+          );
+          const baseEnv = { PATH: join(process.execPath, "..") + ":/usr/bin:/bin", HOME: base };
+          const git = (...args: string[]) => {
+            const result = spawnSync(
+              ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", ...args],
+              { cwd: checkout, env: { ...baseEnv, GIT_CONFIG_NOSYSTEM: "1" } },
+            );
+            expect(result.exitCode).toBe(0);
+            return result.stdout.toString().trim();
+          };
+          // Committed, so only the registration hash differs from the lease.
+          git("init", "-q");
+          git("add", "-A");
+          git("commit", "-q", "--no-verify", "--no-gpg-sign", "-m", "edited after the lease");
+          const grant: LocalGrant = {
+            schema: 1,
+            status: "GRANTED",
+            executionMode: "orca-local",
+            exclusiveLocalBatch: true,
+            currentDispatchConfirmed: true,
+            owner: "orca:fixture",
+            runId: "run_ab12",
+            dispatchId: "ctx_cd34",
+            taskId: "task_ef56",
+            workerTerminal: "fixture-worker",
+            rootTerminal: "fixture-root",
+            worktree: checkout,
+            uid: uid(),
+            gid: gid(),
+            source: git("rev-parse", "HEAD"),
+            tree: git("rev-parse", "HEAD^{tree}"),
+            allowedModes: ["record-before", "stage", "record-after", "run"],
+            expiresUtc: new Date(Date.now() + 3600000).toISOString(),
+            outputRoot: output,
+            registrationHashes: Object.fromEntries(
+              registeredModules.map((name) => [
+                name,
+                name === edited ? issued : sha(join(checkout, name)),
+              ]),
+            ),
+            stageCommands: {},
+          };
+          if (fault === "missing") Reflect.deleteProperty(grant.registrationHashes, edited);
+          const path = join(base, "local.json");
+          write(path, grant);
+          const env = {
+            ...baseEnv,
+            FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+            FVOCI_SELECTED_LOCAL_ALLOCATION: path,
+            FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: sha(path),
+            FVOCI_CI_OWNER: "orca:fixture",
+            FVOCI_ROOT_RUN_OWNER: "orca:fixture",
+            FVOCI_LOCAL_RUN_ID: "run_ab12",
+            FVOCI_LOCAL_DISPATCH_ID: "ctx_cd34",
+            FVOCI_LOCAL_TASK_ID: "task_ef56",
+            ORCA_TERMINAL_HANDLE: "fixture-worker",
+            FVOCI_LOCAL_ROOT_TERMINAL: "fixture-root",
+            FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+          };
+          const cli = (...args: string[]) =>
+            spawnSync([process.execPath, join(checkout, entry), ...args], {
+              cwd: checkout,
+              env,
+              stdout: "pipe",
+              stderr: "pipe",
+            });
+          // Loading the entry alone, then each pre-lease mode, then run.
+          expect(cli("--help").exitCode).toBe(0);
+          expect(existsSync(marker)).toBe(false);
+          for (const mode of ["record-before", "config-list"]) {
+            expect(cli(mode, "--output", output).exitCode).toBe(1);
+            expect(existsSync(marker)).toBe(false);
+          }
+          const refused = cli("run", "--lane", "install/on", "--output", output);
+          expect(refused.exitCode).toBe(1);
+          expect(refused.stderr.toString()).toBe(
+            "selected backend admission failed; private inputs withheld\n",
+          );
+          expect(existsSync(marker)).toBe(false);
+          expect(readdirSync(output)).toEqual([]);
+          // The refusal is the stale driver hash, not an unrelated lease field. The
+          // probe sits outside the checkout and loads only its admission module.
+          const probe = join(base, "lease-probe.ts");
+          writeFileSync(
+            probe,
+            "import { localAllocation } from " +
+              JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts")) +
+              ';\ntry {\n  localAllocation("run", [' +
+              String(uid()) +
+              ", " +
+              String(gid()) +
+              ']);\n  console.log("accepted");\n} catch (error) {\n  console.log((error as Error).message);\n}\n',
+          );
+          const reason = spawnSync([process.execPath, probe], {
+            cwd: checkout,
+            env,
+            stdout: "pipe",
+          });
+          expect(reason.stdout.toString()).toBe("unregistered module " + edited + "\n");
+          expect(existsSync(marker)).toBe(false);
+          // The planted top level is live: loading the driver module writes it.
+          expect(
+            spawnSync(
+              [
+                process.execPath,
+                "-e",
+                "await import(" + JSON.stringify(join(checkout, edited)) + ")",
+              ],
+              {
+                cwd: checkout,
+                env: baseEnv,
+              },
+            ).exitCode,
+          ).toBe(0);
+          expect(readFileSync(marker, "utf8")).toBe("common.ts top-level ran\n");
         },
-      ).exitCode,
-    ).toBe(0);
-    expect(readFileSync(marker, "utf8")).toBe("common.ts top-level ran\n");
-  });
+      );
 });
 
 // The consume-phase config-list leaf and its launcher gate in

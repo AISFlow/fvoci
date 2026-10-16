@@ -19,9 +19,9 @@ use url::Url;
 
 use crate::search::text::{is_chosung_query, normalize_search_text};
 
-/// Official CE v1.53.2 multiarch digest. EE/BUSL is forbidden.
+/// Official CE v1.55.0 multiarch digest. EE/BUSL is forbidden.
 pub const MEILI_CE_IMAGE: &str =
-    "getmeili/meilisearch:v1.53.2@sha256:c94e58ca09662dd6e65e8f1b0fd145767be3da7d5422a863a27b8d2b68e090c9";
+    "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c";
 pub const MEILI_INDEX_UID: &str = "fvoci";
 pub const MEILI_MAX_TOTAL_HITS: u32 = 1000;
 pub const MEILI_OP_TIMEOUT_MS: u64 = 30_000;
@@ -131,7 +131,7 @@ impl MeiliConfig {
             url: url.trim_end_matches('/').to_string(),
             api_key,
             index_uid,
-            http: reqwest::Client::builder()
+            http: crate::http_client::builder()
                 .timeout(Duration::from_millis(MEILI_OP_TIMEOUT_MS))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -928,7 +928,7 @@ pub struct MeiliVectorSearchInput {
     pub limit: u32,
 }
 
-/// Source `meiliVectorScore`: CE 1.53.2 userProvided with `semanticRatio: 1`
+/// Source `meiliVectorScore`: CE 1.55.0 userProvided with `semanticRatio: 1`
 /// reports `_rankingScore` = (1 + cosine) / 2; map it back to cosine.
 pub fn meili_vector_score(ranking_score: f64) -> f64 {
     2.0 * ranking_score - 1.0

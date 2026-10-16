@@ -1,4 +1,5 @@
 import { t } from "@fvoci/i18n";
+import { extractText } from "@fvoci/editor/extract";
 import type { components } from "@/generated/api";
 import { api, ensureOk } from "@/lib/api";
 
@@ -54,10 +55,16 @@ export function extractPreviewText(node: unknown): string {
       type?: unknown;
       attrs?: unknown;
     };
-    if (typeof record.text === "string") {
-      size += record.text.length;
+    const text =
+      record.type === "emoji"
+        ? extractText(record)
+        : typeof record.text === "string"
+          ? record.text
+          : "";
+    if (text) {
+      size += text.length;
       if (size > 2 * 1024 * 1024) return "";
-      parts.push(record.text);
+      parts.push(text);
     }
     if (record.content !== undefined) {
       if (!Array.isArray(record.content)) return "";

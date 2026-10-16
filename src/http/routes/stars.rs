@@ -443,11 +443,13 @@ mod selected_list_access_http_tests {
             ("documents", doc),
             ("tasks", task),
         ] {
-            sqlx::query(&format!("UPDATE {table} SET deleted_at=1 WHERE id=?1"))
-                .bind(target.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET deleted_at=1 WHERE id=?1"
+            )))
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
             let (status, visible) = get(app.clone(), &path, Some(&token), false).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
@@ -455,11 +457,13 @@ mod selected_list_access_http_tests {
                 2,
                 "deleted target must be hidden"
             );
-            sqlx::query(&format!("UPDATE {table} SET deleted_at=NULL WHERE id=?1"))
-                .bind(target.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET deleted_at=NULL WHERE id=?1"
+            )))
+            .bind(target.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
         }
         sqlx::query("UPDATE tasks SET archived_at=1 WHERE id=?1")
             .bind(task.as_bytes().as_slice())
@@ -669,11 +673,13 @@ mod selected_list_access_http_tests {
                 .unwrap();
         }
         for (column, actor) in [("suspended_at", f.user), ("deleted_at", f.user)] {
-            sqlx::query(&format!("UPDATE users SET {column}=1 WHERE id=?1"))
-                .bind(actor.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE users SET {column}=1 WHERE id=?1"
+            )))
+            .bind(actor.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
             for name in ["stars", "groups"] {
                 assert_eq!(
                     get(

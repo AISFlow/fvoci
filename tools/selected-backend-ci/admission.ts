@@ -1,12 +1,13 @@
 import { deepEquals, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { constants, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import {
   accessible,
   below,
   call,
+  digest,
   env,
   gid,
   groups,
@@ -19,7 +20,16 @@ import {
   tool,
   uid,
 } from "./io.ts";
-import type { AccessReceipt, Browser, Bundle, Inputs, LocalGrant, Web } from "./types.ts";
+import type {
+  AccessReceipt,
+  Browser,
+  Bundle,
+  Inputs,
+  LocalConsumerGrant,
+  LocalGrant,
+  Reference,
+  Web,
+} from "./types.ts";
 
 const localModes = ["record-before", "stage", "record-after", "run"];
 export function allocationExpiry(value: string): number {
@@ -45,6 +55,22 @@ export function localAllocation(
   mode: string,
   expected: readonly [number, number] = [1000, 1000],
 ): LocalGrant {
+  const grant = localIdentity(expected);
+  assert.ok(
+    grant.purpose === undefined ||
+      grant.purpose === "equal-work" ||
+      grant.purpose === "auth-session",
+    "selected allocation purpose only",
+  );
+  assert.ok(
+    grant.allowedModes.includes(mode) &&
+      grant.allowedModes.every((value) => localModes.includes(value)),
+  );
+  registered(grant, registeredModules);
+  return grant;
+}
+
+function localIdentity(expected: readonly [number, number]): LocalGrant {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE, "orca-local");
   assert.ok(!process.env.CI && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
   const path = env("FVOCI_SELECTED_LOCAL_ALLOCATION");
@@ -52,6 +78,8 @@ export function localAllocation(
   const facts = statSync(path);
   assert.ok(facts.uid === uid() && (facts.mode & 0o777) === 0o600);
   assert.equal(sha(path), env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
+  // Purpose belongs to each entry: the selected lanes and every local
+  // consumer admit only their own exact purposes after this shared identity.
   const grant = read(path) as LocalGrant;
   assert.ok(
     grant.schema === 1 && grant.status === "GRANTED" && grant.executionMode === "orca-local",
@@ -84,21 +112,20 @@ export function localAllocation(
     ),
     0,
   );
-  assert.ok(
-    grant.allowedModes.includes(mode) &&
-      grant.allowedModes.every((value) => localModes.includes(value)),
-  );
   assert.ok(Date.now() < allocationExpiry(grant.expiresUtc), "expired local allocation");
   assert.ok(
     isAbsolute(grant.outputRoot) &&
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),
   );
-  for (const name of registeredModules)
+  return grant;
+}
+
+function registered(grant: LocalGrant, modules: readonly string[]): void {
+  for (const name of modules)
     assert.ok(
       grant.registrationHashes[name] === sha(join(root, name)),
       "unregistered module " + name,
     );
-  return grant;
 }
 // The runner and lane driver modules a local lease is issued for: the CLI
 // entry and every module it loads (they run before this check), and the lane
@@ -112,12 +139,368 @@ export const registeredModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/equal-work.ts",
+  "tools/selected-backend-ci/drivers/equal-work-policy.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",
   "tools/selected-backend-ci/drivers/install.ts",
   "tools/selected-backend-ci/drivers/postgres.ts",
   "tools/selected-backend-ci/drivers/sqlite.ts",
+  // The auth-session lane purpose: its shared consumer and the owned SMTP sink.
+  "tools/turso/ui-auth-session.ts",
+  "tools/turso/ui-audit.ts",
+  "tools/turso/ui-common.ts",
+  "tools/turso/ui-processes.ts",
+  "tools/turso/ui-selected-native-policy.ts",
+  "apps/web/e2e-pending/collab-wire.ts",
+  "tools/web-e2e/compat.ts",
+  "tools/web-e2e/smtp-sink.ts",
+  "apps/web/e2e-pending/auth-session-contract.ts",
 ] as const;
+
+const consumerCommonModules = [
+  "tools/selected-backend-ci/admission.ts",
+  "tools/selected-backend-ci/types.ts",
+  "tools/selected-backend-ci/build.ts",
+  "tools/selected-backend-ci/io.ts",
+  "tools/web-e2e/compat.ts",
+  "tools/turso/ui-record.ts",
+  "tools/turso/ui-common.ts",
+  "tools/turso/ui-processes.ts",
+  "tools/turso/ui-server.ts",
+  "tools/turso/ui-start-diagnostic.ts",
+  "tools/turso/ui-selected-native-policy.ts",
+  "apps/web/e2e-pending/collab-wire.ts",
+] as const;
+
+export const tursoUiModules = Object.freeze([
+  ...consumerCommonModules,
+  "tools/turso/ui.ts",
+  "tools/turso/ui-flow.ts",
+  "tools/turso/ui-native.ts",
+  "tools/turso/ui-audit.ts",
+  "tools/turso/ui-container.ts",
+  "tools/turso/ui-browser-diagnostic.ts",
+  "tools/turso/ui-restore.ts",
+  "tools/turso/ui-restore-observe.ts",
+  "tools/turso/ui-restore-local.ts",
+  "tools/turso/guard.ts",
+  "tools/turso/guard-policy.ts",
+  "tools/turso/guard-io.ts",
+  "tools/turso/guard-receipts.ts",
+  "tools/turso/python-compat.ts",
+  "tools/keycloak/local-libsql.ts",
+  "tools/keycloak/redact.ts",
+  "apps/web/e2e-pending/turso-restore-playwright.config.ts",
+  "apps/web/e2e-pending/turso-restore-tsconfig.json",
+  "apps/web/e2e-pending/v060-turso-restore.acceptance.ts",
+  "apps/web/e2e-pending/turso-restore-helpers.ts",
+  "apps/web/e2e-pending/collab-playwright.config.ts",
+  "apps/web/e2e-pending/collab-helpers.ts",
+  "apps/web/e2e-pending/collab-attachment-oracle.ts",
+  "apps/web/e2e-pending/collab-restart.ts",
+  "apps/web/e2e/helpers.ts",
+  // The dedicated auth allocations of --local-auth.
+  "tools/turso/ui-auth-session.ts",
+  "tools/web-e2e/smtp-sink.ts",
+  "apps/web/e2e-pending/auth-session-playwright.config.ts",
+  "apps/web/e2e-pending/auth-session-tsconfig.json",
+  "apps/web/e2e-pending/auth-session-selected-backend.acceptance.ts",
+  "apps/web/e2e-pending/auth-session-helpers.ts",
+  "apps/web/e2e-pending/auth-session-contract.ts",
+  "apps/web/e2e-pending/selected-backend-fixture.ts",
+] as const);
+
+export const keycloakModules = Object.freeze([
+  ...consumerCommonModules,
+  "tools/keycloak/run.ts",
+  "tools/keycloak/process-witness.ts",
+  "tools/keycloak/local-libsql.ts",
+  "tools/keycloak/realm.ts",
+  "tools/keycloak/admin.ts",
+  "tools/keycloak/redact.ts",
+  "apps/web/e2e-keycloak/config.ts",
+  "apps/web/e2e-keycloak/observer.ts",
+  "apps/web/e2e-keycloak/keycloak.config.ts",
+  "apps/web/e2e-keycloak/oidc-keycloak-flow.spec.ts",
+  "apps/web/e2e/helpers.ts",
+  "tools/web-e2e/database-urls.ts",
+  "tools/selected-backend-ci/drivers/postgres.ts",
+  "tools/selected-backend-ci/drivers/binding.ts",
+  "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/restart.ts",
+] as const);
+
+const tursoUiModes = ["record-before", "freeze", "current-build", "fixture", "server", "actor"];
+const keycloakModes = ["record-before", "freeze", "current-build", "keycloak"];
+
+function ownedDirectory(path: string): void {
+  assert.ok(isAbsolute(path) && realpathSync(path) === path, "physical owned directory required");
+  const facts = lstatSync(path);
+  assert.ok(facts.isDirectory() && facts.uid === uid() && facts.gid === gid());
+  assert.equal(facts.mode & 0o777, 0o700, "private owned directory required");
+}
+
+function admittedReference(reference: Reference): void {
+  assert.ok(isAbsolute(reference.path));
+  assert.ok(!lstatSync(reference.path).isSymbolicLink() && statSync(reference.path).isFile());
+  assert.match(reference.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(sha(reference.path), reference.sha256, "local input changed");
+}
+
+function admittedCommands(grant: LocalConsumerGrant): void {
+  const entry = join(
+    root,
+    grant.purpose === "keycloak" ? "tools/keycloak/run.ts" : "tools/turso/ui.ts",
+  );
+  const expected: Record<string, string[]> = {
+    "record-before": [process.execPath, "--no-env-file", entry, "--record-before"],
+    freeze: [process.execPath, "--no-env-file", entry, "--freeze"],
+    native: [
+      grant.heavy.path,
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "--features",
+      "api-schema,db-tests",
+      "--jobs",
+      "2",
+      "--bin",
+      "fvoci-server",
+      "--bin",
+      "fvoci-migrate",
+      "--bin",
+      "fvoci-e2e-fixture",
+      "--message-format=json",
+    ],
+    engine: [
+      grant.heavy.path,
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "--manifest-path",
+      "crates/collab-engine/Cargo.toml",
+      "--features",
+      "worker",
+      "--jobs",
+      "2",
+      "--bin",
+      "collab-engine",
+      "--message-format=json",
+    ],
+    web: [process.execPath, "--bun", "run", "--cwd", "apps/web", "build"],
+  };
+  if (grant.purpose === "keycloak")
+    expected.sso = [
+      grant.heavy.path,
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--features",
+      "db-tests",
+      "--test",
+      "identity_integration",
+      "--no-run",
+      "--message-format=json",
+    ];
+  // Exactly one local Turso runtime per grant: the restore or the dedicated
+  // auth allocations. Any other argv stays unapproved.
+  if (grant.purpose === "turso-ui")
+    expected.run = [
+      process.execPath,
+      "--no-env-file",
+      entry,
+      grant.stageCommands.run?.[3] === "--local-auth" ? "--local-auth" : "--local-restore",
+    ];
+  else if (grant.stageCommands.run) {
+    const command = grant.stageCommands.run;
+    assert.ok(command, "exact Keycloak runtime command required");
+    const backend = command[3]?.replace(/^--backend=/, "");
+    assert.ok(backend);
+    assert.ok(
+      grant.keycloak?.backends.includes(backend as "postgres" | "sqlite" | "libsql-remote"),
+    );
+    expected.run = [process.execPath, "--no-env-file", entry, "--backend=" + backend];
+    if (command.length === 5) {
+      assert.ok(backend === "postgres" && grant.keycloak?.sso);
+      expected.run.push("--workspace-sso");
+    }
+  }
+  assert.ok(Object.keys(grant.stageCommands).length > 0);
+  for (const [stage, argv] of Object.entries(grant.stageCommands))
+    assert.ok(
+      expected[stage] && deepEquals(argv, expected[stage]),
+      "unapproved consumer stage argv",
+    );
+}
+
+function admittedProcessObserver(grant: LocalConsumerGrant): void {
+  const witness = grant.keycloak?.processObserver;
+  assert.ok(witness, "Keycloak runtime process observer required");
+  assert.ok(isAbsolute(witness.directory) && realpathSync(witness.directory) === witness.directory);
+  for (let path = witness.directory; ; path = dirname(path)) {
+    const facts = lstatSync(path);
+    assert.ok(
+      facts.isDirectory() &&
+        facts.uid === 0 &&
+        facts.gid === 0 &&
+        (facts.mode & 0o022) === 0 &&
+        !accessible(path, constants.W_OK),
+      "mutable root observer ancestor refused",
+    );
+    if (dirname(path) === path) break;
+  }
+  assert.equal(statSync(witness.directory).mode & 0o777, 0o711);
+  for (const [reference, mode] of [
+    [witness.bun, 0o555],
+    [witness.module, 0o444],
+    [witness.config, 0o444],
+  ] as const) {
+    assert.equal(dirname(reference.path), witness.directory);
+    admittedReference(reference);
+    const facts = lstatSync(reference.path);
+    assert.ok(
+      facts.uid === 0 &&
+        facts.gid === 0 &&
+        facts.nlink === 1 &&
+        (facts.mode & 0o7777) === mode &&
+        !accessible(reference.path, constants.W_OK),
+      "root observer file identity refused",
+    );
+  }
+  assert.equal(witness.bun.sha256, sha(process.execPath));
+  assert.equal(witness.module.sha256, sha(join(root, "tools/keycloak/process-witness.ts")));
+  assert.equal(witness.config.sha256, digest(""));
+}
+
+function consumerAllocation(
+  mode: string,
+  purpose: "turso-ui" | "keycloak",
+  expected: readonly [number, number] = [1000, 1000],
+): LocalConsumerGrant {
+  const grant = localIdentity(expected) as LocalConsumerGrant;
+  assert.equal(call(["git", "status", "--short"]), "", "current consumer source must be clean");
+  assert.equal(grant.purpose, purpose, "local consumer purpose mismatch");
+  if (purpose === "turso-ui")
+    assert.equal(grant.keycloak, undefined, "Turso allocation cannot grant Keycloak");
+  else
+    assert.equal(
+      grant.canonicalRuntime,
+      undefined,
+      "Keycloak allocation cannot grant Turso containers",
+    );
+  const modes = purpose === "turso-ui" ? tursoUiModes : keycloakModes;
+  assert.ok(
+    grant.allowedModes.includes(mode) && grant.allowedModes.every((v) => modes.includes(v)),
+  );
+  const modules = purpose === "turso-ui" ? tursoUiModules : keycloakModules;
+  assert.ok(deepEquals(Object.keys(grant.registrationHashes).sort(), [...modules].sort()));
+  registered(grant, modules);
+  ownedDirectory(grant.outputRoot);
+  assert.equal(env("RUNNER_TEMP"), grant.outputRoot);
+  admittedReference(grant.heavy);
+  assert.ok(accessible(grant.heavy.path, constants.R_OK | constants.X_OK));
+  admittedCommands(grant);
+  if (mode === "record-before" || mode === "freeze")
+    assert.ok(grant.stageCommands[mode], "current build stage argv required");
+  else if (mode !== "current-build")
+    assert.ok(grant.stageCommands.run, "current runtime stage argv required");
+  assert.match(grant.inputSha256, /^[0-9a-f]{64}$/);
+  assert.equal(
+    grant.inputSha256,
+    digest(
+      JSON.stringify({
+        purpose: grant.purpose,
+        source: grant.source,
+        tree: grant.tree,
+        registrationHashes: grant.registrationHashes,
+        stageCommands: grant.stageCommands,
+        heavy: grant.heavy,
+        build: grant.build ?? null,
+        localLibsql: grant.localLibsql ?? null,
+        canonicalRuntime: grant.canonicalRuntime ?? null,
+        keycloak: grant.keycloak ?? null,
+      }),
+    ),
+    "local consumer input binding changed",
+  );
+  if (mode === "record-before" || mode === "freeze") return grant;
+  assert.ok(grant.build, "current build seal required");
+  assert.equal(grant.build.manifest.path, join(grant.outputRoot, "turso-ui/current-build.json"));
+  assert.equal(
+    grant.build.physical.path,
+    join(grant.outputRoot, "turso-ui/physical-before.private.json"),
+  );
+  admittedReference(grant.build.manifest);
+  admittedReference(grant.build.physical);
+  if (mode === "current-build") return grant;
+  if (purpose === "turso-ui" || grant.keycloak?.backends.includes("libsql-remote")) {
+    const local = grant.localLibsql;
+    assert.ok(local, "owned local libSQL fixture required");
+    assert.equal(local.host, "127.0.0.1");
+    assert.equal(local.port, 0);
+    assert.equal(local.tls, "generated-private-san-ip-loopback");
+    assert.equal(local.childOnlyTrust, true);
+    assert.match(local.label, /^fvoci-[a-z0-9-]+$/);
+    assert.ok(below(local.directory, grant.outputRoot) && local.directory !== grant.outputRoot);
+    admittedReference(local.binary);
+    // The shared fixture enforces the official binary pin and proves its
+    // actual child/socket/certificate before handing its private env over.
+    // This is the allowed parent, not a caller-provided existing endpoint.
+    // Every run allocates a new child directory below it; the shared fixture
+    // observes the actual bound child/socket before releasing its env.
+  }
+  if (purpose === "turso-ui") {
+    assert.ok(grant.canonicalRuntime?.networkAuthorized === true);
+    assert.match(grant.canonicalRuntime.imageId, /^sha256:[0-9a-f]{64}$/);
+    admittedReference(grant.canonicalRuntime.shellProof);
+    assert.equal(grant.keycloak, undefined, "Turso allocation cannot grant Keycloak");
+  } else {
+    const keycloak = grant.keycloak;
+    assert.ok(keycloak && keycloak.backends.length > 0);
+    assert.equal(new Set(keycloak.backends).size, keycloak.backends.length);
+    assert.ok(keycloak.backends.every((v) => ["postgres", "sqlite", "libsql-remote"].includes(v)));
+    assert.equal(keycloak.heavy, grant.heavy.path);
+    if (keycloak.sqld) {
+      admittedReference(keycloak.sqld);
+      assert.ok(deepEquals(keycloak.sqld, grant.localLibsql?.binary));
+    }
+    if (keycloak.sso) admittedReference(keycloak.sso);
+    admittedProcessObserver(grant);
+    if (keycloak.chromiumTmp) {
+      assert.match(keycloak.chromiumTmp, /^\/tmp\/fvoci-[a-z0-9-]+$/);
+      assert.equal(realpathSync(keycloak.chromiumTmp), keycloak.chromiumTmp);
+      const facts = statSync(keycloak.chromiumTmp);
+      assert.ok(facts.isDirectory() && facts.uid === uid() && (facts.mode & 0o777) === 0o711);
+    }
+    assert.equal(
+      grant.canonicalRuntime,
+      undefined,
+      "Keycloak allocation cannot grant Turso containers",
+    );
+  }
+  return grant;
+}
+
+/** Each entry owns its static policy; callers cannot supply a smaller registry. */
+export const localTursoUiAllocation = (
+  mode: string,
+  expected?: readonly [number, number],
+): LocalConsumerGrant => consumerAllocation(mode, "turso-ui", expected);
+export const localKeycloakAllocation = (mode: string): LocalConsumerGrant =>
+  consumerAllocation(mode, "keycloak");
+/** The granted local Turso runtime argv selects exactly one consumer entry. */
+export function localTursoUiRun(
+  mode: "--local-restore" | "--local-auth",
+  expected?: readonly [number, number],
+): LocalConsumerGrant {
+  const grant = localTursoUiAllocation("server", expected);
+  assert.equal(grant.stageCommands.run?.[3], mode, "unapproved consumer stage argv");
+  return grant;
+}
 
 // The whole-flow job and the five per-lane jobs that start the selected runtime.
 export const runtimeJobs = [
@@ -420,7 +803,7 @@ export function configListInputs(
   for (const name of ["@playwright/test", "playwright", "playwright-core"]) {
     const path = join(checkout, "node_modules", name, "package.json"),
       data = read(path) as { version: string; bin?: { playwright: string } };
-    assert.equal(data.version, "1.63.0");
+    assert.equal(data.version, "1.64.0");
     if (name === "playwright") assert.equal(data.bin?.playwright, "cli.js");
     modules[name] = sha(path);
   }

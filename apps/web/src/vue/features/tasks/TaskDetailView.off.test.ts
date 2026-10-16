@@ -21,7 +21,7 @@ const functions = source.statements
   .join("\n");
 const script = ts.transpile(functions, {
   target: ts.ScriptTarget.ES2022,
-  module: ts.ModuleKind.None,
+  module: ts.ModuleKind.ESNext,
 });
 function deferred() {
   let resolve!: (value: boolean) => void;

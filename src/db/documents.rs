@@ -302,7 +302,7 @@ pub async fn document_permissions(
     // The grant arm is `group_document_grant_roles_select_sql` with the
     // document parameter widened to `= ANY($2)`; one row per (document, grant).
     let join = group_members_join_sql("dm", "gm");
-    let rows: Vec<DocumentGrantRow> = sqlx::query_as(&format!(
+    let rows: Vec<DocumentGrantRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         r#"
             SELECT d.id, d.project_id, d.deleted_at, g.role
             FROM fvoci.documents d
@@ -317,7 +317,7 @@ pub async fn document_permissions(
             ) g ON g.document_id = d.id
             WHERE d.workspace_id = $1 AND d.id = ANY($2)
             "#
-    ))
+    )))
     .bind(workspace_id)
     .bind(document_ids)
     .bind(user_id)
@@ -359,12 +359,12 @@ async fn wiki_group_roles(
     document_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String,)>(&format!(
+    let rows = sqlx::query_as::<_, (String,)>(sqlx::AssertSqlSafe(format!(
         r#"
         {}
         "#,
         group_document_grant_roles_select_sql(1, 2, 3)
-    ))
+    )))
     .bind(workspace_id)
     .bind(document_id)
     .bind(user_id)
@@ -1347,7 +1347,7 @@ impl OperationTx<'_, '_> {
             Self::Postgres(tx) => {
                 let guest_wiki = guest_wiki_document_ids_select_sql(1, 3);
                 let visible_project = visible_project_sql("p", 2, 3);
-                sqlx::query_as::<_, TreeRow>(&format!(
+                sqlx::query_as::<_, TreeRow>(sqlx::AssertSqlSafe(format!(
                     r#"
         SELECT d.id, d.workspace_id, d.parent_id, d.project_id, d.title,
                d.icon, d.path, d.sort_key, d.number, d.status
@@ -1368,7 +1368,7 @@ impl OperationTx<'_, '_> {
           ))
         ORDER BY d.sort_key COLLATE "C", d.id
         "#
-                ))
+                )))
                 .bind(workspace_id)
                 .bind(guest)
                 .bind(actor_user_id)

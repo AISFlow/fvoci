@@ -4,7 +4,7 @@
 //! Rust's own collections abort on allocation failure (SIGABRT, which the
 //! parent classifies as a resource limit). Some libraries instead see the null
 //! pointer and panic: `zlib-rs` (flate2's backend once `docx-rs` and
-//! `docx-zip` enable `zip/deflate`) asserts in `InflateStream::new`. Without
+//! FVOCI's own `zip` enable `zip/deflate`) asserts in `InflateStream::new`. Without
 //! this record such a panic reads as "the bytes broke the parser". `main`
 //! installs [`RecordingAlloc`] as the global allocator; the office child's
 //! panic hook aborts when [`allocation_failed`] is set.

@@ -38,6 +38,23 @@ test("lost success survives a new consumer with original payload and command UUI
   forgetCommand(s, retry);
   expect(recoverCommand(s, A)).toBeNull();
 });
+test("a stored command with any 8-4-4-4-12 hex ids stays recoverable unchanged", () => {
+  // Version and variant nibbles outside RFC 9562, which the stored ids were never checked for.
+  const s = storage(),
+    loose: PendingInputCommand = {
+      actorId: "00000000-0000-0000-0000-000000000001",
+      workspaceId: "11111111-1111-1111-1111-111111111111",
+      body: {
+        requestId: "0190a0c6-9a1e-0cc1-ca3b-0123456789AB",
+        intent: "note",
+        title: "보관된 명령",
+        projectId: "22222222-2222-2222-2222-222222222222",
+        source: { documentId: "33333333-3333-3333-3333-333333333333", anchor: null },
+      },
+    };
+  rememberCommand(s, loose);
+  expect(recoverCommand(s, loose.actorId)).toEqual(loose);
+});
 test("old success cannot erase a separately abandoned/new pending command", () => {
   const s = storage(),
     old = command();

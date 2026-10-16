@@ -224,13 +224,18 @@ describe("postgres budget", () => {
 
 describe("selected library", () => {
   // The per-test result rule moved with the runner: xtask/src/selected_library.rs tests it.
-  test("the registry keeps 54 filters and the original44 prefix", () => {
-    expect(RUST_SELECTED_LIBRARY_FILTERS).toHaveLength(54);
+  test("the registry keeps 56 filters and the original44 and all54 prefixes", () => {
+    expect(RUST_SELECTED_LIBRARY_FILTERS).toHaveLength(56);
     expect(
       createHash("sha256")
         .update(RUST_SELECTED_LIBRARY_FILTERS.slice(0, 44).join("\n"))
         .digest("hex"),
     ).toBe("b1d7fff1c44346a300454eff3b0721e1a2078842308a1847b9e9411e23741cb1");
+    expect(
+      createHash("sha256")
+        .update(RUST_SELECTED_LIBRARY_FILTERS.slice(0, 54).join("\n"))
+        .digest("hex"),
+    ).toBe("aa10daa88b6f9860b43bfb628edb535f185cd4dacd7f1faad27f7d2178ab7498");
   });
 
   test("the workflow check reads the runner's filter file from the verified tree", () => {
@@ -238,7 +243,7 @@ describe("selected library", () => {
     const text = RUST_SELECTED_LIBRARY_FILTERS.join("\n") + "\n";
     const unreadable = `rust: selected library filters must be the LF-terminated UTF-8 file ${RUST_SELECTED_LIBRARY_FILTERS_FILE}`;
     const registry =
-      "rust: selected library registry must retain all54 exact filters (original44 prefix and member10)";
+      "rust: selected library registry must retain all56 exact filters (all54 prefix and libdebt2)";
     const dir = mkdtempSync(join(tmpdir(), "rust1-filters-"));
     const check = (body?: string | Uint8Array) => {
       rmSync(join(dir, "xtask"), { recursive: true, force: true });
@@ -287,11 +292,14 @@ describe("selected library", () => {
       swap(33),
       swap(35),
       swap(44),
+      swap(53),
+      swap(54),
       all.slice(0, 18),
       all.slice(0, 28),
       all.slice(0, 33),
       all.slice(0, 35),
       all.slice(0, 44),
+      all.slice(0, 54),
     ];
     all.forEach((_, index) => variants.push(all.filter((__, i) => i !== index)));
     for (let index = 18; index < all.length; index++) {
@@ -300,7 +308,7 @@ describe("selected library", () => {
     }
     for (const filters of variants) {
       expect(verifySelectedLibraryExecution(jobs, filters)).toContain(
-        "rust: selected library registry must retain all54 exact filters (original44 prefix and member10)",
+        "rust: selected library registry must retain all56 exact filters (all54 prefix and libdebt2)",
       );
     }
   });

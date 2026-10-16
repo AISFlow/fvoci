@@ -17,9 +17,12 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { deepEquals } from "bun";
 import { dirname, isAbsolute, join } from "node:path";
-import { root as checkout, sha, uid } from "../selected-backend-ci/io.ts";
+import { root as checkout, sha, uid, gid, write, jsonText } from "../selected-backend-ci/io.ts";
+import { image as finalFixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import {
+  FIXTURE_BUDGET,
   fixtureInput,
   cleanEnv,
   decodeUtf8,
@@ -55,11 +58,12 @@ import {
   type ProcRow,
   type Scope,
 } from "./ui-processes.ts";
-import { loadLocalLease, type LocalLease, type Manifest } from "./ui-record.ts";
+import { currentBuild, loadLocalLease, type LocalLease, type Manifest } from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
 
+// Hosted qualification only; local authority supplies its own qualified digest.
 export const QUALIFIED_CANONICAL_IMAGE =
   "sha256:396a5f8e43e8de4b2e1567f2c8a8e841bf45037a4e4ff7cb76dc384951025f35";
 export const QUALIFIED_SHELL = "/bin/sh";
@@ -73,6 +77,8 @@ export const DAEMON_CAPS: Readonly<Record<string, string>> = {
 export const SECRET_ENV_KEYS = ["FVOCI_LIBSQL_URL", "FVOCI_LIBSQL_AUTH_TOKEN"];
 export const NATIVE_CAPSULE_KEYS = [
   ...SECRET_ENV_KEYS,
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
   "PASSWORD_PEPPER_KEYS",
   "PASSWORD_PEPPER_ACTIVE_KEY_ID",
   "ENCRYPTION_KEYS",
@@ -82,7 +88,11 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_TEST_TURSO_DESTRUCTIVE",
   "E2E_DATABASE_BACKEND",
   "FVOCI_E2E_TURSO_UI_SELECTED",
+  "FVOCI_E2E_SQLITE_OBSERVER_SELECTED",
+  "FVOCI_E2E_SQLITE_RUN_ROOT",
+  "FVOCI_E2E_SQLITE_PATH",
   "FVOCI_DATABASE_BACKEND",
+  "FVOCI_SQLITE_PATH",
   "FVOCI_REALTIME_MODE",
   "FVOCI_BIND",
   "FVOCI_PUBLIC_ORIGIN",
@@ -99,6 +109,14 @@ export const NATIVE_CAPSULE_KEYS = [
   "FVOCI_MAINTENANCE_INTERVAL_SECS",
   "FVOCI_UPLOAD_GC_INTERVAL_SECS",
   "FVOCI_REVISION_SWEEP_INTERVAL_SECS",
+  "REVISION_KEEP",
+  "REVISION_SNAPSHOT_INTERVAL_HOURS",
+  "METRICS_ALLOW_IPS",
+  // The normal mailer relay of a dedicated auth allocation: an owned loopback
+  // sink, no SMTP credential. The native fixture never receives it.
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_FROM",
 ];
 export const FIXED_LAUNCHER =
   "#!/bin/sh\n" +
@@ -124,7 +142,7 @@ export const BINARY_DST = "/fvoci-current/bin";
 export const DIST_DST = "/fvoci-current/dist";
 export const ONE_SHOT_LIVE = "unsupported-before-execution";
 export const BLOCKED = "BLOCKED";
-export const FIXTURE_BUDGET = 120;
+export { FIXTURE_BUDGET } from "./ui-common.ts";
 export const STAT_READ_BOUND = 512;
 export const STAT_BODY_MAX = 511;
 export const STAT_FIFO_NAME = "stat.ready";
@@ -147,6 +165,8 @@ export interface Bound {
 }
 /** Server allocation state carried from start to stop. */
 export interface ServerHandle {
+  /** Actual sealed hosted image of a final-only owned container. */
+  runtimeImage?: string;
   child: Child;
   containerId?: string;
   goFd?: number | null;
@@ -170,6 +190,9 @@ export function allocationCaps(grant?: unknown): Record<string, string> {
 }
 
 export function readShellProof(runtime: unknown): string {
+  const image = isRecord(runtime) ? runtime.imageId : undefined;
+  require(typeof image === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(image), "UI_CANONICAL_SHELL_UNAVAILABLE");
   const proof = isRecord(runtime) ? runtime.shellProof : undefined;
   require(isRecord(proof), "UI_CANONICAL_SHELL_UNAVAILABLE");
   const path = proof.path,
@@ -177,26 +200,83 @@ export function readShellProof(runtime: unknown): string {
   require(typeof path === "string" &&
     path.startsWith("/") &&
     !path.startsWith("//"), "UI_CANONICAL_SHELL_UNAVAILABLE");
-  let link: boolean;
+  let file: boolean;
   try {
-    link = lstatSync(path).isSymbolicLink();
+    file = lstatSync(path).isFile();
   } catch {
-    link = false;
+    file = false;
   }
-  require(isAbsolute(path) && !link, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  require(isAbsolute(path) && file, "UI_CANONICAL_SHELL_UNAVAILABLE");
   require(typeof hash === "string" &&
     /^[0-9a-f]{64}$/.test(hash), "UI_CANONICAL_SHELL_UNAVAILABLE");
   require(sha(path) === hash, "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const config = record(JSON.parse(readFileSync(path, "utf8")), "Config");
-  require(config.Image === QUALIFIED_CANONICAL_IMAGE &&
-    get(runtime, "imageId") === QUALIFIED_CANONICAL_IMAGE, "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const cmd = Array.isArray(config.Cmd) ? config.Cmd : [];
-  require(cmd.includes(QUALIFIED_SHELL), "UI_CANONICAL_SHELL_UNAVAILABLE");
-  const environment = Array.isArray(config.Env) ? config.Env : [];
-  require(!environment.some(
-    (item) => String(item).startsWith("FVOCI_LIBSQL_") || String(item).startsWith("ENCRYPTION_"),
-  ), "UI_DOCKER_ENV_SECRET_REFUSED");
+  const inspect: unknown = JSON.parse(readFileSync(path, "utf8"));
+  require(isRecord(inspect) &&
+    isRecord(inspect.Config) &&
+    isRecord(inspect.State), "UI_CANONICAL_SHELL_UNAVAILABLE");
+  const config = inspect.Config,
+    state = inspect.State;
+  require(config.Image === image &&
+    inspect.Image === image &&
+    inspect.Path === QUALIFIED_SHELL &&
+    Array.isArray(config.Entrypoint) &&
+    config.Entrypoint.length === 1 &&
+    config.Entrypoint[0] === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  require(state.Status === "exited" &&
+    state.Running === false &&
+    state.Pid === 0 &&
+    state.ExitCode === 0 &&
+    state.OOMKilled === false &&
+    state.Error === "" &&
+    typeof state.FinishedAt === "string" &&
+    Date.parse(state.FinishedAt) > 0, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  admitLocalConfig(config);
   return QUALIFIED_SHELL;
+}
+
+function canonicalImage(grant: unknown): string {
+  if (executionMode() === "github-ci") {
+    if (isRecord(grant) && isRecord(grant.finalRuntime)) {
+      require(grant.finalRuntime.reference === finalFixtureImage &&
+        typeof grant.finalRuntime.imageId === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(grant.finalRuntime.imageId), "UI_FINAL_RUNTIME_IMAGE_REFUSED");
+      return grant.finalRuntime.imageId;
+    }
+    return QUALIFIED_CANONICAL_IMAGE;
+  }
+  const runtime = get(grant, "canonicalRuntime");
+  require(readShellProof(runtime) === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  return get(runtime, "imageId") as string;
+}
+
+function containerUser(context: unknown): { uid: number; gid: number } {
+  if (executionMode() === "github-ci" && isRecord(context) && isRecord(context.finalRuntime)) {
+    const user = uid(),
+      group = gid();
+    require(user > 0 &&
+      group > 0 &&
+      context.finalRuntime.uid === user &&
+      context.finalRuntime.gid === group, "UI_FINAL_RUNTIME_USER_CHANGED");
+    return { uid: user, gid: group };
+  }
+  return { uid: 1000, gid: 1000 };
+}
+
+/** Local receipts and inherited image config must publish no private inputs. */
+function admitLocalConfig(config: Record_, secretValues: string[] = []): void {
+  require(config.Env === null ||
+    (Array.isArray(config.Env) &&
+      config.Env.every((item) => typeof item === "string")), "UI_DOCKER_ENV_SECRET_REFUSED");
+  const environment = config.Env ?? [];
+  require(!environment.some((item) => {
+    const key = item.split("=", 1)[0] as string;
+    return (
+      key.startsWith("FVOCI_LIBSQL_") ||
+      key.startsWith("ENCRYPTION_") ||
+      /PASSWORD|TOKEN|SECRET|CREDENTIAL/.test(key)
+    );
+  }), "UI_DOCKER_ENV_SECRET_REFUSED");
+  admitPublishedConfig(Array.isArray(config.Cmd) ? config.Cmd : [], environment, secretValues);
 }
 
 export function openReferencedGrant(
@@ -240,9 +320,30 @@ export function capsuleText(environment: Record<string, string>): string {
       !value.includes("\n"), "UI_DOCKER_ENV_SECRET_REFUSED");
     lines.push(key + "=" + shellQuote(value) + "\n");
   }
-  require(SECRET_ENV_KEYS.every((key) =>
-    lines.some((line) => line.startsWith(key + "=")),
-  ), "UI_DOCKER_ENV_SECRET_REFUSED");
+  if (environment.FVOCI_E2E_SQLITE_OBSERVER_SELECTED === "1") {
+    const directory = environment.FVOCI_E2E_SQLITE_RUN_ROOT,
+      file = environment.FVOCI_E2E_SQLITE_PATH;
+    require(environment.E2E_DATABASE_BACKEND === "sqlite" &&
+      environment.FVOCI_DATABASE_BACKEND === "sqlite" &&
+      typeof directory === "string" &&
+      isAbsolute(directory) &&
+      file === join(directory, "app.sqlite") &&
+      SECRET_ENV_KEYS.every((key) => !Object.hasOwn(environment, key)) &&
+      !Object.hasOwn(environment, "PASSWORD_PEPPER_KEYS") &&
+      !Object.hasOwn(environment, "ENCRYPTION_KEYS"), "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+  } else if (environment.FVOCI_DATABASE_BACKEND === "sqlite") {
+    const file = environment.FVOCI_SQLITE_PATH,
+      storage = environment.FVOCI_STORAGE_DIR;
+    require(typeof file === "string" &&
+      typeof storage === "string" &&
+      file === join(storage, "app.sqlite") &&
+      SECRET_ENV_KEYS.every(
+        (key) => !Object.hasOwn(environment, key),
+      ), "UI_SQLITE_DESTINATION_REFUSED");
+  } else
+    require(SECRET_ENV_KEYS.every((key) =>
+      lines.some((line) => line.startsWith(key + "=")),
+    ), "UI_DOCKER_ENV_SECRET_REFUSED");
   return lines.join("");
 }
 
@@ -285,11 +386,15 @@ export function containerArgv(
 ): string[] {
   require(launcher.startsWith("/") && capsule.startsWith("/"), "UI_CURRENT_ARTIFACT_MISSING");
   const caps = allocationCaps(grant);
+  const image = canonicalImage(grant);
+  const user = containerUser(grant);
   const limit = caps["memory.max"] as string;
   const memory = limit === "max" ? [] : ["--memory", limit, "--memory-swap", limit];
   const argv = [
     "docker",
     "create",
+    ...(binary === BINARY_DST + "/fvoci-e2e-fixture" ? ["--interactive"] : []),
+    ...(executionMode() === "orca-local" ? ["--pull", "never"] : []),
     "--name",
     name,
     "--read-only",
@@ -298,18 +403,18 @@ export function containerArgv(
     "--security-opt",
     "no-new-privileges",
     "--user",
-    "1000:1000",
+    String(user.uid) + ":" + String(user.gid),
     ...memory,
     "--pids-limit",
     caps["pids.max"] as string,
     "--tmpfs",
-    "/tmp:rw,noexec,nosuid,size=67108864,uid=1000,gid=1000",
+    "/tmp:rw,noexec,nosuid,size=67108864,uid=" + String(user.uid) + ",gid=" + String(user.gid),
     "--network",
     "host",
     "--entrypoint",
     QUALIFIED_SHELL,
-    ...mountArgs,
-    QUALIFIED_CANONICAL_IMAGE,
+    ...mountArgs.flatMap((mount) => ["--mount", mount]),
+    image,
     LAUNCHER_DST,
     CAPSULE_DST,
     binary,
@@ -357,12 +462,22 @@ export function creationIdentity(
   argv: string[],
   secretValues: string[],
   kind: string,
+  grant?: unknown,
 ): Creation {
   const config = record(inspect, "Config"),
     host = record(inspect, "HostConfig");
   require(get(inspect, "State", "Pid") === 0 &&
     get(inspect, "State", "Running") === false, "UI_DAEMON_PID_REFUSED");
-  require(config.Image === QUALIFIED_CANONICAL_IMAGE, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  const image = canonicalImage(grant);
+  require(config.Image === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+  if (isRecord(grant) && grant.finalRuntime !== undefined)
+    require(get(inspect, "Image") === image &&
+      get(inspect, "Path") === QUALIFIED_SHELL, "UI_FINAL_RUNTIME_IMAGE_CHANGED");
+  if (executionMode() === "orca-local") {
+    require(get(inspect, "Image") === image &&
+      get(inspect, "Path") === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+    admitLocalConfig(config, secretValues);
+  }
   const entrypoint = Array.isArray(config.Entrypoint) ? config.Entrypoint : [];
   require(entrypoint.length === 1 &&
     entrypoint[0] === QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
@@ -377,7 +492,9 @@ export function creationIdentity(
   require(host.ReadonlyRootfs === true &&
     capDrop.length === 1 &&
     capDrop[0] === "ALL", "UI_DAEMON_CAP_REFUSED");
-  require(config.User === "1000:1000" && host.Privileged !== true, "UI_DAEMON_CAP_REFUSED");
+  const user = containerUser(grant);
+  require(config.User === String(user.uid) + ":" + String(user.gid) &&
+    host.Privileged !== true, "UI_DAEMON_CAP_REFUSED");
   // Present CPU fields must be the Docker zero values. Missing fields are not proof.
   if (Object.hasOwn(host, "CpuQuota"))
     require(isInt(host.CpuQuota) && host.CpuQuota === 0, "UI_DAEMON_CAP_REFUSED");
@@ -390,7 +507,7 @@ export function creationIdentity(
     qualification: BLOCKED,
     cgroupCaps: "not-observed",
     shell: QUALIFIED_SHELL,
-    image: QUALIFIED_CANONICAL_IMAGE,
+    image,
   };
 }
 
@@ -486,8 +603,13 @@ export const openStatReader = (path: string) => openSync(path, statOpenFlags());
 export const openGoHolder = (path: string) => openSync(path, goOpenFlags());
 
 /** select(2) on the stat FIFO until readable or the budget ends; one bounded read. */
-export async function readStatOnce(fd: number, deadline: number): Promise<string> {
+export async function readStatOnce(
+  fd: number,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<string> {
   for (;;) {
+    signal?.throwIfAborted();
     budgetRemain(deadline);
     if (readable(fd)) break;
     await pause(20);
@@ -600,9 +722,11 @@ export function bindPausedShell(
   const expected = allocationCaps(grant);
   for (const [key, required] of Object.entries(expected))
     require(caps[key] === required, "UI_DAEMON_CAP_REFUSED");
-  const fixed = (value: unknown) =>
-    Array.isArray(value) && value.length === 4 && value.every((item) => item === 1000);
-  require(fixed(credentials.uid) && fixed(credentials.gid), "UI_DAEMON_PID_REFUSED");
+  const user = containerUser(grant);
+  const fixed = (value: unknown, expected: number) =>
+    Array.isArray(value) && value.length === 4 && value.every((item) => item === expected);
+  require(fixed(credentials.uid, user.uid) &&
+    fixed(credentials.gid, user.gid), "UI_DAEMON_PID_REFUSED");
   return {
     maintenance: { pid: namespace, startTicks: ticks },
     retirement: { pid, startTicks: ticks },
@@ -707,12 +831,14 @@ export async function releaseAttached(
   deadline: number,
   grant: unknown,
   proc: DaemonProc = linuxProc,
+  signal?: AbortSignal,
 ): Promise<[Bound, number]> {
+  signal?.throwIfAborted();
   const statFd = openStatReader(join(directory, STAT_FIFO_NAME));
   let goFd: number | null = null;
   try {
     goFd = openGoHolder(join(directory, GO_FIFO_NAME));
-    const statText = await readStatOnce(statFd, deadline);
+    const statText = await readStatOnce(statFd, deadline, signal);
     const sample = await samplePausedDaemon(
       scope,
       containerId,
@@ -722,6 +848,7 @@ export async function releaseAttached(
       grant,
       proc,
     );
+    signal?.throwIfAborted();
     writeGoOnce(goFd);
     return [sample, goFd];
   } catch (error) {
@@ -967,15 +1094,34 @@ export async function publishContainer(
   grantFor: (kind: string) => Record_ = (k) => openReferencedGrant(k),
 ): Promise<[string, Creation, Record_]> {
   const grant = grantFor(kind);
-  const secretValues = SECRET_ENV_KEYS.map((key) => get(environment, key) as string);
+  const secretValues = SECRET_ENV_KEYS.flatMap((key) =>
+    typeof environment[key] === "string" ? [environment[key]] : [],
+  );
   if (environment.ENCRYPTION_KEYS) secretValues.push(environment.ENCRYPTION_KEYS);
+  // No create/start or private FIFO/capsule publication before local qualification.
+  if (executionMode() === "orca-local") {
+    allocationCaps(grant);
+    const image = canonicalImage(grant);
+    require(scope !== null, "UI_OWNED_PROCESS_SCOPE_REQUIRED");
+    const inspected = parseBytes(
+      await docker.client(scope, ["docker", "image", "inspect", image], 10),
+    );
+    require(Array.isArray(inspected) &&
+      inspected.length === 1 &&
+      get(inspected, 0, "Id") === image, "UI_CANONICAL_SHELL_UNAVAILABLE");
+    admitLocalConfig(record(inspected, 0, "Config"), secretValues);
+  }
   const storage = environment.FVOCI_STORAGE_DIR;
   require(typeof storage === "string" &&
     storage.startsWith("/") &&
     !storage.includes(","), "UI_CURRENT_ARTIFACT_MISSING");
   const prepared: Record<string, string> = {};
   for (const key of NATIVE_CAPSULE_KEYS) {
-    if (binaryName === "fvoci-e2e-fixture" && key.startsWith("ENCRYPTION_")) continue;
+    if (
+      binaryName === "fvoci-e2e-fixture" &&
+      (key.startsWith("ENCRYPTION_") || key.startsWith("SMTP_"))
+    )
+      continue;
     if (Object.hasOwn(environment, key)) prepared[key] = environment[key] as string;
   }
   prepared.FVOCI_COLLAB_ENGINE = BINARY_DST + "/collab-engine";
@@ -996,6 +1142,24 @@ export async function publishContainer(
       mountSpec(join(checkout, "apps/web/dist"), DIST_DST, true),
       mountSpec(storage, storage, false),
     ];
+    if (prepared.FVOCI_E2E_SQLITE_OBSERVER_SELECTED === "1") {
+      require(binaryName === "fvoci-e2e-fixture" &&
+        ["baseline", "observe", "serial-observe"].includes(command[0] ?? "") &&
+        command.length === 1, "UI_SQLITE_OBSERVER_MODE_REFUSED");
+      mounts.push(
+        mountSpec(
+          prepared.FVOCI_E2E_SQLITE_RUN_ROOT as string,
+          prepared.FVOCI_E2E_SQLITE_RUN_ROOT as string,
+          false,
+        ),
+      );
+    }
+    if (environment.SSL_CERT_FILE) {
+      require(isAbsolute(environment.SSL_CERT_FILE) &&
+        !lstatSync(environment.SSL_CERT_FILE).isSymbolicLink() &&
+        statSync(environment.SSL_CERT_FILE).isFile(), "UI_LOCAL_CA_REFUSED");
+      mounts.push(mountSpec(environment.SSL_CERT_FILE, environment.SSL_CERT_FILE, true));
+    }
     const argv = containerArgv(
       "fvoci-tui-" + token(6),
       launcher,
@@ -1012,15 +1176,37 @@ export async function publishContainer(
     const inspected = parseBytes(
       await docker.client(scope, ["docker", "inspect", containerId], 10),
     );
-    const creation = creationIdentity(get(inspected, 0), argv, secretValues, kind);
+    const creation = creationIdentity(get(inspected, 0), argv, secretValues, kind, grant);
     require(creation.qualification === BLOCKED &&
-      get(grant, "canonicalRuntime", "imageId") ===
-        creation.image, "UI_DAEMON_OBSERVATION_UNSUPPORTED");
+      canonicalImage(grant) === creation.image, "UI_DAEMON_OBSERVATION_UNSUPPORTED");
     scope.io.write(join(directory, "creation-identity.private.json"), creation);
     return [containerId, creation, grant];
   } catch (original) {
     await releaseFailedPublish(scope as Scope, directory, containerId, original);
     throw original as Error;
+  }
+}
+
+/** Interrupt only the wait; the existing fixture owner still settles its
+ * output and performs its container/FD/FIFO cleanup before returning failure. */
+async function interruptibleFixtureOutput(
+  output: Promise<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (signal === undefined) return output;
+  signal.throwIfAborted();
+  let stop: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    stop = () => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new UiError("UI_PARENT_INTERRUPT"));
+    };
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  try {
+    return await Promise.race([output, aborted]);
+  } finally {
+    if (stop !== undefined) signal.removeEventListener("abort", stop);
   }
 }
 
@@ -1031,11 +1217,15 @@ export async function localFixture(
   environment: Record<string, string>,
   input?: Record_,
   proc: DaemonProc = linuxProc,
+  publish: typeof publishContainer = publishContainer,
+  signal?: AbortSignal,
+  pending?: { output?: Promise<Uint8Array> },
 ): Promise<Record_> {
+  signal?.throwIfAborted();
   // One directory per call: a consumer runs the same mode more than once.
   const directory = join(scope.io.root(), "local-fixture-" + mode + "-" + token(6));
   mkdirSync(directory, 0o700);
-  const [containerId, creation, grant] = await publishContainer(
+  const [containerId, creation, grant] = await publish(
     scope,
     directory,
     environment,
@@ -1049,7 +1239,9 @@ export async function localFixture(
     original: unknown = null,
     value: Record_ | undefined;
   const receiptErrors: string[] = [];
+  let output: Promise<Uint8Array> | undefined;
   try {
+    signal?.throwIfAborted();
     require(creation.qualification === BLOCKED &&
       creation.liveDaemon === ONE_SHOT_LIVE &&
       creation.cgroupCaps === "not-observed", "UI_DAEMON_OBSERVATION_UNSUPPORTED");
@@ -1067,10 +1259,13 @@ export async function localFixture(
       deadline,
       grant,
       proc,
+      signal,
     );
     goFd = fd;
     const payload = fixtureInput(input);
-    const stdout = await communicate(child, payload, budgetRemain(deadline));
+    output = communicate(child, payload, budgetRemain(deadline));
+    if (pending !== undefined) pending.output = output;
+    const stdout = await interruptibleFixtureOutput(output, signal);
     const state = await readDaemonExit(scope, containerId, 10);
     require(stdout.length < 64 * 1024 * 1024, "UI_NATIVE_FIXTURE_OUTPUT_REFUSED");
     const parsed = parsePlain(stdout);
@@ -1101,6 +1296,15 @@ export async function localFixture(
     original = error;
   }
   const errors = await cleanupOwned(scope, containerId, child, directory, [goFd]);
+  // Stopping the owned native process closes its output. Await the same
+  // pending communication as well; no abandoned reader/timer survives.
+  if (output !== undefined && (pending === undefined || original === null)) {
+    try {
+      await output;
+    } catch {
+      /* The original wait error stays first. */
+    }
+  }
   errors.push(...receiptErrors);
   reportCleanup(scope, original, errors);
   if (original !== null) throw original as Error;
@@ -1175,6 +1379,25 @@ export async function stopAttachedDaemon(
   reportCleanup(scope, original, errors);
   if (original !== null) throw original as Error;
   if (errors.length) throw new UiError("UI_PROCESS_CLOSURE_FAILED");
+  if (server.runtimeImage !== undefined) {
+    const listed = await docker.client(
+      scope,
+      [
+        "docker",
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+        "--filter",
+        "id=" + String(server.containerId),
+      ],
+      10,
+    );
+    require(decodeUtf8(listed).trim() === "", "UI_FINAL_CONTAINER_REMAINS");
+    (stopped as Record_).containerAbsent = true;
+    (stopped as Record_).imageId = server.runtimeImage;
+  }
   return stopped as Record_;
 }
 
@@ -1190,6 +1413,31 @@ const localStartSteps: LocalStartSteps = {
   cleanup: cleanupOwned,
   clock: now,
 };
+
+/** The existing publisher/lifecycle with the actual same-job hosted image
+ * observation. This context is not a LocalGrant or a new runtime loader. */
+export async function hostedFinalServerStart(
+  scope: Scope,
+  manifest: Manifest,
+  environment: Record<string, string>,
+  directory: string,
+): Promise<Started> {
+  require(executionMode() === "github-ci" &&
+    environment.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE === "true" &&
+    environment.FVOCI_TEST_TURSO_DESTRUCTIVE === "true", "UI_FINAL_HUMAN_GATE_REQUIRED");
+  const current = currentBuild(lease.load);
+  require(manifest.finalRuntime !== undefined &&
+    deepEquals(current, manifest, true), "UI_FINAL_RUNTIME_IMAGE_CHANGED");
+  const running = await localServerStart(scope, manifest, environment, directory, false, {
+    ...localStartSteps,
+    publish: (owned, output, env, binaries, binary, command, kind) =>
+      publishContainer(owned, output, env, binaries, binary, command, kind, () => ({
+        finalRuntime: manifest.finalRuntime,
+      })),
+  });
+  running.server.runtimeImage = manifest.finalRuntime.imageId;
+  return running;
+}
 
 export async function localServerStart(
   scope: Scope,
@@ -1274,5 +1522,217 @@ export async function localServerStart(
     }
     reportCleanup(scope, original, errors);
     throw original as Error;
+  }
+}
+
+/** Narrow selected-parent observer entry. Its own existing process scope has
+ * no preexisting server child; the selected parent keeps normal server ownership. */
+export function publishSelectedSqlitePacket(path: string, value: Record_): void {
+  const parent = lstatSync(dirname(path));
+  require(isAbsolute(path) &&
+    realpathSync(dirname(path)) === dirname(path) &&
+    parent.isDirectory() &&
+    !parent.isSymbolicLink() &&
+    parent.uid === uid() &&
+    parent.gid === gid() &&
+    (parent.mode & 0o777) === 0o700 &&
+    Buffer.byteLength(jsonText(value)) < 64 * 1024 * 1024, "UI_SQLITE_OBSERVER_PACKET_REFUSED");
+  write(path, value);
+}
+
+export async function selectedSqliteObserver(
+  mode: string,
+  request: Record_,
+  signal?: AbortSignal,
+  packetPath?: string,
+): Promise<Record_> {
+  signal?.throwIfAborted();
+  require(["baseline", "observe", "serial-observe"].includes(mode) &&
+    deepEquals(Object.keys(request).sort(), [
+      "container",
+      "inode",
+      "input",
+    ]), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+  const { loadCurrent } = await import("../selected-backend-ci/drivers/binding.ts");
+  const { sqliteDriver } = await import("../selected-backend-ci/drivers/sqlite.ts");
+  const { inodeOf } = await import("../selected-backend-ci/drivers/common.ts");
+  const { localAllocation } = await import("../selected-backend-ci/admission.ts");
+  const { UiProcesses, withProcesses } = await import("./ui-processes.ts");
+  const current = await loadCurrent("sqlite", sqliteDriver);
+  require(current.flow === "on" &&
+    current.manifest.purpose === undefined &&
+    current.grant.backend === "sqlite", "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+  require(packetPath === undefined ||
+    (dirname(packetPath) === join(current.run, "products") &&
+      !existsSync(packetPath)), "UI_SQLITE_OBSERVER_PACKET_REFUSED");
+  const container = request.container;
+  const input = request.input;
+  require(typeof container === "string" &&
+    /^fvoci-v060-vue-sqlite-current-[a-f0-9]{12}$/.test(container) &&
+    isRecord(input), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+  const database = join(current.run, "database"),
+    file = join(database, "app.sqlite"),
+    storage = join(current.run, "storage");
+  const target = () => {
+    const root = lstatSync(database),
+      db = lstatSync(file);
+    require(root.isDirectory() &&
+      !root.isSymbolicLink() &&
+      root.uid === uid() &&
+      (root.mode & 0o777) === 0o700 &&
+      db.isFile() &&
+      !db.isSymbolicLink() &&
+      db.uid === uid() &&
+      db.gid === gid() &&
+      db.nlink === 1 &&
+      (db.mode & 0o777) === 0o600 &&
+      deepEquals(inodeOf(file), request.inode), "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+  };
+  target();
+  const binaries = Object.fromEntries(
+    Object.entries(current.build.binaries).map(([path, binary]) => [
+      binary.target.name,
+      { ...binary, path },
+    ]),
+  );
+  const directory = join(current.run, "selected-observer-" + mode + "-" + token(6));
+  mkdirSync(directory, 0o700);
+  const scope = new UiProcesses(undefined, {
+    root: () => directory,
+    write,
+    output: {
+      out: (line) => {
+        process.stdout.write(line + "\n");
+      },
+      err: (line) => {
+        process.stderr.write(line + "\n");
+      },
+    },
+  });
+  signal?.throwIfAborted();
+  const pending: { output?: Promise<Uint8Array> } = {};
+  let value: Record_;
+  try {
+    value = await withProcesses(async (owned) => {
+      signal?.throwIfAborted();
+      // Derive the actual runtime from the already owned normal container, never
+      // from a source-labelled literal or a fabricated Turso runtime lease.
+      const observed = parsePlain(await docker.client(owned, ["docker", "inspect", container], 10));
+      const config = record(observed, 0, "Config"),
+        host = record(observed, 0, "HostConfig");
+      const imageId = get(observed, 0, "Image");
+      require(config.Image === finalFixtureImage &&
+        get(config, "Labels", "fvoci.owner") === current.grant.owner &&
+        get(config, "Labels", "fvoci.test-run") === "v060-current-normal-vue-sqlite" &&
+        get(observed, 0, "State", "Running") === true &&
+        host.NetworkMode === "host" &&
+        typeof imageId === "string" &&
+        /^sha256:[a-f0-9]{64}$/.test(imageId), "UI_SQLITE_OBSERVER_PARENT_REFUSED");
+      for (const [source, destination] of [
+        [database, "/fvoci/database"],
+        [storage, "/fvoci/storage"],
+      ]) {
+        const mounts = get(observed, 0, "Mounts");
+        require(Array.isArray(mounts) &&
+          mounts.filter(
+            (mount) =>
+              isRecord(mount) &&
+              mount.Type === "bind" &&
+              mount.Source === source &&
+              mount.Destination === destination &&
+              mount.RW === true,
+          ).length === 1, "UI_SQLITE_OBSERVER_TARGET_REFUSED");
+      }
+      let grant: Record_;
+      if (executionMode() === "orca-local") {
+        // This is the existing selected allocation, not a LocalLease or a new purpose.
+        const local: unknown = localAllocation("run");
+        require(isRecord(local) &&
+          isRecord(local.canonicalRuntime) &&
+          local.canonicalRuntime.imageId === imageId &&
+          local.canonicalRuntime.networkAuthorized === true &&
+          readShellProof(local.canonicalRuntime) ===
+            QUALIFIED_SHELL, "UI_CANONICAL_SHELL_UNAVAILABLE");
+        grant = { canonicalRuntime: local.canonicalRuntime };
+      } else {
+        grant = { finalRuntime: { reference: finalFixtureImage, imageId, uid: uid(), gid: gid() } };
+      }
+      target();
+      const result = await localFixture(
+        owned,
+        { binaries },
+        mode,
+        {
+          E2E_DATABASE_BACKEND: "sqlite",
+          FVOCI_DATABASE_BACKEND: "sqlite",
+          FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+          FVOCI_E2E_SQLITE_RUN_ROOT: database,
+          FVOCI_E2E_SQLITE_PATH: file,
+          FVOCI_STORAGE_DIR: storage,
+        },
+        input,
+        linuxProc,
+        (scope, output, env, manifest, binary, command, kind) =>
+          publishContainer(scope, output, env, manifest, binary, command, kind, () => grant),
+        signal,
+        pending,
+      );
+      require(result.connectionClose === "confirmed" &&
+        (mode === "serial-observe" ? get(result, "dataset", "backend") : result.backend) ===
+          "sqlite", "UI_SQLITE_OBSERVER_NATIVE_REFUSED");
+      target();
+      return result;
+    }, scope);
+  } finally {
+    // The existing Scope owner has closed its resources before this actual
+    // communication settles; no additional kill/timeout fallback is introduced.
+    if (pending.output !== undefined) {
+      try {
+        await pending.output;
+      } catch {
+        /* Preserve the original failure. */
+      }
+    }
+  }
+  signal?.throwIfAborted();
+  require(deepEquals(
+    await loadCurrent("sqlite", sqliteDriver),
+    current,
+    true,
+  ), "UI_SQLITE_OBSERVER_SOURCE_CHANGED");
+  target();
+  // Publication occurs only after the actual Scope/communication closure,
+  // source/target revalidation and interrupt checks above have all completed.
+  if (packetPath !== undefined) publishSelectedSqlitePacket(packetPath, value);
+  return value;
+}
+
+if (import.meta.main) {
+  const interrupt = new AbortController();
+  const onInterrupt = () => {
+    interrupt.abort(new UiError("UI_PARENT_INTERRUPT"));
+  };
+  process.on("SIGINT", onInterrupt);
+  try {
+    const [entry, mode, packetPath, extra] = process.argv.slice(2);
+    require(entry === "--selected-sqlite-observe" &&
+      typeof mode === "string" &&
+      typeof packetPath === "string" &&
+      extra === undefined, "UI_SQLITE_OBSERVER_MODE_REFUSED");
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    for await (const chunk of Bun.stdin.stream()) {
+      length += chunk.length;
+      require(length <= 32768, "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+      chunks.push(chunk);
+    }
+    const request = parsePlain(Buffer.concat(chunks));
+    require(isRecord(request), "UI_SQLITE_OBSERVER_INPUT_REFUSED");
+    await selectedSqliteObserver(mode, request, interrupt.signal, packetPath);
+  } catch (error) {
+    console.error(failureCode(error));
+    process.exitCode = 1;
+  } finally {
+    process.off("SIGINT", onInterrupt);
   }
 }

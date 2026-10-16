@@ -2,8 +2,10 @@
 //! migration/reset/cleanup operation or public SQL executor is exposed.
 use super::backend::{Backend, DbTransaction, FamilyTx};
 use super::codec::{Cell, FamilyRow};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use sqlx::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -230,6 +232,47 @@ fn family<'a>(tx: &'a mut DbTransaction<'_>) -> Result<&'a mut FamilyTx, sqlx::E
     }
 }
 
+// Only these fixed observation statements use the detached owned connection.
+// Remote callers retain their original transaction/backend admission.
+enum NativeRead<'a> {
+    Remote(&'a mut FamilyTx),
+    OwnedSqlite(&'a mut sqlx::SqliteConnection),
+}
+impl NativeRead<'_> {
+    async fn query(
+        &mut self,
+        sql: &'static str,
+        args: &[Cell],
+    ) -> Result<Vec<FamilyRow>, sqlx::Error> {
+        match self {
+            Self::Remote(tx) => tx.query(sql, args).await,
+            Self::OwnedSqlite(connection) => {
+                let mut query = sqlx::query(sql);
+                for cell in args {
+                    query = match cell {
+                        Cell::Null => query.bind(Option::<i64>::None),
+                        Cell::Integer(value) => query.bind(*value),
+                        Cell::Text(value) => query.bind(value),
+                        Cell::Blob(value) => query.bind(value),
+                    };
+                }
+                Ok(query
+                    .fetch_all(&mut **connection)
+                    .await?
+                    .into_iter()
+                    .map(FamilyRow::Local)
+                    .collect())
+            }
+        }
+    }
+}
+
+fn column_names(row: &FamilyRow) -> Result<Vec<&str>, sqlx::Error> {
+    (0..row.column_count()?)
+        .map(|index| row.column_name(index))
+        .collect()
+}
+
 fn exact(cell: Cell) -> Value {
     match cell {
         Cell::Null => json!(["null"]),
@@ -240,11 +283,8 @@ fn exact(cell: Cell) -> Value {
 }
 
 fn row_hash(row: &FamilyRow) -> Result<String, sqlx::Error> {
-    let FamilyRow::Remote(remote) = row else {
-        return Err(refused());
-    };
-    let cells = (0..remote.column_count())
-        .map(|i| row.cell(i as usize).map(exact))
+    let cells = (0..column_names(row)?.len())
+        .map(|i| row.cell(i).map(exact))
         .collect::<Result<Vec<_>, _>>()?;
     let bytes = serde_json::to_vec(&cells).map_err(|_| refused())?;
     if bytes.len() > 16 * 1024 * 1024 {
@@ -300,11 +340,71 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             .map(|(_, value)| value)
             .ok_or_else(refused)
     };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0) {
+        return Ok(Value::Null);
+    }
+    let payload = cell("payload")?.value()?;
+    // The normal logout producer has no stored target. Bind its actual actor
+    // explicitly; never manufacture a user target for this event.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.logout") {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("target_id")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Null, Cell::Null, Cell::Blob(actor))
+                if channel == "web" && actor.len() == 16 && payload == json!({}) =>
+            {
+                actor
+            }
+            _ => return Ok(Value::Null),
+        };
+        return Ok(json!({
+            "class":"actor-logout",
+            "sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor)
+        }));
+    }
     let target = match cell("target_id")? {
         Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
         _ => return Ok(Value::Null),
     };
-    let payload = cell("payload")?.value()?;
+    // Instance generic OIDC link/unlink producers use a link target, not a
+    // user target. Retain both actual IDs without exporting their email.
+    if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked" || verb == "identity.unlinked")
+    {
+        let actor = match (
+            cell("channel")?,
+            cell("workspace_id")?,
+            cell("target_type")?,
+            cell("actor_user_id")?,
+        ) {
+            (Cell::Text(channel), Cell::Null, Cell::Text(kind), Cell::Blob(actor))
+                if channel == "web" && kind == "identity_link" && actor.len() == 16 =>
+            {
+                Uuid::from_slice(actor).map_err(|_| refused())?
+            }
+            _ => return Ok(Value::Null),
+        };
+        let Some(email) = payload
+            .get("email")
+            .filter(|email| email.is_null() || email.is_string())
+        else {
+            return Ok(Value::Null);
+        };
+        if payload != json!({"userId":actor.to_string(),"provider":"generic","email":email}) {
+            return Ok(Value::Null);
+        }
+        let class = if matches!(cell("verb")?, Cell::Text(verb) if verb == "identity.linked") {
+            "actor-identity-linked"
+        } else {
+            "actor-identity-unlinked"
+        };
+        return Ok(json!({"class":class,"sequence":exact(cell("seq")?.clone()),
+            "actor":hex::encode(actor.as_bytes()),"target":hex::encode(target.as_bytes())}));
+    }
     let class = match (
         cell("verb")?,
         cell("channel")?,
@@ -325,6 +425,38 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
             && payload == json!({"userId":target.to_string(),"method":"password"}) =>
         {
             "actor-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if verb == "auth.login"
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string(),"method":"oidc:generic"}) =>
+        {
+            "actor-oidc-login"
+        }
+        (
+            Cell::Text(verb),
+            Cell::Text(channel),
+            Cell::Text(kind),
+            Cell::Null,
+            Cell::Blob(actor),
+        ) if (verb == "auth.password_changed" || verb == "auth.password_reset")
+            && channel == "web"
+            && kind == "user"
+            && actor == target.as_bytes()
+            && payload == json!({"userId":target.to_string()}) =>
+        {
+            if verb == "auth.password_changed" {
+                "actor-password-change"
+            } else {
+                "actor-password-reset"
+            }
         }
         (
             Cell::Text(verb),
@@ -361,20 +493,197 @@ fn event_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
     )
 }
 
-fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
-    let FamilyRow::Remote(remote) = row else {
-        return Err(refused());
+// The selected SQLite preparation accepts an invitation before the separate
+// password login. Keep this fallback out of the shared/remote witness contract.
+fn sqlite_invitation_login_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
     };
+    let actor = match cell("actor_user_id")? {
+        Cell::Blob(actor) if actor.len() == 16 => Uuid::from_slice(actor).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    if !matches!(cell("seq")?, Cell::Integer(sequence) if *sequence > 0)
+        || !matches!(cell("verb")?, Cell::Text(verb) if verb == "auth.login")
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("workspace_id")?, Cell::Null)
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "user")
+        || !matches!(cell("target_id")?, Cell::Blob(target) if target == actor.as_bytes())
+        || cell("payload")?.value()? != json!({"userId":actor.to_string(),"method":"invitation"})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"actor-invitation-login","sequence":exact(cell("seq")?.clone()),
+        "target":hex::encode(actor.as_bytes())}),
+    )
+}
+
+fn sqlite_invitation_accepted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    if !matches!(cell("verb")?, Cell::Text(verb) if verb == "invitation.accepted") {
+        return Ok(Value::Null);
+    }
+    let ids = ["workspace_id", "actor_user_id", "target_id"].map(|name| match cell(name)? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused()),
+        _ => Err(refused()),
+    });
+    let [Ok(workspace), Ok(actor), Ok(target)] = ids else {
+        return Ok(Value::Null);
+    };
+    let payload = cell("payload")?.value()?;
+    let Some(email) = payload.get("email").and_then(Value::as_str) else {
+        return Ok(Value::Null);
+    };
+    if !matches!(cell("seq")?, Cell::Integer(seq) if *seq > 0)
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "invitation")
+        || !matches!(cell("created_at")?, Cell::Integer(time) if *time >= 0)
+        || payload
+            != json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":email})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"workspace-invitation-accepted","sequence":exact(cell("seq")?.clone()),
+        "workspace":hex::encode(workspace.as_bytes()),"actor":hex::encode(actor.as_bytes()),
+        "target":hex::encode(target.as_bytes()),"email":email,"createdAt":exact(cell("created_at")?.clone())}),
+    )
+}
+
+// Public invitation fields only. The complete primary hash still binds the
+// token and every other column without exporting credential material.
+fn sqlite_invitation_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    let id = |name: &str| match cell(name)? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Ok(hex::encode(bytes)),
+        _ => Err(refused()),
+    };
+    if !matches!(cell("accepted_at")?, Cell::Integer(_) | Cell::Null)
+        || !matches!(cell("expires_at")?, Cell::Integer(_))
+    {
+        return Err(refused());
+    }
+    Ok(json!({"id":id("id")?,
+        "workspace":id("workspace_id")?,
+        "inviter":id("invited_by")?,
+        "email":cell("email")?.string()?,"role":cell("role")?.string()?,
+        "acceptedAt":exact(cell("accepted_at")?.clone()),"expiresAt":exact(cell("expires_at")?.clone())}))
+}
+
+// Only the selected SQLite PRODUCT4 document upload producer is witnessed.
+// Its system transaction deliberately stores a NULL actor and channel `web`.
+fn sqlite_attachment_extracted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    if !matches!(cell("verb")?, Cell::Text(verb) if verb == "attachment.extracted") {
+        return Ok(Value::Null);
+    }
+    let target = match cell("target_id")? {
+        Cell::Blob(bytes) if bytes.len() == 16 => Uuid::from_slice(bytes).map_err(|_| refused())?,
+        _ => return Ok(Value::Null),
+    };
+    if !matches!(cell("id")?, Cell::Blob(id) if id.len() == 16)
+        || !matches!(cell("seq")?, Cell::Integer(seq) if *seq > 0)
+        || !matches!(cell("workspace_id")?, Cell::Blob(id) if id.len() == 16)
+        || !matches!(cell("actor_user_id")?, Cell::Null)
+        || !matches!(cell("channel")?, Cell::Text(channel) if channel == "web")
+        || !matches!(cell("target_type")?, Cell::Text(kind) if kind == "attachment")
+        || !matches!(cell("created_at")?, Cell::Integer(time) if *time > 0)
+        || cell("payload")?.value()? != json!({"attachmentId":target.to_string(),"status":"ok"})
+    {
+        return Ok(Value::Null);
+    }
+    Ok(
+        json!({"class":"sqlite-attachment-extracted","sequence":exact(cell("seq")?.clone()),
+        "target":hex::encode(target.as_bytes()),
+        "columns":columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
+        "cells":columns.iter().map(|(_,cell)| exact(cell.clone())).collect::<Vec<_>>()}),
+    )
+}
+
+fn sqlite_extracted_attachment_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+    let cell = |name: &str| {
+        columns
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+            .ok_or_else(refused)
+    };
+    for name in ["id", "workspace_id", "document_id", "uploader_id"] {
+        if !matches!(cell(name)?, Cell::Blob(id) if id.len() == 16) {
+            return Ok(Value::Null);
+        }
+    }
+    if !matches!(cell("task_id")?, Cell::Null)
+        || !matches!(cell("status")?, Cell::Text(status) if status == "stored")
+        || !matches!(cell("extract_status")?, Cell::Text(status) if status == "ok")
+        || !matches!(cell("extract_attempts")?, Cell::Integer(attempt) if (1..=i64::from(super::attachment_extract::EXTRACT_MAX_ATTEMPTS)).contains(attempt))
+        || !matches!(cell("extract_lease_token")?, Cell::Null)
+        || !matches!(cell("extract_lease_expires_at")?, Cell::Null)
+        || !matches!(cell("completed_at")?, Cell::Integer(time) if *time > 0)
+    {
+        return Ok(Value::Null);
+    }
+    // Never export storage keys, names, extracted text or a live lease token.
+    let names = [
+        "id",
+        "workspace_id",
+        "document_id",
+        "task_id",
+        "uploader_id",
+        "status",
+        "extract_status",
+        "extract_attempts",
+        "extract_lease_token",
+        "extract_lease_expires_at",
+        "completed_at",
+    ];
+    let cells = names
+        .iter()
+        .map(|name| cell(name).map(|value| exact(value.clone())))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"columns":names,"cells":cells}))
+}
+
+fn row_allocation(
+    table: &str,
+    row: &FamilyRow,
+    selected_sqlite: bool,
+) -> Result<Value, sqlx::Error> {
+    let columns = column_names(row)?;
     let mut workspaces = Vec::new();
     let mut actors = Vec::new();
     let mut events = Vec::new();
     let mut own_id = None;
     let mut consumer = None;
     let mut event_columns = Vec::new();
-    for i in 0..remote.column_count() {
-        let name = remote.column_name(i).ok_or_else(refused)?;
-        let cell = row.cell(i as usize)?;
-        if table == "events" {
+    for (i, name) in columns.into_iter().enumerate() {
+        let cell = row.cell(i)?;
+        if table == "events"
+            || (selected_sqlite && matches!(table, "notifications" | "invitations" | "attachments"))
+        {
             event_columns.push((name.to_string(), cell.clone()));
         }
         let destination = match name {
@@ -394,16 +703,18 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
                 _ => return Err(refused()),
             }
         } else if name == "id"
-            && matches!(
+            && (matches!(
                 table,
-                "users" | "workspaces" | "events" | "documents" | "tasks"
-            )
+                "users" | "workspaces" | "events" | "documents" | "tasks" | "identity_links"
+            ) || (selected_sqlite && table == "attachments"))
         {
             let bytes = cell.bytes()?;
             if bytes.len() != 16 {
                 return Err(refused());
             }
             own_id = Some(hex::encode(bytes));
+        } else if name == "id" && table == "sessions" && matches!(row, FamilyRow::Local(_)) {
+            own_id = Some(hex::encode(cell.id()?.as_bytes()));
         } else if name == "consumer" {
             consumer = Some(cell.string()?);
         }
@@ -411,6 +722,28 @@ fn row_allocation(table: &str, row: &FamilyRow) -> Result<Value, sqlx::Error> {
     let mut allocation = json!({"workspaces":workspaces,"actors":actors,"events":events,"self":own_id,"consumer":consumer});
     if table == "events" {
         allocation["eventWitness"] = event_witness(&event_columns)?;
+        if selected_sqlite && allocation["eventWitness"].is_null() {
+            allocation["eventWitness"] = sqlite_invitation_login_witness(&event_columns)?;
+            if allocation["eventWitness"].is_null() {
+                allocation["eventWitness"] = sqlite_invitation_accepted_witness(&event_columns)?;
+            }
+            if allocation["eventWitness"].is_null() {
+                allocation["eventWitness"] = sqlite_attachment_extracted_witness(&event_columns)?;
+            }
+        }
+    }
+    if selected_sqlite && table == "invitations" {
+        allocation["invitation"] = sqlite_invitation_fields(&event_columns)?;
+    }
+    if selected_sqlite && table == "attachments" {
+        allocation["extraction"] = sqlite_extracted_attachment_fields(&event_columns)?;
+        if !allocation["extraction"].is_null() {
+            allocation["extraction"]["sha256"] = json!(row_hash(row)?);
+        }
+    }
+    if selected_sqlite && table == "notifications" {
+        allocation["notification"] = json!({"columns":event_columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
+            "cells":event_columns.iter().map(|(_,cell)| exact(cell.clone())).collect::<Vec<_>>(),"sha256":row_hash(row)?});
     }
     Ok(allocation)
 }
@@ -696,6 +1029,48 @@ const PRESERVATION_READS: &[(&str, &str)] = &[
 ];
 
 pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
+    Ok(capture_primary(backend, None).await?.dataset)
+}
+
+/// Conditional eligibility inputs, never evidence that a server used them.
+/// The authenticated consumer must bind these exact values to its sealed
+/// server configuration, source/native binary and target before admission.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SerialPolicy {
+    revision_keep: std::num::NonZeroU32,
+    revision_snapshot_interval_hours: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialObservation {
+    dataset: Value,
+    checks: SerialChecks,
+}
+
+struct PrimaryCapture {
+    dataset: Value,
+    checks: Option<SerialChecks>,
+}
+
+/// Fixed observation, with no caller-supplied completion witness or horizon.
+/// There is deliberately no aggregate `ready` or process-closure assertion.
+pub async fn capture_serial_observation(
+    backend: &Backend,
+    policy: SerialPolicy,
+) -> Result<SerialObservation, sqlx::Error> {
+    let captured = capture_primary(backend, Some(policy)).await?;
+    Ok(SerialObservation {
+        dataset: captured.dataset,
+        checks: captured.checks.ok_or_else(refused)?,
+    })
+}
+
+async fn capture_primary(
+    backend: &Backend,
+    policy: Option<SerialPolicy>,
+) -> Result<PrimaryCapture, sqlx::Error> {
     if !matches!(backend, Backend::LibsqlRemote(_)) {
         return Err(baseline_failure("backend-contract", refused()));
     }
@@ -709,10 +1084,34 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         .begin_read()
         .await
         .map_err(|error| baseline_failure("begin-read", error))?;
+    let result = match family(&mut tx) {
+        Ok(f) => {
+            capture_primary_read(
+                &mut NativeRead::Remote(f),
+                &current,
+                policy,
+                "libsql-remote",
+            )
+            .await
+        }
+        Err(error) => Err(baseline_failure("family-contract", error)),
+    };
+    let rollback = tx
+        .rollback()
+        .await
+        .map_err(|error| baseline_failure("rollback", error));
+    finished(result, rollback, "not-attempted")
+}
+
+async fn capture_primary_read(
+    f: &mut NativeRead<'_>,
+    current: &super::migrate::SqliteCapability,
+    policy: Option<SerialPolicy>,
+    backend: &'static str,
+) -> Result<PrimaryCapture, sqlx::Error> {
     let mut phase = "family-contract";
     let mut table_comparison = None;
     let result = async {
-        let f = family(&mut tx)?;
         phase = "table-read";
         let tables = f.query("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name", &[]).await?;
         phase = "table-conversion";
@@ -728,6 +1127,9 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         let mut fingerprints = BTreeMap::new();
         let mut allocations = BTreeMap::new();
         let mut instance_config = Vec::new();
+        let mut serial_users = Vec::new();
+        let mut serial_memberships = Vec::new();
+        let mut serial_workspaces = BTreeSet::new();
         let mut total = 0usize;
         for (name, sql) in PRESERVATION_READS {
             phase = "preservation-read";
@@ -740,15 +1142,29 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             for row in &rows {
                 phase = "row-hash";
                 let hash = row_hash(row)?;
+                if matches!(*name, "users" | "memberships" | "workspaces") && policy.is_some() {
+                    phase = "serial-actor-witness";
+                    let mut columns = Vec::new();
+                    for (i, column) in column_names(row)?.into_iter().enumerate() {
+                        if matches!(column, "id" | "email" | "workspace_id" | "user_id" | "role") {
+                            columns.push((column.to_string(), row.cell(i)?));
+                        }
+                    }
+                    match *name {
+                        "users" => serial_users.push(serial_user_witness(&columns, &hash)?),
+                        "memberships" => serial_memberships.push(serial_membership_witness(&columns, &hash)?),
+                        "workspaces" => { serial_workspaces.insert(serial_column(&columns, "id")?.id()?); }
+                        _ => return Err(refused()),
+                    }
+                }
                 if *name == "instance_config" {
-                    let FamilyRow::Remote(remote) = row else { return Err(refused()) };
-                    let columns = (0..remote.column_count()).map(|i| {
-                        Ok((remote.column_name(i).ok_or_else(refused)?.to_string(), row.cell(i as usize)?))
+                    let columns = column_names(row)?.into_iter().enumerate().map(|(i, column)| {
+                        Ok((column.to_string(), row.cell(i)?))
                     }).collect::<Result<Vec<_>, sqlx::Error>>()?;
                     instance_config.push(instance_config_witness(&hash, &columns)?);
                 }
                 phase = "row-allocation";
-                owners.insert(hash.clone(), row_allocation(name, row)?);
+                owners.insert(hash.clone(), row_allocation(name, row, backend == "sqlite")?);
                 *hashes.entry(hash).or_default() += 1;
             }
             fingerprints.insert(*name, hashes);
@@ -764,8 +1180,7 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
             if rows.len() > 10000 { return Err(refused()) }
             phase = "ui-conversion";
             let cells = rows.iter().map(|row| {
-                let FamilyRow::Remote(remote) = row else { return Err(refused()) };
-                (0..remote.column_count()).map(|i| row.cell(i as usize).map(exact)).collect::<Result<Vec<_>, _>>()
+                (0..column_names(row)?.len()).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()
             }).collect::<Result<Vec<_>, _>>()?;
             operations.insert(*name, cells);
         }
@@ -780,25 +1195,854 @@ pub async fn capture_baseline(backend: &Backend) -> Result<Value, sqlx::Error> {
         phase = "ledger-conversion";
         let ledger = ledger.iter().map(|row| (0..4).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
         phase = "summary-conversion";
-        Ok(json!({"schema":1,"backend":"libsql-remote","schemaCurrent":true,
+        let dataset = json!({"schema":1,"backend":backend,"schemaCurrent":true,
             "schemaSha256":current.schema_sha256,"lineage":current.lineage,
             "ledger":ledger,"setupNeeded":users[0].cell(0)?.integer()? == 0,
             "fingerprints":fingerprints,"allocations":allocations,"rows":total,"operations":operations,
             "instanceConfig":instance_config,
-            "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?}))
+            "startupHazards":hazards[0].cell(0)?.integer()?,"liveOutboxLeases":live_outbox[0].cell(0)?.integer()?});
+        phase = "serial-observation";
+        let checks = match policy {
+            Some(policy) => {
+                join_serial_memberships(&serial_users, &serial_workspaces, &serial_memberships)?;
+                Some(serial_checks(f, policy, serial_users, serial_memberships).await?)
+            },
+            None => None,
+        };
+        Ok(PrimaryCapture { dataset, checks })
     }.await;
-    let result = result.map_err(|original| {
+    result.map_err(|original| {
         sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
             phase,
             original,
             table_comparison,
         }))
-    });
-    let rollback = tx
-        .rollback()
-        .await
-        .map_err(|error| baseline_failure("rollback", error));
-    finished(result, rollback, "not-attempted")
+    })
+}
+
+// Cover the entire existing job limit forwards from the native clock. This is
+// stronger than its remaining horizon and cannot be shortened by CLI input.
+const SERIAL_HORIZON_MICROS: i64 = 40 * 60 * 1_000_000;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialChecks {
+    schema: u8,
+    clock_micros: String,
+    horizon_end_micros: String,
+    coverage_micros: String,
+    policy: SerialPolicy,
+    policy_sha256: String,
+    policy_binding: &'static str,
+    users: Vec<SerialUser>,
+    memberships: Vec<SerialMembership>,
+    event_head: String,
+    relay_completion: RelayCompletion,
+    outbox: Vec<RelayObservation>,
+    owners: BTreeMap<&'static str, Vec<Vec<Value>>>,
+    room_closure_binding: &'static str,
+    background: Vec<BackgroundFact>,
+    revision_candidates: Vec<RevisionObservation>,
+    automatic_revision_ranks: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialUser {
+    id: Uuid,
+    email: String,
+    row_fingerprint: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialMembership {
+    workspace_id: Uuid,
+    user_id: Uuid,
+    role: String,
+    row_fingerprint: String,
+}
+
+fn serial_column<'a>(columns: &'a [(String, Cell)], name: &str) -> Result<&'a Cell, sqlx::Error> {
+    columns
+        .iter()
+        .find(|(column, _)| column == name)
+        .map(|(_, cell)| cell)
+        .ok_or_else(refused)
+}
+
+fn serial_membership_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialMembership, sqlx::Error> {
+    Ok(SerialMembership {
+        workspace_id: serial_column(columns, "workspace_id")?.id()?,
+        user_id: serial_column(columns, "user_id")?.id()?,
+        role: serial_column(columns, "role")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
+}
+
+fn join_serial_memberships(
+    users: &[SerialUser],
+    workspaces: &BTreeSet<Uuid>,
+    memberships: &[SerialMembership],
+) -> Result<(), sqlx::Error> {
+    let users = users.iter().map(|user| user.id).collect::<BTreeSet<_>>();
+    let mut keys = BTreeSet::new();
+    for membership in memberships {
+        if !users.contains(&membership.user_id)
+            || !workspaces.contains(&membership.workspace_id)
+            || !keys.insert((membership.workspace_id, membership.user_id))
+        {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
+fn serial_user_witness(
+    columns: &[(String, Cell)],
+    fingerprint: &str,
+) -> Result<SerialUser, sqlx::Error> {
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(refused());
+    }
+    Ok(SerialUser {
+        id: serial_column(columns, "id")?.id()?,
+        email: serial_column(columns, "email")?.string()?,
+        row_fingerprint: fingerprint.to_string(),
+    })
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum RelayCompletion {
+    Complete,
+    Incomplete,
+    UnknownRegistry,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayObservation {
+    consumer: String,
+    immutable_sha256: String,
+    row_sha256: String,
+    last_seq: String,
+    lease_owner: Option<String>,
+    lease_until_micros: Option<String>,
+    updated_at_micros: String,
+}
+
+fn relay_completion(head: i64, relays: &[RelayObservation]) -> RelayCompletion {
+    use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
+    let expected = BTreeSet::from([
+        crate::notifications::NOTIFICATIONS_CONSUMER,
+        crate::mail::MAIL_CONSUMER,
+        crate::push::consumer::PUSH_CONSUMER,
+        WEBHOOKS_CONSUMER,
+        GITHUB_CONSUMER,
+    ]);
+    let names = relays
+        .iter()
+        .map(|r| r.consumer.as_str())
+        .collect::<BTreeSet<_>>();
+    if names != expected || relays.len() != expected.len() {
+        RelayCompletion::UnknownRegistry
+    } else if head < 0
+        || relays.iter().any(|r| {
+            r.last_seq.parse::<i64>() != Ok(head)
+                || r.lease_owner.is_some()
+                || r.lease_until_micros.is_some()
+        })
+    {
+        RelayCompletion::Incomplete
+    } else {
+        RelayCompletion::Complete
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundFact {
+    kind: &'static str,
+    // Counts are either exact eligibility or an explicit conservative blocker.
+    // They never grant a foreign row an ownership/preservation exemption.
+    interpretation: &'static str,
+    eligibility: Eligibility,
+    now: i64,
+    through_horizon: i64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Eligibility {
+    Clear,
+    Blocked,
+    Unknown,
+}
+
+impl BackgroundFact {
+    fn observe(
+        kind: &'static str,
+        interpretation: &'static str,
+        now: i64,
+        through_horizon: i64,
+    ) -> Result<Self, sqlx::Error> {
+        if !(0..=100000).contains(&now) || !(now..=100000).contains(&through_horizon) {
+            return Err(refused());
+        }
+        let eligibility = if interpretation == "unknown" && through_horizon > 0 {
+            Eligibility::Unknown
+        } else if through_horizon > 0 {
+            Eligibility::Blocked
+        } else {
+            Eligibility::Clear
+        };
+        Ok(Self {
+            kind,
+            interpretation,
+            eligibility,
+            now,
+            through_horizon,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionObservation {
+    workspace: String,
+    target_kind: String,
+    target: String,
+    writer_generation: String,
+    state_updated_at_micros: String,
+    anchor_at_micros: String,
+    due_now: bool,
+    due_through_horizon: bool,
+}
+
+fn serial_horizon(now: i64) -> Result<i64, sqlx::Error> {
+    if now <= 0 {
+        return Err(refused());
+    }
+    now.checked_add(SERIAL_HORIZON_MICROS)
+        .filter(|end| chrono::DateTime::from_timestamp_micros(*end).is_some())
+        .ok_or_else(refused)
+}
+
+fn revision_due(
+    candidate: &super::revisions::ScheduledRevisionCandidate,
+    at: i64,
+    policy: SerialPolicy,
+) -> Result<bool, sqlx::Error> {
+    let at = chrono::DateTime::from_timestamp_micros(at).ok_or_else(refused)?;
+    let cutoff = at
+        .checked_sub_signed(chrono::Duration::hours(i64::from(
+            policy.revision_snapshot_interval_hours,
+        )))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    Ok(policy.revision_snapshot_interval_hours != 0 && candidate.snapshot_due(cutoff))
+}
+
+async fn serial_native_cells(
+    f: &mut NativeRead<'_>,
+    sql: &'static str,
+) -> Result<Vec<Vec<Cell>>, sqlx::Error> {
+    let rows = f.query(sql, &[]).await?;
+    if rows.len() > 10000 {
+        return Err(refused());
+    }
+    rows.iter()
+        .map(|row| (0..column_names(row)?.len()).map(|i| row.cell(i)).collect())
+        .collect()
+}
+
+fn serial_exact_cells(rows: &[Vec<Cell>]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| row.iter().cloned().map(exact).collect())
+        .collect()
+}
+
+async fn serial_cells(
+    f: &mut NativeRead<'_>,
+    sql: &'static str,
+) -> Result<Vec<Vec<Value>>, sqlx::Error> {
+    Ok(serial_exact_cells(&serial_native_cells(f, sql).await?))
+}
+
+fn serial_room_owner_fact(
+    kind: &'static str,
+    now: i64,
+    rows: &[Vec<Cell>],
+) -> Result<BackgroundFact, sqlx::Error> {
+    if !matches!(kind, "document-room-owners" | "task-room-owners") || rows.len() > 10000 {
+        return Err(refused());
+    }
+    serial_horizon(now)?;
+    let mut live = 0;
+    for row in rows {
+        if row.len() != 5 {
+            return Err(refused());
+        }
+        row[0].id()?;
+        row[1].id()?;
+        row[2].id()?;
+        if row[3].integer()? <= 0 {
+            return Err(refused());
+        }
+        let expires_at = row[4].datetime()?.timestamp_micros();
+        live += i64::from(expires_at > now);
+    }
+    // Every currently live owner overlaps the forward coverage, even if its
+    // lease expires inside it. Expired raw lineage is retained, never a normal
+    // release or process-retirement receipt: the parent must bind both.
+    BackgroundFact::observe(kind, "live-owner-overlaps-coverage", live, live)
+}
+
+// Readonly counterparts of the current scheduler leaves. Retention durations
+// come from their maintained public constants, not a separate observer policy.
+// Fixed queries only; the caller cannot supply a table, predicate or cutoff.
+const SERIAL_BACKGROUND_READS: &[(&str, &str, &str)] = &[
+    ("magic-expiry", "eligible", "SELECT count(*) FROM magic_tokens WHERE expires_at<=?1"),
+    ("mfa-expiry", "eligible", "SELECT count(*) FROM mfa_challenges WHERE expires_at<=?1"),
+    ("oidc-expiry", "eligible", "SELECT count(*) FROM oidc_states WHERE expires_at<=?1"),
+    ("ics-expiry", "eligible", "SELECT count(*) FROM ics_tokens WHERE expires_at IS NOT NULL AND expires_at<=?1"),
+    ("github-install-expiry", "eligible", "SELECT count(*) FROM github_install_states WHERE expires_at<=?1"),
+    ("withdrawn-users", "conservative-blocker", "SELECT count(*) FROM users WHERE deleted_at IS NOT NULL"),
+    ("deleted-workspaces", "conservative-blocker", "SELECT count(*) FROM workspaces WHERE deleted_at IS NOT NULL"),
+    ("trashed-documents", "conservative-blocker", "SELECT count(*) FROM documents WHERE deleted_at IS NOT NULL"),
+    ("unfinished-uploads", "conservative-blocker", "SELECT count(*) FROM attachments WHERE status<>'stored' OR extract_status='pending' OR preview_status='pending'"),
+    ("object-cleanup", "pending", "SELECT count(*) FROM attachment_object_cleanups"),
+    ("imports", "conservative-blocker", "SELECT count(*) FROM import_jobs WHERE status<>'completed' OR lease_token IS NOT NULL OR lease_until IS NOT NULL OR payload IS NOT NULL"),
+    ("deferred-import-events", "pending", "SELECT count(*) FROM import_deferred_events"),
+    ("outbox-failures", "conservative-blocker", "SELECT count(*) FROM outbox_failures"),
+    ("push-deliveries", "conservative-blocker", "SELECT count(*) FROM push_deliveries"),
+    ("pending-webhooks", "pending", "SELECT count(*) FROM webhook_deliveries WHERE status='pending'"),
+    // Digest claims can update last_digest_at even when no message is sent.
+    // Without sharing its private interval, refuse enabled digest preferences.
+    ("enabled-digests", "conservative-blocker", "SELECT count(*) FROM notification_prefs WHERE mail_digest=1"),
+    ("notification-read-retention", "eligible", "SELECT count(*) FROM notifications WHERE read_at IS NOT NULL AND read_at<?1-?2"),
+    ("notification-archived-retention", "eligible", "SELECT count(*) FROM notifications WHERE archived_at IS NOT NULL AND read_at IS NULL AND archived_at<?1-?2"),
+    ("processed-retention", "eligible", "SELECT count(*) FROM processed_events p INNER JOIN events e ON e.id=p.event_id WHERE p.consumer IN (?3,?4,?5,?6,?7,?8) AND e.seq<(SELECT max(e2.seq) FROM processed_events p2 INNER JOIN events e2 ON e2.id=p2.event_id WHERE p2.consumer=p.consumer) AND p.processed_at<?1-?2"),
+    ("unknown-processed-consumer", "unknown", "SELECT count(*) FROM processed_events WHERE consumer NOT IN (?3,?4,?5,?6,?7,?8)"),
+    ("webhook-retention", "eligible", "SELECT count(*) FROM webhook_deliveries WHERE status IN ('delivered','failed') AND created_at<?1-?2"),
+    ("github-retention", "eligible", "SELECT count(*) FROM github_deliveries WHERE processed_at<?1-?2"),
+    ("maintenance-owners", "owner", "SELECT count(*) FROM maintenance_job_claims WHERE owner_token IS NOT NULL"),
+];
+
+async fn serial_checks(
+    f: &mut NativeRead<'_>,
+    policy: SerialPolicy,
+    mut users: Vec<SerialUser>,
+    mut memberships: Vec<SerialMembership>,
+) -> Result<SerialChecks, sqlx::Error> {
+    use crate::integrations::{github::GITHUB_CONSUMER, webhooks::WEBHOOKS_CONSUMER};
+    let clock = f
+        .query(
+            "SELECT unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000",
+            &[],
+        )
+        .await?;
+    let now = clock.first().ok_or_else(refused)?.cell(0)?.integer()?;
+    let horizon = serial_horizon(now)?;
+    let head = f.query("SELECT last_seq,(SELECT coalesce(max(seq),0) FROM events) FROM event_sequence WHERE id=1", &[]).await?;
+    if head.len() != 1 {
+        return Err(refused());
+    }
+    let head_seq = head[0].cell(0)?.integer()?;
+    if head_seq < 0 || head_seq != head[0].cell(1)?.integer()? {
+        return Err(refused());
+    }
+    let relay_rows = f.query("SELECT consumer,last_seq,lease_owner,lease_until,updated_at FROM outbox_consumers ORDER BY consumer LIMIT 10001", &[]).await?;
+    if relay_rows.len() > 10000 {
+        return Err(refused());
+    }
+    let outbox = relay_rows
+        .iter()
+        .map(|row| {
+            let consumer = row.cell(0)?.string()?;
+            let immutable =
+                serde_json::to_vec(&[exact(Cell::text(&consumer))]).map_err(|_| refused())?;
+            Ok(RelayObservation {
+                consumer,
+                immutable_sha256: hex::encode(Sha256::digest(immutable)),
+                row_sha256: row_hash(row)?,
+                last_seq: row.cell(1)?.integer()?.to_string(),
+                lease_owner: row.cell(2)?.optional(Cell::id)?.map(|id| id.to_string()),
+                lease_until_micros: row.cell(3)?.optional(Cell::integer)?.map(|v| v.to_string()),
+                updated_at_micros: row.cell(4)?.integer()?.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let mut owners = BTreeMap::new();
+    let mut room_facts = Vec::new();
+    for (name, sql) in UI_OPERATION_READS.iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "maintenance_job_claims" | "collab_room_fences" | "task_collab_room_fences"
+        )
+    }) {
+        let rows = serial_native_cells(f, sql).await?;
+        if let Some(kind) = match *name {
+            "collab_room_fences" => Some("document-room-owners"),
+            "task_collab_room_fences" => Some("task-room-owners"),
+            _ => None,
+        } {
+            room_facts.push(serial_room_owner_fact(kind, now, &rows)?);
+        }
+        owners.insert(*name, serial_exact_cells(&rows));
+    }
+    let mut background = Vec::new();
+    for (kind, interpretation, sql) in SERIAL_BACKGROUND_READS {
+        let days = match *kind {
+            "notification-read-retention" => crate::jobs::NOTIFICATION_READ_RETENTION_DAYS,
+            "notification-archived-retention" => crate::jobs::NOTIFICATION_ARCHIVED_RETENTION_DAYS,
+            "processed-retention" => crate::jobs::PROCESSED_GC_WINDOW_DAYS,
+            "webhook-retention" => super::integrations::WEBHOOK_DELIVERY_RETENTION_DAYS,
+            "github-retention" => super::integrations::GITHUB_DELIVERY_RETENTION_DAYS,
+            _ => 0,
+        };
+        let mut counts = Vec::new();
+        for at in [now, horizon] {
+            // libSQL rejects extra bind parameters. Each fixed statement uses
+            // exactly its highest numbered placeholder (including sparse ?3).
+            let mut args = vec![
+                Cell::Integer(at),
+                Cell::Integer(i64::from(days) * 86_400_000_000),
+                Cell::text(crate::notifications::NOTIFICATIONS_CONSUMER),
+                Cell::text(crate::mail::MAIL_CONSUMER),
+                Cell::text(crate::push::consumer::PUSH_CONSUMER),
+                Cell::text(crate::search::index::SEARCH_INDEX_CONSUMER),
+                Cell::text(WEBHOOKS_CONSUMER),
+                Cell::text(GITHUB_CONSUMER),
+            ];
+            args.truncate(if sql.contains("?8") {
+                8
+            } else if sql.contains("?2") {
+                2
+            } else if sql.contains("?1") {
+                1
+            } else {
+                0
+            });
+            let rows = f.query(sql, &args).await?;
+            if rows.len() != 1 {
+                return Err(refused());
+            }
+            let count = rows[0].cell(0)?.integer()?;
+            if !(0..=100000).contains(&count) {
+                return Err(refused());
+            }
+            counts.push(count);
+        }
+        background.push(BackgroundFact::observe(
+            kind,
+            interpretation,
+            counts[0],
+            counts[1],
+        )?);
+    }
+    background.extend(room_facts);
+    let mut revision_candidates = Vec::new();
+    for (kind, sql) in [
+        ("document", "SELECT s.workspace_id,s.document_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='document' AND r.target_id=s.document_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM document_states s INNER JOIN documents d ON d.workspace_id=s.workspace_id AND d.id=s.document_id AND d.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.document_id LIMIT 10001"),
+        ("task", "SELECT s.workspace_id,s.task_id,s.writer_generation,s.updated_at,coalesce((SELECT r.created_at FROM revisions r WHERE r.workspace_id=s.workspace_id AND r.target_kind='task' AND r.target_id=s.task_id ORDER BY r.created_at DESC,r.id DESC LIMIT 1),s.created_at) FROM task_states s INNER JOIN tasks t ON t.workspace_id=s.workspace_id AND t.id=s.task_id AND t.deleted_at IS NULL INNER JOIN workspaces w ON w.id=s.workspace_id AND w.deleted_at IS NULL ORDER BY s.workspace_id,s.task_id LIMIT 10001"),
+    ] {
+        let rows = f.query(sql, &[]).await?;
+        if rows.len() > 10000 { return Err(refused()); }
+        for row in rows {
+            let workspace = row.cell(0)?.id()?;
+            let target = row.cell(1)?.id()?;
+            let candidate = super::revisions::ScheduledRevisionCandidate {
+                workspace_id: workspace,
+                target: if kind == "document" { super::revisions::RevisionTarget::Document(target) } else { super::revisions::RevisionTarget::Task(target) },
+                writer_generation: row.cell(2)?.integer()?,
+                state_updated_at: row.cell(3)?.datetime()?,
+                anchor_at: row.cell(4)?.datetime()?,
+            };
+            revision_candidates.push(RevisionObservation {
+                workspace: workspace.to_string(), target_kind: kind.into(), target: target.to_string(),
+                writer_generation: candidate.writer_generation.to_string(),
+                state_updated_at_micros: candidate.state_updated_at.timestamp_micros().to_string(),
+                anchor_at_micros: candidate.anchor_at.timestamp_micros().to_string(),
+                due_now: revision_due(&candidate, now, policy)?,
+                due_through_horizon: revision_due(&candidate, horizon, policy)?,
+            });
+        }
+    }
+    let automatic_revision_ranks = serial_cells(f, "SELECT r.workspace_id,r.target_kind,r.target_id,r.id,r.reason,r.created_at,row_number() OVER (PARTITION BY r.workspace_id,r.target_kind,r.target_id ORDER BY r.created_at DESC,r.id DESC) FROM revisions r INNER JOIN workspaces w ON w.id=r.workspace_id AND w.deleted_at IS NULL WHERE r.reason IN ('session','scheduled') ORDER BY r.workspace_id,r.target_kind,r.target_id,r.created_at DESC,r.id DESC LIMIT 10001").await?;
+    let mut excess = 0;
+    for row in &automatic_revision_ranks {
+        let rank = row[6][1]
+            .as_str()
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or_else(refused)?;
+        if rank > i64::from(policy.revision_keep.get()) {
+            excess += 1;
+        }
+    }
+    background.push(BackgroundFact::observe(
+        "automatic-revision-retention",
+        "eligible-conditional-on-policy",
+        excess,
+        excess,
+    )?);
+    let policy_bytes = serde_json::to_vec(&policy).map_err(|_| refused())?;
+    users.sort_unstable_by_key(|user| user.id);
+    memberships.sort_unstable_by_key(|membership| (membership.workspace_id, membership.user_id));
+    Ok(SerialChecks {
+        schema: 1,
+        clock_micros: now.to_string(),
+        horizon_end_micros: horizon.to_string(),
+        coverage_micros: SERIAL_HORIZON_MICROS.to_string(),
+        policy,
+        policy_sha256: hex::encode(Sha256::digest(policy_bytes)),
+        policy_binding: "required-from-sealed-server",
+        users,
+        memberships,
+        event_head: head_seq.to_string(),
+        relay_completion: relay_completion(head_seq, &outbox),
+        outbox,
+        owners,
+        room_closure_binding: "required-normal-release-and-parent-retirement",
+        background,
+        revision_candidates,
+        automatic_revision_ranks,
+    })
+}
+
+#[cfg(test)]
+mod serial_tests {
+    use super::*;
+
+    #[test]
+    fn serial_membership_requires_actual_user_workspace_and_unique_native_key() {
+        let user = Uuid::from_u128(7);
+        let workspace = Uuid::from_u128(8);
+        let columns = vec![
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("user_id".into(), Cell::uuid(user)),
+            ("role".into(), Cell::text("admin")),
+        ];
+        let users = vec![SerialUser {
+            id: user,
+            email: "native@example.invalid".into(),
+            row_fingerprint: "a".repeat(64),
+        }];
+        let membership = serial_membership_witness(&columns, &"b".repeat(64)).unwrap();
+        assert_eq!(membership.role, "admin");
+        assert_eq!(membership.row_fingerprint, "b".repeat(64));
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_ok());
+        assert!(join_serial_memberships(
+            &[],
+            &BTreeSet::from([workspace]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([Uuid::nil()]),
+            std::slice::from_ref(&membership)
+        )
+        .is_err());
+        let duplicate = serial_membership_witness(&columns, &"c".repeat(64)).unwrap();
+        assert!(join_serial_memberships(
+            &users,
+            &BTreeSet::from([workspace]),
+            &[membership, duplicate]
+        )
+        .is_err());
+        for missing in ["workspace_id", "user_id", "role"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_membership_witness(&absent, &"b".repeat(64)).is_err());
+        }
+        let mut wrong = columns;
+        wrong[2].1 = Cell::Null;
+        assert!(serial_membership_witness(&wrong, &"b".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn serial_user_witness_preserves_actual_identity_and_refuses_missing_or_wrong_types() {
+        let columns = vec![
+            ("id".into(), Cell::uuid(Uuid::from_u128(7))),
+            ("email".into(), Cell::text("exact+한글@example.invalid")),
+            (
+                "password_hash".into(),
+                Cell::text("PRIVATE_PASSWORD_HASH_CANARY"),
+            ),
+        ];
+        let fingerprint = "a".repeat(64);
+        let witness = serial_user_witness(&columns, &fingerprint).unwrap();
+        assert_eq!(witness.id, Uuid::from_u128(7));
+        assert_eq!(witness.email, "exact+한글@example.invalid");
+        assert_eq!(witness.row_fingerprint, fingerprint);
+        let encoded = serde_json::to_value(witness).unwrap();
+        assert_eq!(encoded.as_object().unwrap().len(), 3);
+        assert!(!encoded.to_string().contains("PRIVATE_"));
+        assert!(!encoded.to_string().contains("password"));
+        for missing in ["id", "email"] {
+            let mut absent = columns.clone();
+            absent.retain(|(name, _)| name != missing);
+            assert!(serial_user_witness(&absent, &fingerprint).is_err());
+        }
+        for invalid in [
+            Cell::Null,
+            Cell::text("not-a-native-uuid"),
+            Cell::Blob(vec![0; 15]),
+        ] {
+            let mut wrong = columns.clone();
+            wrong[0].1 = invalid;
+            assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        }
+        let mut wrong = columns.clone();
+        wrong[1].1 = Cell::Integer(7);
+        assert!(serial_user_witness(&wrong, &fingerprint).is_err());
+        assert!(serial_user_witness(&columns, "unbound").is_err());
+    }
+
+    fn policy(interval: u32) -> SerialPolicy {
+        SerialPolicy {
+            revision_keep: std::num::NonZeroU32::new(200).unwrap(),
+            revision_snapshot_interval_hours: interval,
+        }
+    }
+
+    fn relays(head: i64) -> Vec<RelayObservation> {
+        ["notifications", "mail", "push", "webhooks", "github"]
+            .into_iter()
+            .map(|consumer| RelayObservation {
+                consumer: consumer.into(),
+                immutable_sha256: String::new(),
+                row_sha256: String::new(),
+                last_seq: head.to_string(),
+                lease_owner: None,
+                lease_until_micros: None,
+                updated_at_micros: "1".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn serial_completion_requires_exact_registry_head_and_no_lease() {
+        let good = relays(9007199254740993);
+        assert_eq!(
+            relay_completion(9007199254740993, &good),
+            RelayCompletion::Complete
+        );
+        for cursor in ["9007199254740992", "9007199254740994", "not-an-integer"] {
+            let mut backlog = relays(9007199254740993);
+            backlog[0].last_seq = cursor.into();
+            assert_eq!(
+                relay_completion(9007199254740993, &backlog),
+                RelayCompletion::Incomplete
+            );
+        }
+        for until_only in [false, true] {
+            let mut leased = relays(1);
+            if until_only {
+                leased[0].lease_until_micros = Some("0".into());
+            } else {
+                leased[0].lease_owner = Some(Uuid::nil().to_string());
+            }
+            assert_eq!(relay_completion(1, &leased), RelayCompletion::Incomplete);
+        }
+        for names in [
+            vec!["notifications", "mail", "push", "webhooks"],
+            vec!["notifications", "mail", "push", "webhooks", "unknown"],
+            vec![
+                "notifications",
+                "mail",
+                "push",
+                "webhooks",
+                "github",
+                "github",
+            ],
+        ] {
+            let mut unknown = relays(1);
+            unknown.clear();
+            for name in names {
+                let mut row = relays(1).remove(0);
+                row.consumer = name.into();
+                unknown.push(row);
+            }
+            assert_eq!(
+                relay_completion(1, &unknown),
+                RelayCompletion::UnknownRegistry
+            );
+        }
+    }
+
+    #[test]
+    fn serial_background_unknown_pending_future_and_missing_facts_fail_closed() {
+        assert_eq!(
+            BackgroundFact::observe("pending", "pending", 0, 0)
+                .unwrap()
+                .eligibility,
+            Eligibility::Clear
+        );
+        for interpretation in ["pending", "owner", "eligible", "conservative-blocker"] {
+            assert_eq!(
+                BackgroundFact::observe("work", interpretation, 0, 1)
+                    .unwrap()
+                    .eligibility,
+                Eligibility::Blocked
+            );
+        }
+        assert_eq!(
+            BackgroundFact::observe("unknown", "unknown", 1, 1)
+                .unwrap()
+                .eligibility,
+            Eligibility::Unknown
+        );
+        for (now, future) in [(-1, 0), (0, -1), (2, 1), (0, 100001)] {
+            assert!(BackgroundFact::observe("missing", "pending", now, future).is_err());
+        }
+    }
+
+    #[test]
+    fn serial_room_live_eligibility_retains_expired_lineage_without_closure_proof() {
+        let now = 9_007_199_254_740_993;
+        let rows = [now - 1, now, now + 1, now + 20 * 60 * 1_000_000]
+            .into_iter()
+            .map(|expiry| {
+                vec![
+                    Cell::uuid(Uuid::from_u128(1)),
+                    Cell::uuid(Uuid::from_u128(2)),
+                    Cell::uuid(Uuid::from_u128(3)),
+                    Cell::Integer(7),
+                    Cell::Integer(expiry),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let raw = serial_exact_cells(&rows);
+        for kind in ["document-room-owners", "task-room-owners"] {
+            let retained = serial_room_owner_fact(kind, now, &rows[..2]).unwrap();
+            assert_eq!((retained.now, retained.through_horizon), (0, 0));
+            assert_eq!(retained.eligibility, Eligibility::Clear);
+            let mixed = serial_room_owner_fact(kind, now, &rows).unwrap();
+            assert_eq!((mixed.now, mixed.through_horizon), (2, 2));
+            assert_eq!(mixed.eligibility, Eligibility::Blocked);
+            assert_eq!(mixed.interpretation, "live-owner-overlaps-coverage");
+            // A lease ending within the horizon still overlaps coverage and
+            // cannot become Clear by testing only its state at horizon end.
+            let inside = serial_room_owner_fact(kind, now, &rows[3..]).unwrap();
+            assert_eq!((inside.now, inside.through_horizon), (1, 1));
+            assert_eq!(inside.eligibility, Eligibility::Blocked);
+            assert_eq!(serial_exact_cells(&rows), raw);
+            let output = serde_json::to_value(retained).unwrap();
+            assert!(output.get("ready").is_none());
+            assert!(output.get("released").is_none());
+        }
+        assert_eq!(raw.len(), 4);
+        assert_eq!(
+            Value::Array(raw[0].clone()),
+            json!([
+                ["blob", hex::encode(Uuid::from_u128(1).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(2).as_bytes())],
+                ["blob", hex::encode(Uuid::from_u128(3).as_bytes())],
+                ["integer", "7"],
+                ["integer", (now - 1).to_string()]
+            ])
+        );
+    }
+
+    #[test]
+    fn serial_room_owner_observation_refuses_wrong_native_shape_type_clock_and_cap() {
+        let now = 1_700_000_000_000_000;
+        let row = vec![
+            Cell::uuid(Uuid::from_u128(1)),
+            Cell::uuid(Uuid::from_u128(2)),
+            Cell::uuid(Uuid::from_u128(3)),
+            Cell::Integer(1),
+            Cell::Integer(now),
+        ];
+        let kind = "document-room-owners";
+        for at in [0, -1, i64::MAX] {
+            assert!(serial_room_owner_fact(kind, at, std::slice::from_ref(&row)).is_err());
+        }
+        for (column, value) in [
+            (0, Cell::Null),
+            (1, Cell::Blob(vec![0; 15])),
+            (2, Cell::text("not-a-native-owner")),
+            (2, Cell::Null),
+            (3, Cell::Integer(0)),
+            (3, Cell::Integer(-1)),
+            (3, Cell::text("1")),
+            (4, Cell::Null),
+            (4, Cell::text(now.to_string())),
+            (4, Cell::Integer(i64::MAX)),
+        ] {
+            let mut wrong = row.clone();
+            wrong[column] = value;
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        let mut missing = row.clone();
+        missing.pop();
+        let mut extra = row.clone();
+        extra.push(Cell::Null);
+        for wrong in [missing, extra] {
+            assert!(serial_room_owner_fact(kind, now, &[wrong]).is_err());
+        }
+        assert!(serial_room_owner_fact("unknown-room", now, &[]).is_err());
+        assert!(serial_room_owner_fact(kind, now, &vec![row; 10001]).is_err());
+        assert_eq!(
+            serial_room_owner_fact(kind, now, &[]).unwrap().eligibility,
+            Eligibility::Clear
+        );
+    }
+
+    #[test]
+    fn serial_horizon_is_full40_native_clock_checked_and_precise() {
+        let now = 9007199254740993;
+        assert_eq!(serial_horizon(now).unwrap() - now, 2400000000);
+        for invalid in [0, -1, i64::MAX, i64::MAX - SERIAL_HORIZON_MICROS] {
+            assert!(serial_horizon(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn serial_revision_reuses_due_boundary_and_detects_future_work() {
+        use super::super::revisions::{RevisionTarget, ScheduledRevisionCandidate};
+        let at = 1700000000000000;
+        let instant = |micros| chrono::DateTime::from_timestamp_micros(micros).unwrap();
+        let mut candidate = ScheduledRevisionCandidate {
+            workspace_id: Uuid::nil(),
+            target: RevisionTarget::Document(Uuid::nil()),
+            writer_generation: 0,
+            anchor_at: instant(at - 3600000000),
+            state_updated_at: instant(at),
+        };
+        assert!(
+            !revision_due(&candidate, at, policy(1)).unwrap(),
+            "equal cutoff skips"
+        );
+        assert!(revision_due(&candidate, at + 1, policy(1)).unwrap());
+        assert!(revision_due(&candidate, serial_horizon(at).unwrap(), policy(1)).unwrap());
+        assert!(
+            !revision_due(&candidate, at + 1, policy(0)).unwrap(),
+            "disabled scheduled snapshots"
+        );
+        candidate.state_updated_at = candidate.anchor_at;
+        assert!(
+            !revision_due(&candidate, at + 1, policy(1)).unwrap(),
+            "already snapshotted"
+        );
+        candidate.state_updated_at = instant(candidate.anchor_at.timestamp_micros() - 1);
+        assert!(!revision_due(&candidate, at + 1, policy(1)).unwrap());
+        assert!(revision_due(&candidate, i64::MAX, policy(1)).is_err());
+    }
 }
 
 pub struct ActorInput<'a> {
@@ -896,8 +2140,23 @@ pub async fn observe_native(
     }
     super::migrate::assert_sqlite_schema_current(backend).await?;
     let mut tx = backend.begin_read().await?;
+    let result = match family(&mut tx) {
+        Ok(f) => {
+            observe_native_read(&mut NativeRead::Remote(f), workspace, ids, "libsql-remote").await
+        }
+        Err(error) => Err(error),
+    };
+    let rollback = tx.rollback().await;
+    finished(result, rollback, "not-attempted")
+}
+
+async fn observe_native_read(
+    f: &mut NativeRead<'_>,
+    workspace: Uuid,
+    ids: &[Uuid],
+    backend: &'static str,
+) -> Result<Value, sqlx::Error> {
     let result = async {
-        let f = family(&mut tx)?;
         let mut rows = BTreeMap::new();
         for id in ids {
             let args = [Cell::uuid(workspace),Cell::uuid(*id)];
@@ -926,10 +2185,99 @@ pub async fn observe_native(
             let fences = f.query("SELECT workspace_id,document_id,owner_token,fence,expires_at FROM collab_room_fences WHERE workspace_id=?1 AND document_id=?2", &args).await?;
             if fences.len() > 1 { return Err(refused()) }
             let fences = fences.iter().map(|r| (0..5).map(|i| r.cell(i).map(exact)).collect::<Result<Vec<_>, _>>()).collect::<Result<Vec<_>, _>>()?;
-            rows.insert(id.to_string(),json!({"state":hex::encode(s.cell(0)?.bytes()?),"writer_generation":s.cell(1)?.integer()?,"cutoff":cutoff,"tail":tail,"content":s.cell(4)?.value()?,"text":s.cell(5)?.string()?,"version":s.cell(6)?.integer()?,"updates":output,"receipts":receipts,"revisions":revisions,"roomFences":fences}));
+            let mut observed = json!({"state":hex::encode(s.cell(0)?.bytes()?),"writer_generation":s.cell(1)?.integer()?,"cutoff":cutoff,"tail":tail,"content":s.cell(4)?.value()?,"text":s.cell(5)?.string()?,"version":s.cell(6)?.integer()?,"updates":output,"receipts":receipts,"revisions":revisions,"roomFences":fences});
+            if backend == "sqlite" {
+                let state = f.query("SELECT * FROM document_states WHERE workspace_id=?1 AND document_id=?2", &args).await?;
+                if state.len() != 1 { return Err(refused()) }
+                let columns = column_names(&state[0])?;
+                observed["stateColumns"] = json!(columns);
+                observed["stateRow"] = json!((0..columns.len()).map(|index| state[0].cell(index).map(exact)).collect::<Result<Vec<_>, _>>()?);
+                // Same-connection full typed rows bind a readback append to the
+                // complete primary fingerprint, including native timestamps.
+                let mut append_rows = BTreeMap::new();
+                for (table, sql) in [
+                    ("document_collab_updates", "SELECT * FROM document_collab_updates WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                    ("document_collab_op_receipts", "SELECT * FROM document_collab_op_receipts WHERE workspace_id=?1 AND document_id=?2 ORDER BY seq,op_id LIMIT 10001"),
+                    ("events", "SELECT * FROM events WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY seq LIMIT 10001"),
+                    ("audit_log", "SELECT * FROM audit_log WHERE workspace_id=?1 AND target_id=?2 AND verb='document.collab_update_appended' ORDER BY created_at,id LIMIT 10001"),
+                ] {
+                    let native = f.query(sql, &args).await?;
+                    if native.len() > 10000 { return Err(refused()) }
+                    let values = native.iter().map(|row| {
+                        let columns = column_names(row)?;
+                        Ok(json!({"columns":columns,"sha256":row_hash(row)?,"cells":(0..columns.len()).map(|i| row.cell(i).map(exact)).collect::<Result<Vec<_>,_>>()?}))
+                    }).collect::<Result<Vec<_>,sqlx::Error>>()?;
+                    append_rows.insert(table, values);
+                }
+                observed["appendRows"] = json!(append_rows);
+            }
+            rows.insert(id.to_string(), observed);
         }
-        Ok(json!({"backend":"libsql-remote","workspace_id":workspace,"rows":rows}))
+        Ok(json!({"backend":backend,"workspace_id":workspace,"rows":rows}))
     }.await;
+    result
+}
+
+/// Only the owned SQLite CLI admits this branch, after current-schema gating
+/// and detaching the sole native connection. It retains and closes that exact
+/// connection after this awaited read transaction finishes, including failure.
+pub enum OwnedSqliteObservation {
+    Baseline,
+    Serial(SerialPolicy),
+    Native { workspace: Uuid, ids: Vec<Uuid> },
+}
+
+pub async fn observe_owned_sqlite(
+    connection: &mut sqlx::SqliteConnection,
+    current: &super::migrate::SqliteCapability,
+    request: OwnedSqliteObservation,
+) -> Result<Value, sqlx::Error> {
+    if current.mode != super::migrate::SqliteSchemaMode::Raw || current.applied_steps != 12 {
+        return Err(refused());
+    }
+    if let OwnedSqliteObservation::Native { ids, .. } = &request {
+        if ids.is_empty()
+            || ids.len() > 100
+            || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+        {
+            return Err(refused());
+        }
+    }
+    let runtime: (String, String, i64) = sqlx::query_as(
+        "SELECT sqlite_version(),sqlite_source_id(),(SELECT foreign_keys FROM pragma_foreign_keys)",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if runtime.0 != super::pool::SQLITE_VERSION
+        || runtime.1 != super::pool::SQLITE_SOURCE_ID
+        || runtime.2 != 1
+    {
+        return Err(refused());
+    }
+    let mut tx = connection.begin().await?;
+    let mut reader = NativeRead::OwnedSqlite(&mut tx);
+    let result = match request {
+        OwnedSqliteObservation::Baseline => {
+            capture_primary_read(&mut reader, current, None, "sqlite")
+                .await
+                .map(|captured| captured.dataset)
+        }
+        OwnedSqliteObservation::Serial(policy) => {
+            match capture_primary_read(&mut reader, current, Some(policy), "sqlite").await {
+                Ok(captured) => captured.checks.ok_or_else(refused).and_then(|checks| {
+                    serde_json::to_value(SerialObservation {
+                        dataset: captured.dataset,
+                        checks,
+                    })
+                    .map_err(|_| refused())
+                }),
+                Err(error) => Err(error),
+            }
+        }
+        OwnedSqliteObservation::Native { workspace, ids } => {
+            observe_native_read(&mut reader, workspace, &ids, "sqlite").await
+        }
+    };
     let rollback = tx.rollback().await;
     finished(result, rollback, "not-attempted")
 }
@@ -937,6 +2285,385 @@ pub async fn observe_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn owned_sqlite_metadata_preserves_exact_storage_classes_and_rollback() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut tx = connection.begin().await.unwrap();
+        let mut reader = NativeRead::OwnedSqlite(&mut tx);
+        let rows = reader.query("SELECT NULL AS absent,9223372036854775807 AS exact_integer,'0.000000000000000123456789' AS exact_text,x'00ff80' AS exact_blob", &[]).await.unwrap();
+        assert_eq!(
+            column_names(&rows[0]).unwrap(),
+            ["absent", "exact_integer", "exact_text", "exact_blob"]
+        );
+        let expected = json!([
+            ["null"],
+            ["integer", "9223372036854775807"],
+            ["text", "0.000000000000000123456789"],
+            ["blob", "00ff80"]
+        ]);
+        assert_eq!(
+            row_hash(&rows[0]).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&expected).unwrap()))
+        );
+        let real = reader.query("SELECT 1.5 AS lossy", &[]).await.unwrap();
+        assert!(row_hash(&real[0]).is_err());
+        tx.rollback().await.unwrap();
+        // A successful fixed read must leave this same connection usable and
+        // outside its read transaction, before its explicit native close.
+        connection.begin().await.unwrap().rollback().await.unwrap();
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_primary_entry_still_refuses_local_backend_before_connect() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let backend = Backend::Sqlite(pool);
+        let error = capture_baseline(&backend).await.unwrap_err();
+        assert_eq!(
+            failure_receipt(&error)["baselineFailure"]["phase"],
+            "backend-contract"
+        );
+        backend.close().await.unwrap();
+    }
+
+    fn auth_event(verb: &str) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let logout = verb == "auth.logout";
+        vec![
+            ("seq".into(), Cell::Integer(7)),
+            ("verb".into(), Cell::text(verb)),
+            ("channel".into(), Cell::text("web")),
+            ("workspace_id".into(), Cell::Null),
+            ("actor_user_id".into(), Cell::uuid(actor)),
+            (
+                "target_id".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::uuid(actor)
+                },
+            ),
+            (
+                "target_type".into(),
+                if logout {
+                    Cell::Null
+                } else {
+                    Cell::text("user")
+                },
+            ),
+            (
+                "payload".into(),
+                Cell::json(&if logout {
+                    json!({})
+                } else {
+                    json!({"userId":actor.to_string()})
+                })
+                .unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn sqlite_extraction_witness_requires_exact_producer_and_closed_document_attachment() {
+        let id = Uuid::from_u128(1);
+        let event = vec![
+            ("id".into(), Cell::uuid(Uuid::from_u128(2))),
+            ("seq".into(), Cell::Integer(9)),
+            ("workspace_id".into(), Cell::uuid(Uuid::from_u128(3))),
+            ("actor_user_id".into(), Cell::Null),
+            ("verb".into(), Cell::text("attachment.extracted")),
+            ("target_type".into(), Cell::text("attachment")),
+            ("target_id".into(), Cell::uuid(id)),
+            (
+                "payload".into(),
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"ok"})).unwrap(),
+            ),
+            ("channel".into(), Cell::text("web")),
+            ("created_at".into(), Cell::Integer(50)),
+        ];
+        assert_eq!(event_witness(&event).unwrap(), Value::Null);
+        let witness = sqlite_attachment_extracted_witness(&event).unwrap();
+        assert_eq!(witness["class"], "sqlite-attachment-extracted");
+        assert_eq!(witness["cells"].as_array().unwrap().len(), 10);
+        for (name, value) in [
+            ("id", Cell::Blob(vec![1; 15])),
+            ("seq", Cell::text("9")),
+            ("workspace_id", Cell::Null),
+            ("actor_user_id", Cell::uuid(id)),
+            ("channel", Cell::text("system")),
+            ("verb", Cell::text("attachment.created")),
+            ("target_type", Cell::text("task")),
+            ("target_id", Cell::uuid(Uuid::from_u128(4))),
+            ("created_at", Cell::text("50")),
+            (
+                "payload",
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"pending"})).unwrap(),
+            ),
+            (
+                "payload",
+                Cell::json(&json!({"attachmentId":id.to_string(),"status":"ok","extra":true}))
+                    .unwrap(),
+            ),
+        ] {
+            let mut changed = event.clone();
+            changed
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_attachment_extracted_witness(&changed).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+        let attachment = vec![
+            ("id".into(), Cell::uuid(id)),
+            ("workspace_id".into(), Cell::uuid(Uuid::from_u128(3))),
+            ("document_id".into(), Cell::uuid(Uuid::from_u128(4))),
+            ("task_id".into(), Cell::Null),
+            ("uploader_id".into(), Cell::uuid(Uuid::from_u128(5))),
+            ("status".into(), Cell::text("stored")),
+            ("extract_status".into(), Cell::text("ok")),
+            ("extract_attempts".into(), Cell::Integer(1)),
+            ("extract_lease_token".into(), Cell::Null),
+            ("extract_lease_expires_at".into(), Cell::Null),
+            ("completed_at".into(), Cell::Integer(40)),
+            (
+                "storage_key".into(),
+                Cell::text("PRIVATE_EXTRACTION_CANARY"),
+            ),
+            (
+                "extract_text".into(),
+                Cell::text("PRIVATE_EXTRACTION_CANARY"),
+            ),
+        ];
+        let fields = sqlite_extracted_attachment_fields(&attachment).unwrap();
+        assert_eq!(fields["cells"].as_array().unwrap().len(), 11);
+        assert!(!fields.to_string().contains("PRIVATE_EXTRACTION_CANARY"));
+        for (name, value) in [
+            ("document_id", Cell::Null),
+            ("task_id", Cell::uuid(id)),
+            ("uploader_id", Cell::Blob(vec![1; 15])),
+            ("status", Cell::text("uploading")),
+            ("extract_status", Cell::text("pending")),
+            ("extract_attempts", Cell::Integer(0)),
+            ("extract_attempts", Cell::Integer(3)),
+            ("extract_attempts", Cell::text("1")),
+            ("extract_lease_token", Cell::uuid(id)),
+            ("extract_lease_expires_at", Cell::Integer(100)),
+            ("completed_at", Cell::Null),
+        ] {
+            let mut changed = attachment.clone();
+            changed
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_extracted_attachment_fields(&changed).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_invitation_witness_binds_exact_local_producer_without_changing_shared_witness() {
+        let actor = Uuid::from_u128(1);
+        let mut original = auth_event("auth.login");
+        original
+            .iter_mut()
+            .find(|(name, _)| name == "payload")
+            .unwrap()
+            .1 = Cell::json(&json!({"userId":actor.to_string(),"method":"invitation"})).unwrap();
+        assert_eq!(event_witness(&original).unwrap(), Value::Null);
+        assert_eq!(
+            sqlite_invitation_login_witness(&original).unwrap(),
+            json!({"class":"actor-invitation-login","sequence":["integer","7"],"target":hex::encode(actor.as_bytes())})
+        );
+        for (name, value) in [
+            ("seq", Cell::Integer(0)),
+            ("seq", Cell::text("7")),
+            ("verb", Cell::text("auth.logout")),
+            ("channel", Cell::text("system")),
+            ("workspace_id", Cell::uuid(actor)),
+            ("actor_user_id", Cell::Null),
+            ("actor_user_id", Cell::Blob(vec![1; 15])),
+            ("target_type", Cell::text("document")),
+            ("target_id", Cell::uuid(Uuid::from_u128(2))),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"password"})).unwrap(),
+            ),
+            (
+                "payload",
+                Cell::json(&json!({"userId":actor.to_string(),"method":"invitation","extra":true}))
+                    .unwrap(),
+            ),
+        ] {
+            let mut columns = original.clone();
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+            assert_eq!(
+                sqlite_invitation_login_witness(&columns).unwrap(),
+                Value::Null,
+                "{name}"
+            );
+        }
+        for name in [
+            "seq",
+            "verb",
+            "channel",
+            "workspace_id",
+            "actor_user_id",
+            "target_type",
+            "target_id",
+            "payload",
+        ] {
+            let mut columns = original.clone();
+            columns.retain(|(column, _)| column != name);
+            assert!(
+                sqlite_invitation_login_witness(&columns).is_err(),
+                "missing {name}"
+            );
+        }
+        let workspace = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let accepted = vec![
+            ("seq".into(), Cell::Integer(8)),
+            ("verb".into(), Cell::text("invitation.accepted")),
+            ("channel".into(), Cell::text("web")),
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("actor_user_id".into(), Cell::uuid(actor)),
+            ("target_id".into(), Cell::uuid(target)),
+            ("target_type".into(), Cell::text("invitation")),
+            ("payload".into(), Cell::json(&json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":"owner@example.invalid"})).unwrap()),
+            ("created_at".into(), Cell::Integer(30)),
+        ];
+        assert_eq!(event_witness(&accepted).unwrap(), Value::Null);
+        assert_eq!(
+            sqlite_invitation_accepted_witness(&accepted).unwrap(),
+            json!({
+            "class":"workspace-invitation-accepted","sequence":["integer","8"],
+            "workspace":hex::encode(workspace.as_bytes()),"actor":hex::encode(actor.as_bytes()),
+            "target":hex::encode(target.as_bytes()),"email":"owner@example.invalid","createdAt":["integer","30"]})
+        );
+        for (name, value) in [
+            ("seq", Cell::Integer(0)), ("channel", Cell::text("system")),
+            ("target_type", Cell::text("user")), ("workspace_id", Cell::Null),
+            ("actor_user_id", Cell::Null), ("target_id", Cell::Blob(vec![1;15])),
+            ("created_at", Cell::text("30")),
+            ("payload", Cell::json(&json!({})).unwrap()),
+            ("payload", Cell::json(&json!({"workspaceId":workspace.to_string(),"userId":actor.to_string(),"email":"owner@example.invalid","extra":true})).unwrap()),
+        ] {
+            let mut columns = accepted.clone();
+            columns.iter_mut().find(|(column,_)| column == name).unwrap().1 = value;
+            assert_eq!(sqlite_invitation_accepted_witness(&columns).unwrap(), Value::Null, "{name}");
+        }
+        let invitation = vec![
+            ("id".into(), Cell::uuid(target)),
+            ("workspace_id".into(), Cell::uuid(workspace)),
+            ("invited_by".into(), Cell::uuid(Uuid::from_u128(4))),
+            ("email".into(), Cell::text("owner@example.invalid")),
+            ("role".into(), Cell::text("owner")),
+            ("accepted_at".into(), Cell::Integer(30)),
+            ("expires_at".into(), Cell::Integer(1000)),
+            ("token_hash".into(), Cell::text("PRIVATE_INVITATION_CANARY")),
+        ];
+        let public = sqlite_invitation_fields(&invitation).unwrap();
+        assert_eq!(public.as_object().unwrap().len(), 7);
+        assert_eq!(public["id"], hex::encode(target.as_bytes()));
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("PRIVATE_INVITATION_CANARY"));
+        for name in [
+            "id",
+            "workspace_id",
+            "invited_by",
+            "accepted_at",
+            "expires_at",
+        ] {
+            let mut columns = invitation.clone();
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = Cell::text("wrong storage class");
+            assert!(sqlite_invitation_fields(&columns).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn event_witness_accepts_exact_auth_revocation_producers() {
+        for (verb, class) in [
+            ("auth.logout", "actor-logout"),
+            ("auth.password_changed", "actor-password-change"),
+            ("auth.password_reset", "actor-password-reset"),
+        ] {
+            let witness = event_witness(&auth_event(verb)).unwrap();
+            let mut expected = json!({
+                "class":class,
+                "sequence":["integer","7"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())
+            });
+            if verb == "auth.logout" {
+                expected.as_object_mut().unwrap().remove("target");
+                expected["actor"] = json!(hex::encode(Uuid::from_u128(1).as_bytes()));
+            }
+            assert_eq!(witness, expected, "{verb}");
+        }
+    }
+
+    #[test]
+    fn event_witness_refuses_mismatched_auth_revocation_fields() {
+        for verb in [
+            "auth.logout",
+            "auth.password_changed",
+            "auth.password_reset",
+        ] {
+            let original = auth_event(verb);
+            let wrong = Uuid::from_u128(2);
+            for (name, value) in [
+                ("verb", Cell::text("auth.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1])),
+                ("target_id", Cell::uuid(wrong)),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({"userId":wrong.to_string()})).unwrap()),
+                ("payload", Cell::json(&json!({"userId":Uuid::from_u128(1).to_string(),"extra":"PRIVATE_EVENT_CANARY"})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+                assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb} {name}");
+            }
+            if verb != "auth.logout" {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "actor_user_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} mismatched actor"
+                );
+            }
+        }
+    }
 
     #[test]
     fn event_witness_accepts_only_exact_login_and_projection_producers() {
@@ -1024,6 +2751,384 @@ mod tests {
                 .1 = Cell::uuid(workspace);
             assert_eq!(event_witness(&wrong).unwrap(), Value::Null);
         }
+    }
+
+    fn keycloak_event(verb: &str, email: Value) -> Vec<(String, Cell)> {
+        let actor = Uuid::from_u128(1);
+        let identity = verb != "auth.login";
+        let mut columns = auth_event(verb);
+        for (name, value) in [
+            ("seq", Cell::Integer(9_007_199_254_740_993)),
+            (
+                "target_id",
+                Cell::uuid(if identity { Uuid::from_u128(3) } else { actor }),
+            ),
+            (
+                "target_type",
+                Cell::text(if identity { "identity_link" } else { "user" }),
+            ),
+            (
+                "payload",
+                Cell::json(&if identity {
+                    json!({"userId":actor.to_string(),"provider":"generic","email":email})
+                } else {
+                    json!({"userId":actor.to_string(),"method":"oidc:generic"})
+                })
+                .unwrap(),
+            ),
+        ] {
+            columns
+                .iter_mut()
+                .find(|(column, _)| column == name)
+                .unwrap()
+                .1 = value;
+        }
+        columns
+    }
+
+    #[test]
+    fn keycloak_login_witness_matches_exact_generic_session_producer() {
+        assert_eq!(
+            event_witness(&keycloak_event("auth.login", Value::Null)).unwrap(),
+            json!({"class":"actor-oidc-login","sequence":["integer","9007199254740993"],
+                "target":hex::encode(Uuid::from_u128(1).as_bytes())})
+        );
+    }
+
+    #[test]
+    fn keycloak_identity_witness_matches_global_link_and_unlink_without_private_values() {
+        for (verb, class) in [
+            ("identity.linked", "actor-identity-linked"),
+            ("identity.unlinked", "actor-identity-unlinked"),
+        ] {
+            for email in [Value::Null, json!("PRIVATE_EVENT_EMAIL_CANARY")] {
+                let witness = event_witness(&keycloak_event(verb, email)).unwrap();
+                assert_eq!(
+                    witness,
+                    json!({"class":class,
+                    "sequence":["integer","9007199254740993"],
+                    "actor":hex::encode(Uuid::from_u128(1).as_bytes()),
+                    "target":hex::encode(Uuid::from_u128(3).as_bytes())})
+                );
+                for private in [
+                    "PRIVATE_", "email", "provider", "payload", "issuer", "token",
+                ] {
+                    assert!(!witness.to_string().contains(private), "{verb} {private}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keycloak_witness_refuses_unrecognized_or_mismatched_producer_fields() {
+        let actor = Uuid::from_u128(1);
+        let wrong = Uuid::from_u128(2);
+        for verb in ["auth.login", "identity.linked", "identity.unlinked"] {
+            let identity = verb != "auth.login";
+            let original = keycloak_event(verb, Value::Null);
+            for (name, value) in [
+                ("verb", Cell::text("identity.unknown")),
+                ("channel", Cell::text("system")),
+                ("workspace_id", Cell::uuid(wrong)),
+                ("actor_user_id", Cell::Null),
+                ("actor_user_id", Cell::Blob(vec![1; 15])),
+                ("actor_user_id", Cell::uuid(wrong)),
+                ("target_id", Cell::Null),
+                ("target_id", Cell::Blob(vec![1; 15])),
+                ("target_id", Cell::text(actor.to_string())),
+                ("target_type", Cell::text("document")),
+                ("payload", Cell::json(&json!({})).unwrap()),
+                ("seq", Cell::Integer(0)),
+                ("seq", Cell::Integer(-1)),
+            ] {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == name)
+                    .unwrap()
+                    .1 = value;
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} {name}"
+                );
+            }
+            for payload in if identity {
+                vec![
+                    json!({"userId":wrong.to_string(),"provider":"generic","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"google","email":null}),
+                    json!({"userId":actor.to_string(),"provider":"generic"}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":7}),
+                    json!({"userId":actor.to_string(),"provider":"generic","email":null,"extra":"PRIVATE_CANARY"}),
+                ]
+            } else {
+                vec![
+                    json!({"userId":wrong.to_string(),"method":"oidc:generic"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:google"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:"}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic:unknown"}),
+                    json!({"userId":actor.to_string(),"method":null}),
+                    json!({"userId":actor.to_string()}),
+                    json!({"userId":actor.to_string(),"method":"oidc:generic","extra":"PRIVATE_CANARY"}),
+                ]
+            } {
+                let mut columns = original.clone();
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "payload")
+                    .unwrap()
+                    .1 = Cell::json(&payload).unwrap();
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "{verb} payload"
+                );
+            }
+            for name in [
+                "seq",
+                "verb",
+                "channel",
+                "workspace_id",
+                "actor_user_id",
+                "target_id",
+                "target_type",
+                "payload",
+            ] {
+                let mut columns = original.clone();
+                columns.retain(|(column, _)| column != name);
+                assert!(event_witness(&columns).is_err(), "{verb} missing {name}");
+            }
+            if !identity {
+                let mut columns = original;
+                columns
+                    .iter_mut()
+                    .find(|(column, _)| column == "target_id")
+                    .unwrap()
+                    .1 = Cell::uuid(wrong);
+                assert_eq!(
+                    event_witness(&columns).unwrap(),
+                    Value::Null,
+                    "login target differs from actor"
+                );
+            }
+        }
+        // Invitation events already carry both allocation dimensions. They
+        // must not gain a redundant global-event exception.
+        for verb in ["invitation.created", "invitation.accepted"] {
+            let mut columns = auth_event(verb);
+            for (name, value) in [
+                ("workspace_id", Cell::uuid(wrong)),
+                ("target_id", Cell::uuid(Uuid::from_u128(3))),
+                ("target_type", Cell::text("invitation")),
+                ("payload", Cell::json(&if verb == "invitation.created" {
+                    json!({"workspaceId":wrong.to_string(),"email":"PRIVATE_CANARY","invitationId":Uuid::from_u128(3).to_string()})
+                } else {
+                    json!({"workspaceId":wrong.to_string(),"userId":actor.to_string(),"email":"PRIVATE_CANARY"})
+                }).unwrap()),
+            ] {
+                columns.iter_mut().find(|(column, _)| column == name).unwrap().1 = value;
+            }
+            assert_eq!(event_witness(&columns).unwrap(), Value::Null, "{verb}");
+        }
+    }
+
+    // Registration is not execution authority. ROOT must qualify the exact
+    // source/ELF, CA and fresh startLocalLibsql allocation before selecting it,
+    // and owns that fixture's normal process/port retirement after this test.
+    #[tokio::test]
+    #[ignore = "ROOT-owned strict-TLS disposable remote allocation only"]
+    async fn root_owned_serial_remote_roundtrip_and_eligibility() -> Result<(), &'static str> {
+        collab_engine::process::make_process_non_dumpable().map_err(|_| "NON_DUMPABLE_FAILED")?;
+        if !cfg!(target_os = "linux") {
+            return Err("NON_DUMPABLE_PLATFORM_REQUIRED");
+        }
+        const NAME: &str =
+            "db::e2e_fixture::tests::root_owned_serial_remote_roundtrip_and_eligibility";
+        let args = std::env::args().collect::<Vec<_>>();
+        if ![NAME, "--exact", "--ignored"]
+            .iter()
+            .all(|expected| args.iter().any(|arg| arg.as_str() == *expected))
+            || [
+                ("FVOCI_E2E_SERIAL_REMOTE_SELECTED", "1"),
+                ("FVOCI_TEST_TURSO_DESTRUCTIVE", "true"),
+                ("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true"),
+            ]
+            .iter()
+            .any(|(name, expected)| std::env::var(name).as_deref() != Ok(*expected))
+        {
+            return Err("ROOT_EXACT_SELECTION_REQUIRED");
+        }
+        let endpoint = std::env::var("FVOCI_LIBSQL_URL").map_err(|_| "LOCAL_ENDPOINT_REQUIRED")?;
+        let token = std::env::var("FVOCI_LIBSQL_AUTH_TOKEN").map_err(|_| "LOCAL_TOKEN_REQUIRED")?;
+        let ca = std::env::var("SSL_CERT_FILE").map_err(|_| "LOCAL_CA_REQUIRED")?;
+        let parsed = url::Url::parse(&endpoint).map_err(|_| "LOCAL_ENDPOINT_REFUSED")?;
+        let loopback = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if parsed.scheme() != "https"
+            || !loopback
+            || parsed.port().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !std::fs::metadata(ca).is_ok_and(|metadata| metadata.is_file())
+        {
+            return Err("ROOT_LOCAL_TLS_ALLOCATION_REQUIRED");
+        }
+        let remote = super::super::backend::RemoteDatabase::connect(endpoint, token, 1)
+            .await
+            .map_err(|_| "LOCAL_CONNECT_FAILED")?;
+        let backend = Backend::LibsqlRemote(remote);
+        let result = async {
+            for consumer in [
+                crate::notifications::NOTIFICATIONS_CONSUMER,
+                crate::mail::MAIL_CONSUMER,
+                crate::push::consumer::PUSH_CONSUMER,
+                crate::integrations::webhooks::WEBHOOKS_CONSUMER,
+                crate::integrations::github::GITHUB_CONSUMER,
+            ] {
+                super::super::outbox::ensure_consumer_backend(&backend, consumer)
+                    .await
+                    .map_err(|_| "RELAY_ENSURE_FAILED")?;
+            }
+            let policy = SerialPolicy {
+                revision_keep: std::num::NonZeroU32::new(200).ok_or("POLICY_REFUSED")?,
+                revision_snapshot_interval_hours: 24,
+            };
+            let before = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            let serial = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            let after = capture_baseline(&backend)
+                .await
+                .map_err(|_| "BASELINE_FAILED")?;
+            // Never use assert_eq!/Debug with private native snapshots.
+            if before != serial.dataset || before != after {
+                return Err("READONLY_FULL_DATASET_CHANGED");
+            }
+            let now = serial
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            if serial.checks.coverage_micros != SERIAL_HORIZON_MICROS.to_string()
+                || serial.checks.horizon_end_micros
+                    != serial_horizon(now)
+                        .map_err(|_| "HORIZON_REFUSED")?
+                        .to_string()
+                || serial.checks.event_head != "0"
+                || serial.checks.relay_completion != RelayCompletion::Complete
+                || serial.checks.background.len() != SERIAL_BACKGROUND_READS.len() + 3
+                || serial
+                    .checks
+                    .background
+                    .iter()
+                    .any(|fact| fact.eligibility != Eligibility::Clear)
+            {
+                return Err("FRESH_SERIAL_NOT_CLEAR");
+            }
+            let consumer = crate::notifications::NOTIFICATIONS_CONSUMER;
+            let owner = Uuid::now_v7();
+            let owner_id = owner.to_string();
+            if !super::super::outbox::lease_consumer_backend(&backend, consumer, owner, 60)
+                .await
+                .map_err(|_| "RELAY_LEASE_FAILED")?
+            {
+                return Err("RELAY_LEASE_NOT_ACQUIRED");
+            }
+            let held = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if held.checks.relay_completion != RelayCompletion::Incomplete
+                || !held.checks.outbox.iter().any(|relay| {
+                    relay.consumer == consumer
+                        && relay.lease_owner.as_deref() == Some(owner_id.as_str())
+                        && relay.lease_until_micros.is_some()
+                })
+            {
+                return Err("HELD_LEASE_NOT_BLOCKED");
+            }
+            if !super::super::outbox::release_consumer_backend(&backend, consumer, owner)
+                .await
+                .map_err(|_| "RELAY_RELEASE_FAILED")?
+            {
+                return Err("RELAY_RELEASE_NOT_CONFIRMED");
+            }
+            let released = capture_serial_observation(&backend, policy)
+                .await
+                .map_err(|_| "SERIAL_FAILED")?;
+            if released.checks.relay_completion != RelayCompletion::Complete {
+                return Err("RELEASED_RELAY_NOT_COMPLETE");
+            }
+            let now = released
+                .checks
+                .clock_micros
+                .parse::<i64>()
+                .map_err(|_| "CLOCK_REFUSED")?;
+            let keys = crate::auth::password::Keyring::parse_named(
+                &format!(r#"{{"serial-test":"{}"}}"#, "11".repeat(32)),
+                "serial-test",
+                "ENCRYPTION_KEYS",
+            )
+            .map_err(|_| "OIDC_TEST_KEYRING_FAILED")?;
+            for (hash, expiry, expected_now, expected_horizon) in [
+                ("a".repeat(64), now.checked_add(20 * 60 * 1_000_000), 0, 1),
+                ("b".repeat(64), now.checked_sub(1), 1, 2),
+            ] {
+                let expiry = expiry
+                    .and_then(chrono::DateTime::from_timestamp_micros)
+                    .ok_or("EXPIRY_REFUSED")?;
+                let sealed = crate::secret_box::seal(
+                    &keys,
+                    "root-owned-opaque-state",
+                    &format!("oidc-state:{hash}"),
+                )
+                .map_err(|_| "OIDC_TEST_SEAL_FAILED")?;
+                super::super::oidc::issue_state_backend(&backend, &hash, &sealed, expiry)
+                    .await
+                    .map_err(|_| "OIDC_STATE_ISSUE_FAILED")?;
+                let observed = capture_serial_observation(&backend, policy)
+                    .await
+                    .map_err(|_| "SERIAL_FAILED")?;
+                let fact = observed
+                    .checks
+                    .background
+                    .iter()
+                    .find(|fact| fact.kind == "oidc-expiry")
+                    .ok_or("OIDC_EXPIRY_FACT_MISSING")?;
+                if fact.now != expected_now
+                    || fact.through_horizon != expected_horizon
+                    || fact.eligibility != Eligibility::Blocked
+                {
+                    return Err("OIDC_CURRENT_OR_FORWARD_EXPIRY_NOT_BLOCKED");
+                }
+            }
+            Ok(())
+        }
+        .await;
+        // No follow-up mutation/reconciliation after an uncertain operation.
+        // Always await SDK cleanup, retaining operation and drain categories.
+        let close = backend.close().await;
+        let zero = backend
+            .connection_stats()
+            .is_ok_and(|stats| stats.size == 0);
+        println!(
+            "FVOCI_SERIAL_REMOTE_RESULT operation={} close={} leases={}",
+            result.as_ref().err().copied().unwrap_or("OK"),
+            if close.is_ok() { "OK" } else { "FAILED" },
+            if zero { "ZERO" } else { "UNCONFIRMED" }
+        );
+        result?;
+        if close.is_err() || !zero {
+            return Err("LOCAL_DRAIN_UNCONFIRMED");
+        }
+        Ok(())
     }
 
     #[test]

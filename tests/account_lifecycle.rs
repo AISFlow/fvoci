@@ -412,7 +412,7 @@ impl Harness {
     }
 
     async fn count(&self, sql: &str, id: Uuid) -> i64 {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .fetch_one(&self.admin)
             .await
@@ -943,9 +943,9 @@ async fn cancel_after_grace_period_is_not_found() {
             "now() - interval '14 days' - interval '1 second'",
         ),
     ] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE fvoci.users SET deleted_at = {deleted_sql} WHERE id = $1"
-        ))
+        )))
         .bind(user_id)
         .execute(&h.admin)
         .await
@@ -1464,6 +1464,148 @@ async fn maintenance_sweep_anonymizes_withdrawn_users_after_grace_period() {
         .await,
         1
     );
+    h.finish().await;
+}
+
+/// The owner of a personal workspace is the only lead of its private project.
+/// The erasure tombstones every live project there with the workspace stamp
+/// before the memberships delete, so PostgreSQL's deferred private-lead check
+/// passes and the sweep finishes instead of retrying the user forever. Another
+/// user's personal workspace and the team workspace, where the erased user
+/// still leads a private project, do not change. The family sweep asserts the
+/// same erasure tuple in `jobs::withdrawn::personal_project_erasure`.
+#[tokio::test]
+async fn maintenance_sweep_erases_withdrawn_user_with_private_personal_project() {
+    /// (anonymized, placeholder email, sessions, identity links, personal
+    /// workspace deleted, its memberships, its project grants, its live
+    /// projects, its projects with the workspace stamp)
+    type Erasure = (bool, bool, i64, i64, bool, i64, i64, i64, i64);
+    /// Per workspace: (live, memberships, project grants, live projects,
+    /// projects), then whether the other user is still unerased.
+    type Untouched = (Vec<(bool, i64, i64, i64, i64)>, bool);
+    async fn erasure(h: &Harness, user: Uuid) -> Erasure {
+        sqlx::query_as("SELECT u.anonymized_at IS NOT NULL,u.email LIKE 'withdrawn-%@withdrawn.invalid',(SELECT count(*) FROM fvoci.sessions s WHERE s.user_id=u.id),(SELECT count(*) FROM fvoci.identity_links l WHERE l.user_id=u.id),w.deleted_at IS NOT NULL,(SELECT count(*) FROM fvoci.memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM fvoci.project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id AND p.deleted_at=w.deleted_at) FROM fvoci.users u JOIN fvoci.workspaces w ON w.id=u.personal_workspace_id WHERE u.id=$1")
+            .bind(user)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap()
+    }
+    async fn untouched(h: &Harness, workspaces: [Uuid; 2], user: Uuid) -> Untouched {
+        let mut rows: Vec<(bool, i64, i64, i64, i64)> = Vec::new();
+        for ws in workspaces {
+            rows.push(sqlx::query_as("SELECT w.deleted_at IS NULL,(SELECT count(*) FROM fvoci.memberships m WHERE m.workspace_id=w.id),(SELECT count(*) FROM fvoci.project_members g WHERE g.workspace_id=w.id),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id AND p.deleted_at IS NULL),(SELECT count(*) FROM fvoci.projects p WHERE p.workspace_id=w.id) FROM fvoci.workspaces w WHERE w.id=$1")
+                .bind(ws)
+                .fetch_one(&h.admin)
+                .await
+                .unwrap());
+        }
+        let live = h
+            .count(
+                "SELECT count(*) FROM fvoci.users WHERE id = $1 AND deleted_at IS NULL AND anonymized_at IS NULL",
+                user,
+            )
+            .await;
+        (rows, live == 1)
+    }
+    async fn personal_workspace(h: &Harness, cookie: &str, user: Uuid, from: u8) -> Uuid {
+        let res = call(
+            &h.app,
+            "POST",
+            "/api/v1/me/personal-workspace",
+            None,
+            Some(cookie),
+            peer(from),
+        )
+        .await;
+        assert!(res.status.is_success(), "{:?}", res.json);
+        sqlx::query_scalar("SELECT personal_workspace_id FROM fvoci.users WHERE id = $1")
+            .bind(user)
+            .fetch_one(&h.admin)
+            .await
+            .unwrap()
+    }
+
+    let h = Harness::start().await;
+    let (due_id, _, due_cookie) = h.member("lead", "member").await;
+    let (keep_id, _, keep_cookie) = h.member("keep", "member").await;
+    let personal = personal_workspace(&h, &due_cookie, due_id, 2).await;
+    let kept = personal_workspace(&h, &keep_cookie, keep_id, 4).await;
+    for (cookie, ws, key, visibility) in [
+        (&due_cookie, personal, "PRIV", "private"),
+        (&due_cookie, personal, "OPEN", "workspace"),
+        (&keep_cookie, kept, "KEEP", "private"),
+        (&due_cookie, h.workspace_id, "TEAM", "private"),
+    ] {
+        let res = call(
+            &h.app,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/projects"),
+            Some(json!({"key": key, "name": key, "visibility": visibility})),
+            Some(cookie),
+            peer(5),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::CREATED, "{key}: {:?}", res.json);
+    }
+    sqlx::query(
+        "INSERT INTO fvoci.identity_links (id, user_id, provider, provider_user_id) VALUES ($1, $2, 'google', 'erasure-lead')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(due_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    let res = h
+        .withdraw(
+            &due_cookie,
+            json!({"currentPassword": PASSWORD, "emailLocalPart": null}),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.json);
+    sqlx::query(
+        "UPDATE fvoci.users SET deleted_at = now() - interval '14 days' - interval '1 minute' WHERE id = $1",
+    )
+    .bind(due_id)
+    .execute(&h.admin)
+    .await
+    .unwrap();
+    // Before: the owner's grants are the only leads of both projects.
+    let before = erasure(&h, due_id).await;
+    assert_eq!(
+        (before.4, before.5, before.6, before.7, before.8),
+        (false, 1, 2, 2, 0)
+    );
+    let others = untouched(&h, [kept, h.workspace_id], keep_id).await;
+
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        run_withdrawn_anonymize(&h.app_pool, Utc::now(), &cancel)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        erasure(&h, due_id).await,
+        (true, true, 0, 0, true, 0, 0, 0, 2)
+    );
+    assert_eq!(untouched(&h, [kept, h.workspace_id], keep_id).await, others);
+
+    let stats = run_daily_sweep(&h.app_pool, &h.storage, &h.mailer, &cancel)
+        .await
+        .unwrap()
+        .expect("claimed daily sweep");
+    assert_eq!(
+        (stats.withdrawn_anonymized, stats.workspace.purged),
+        (0, 1),
+        "{stats:?}"
+    );
+    for sql in [
+        "SELECT count(*) FROM fvoci.workspaces WHERE id = $1",
+        "SELECT count(*) FROM fvoci.projects WHERE workspace_id = $1",
+    ] {
+        assert_eq!(h.count(sql, personal).await, 0, "{sql}");
+    }
+    assert_eq!(untouched(&h, [kept, h.workspace_id], keep_id).await, others);
     h.finish().await;
 }
 

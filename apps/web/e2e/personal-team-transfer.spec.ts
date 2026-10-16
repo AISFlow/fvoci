@@ -7,25 +7,25 @@ import { createE2eUser, login } from "./helpers";
 
 const owner = { email: "Admin@Example.COM", password: "supersecret1" };
 const member = { email: "w2-transfer-member@example.com", password: "memberpass1" };
-const workspaceSchema = z.object({ id: z.string().uuid(), slug: z.string() });
+const workspaceSchema = z.object({ id: z.guid(), slug: z.string() });
 const workspacesSchema = z.object({
-  items: z.array(z.object({ id: z.string().uuid(), kind: z.string(), slug: z.string() })),
+  items: z.array(z.object({ id: z.guid(), kind: z.string(), slug: z.string() })),
 });
 const captureSchema = z.object({
-  documentId: z.string().uuid(),
+  documentId: z.guid(),
   documentDisplayId: z.string(),
-  taskId: z.string().uuid(),
+  taskId: z.guid(),
   taskDisplayId: z.string(),
-  projectId: z.string().uuid(),
+  projectId: z.guid(),
 });
-const projectSchema = z.object({ id: z.string().uuid(), key: z.string() });
-const searchSchema = z.object({ items: z.array(z.object({ id: z.string() }).passthrough()) });
+const projectSchema = z.object({ id: z.guid(), key: z.string() });
+const searchSchema = z.object({ items: z.array(z.object({ id: z.string() }).loose()) });
 const transferSchema = z.object({
-  workspaceId: z.string().uuid(),
-  projectId: z.string().uuid(),
-  documentId: z.string().uuid(),
+  workspaceId: z.guid(),
+  projectId: z.guid(),
+  documentId: z.guid(),
   documentNumber: z.number().int(),
-  taskId: z.string().uuid().nullable(),
+  taskId: z.guid().nullable(),
   taskNumber: z.number().int().nullable(),
   replayed: z.boolean(),
 });
@@ -44,7 +44,7 @@ const graphSchema = z.object({
 // A new committed connection with exactly the run's restricted app role; the
 // credentials stay in the child environment and never enter evidence.
 function committed(workspaceId: string, select: string): unknown {
-  z.string().uuid().parse(workspaceId);
+  z.guid().parse(workspaceId);
   const url = new URL(process.env.DATABASE_APP_URL ?? "");
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   if (!container) throw new Error("isolated PostgreSQL container is required");
@@ -91,9 +91,9 @@ const meiliTaskSchema = z
     finishedAt: z.string().nullable().optional(),
     duration: z.string().nullable().optional(),
     details: z.record(z.string(), z.unknown()).nullable().optional(),
-    error: z.object({ code: z.string() }).passthrough().nullable().optional(),
+    error: z.object({ code: z.string() }).loose().nullable().optional(),
   })
-  .passthrough();
+  .loose();
 /**
  * Diagnostic only: this run's isolated Meilisearch tasks enqueued from 10 s
  * before the poll began, read through the harness's own task API with the
@@ -153,7 +153,7 @@ async function observeMeiliTasks(since: Date) {
  * change the poll; the poll's own predicate is unchanged.
  */
 function outboxObserver(workspaceId: string, targets: string[], verbs: string[]) {
-  for (const id of [workspaceId, ...targets]) z.string().uuid().parse(id);
+  for (const id of [workspaceId, ...targets]) z.guid().parse(id);
   const inTargets = targets.map((id) => `'${id}'`).join(",");
   const inVerbs = verbs.map((verb) => `'${verb.replace(/[^a-z.]/g, "")}'`).join(",");
   const observations: unknown[] = [];
@@ -193,7 +193,7 @@ function outboxObserver(workspaceId: string, targets: string[], verbs: string[])
 }
 /** The source pair's committed graph in one tenant, read as the app role. */
 function graph(workspaceId: string, documentId: string, taskId: string) {
-  for (const id of [documentId, taskId]) z.string().uuid().parse(id);
+  for (const id of [documentId, taskId]) z.guid().parse(id);
   return graphSchema.parse(
     committed(
       workspaceId,
@@ -862,7 +862,7 @@ test("task page MOVE refuses an unapplied draft, then saves the body and moves w
 });
 
 const uploadSchema = z.object({
-  attachmentId: z.string().uuid(),
+  attachmentId: z.guid(),
   partSizeBytes: z.number().int(),
   parts: z.array(z.object({ partNumber: z.number().int(), url: z.string() })),
 });
@@ -965,7 +965,7 @@ test("COPY with an attachment: the copy gets a new file id a fresh teammate down
   // task, a different id and key; the copied body names the new id only;
   // the private original's files are unchanged.
   const teamFiles = z
-    .array(z.object({ id: z.string().uuid(), task: z.string().uuid(), key: z.string() }))
+    .array(z.object({ id: z.guid(), task: z.guid(), key: z.string() }))
     .parse(
       committed(
         team.id,
@@ -1016,8 +1016,8 @@ test("COPY with an attachment: the copy gets a new file id a fresh teammate down
   expect(Buffer.from(await original.body()).equals(bytes)).toBe(true);
 });
 
-const identitySchema = z.object({ userId: z.string().uuid(), sessionId: z.string().uuid() });
-const timerReceiptSchema = z.object({ runId: z.string().uuid(), version: z.number().int() });
+const identitySchema = z.object({ userId: z.guid(), sessionId: z.guid() });
+const timerReceiptSchema = z.object({ runId: z.guid(), version: z.number().int() });
 /** Labelled admin fixture (isolated run DB, local socket): states no current route creates. */
 function adminFixture(sql: string): string {
   const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
@@ -1199,23 +1199,23 @@ test("MOVE discloses and carries the time records and my timer; COPY keeps them 
 });
 
 const updateLogSchema = z.array(
-  z.object({ seq: z.number(), op: z.string().uuid(), payload: z.string(), at: z.string() }),
+  z.object({ seq: z.number(), op: z.guid(), payload: z.string(), at: z.string() }),
 );
 const nativeSchema = z.object({
   document: z.object({ content: z.string(), hasToken: z.boolean() }),
-  documentState: z.object({ state: z.string() }).passthrough().nullable(),
+  documentState: z.object({ state: z.string() }).loose().nullable(),
   documentUpdates: updateLogSchema,
-  taskState: z.object({ state: z.string() }).passthrough().nullable(),
+  taskState: z.object({ state: z.string() }).loose().nullable(),
   taskUpdates: updateLogSchema,
-  revisions: z.array(z.object({ id: z.string().uuid() }).passthrough()),
+  revisions: z.array(z.object({ id: z.guid() }).loose()),
 });
 const timerGraphSchema = z.object({
-  workspaces: z.array(z.string().uuid()),
-  runs: z.array(z.object({ id: z.string().uuid() }).passthrough()),
-  segments: z.array(z.object({ id: z.string().uuid(), run: z.string().uuid() }).passthrough()),
+  workspaces: z.array(z.guid()),
+  runs: z.array(z.object({ id: z.guid() }).loose()),
+  segments: z.array(z.object({ id: z.guid(), run: z.guid() }).loose()),
 });
-const teamTaskSchema = z.object({ id: z.string().uuid(), number: z.number().int() });
-const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string() }).passthrough()) });
+const teamTaskSchema = z.object({ id: z.guid(), number: z.number().int() });
+const workflowSchema = z.object({ statuses: z.array(z.object({ id: z.string() }).loose()) });
 
 /**
  * One MOVE observed by another signed-in session of the owner that keeps two
@@ -1436,11 +1436,11 @@ test("MOVE whose committed success is lost replays the same request once: same I
   // My timer rows are actor-scoped (048 self_timer RLS): read through the
   // same restricted role with a transaction-local self user (a validated
   // UUID), canonical and ordered, without the workspace column.
-  const actor = z.string().uuid().parse(me.userId);
+  const actor = z.guid().parse(me.userId);
   // 048 self_timer filters by user only, so each read also names the
   // validated workspace: the source and destination are observed separately.
   const timerRows = (workspace: string) => {
-    const tenant = z.string().uuid().parse(workspace);
+    const tenant = z.guid().parse(workspace);
     return timerGraphSchema.parse(
       committed(
         workspace,

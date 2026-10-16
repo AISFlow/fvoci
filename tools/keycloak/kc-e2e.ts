@@ -1,4 +1,4 @@
-// Helpers of scripts/keycloak-oidc-e2e.sh (local, opt-in Keycloak OIDC check).
+// Helpers of tools/keycloak/run.ts (local, opt-in Keycloak OIDC check).
 //
 // Secrets come from the environment or the mode-600 config file and are never
 // printed; `redact` replaces them and every code/state/token-shaped value.

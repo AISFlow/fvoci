@@ -192,7 +192,7 @@ fn scan(file: &File) -> Result<(Digests, Option<Vec<u8>>), String> {
 
 /// Normal relative components only, written canonically, under a Cargo target
 /// directory.
-fn safe_relative(path: &str) -> bool {
+pub(crate) fn safe_relative(path: &str) -> bool {
     let canonical = Path::new(path)
         .components()
         .map(|c| match c {

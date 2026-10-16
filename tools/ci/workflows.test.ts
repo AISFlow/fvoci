@@ -89,7 +89,7 @@ test("Rust SQLite controls have an independent budget without duplicating the de
   assert.ok(needs(job(rust, "rust-ci-gate")).includes("fast-sqlite"));
   assert.equal(sqlite.if, "needs.ci-plan.outputs.select_fast_sqlite == 'true'");
   assert.equal(
-    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (54 exact tests)")
+    oneStep(sqlite, (step) => step.name === "Selected SQLite library controls (56 exact tests)")
       .run,
     "xtask/target/debug/xtask selected-library --target-dir target/db-lib\n",
   );
@@ -872,7 +872,7 @@ for (const path of ["target", "crates/collab-engine/target"])
     // The normalized producer has no long-term helper cache. Keep testing the
     // writer collision policy if another helper writer is introduced later.
     const selected =
-      path === "target" ? save("collaboration-test-build") : structuredClone(ordinary);
+      path === "target" ? save("collaboration-main-build") : structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
     if (path !== "target") {
       assert.ok(

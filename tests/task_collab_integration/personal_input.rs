@@ -172,7 +172,7 @@ async fn personal_input_origin_failure_rolls_back_task_events_activity_and_recei
     run_test("personal_input_origin_failure_rolls_back_task_events_activity_and_receipt",async {
     let mut run=TestRun::new(TestDb::bootstrap().await);let(addr,f)=setup_task(&mut run,5000).await;let owner=personal(addr,&f.owner).await;let ws=owner.workspace_id;let path=input_path(&owner);let request=Uuid::now_v7();
     let admin=admin_pool(&run.harness).await;
-    sqlx::raw_sql(&format!(r#"CREATE FUNCTION fvoci.fixture_origin_fail() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, fvoci AS $$ BEGIN
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(r#"CREATE FUNCTION fvoci.fixture_origin_fail() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, fvoci AS $$ BEGIN
       IF NEW.request_id = '{request}'::uuid THEN
         IF EXISTS(SELECT 1 FROM fvoci.task_activity WHERE task_id=NEW.task_id)
            AND EXISTS(SELECT 1 FROM fvoci.events WHERE target_id=NEW.task_id AND verb='task.created')
@@ -180,7 +180,7 @@ async fn personal_input_origin_failure_rolls_back_task_events_activity_and_recei
            AND EXISTS(SELECT 1 FROM fvoci.task_assignees WHERE task_id=NEW.task_id)
         THEN RAISE EXCEPTION 'fixture_after_task_event_activity_before_origin'; END IF;
       END IF; RETURN NEW; END $$;
-      CREATE TRIGGER fixture_origin_fail BEFORE INSERT ON fvoci.task_origins FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_origin_fail();"#)).execute(&admin).await.unwrap();
+      CREATE TRIGGER fixture_origin_fail BEFORE INSERT ON fvoci.task_origins FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_origin_fail();"#))).execute(&admin).await.unwrap();
     let body=json!({"requestId":request,"intent":"task","title":"rollback fixture"});let(status,_)=session_call(addr,Method::POST,&path,&owner.session_token,Some(body.clone())).await;
     sqlx::raw_sql("DROP TRIGGER fixture_origin_fail ON fvoci.task_origins; DROP FUNCTION fvoci.fixture_origin_fail();").execute(&admin).await.unwrap();admin.close().await;
     assert_eq!(status,StatusCode::INTERNAL_SERVER_ERROR);assert_eq!(committed_counts(&run,ws,"rollback fixture").await,(0,0,0,0,0,0,0));
@@ -309,8 +309,8 @@ async fn personal_input_origin_operation_first_serializes_revocation_until_commi
     run_test("personal_input_origin_operation_first_serializes_revocation_until_commit",async {
     let mut run=TestRun::new(TestDb::bootstrap().await);let(addr,owner,requester,target,source,document)=source_fixture(&mut run).await;let ws=owner.workspace_id;let command=Uuid::now_v7();let barrier=90010077i64;
     let admin=admin_pool(&run.harness).await;
-    sqlx::raw_sql(&format!(r#"CREATE FUNCTION fvoci.fixture_origin_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_id='{command}'::uuid THEN PERFORM pg_advisory_xact_lock({barrier}); END IF; RETURN NEW; END $$;
-    CREATE TRIGGER fixture_origin_barrier BEFORE INSERT ON fvoci.task_origins FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_origin_barrier();"#)).execute(&admin).await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(r#"CREATE FUNCTION fvoci.fixture_origin_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.request_id='{command}'::uuid THEN PERFORM pg_advisory_xact_lock({barrier}); END IF; RETURN NEW; END $$;
+    CREATE TRIGGER fixture_origin_barrier BEFORE INSERT ON fvoci.task_origins FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_origin_barrier();"#))).execute(&admin).await.unwrap();
     let mut hold=observer(&run,ws).await;let hold_pid:i32=sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut hold).await.unwrap();sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(barrier).execute(&mut hold).await.unwrap();
     let token=requester.session_token.clone();let path=document_api(ws,document,"/tasks");let request=tokio::spawn(async move{session_call(addr,Method::POST,&path,&token,Some(json!({"projectId":target,"requestId":command,"task":{"title":"operation first"}}))).await});
     let mut revoke=observer(&run,ws).await;let product_pid=blocked_by(&mut revoke,hold_pid).await;let revoke_pid:i32=sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut revoke).await.unwrap();

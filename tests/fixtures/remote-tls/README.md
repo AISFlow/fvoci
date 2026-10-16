@@ -1,8 +1,9 @@
 # Remote libSQL TLS test fixtures
 
 Test-only certificates for the `db::backend::remote_tls` handshake tests of
-the vendored libsql connector (`vendor/libsql-0.9.30/src/tls.rs`). Nothing
-outside those tests uses them. `server.key` is a throwaway test key; it
+the vendored libsql connector (`vendor/libsql-0.9.30/src/tls.rs`) and for
+`http_client::tests::public_roots_refuse_a_private_ca` (`ca.pem`, `server.pem`
+and `server.key`). Nothing else uses them. `server.key` is a throwaway test key; it
 protects nothing and is not registered anywhere.
 
 | File | Contents |

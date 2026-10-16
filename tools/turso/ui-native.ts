@@ -12,8 +12,16 @@ import {
   readFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { root as checkout, sha } from "../selected-backend-ci/io.ts";
-import { baselineFailureDiagnostic, OFF, ON } from "./ui-audit.ts";
+import { root as checkout, sha, digest } from "../selected-backend-ci/io.ts";
+import {
+  baselineFailureDiagnostic,
+  OFF,
+  ON,
+  RESTORE,
+  captureRoomLog,
+  type RoomLogOrigin,
+} from "./ui-audit.ts";
+import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import {
   fixtureInput,
@@ -35,11 +43,17 @@ import {
 import {
   localFixture,
   localServerStart,
+  lease,
   stopAttachedDaemon,
   type ServerHandle,
 } from "./ui-container.ts";
 import { communicate, identity, now, poll, wait, type Scope } from "./ui-processes.ts";
-import type { Manifest } from "./ui-record.ts";
+import {
+  loadLocalLease,
+  recheckFinalBrowsers,
+  type BrowserEngine,
+  type Manifest,
+} from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 
@@ -60,16 +74,26 @@ const nativeCode = /^(?:TURSO_UI_[A-Z_]+|UI_NATIVE_FIXTURE_FAILED)$/;
 
 export async function fixture(
   scope: Scope | null,
-  manifest: Pick<Manifest, "binaries">,
+  manifest: Pick<Manifest, "binaries"> & Partial<Pick<Manifest, "finalTrust">>,
   mode: string,
   environment: Record<string, string>,
   input?: Record_,
 ): Promise<Record_> {
   if (executionMode() === "orca-local")
-    return localFixture(scope as Scope, manifest, mode, environment, input);
+    return localFixture(
+      scope as Scope,
+      manifest,
+      mode,
+      { ...environment, E2E_DATABASE_BACKEND: "libsql-remote", FVOCI_E2E_TURSO_UI_SELECTED: "1" },
+      input,
+    );
   const env = cleanEnv();
   for (const key of FIXTURE_KEYS)
     if (Object.hasOwn(environment, key)) env[key] = environment[key] as string;
+  if (manifest.finalTrust !== undefined) {
+    env.SSL_CERT_FILE = manifest.finalTrust.path;
+    Reflect.deleteProperty(env, "SSL_CERT_DIR");
+  }
   env.E2E_DATABASE_BACKEND = "libsql-remote";
   env.FVOCI_E2E_TURSO_UI_SELECTED = "1";
   require(scope !== null, "UI_OWNED_PROCESS_SCOPE_REQUIRED");
@@ -149,11 +173,51 @@ export interface Started {
   server: ServerHandle;
   base: string;
   log: number;
+  roomLog?: RoomLogOrigin;
+}
+
+/** The maintained same-PID launcher/publisher evidence, with the actual stdout FD. */
+export function serverRoomLog(
+  scope: Scope,
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  started: Started,
+  directory: string,
+  target: string,
+): RoomLogOrigin {
+  const server = started.server,
+    retired = server.hostIdentity ?? identity(server.child.pid);
+  const observed = identity(retired.pid);
+  const native = server.maintenanceIdentity ?? retired;
+  require(observed.startTicks === retired.startTicks &&
+    observed.comm === "fvoci-server" &&
+    (observed.exeInspection === "UNAVAILABLE" ||
+      observed.exe ===
+        (server.containerId === undefined
+          ? manifest.binaries["fvoci-server"]?.path
+          : "/fvoci-current/bin/fvoci-server")), "UI_NORMAL_MAIN_IDENTITY_FAILED");
+  if (server.containerId !== undefined)
+    require(server.daemonSample !== undefined &&
+      server.daemonSample.clientPid === server.child.pid &&
+      server.daemonSample.maintenance.pid === native.pid &&
+      server.daemonSample.maintenance.startTicks === native.startTicks &&
+      server.daemonSample.retirement.pid === retired.pid &&
+      server.daemonSample.retirement.startTicks ===
+        retired.startTicks, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return captureRoomLog(
+    scope,
+    manifest,
+    join(directory, "server.private.log"),
+    started.log,
+    server.child,
+    native,
+    target,
+    retired,
+  );
 }
 
 export async function start(
   scope: Scope,
-  manifest: Pick<Manifest, "binaries">,
+  manifest: Pick<Manifest, "binaries"> & Partial<Pick<Manifest, "sourceInputs" | "finalBrowsers">>,
   environment: Record<string, string>,
   directory: string,
   expectedSetup = false,
@@ -163,17 +227,19 @@ export async function start(
     return localServerStart(scope, manifest, environment, directory, expectedSetup);
   const logpath = join(directory, "server.private.log");
   const log = openSync(logpath, "wx", 0o600);
-  fchmodSync(log, 0o600);
-  const launch = get(manifest, "binaries", "fvoci-migrate", "path") as string;
-  const child = scope.spawn([launch, "--start"], "server", {
-    env: environment,
-    stdin: "ignore",
-    stdout: log,
-    stderr: log,
-  });
-  const started = clock();
-  const deadline = started + SERVER_BUDGET;
+  let child: ReturnType<Scope["spawn"]> | undefined;
+  let started: number | undefined, deadline: number | undefined;
   try {
+    fchmodSync(log, 0o600);
+    const launch = get(manifest, "binaries", "fvoci-migrate", "path") as string;
+    child = scope.spawn([launch, "--start"], "server", {
+      env: environment,
+      stdin: "ignore",
+      stdout: log,
+      stderr: log,
+    });
+    started = clock();
+    deadline = started + SERVER_BUDGET;
     const base = await awaitListening(logpath, child, deadline, clock);
     const observed = identity(child.pid);
     require(observed.comm === "fvoci-server" &&
@@ -188,15 +254,29 @@ export async function start(
       kernelExeProof: observed.exeInspection,
     });
     await requireSetup(base, expectedSetup);
-    return { server: { child }, base, log };
+    const running: Started = { server: { child }, base, log };
+    if (manifest.finalBrowsers !== undefined) {
+      require(manifest.sourceInputs !== undefined, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+      running.roomLog = serverRoomLog(
+        scope,
+        { binaries: manifest.binaries, sourceInputs: manifest.sourceInputs },
+        running,
+        directory,
+        digest(environment.FVOCI_LIBSQL_URL ?? ""),
+      );
+    }
+    return running;
   } catch (original) {
     const diagnostic =
-      failureCode(original) === "UI_SERVER_START_FAILED"
+      failureCode(original) === "UI_SERVER_START_FAILED" &&
+      child !== undefined &&
+      started !== undefined &&
+      deadline !== undefined
         ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock)
         : null;
     const cleanup: string[] = [];
     try {
-      await scope.finish(child, true);
+      if (child !== undefined) await scope.finish(child, true);
     } catch (error) {
       cleanup.push(failureCode(error));
     }
@@ -269,13 +349,51 @@ const SECRET_BROWSER_KEYS = [
 
 export async function browser(
   scope: Scope,
-  manifest: Pick<Manifest, "bun" | "physicalInputs">,
+  manifest: Pick<Manifest, "bun" | "physicalInputs" | "finalBrowsers" | "finalBrowserRuntime"> &
+    Partial<Pick<Manifest, "sourceInputs">>,
   directory: string,
   environment: Record<string, string>,
   spec: string,
   grep?: string,
   workspace: string = checkout,
+  config = "collab-playwright.config.ts",
+  heavy?: string,
+  engine?: BrowserEngine,
 ): Promise<unknown> {
+  const flow = environment.FVOCI_E2E_SELECTED_FLOW;
+  const final =
+    config === "selected-final-playwright.config.ts" && spec === "selected-final-acceptance.ts";
+  const equal = config === "equal-work-playwright.config.ts" && spec === "v060-equal-work.spec.ts";
+  // The dedicated auth spec has its own config and exactly its three cases.
+  require((config === "collab-playwright.config.ts" &&
+    spec !== AUTH_SPEC &&
+    spec !== "selected-final-acceptance.ts") ||
+    (spec === RESTORE && config === "turso-restore-playwright.config.ts") ||
+    (spec === AUTH_SPEC &&
+      config === "auth-session-playwright.config.ts" &&
+      grep === undefined &&
+      (flow === "on" || flow === "off")) ||
+    final ||
+    (equal &&
+      manifest.finalBrowsers !== undefined &&
+      environment.FVOCI_E2E_EQUAL_WORK_PREPARED === "1"), "UI_BROWSER_CONFIG_REFUSED");
+  require(final
+    ? engine !== undefined
+    : engine === undefined, "UI_FINAL_BROWSER_SELECTION_REQUIRED");
+  let finalBindingHash: string | undefined;
+  if (final) {
+    recheckFinalBrowsers(manifest);
+    const bindingPath = environment.FVOCI_E2E_FINAL_ACTOR_BINDING;
+    require(typeof bindingPath === "string", "UI_FINAL_ACTOR_BINDING_REQUIRED");
+    const binding = privateRead(bindingPath, 16384);
+    require(get(binding, "browser") === engine &&
+      manifest.sourceInputs !== undefined &&
+      get(binding, "source") === manifest.sourceInputs.source &&
+      get(binding, "tree") === manifest.sourceInputs.tree &&
+      environment.FVOCI_E2E_FINAL_BROWSER === engine, "UI_FINAL_BROWSER_SELECTION_CHANGED");
+    finalBindingHash = sha(bindingPath);
+  }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   const report = join(directory, "playwright.private.json");
   const env: Record<string, string> = {
     ...cleanEnv(),
@@ -286,6 +404,12 @@ export async function browser(
   };
   // A Bun test worker's id must not reach the Playwright child.
   Reflect.deleteProperty(env, "JEST_WORKER_ID");
+  if (final && engine !== undefined) {
+    env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers?.[engine].path ?? "";
+  } else if (manifest.finalBrowsers !== undefined) {
+    env.FVOCI_E2E_FINAL_BROWSER_BIN = manifest.finalBrowsers.chromium.path;
+  }
+  if (manifest.finalBrowsers !== undefined) env.FVOCI_TURSO_UI_FINAL = "1";
   require(!SECRET_BROWSER_KEYS.some((key) =>
     Object.hasOwn(env, key),
   ), "UI_BROWSER_SECRET_ENV_REFUSED");
@@ -302,7 +426,7 @@ export async function browser(
   }
   const pkg = JSON.parse(readFileSync(packagePath, "utf8")) as unknown;
   require(isRecord(pkg) &&
-    pkg.version === "1.63.0" &&
+    pkg.version === "1.64.0" &&
     isRecord(pkg.bin) &&
     pkg.bin.playwright === "cli.js", "UI_PLAYWRIGHT_CLI_REFUSED");
   // The checked env is the whole env: no .env or bunfig of apps/web is loaded.
@@ -313,7 +437,7 @@ export async function browser(
     cli,
     "test",
     "--config",
-    "e2e-pending/collab-playwright.config.ts",
+    "e2e-pending/" + config,
     "--reporter=line,json",
   ];
   if (grep) args.push("--grep", grep);
@@ -322,6 +446,12 @@ export async function browser(
   let code = -1;
   try {
     fchmodSync(output, 0o600);
+    if (executionMode() === "orca-local") {
+      const grant = loadLocalLease("current-build", lease.load);
+      require(typeof heavy === "string" &&
+        get(grant, "heavy", "path") === heavy, "UI_LOCAL_ALLOCATION_REFUSED");
+      args.unshift(heavy);
+    }
     const child = scope.spawn(args, "browser", {
       env,
       cwd: join(workspace, "apps/web"),
@@ -345,7 +475,7 @@ export async function browser(
           chmodSync(report, 0o600);
           failedReport = privateRead(report, 64 * 1024 * 1024);
         }
-        if ([ON, OFF].includes(spec))
+        if ([ON, OFF, AUTH_SPEC].includes(spec))
           source = readFileSync(join(workspace, "apps/web/e2e-pending", spec), "utf8");
       } catch {
         // Malformed private input never supplies invented details.
@@ -356,7 +486,11 @@ export async function browser(
             browserFailureDiagnostic(
               failedReport,
               spec,
-              spec === OFF ? "off" : grep === "selected normal main restart:" ? "restart" : "on",
+              spec === OFF || (spec === AUTH_SPEC && flow === "off")
+                ? "off"
+                : grep === "selected normal main restart:"
+                  ? "restart"
+                  : "on",
               source,
             ),
           ),
@@ -382,6 +516,12 @@ export async function browser(
   }
   if (existsSync(report)) chmodSync(report, 0o600);
   require(code === 0, "UI_ACTUAL_BROWSER_FAILED");
+  if (final) {
+    recheckFinalBrowsers(manifest);
+    require(sha(environment.FVOCI_E2E_FINAL_ACTOR_BINDING as string) ===
+      finalBindingHash, "UI_FINAL_ACTOR_BINDING_CHANGED");
+  }
+  if (manifest.finalBrowsers !== undefined) recheckFinalBrowsers(manifest);
   return JSON.parse(readFileSync(report, "utf8"));
 }
 

@@ -15,7 +15,7 @@ export type VerifyContext = {
 export type Result<T> = [T, null] | [null, string];
 
 export const RUST_WORKFLOW_FILE = "rust.yml";
-export const RUST_COLLAB_CI_SCRIPT = "scripts/run-rust-collaboration-ci-tests.sh";
+export const RUST_COLLAB_CI_SCRIPT = "xtask/collaboration-suites.tsv";
 export const RUST_CAPACITY_PROBE_SCRIPT = "scripts/collab-capacity-probe.sh";
 export const RUST_POSTGRES_RUNNER_ARCH: Readonly<Record<string, "x64" | "arm64">> = {
   "ubuntu-26.04": "x64",
@@ -44,7 +44,10 @@ export const RUST_S3_INTEGRATION_STEP =
   "S3-compatible storage integration tests (pinned test server)";
 export const RUST_COLLAB_INTEGRATION_STEP =
   "WebSocket, PostgreSQL and native helper integration tests";
-export const RUST_COLLAB_INTEGRATION_RUN = "bash scripts/run-rust-collaboration-ci-tests.sh";
+export const RUST_COLLAB_INTEGRATION_RUN =
+  "bash scripts/start-test-meili.sh " +
+  RUST_XTASK +
+  ' rust-binaries collaboration --directory "$RUNNER_TEMP/rust-binaries" --sqlite-identity "${{ steps.sqlite.outputs.cache_identity }}"';
 export const RUST_COLLAB_MATRIX_RUNNERS: ReadonlySet<string> = new Set([
   "ubuntu-26.04",
   "ubuntu-26.04-arm",
@@ -255,3 +258,7 @@ export function postgresMatrixInventory(jobs: Mapping): Result<PerArch> {
   }
   return [perArch, null];
 }
+
+// Shared preparation policy for native handoff producers and consumers.
+export const HOST_APT_PREPARATION_RUN =
+  "printf '%s\\n' 'APT::Get::Always-Include-Phased-Updates \"true\";' 'APT::Get::Never-Include-Phased-Updates \"false\";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null\nsudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update\nsudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove\nsudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev\n";

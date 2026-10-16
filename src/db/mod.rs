@@ -28,6 +28,8 @@ pub mod identity;
 pub mod import_jobs;
 pub mod integrations;
 pub mod invitations;
+#[cfg(feature = "db-tests")]
+pub mod keycloak_fixture;
 pub mod labels;
 pub mod legal;
 #[cfg(all(test, feature = "db-tests"))]

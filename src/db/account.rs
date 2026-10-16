@@ -13,7 +13,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::backend::OperationTx;
-use super::codec::Cell;
+use super::codec::{Cell, PostgresRefusal};
 
 use crate::auth::token::{hash_token, new_token, token_hashes_eq};
 use crate::db::context::{
@@ -984,6 +984,17 @@ async fn mark_personal_workspace_deleted(
         .await?;
     crate::db::context::restore_system(tx, &previous).await?;
     crate::db::api_tokens::remove_by_workspace(tx, workspace_id).await?;
+    // As in workspace trash: every live project goes with the workspace
+    // stamp. The memberships delete cascades every user grant, and the
+    // deferred project_members_private_lead_check_del only exempts deleted
+    // projects, so a private project led by its owner would otherwise refuse
+    // the commit and the sweep would retry this erasure forever.
+    sqlx::query(
+        "UPDATE fvoci.projects SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(workspace_id)
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("DELETE FROM fvoci.memberships WHERE workspace_id = $1")
         .bind(workspace_id)
         .execute(&mut **tx)
@@ -1197,15 +1208,27 @@ impl OperationTx<'_, '_> {
             let live = tx.query("SELECT 1 FROM workspaces WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
             if !live.is_empty() {
                 tx.set_tenant(workspace)?;
+                // Every live project goes with the workspace stamp, as on
+                // PostgreSQL, before the memberships delete drops its leads.
+                let stamp = Cell::instant(crate::db::identity::stored_now())?;
                 for sql in [
                     "DELETE FROM invitations WHERE workspace_id=?1",
                     "DELETE FROM ics_tokens WHERE workspace_id=?1",
                     "DELETE FROM api_tokens WHERE workspace_id=?1",
-                    "DELETE FROM memberships WHERE workspace_id=?1",
                 ] {
                     tx.execute(sql, &[Cell::uuid(workspace)]).await?;
                 }
-                tx.execute("UPDATE workspaces SET deleted_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000),updated_at=(unixepoch()*1000000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER)*1000) WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace)]).await?;
+                tx.execute(
+                    "UPDATE projects SET deleted_at=?2,updated_at=?2 WHERE workspace_id=?1 AND deleted_at IS NULL",
+                    &[Cell::uuid(workspace), stamp.clone()],
+                )
+                .await?;
+                tx.execute(
+                    "DELETE FROM memberships WHERE workspace_id=?1",
+                    &[Cell::uuid(workspace)],
+                )
+                .await?;
+                tx.execute("UPDATE workspaces SET deleted_at=?2,updated_at=?2 WHERE id=?1 AND kind='personal' AND deleted_at IS NULL", &[Cell::uuid(workspace), stamp]).await?;
                 self.maintenance_account_record(AccountRecord {
                     verb: "workspace.deleted",
                     actor_user_id: None,
@@ -1589,6 +1612,19 @@ pub async fn complete_email_change(
     Ok(Some(EmailChanged { old_email }))
 }
 
+/// `app_user_update_email`'s address check (PG 02_identity.sql): printable
+/// ASCII, already lower case, one `@` with text on both sides, and at most 320
+/// characters as PostgreSQL `length()` counts them.
+fn update_email_accepts(email: &str) -> bool {
+    !email.is_empty()
+        && email.bytes().all(|b| (b'!'..=b'~').contains(&b))
+        && !email.bytes().any(|b| b.is_ascii_uppercase())
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        })
+        && email.chars().count() <= 320
+}
+
 pub async fn complete_email_change_backend(
     backend: &super::backend::Backend,
     payload: &MagicPayload,
@@ -1604,9 +1640,6 @@ pub async fn complete_email_change_backend(
     let Some(new_email) = payload.new_email.as_deref() else {
         return Ok(None);
     };
-    if normalize_email(new_email).ok().as_deref() != Some(new_email) {
-        return Err(sqlx::Error::Protocol("invalid canonical email".into()));
-    }
     let mut tx = backend.begin_write().await?;
     let OperationTx::SqliteFamily(family) = tx.operation() else {
         unreachable!("family email change")
@@ -1618,6 +1651,12 @@ pub async fn complete_email_change_backend(
         return Ok(None);
     };
     let old_email = row.cell(0)?.string()?;
+    // Where PostgreSQL calls app_user_update_email: its check runs before the
+    // taken-address answer and raises the same SQLSTATE.
+    if !update_email_accepts(new_email) {
+        tx.rollback().await?;
+        return Err(PostgresRefusal::INVALID_EMAIL.into());
+    }
     let taken = family
         .query(
             "SELECT EXISTS(SELECT 1 FROM users WHERE email=?1 AND id<>?2)",

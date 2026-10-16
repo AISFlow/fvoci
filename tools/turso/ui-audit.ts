@@ -2,10 +2,35 @@
 // preservation audit. No process, network or file system access except the
 // bounded server log read in maintenanceReceipts.
 import { deepEquals } from "bun";
-import { readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { basename } from "node:path";
 import { jsonInteger } from "../selected-backend-ci/io.ts";
 import { pySplitlines } from "../web-e2e/compat.ts";
+import { digest } from "../selected-backend-ci/io.ts";
+import { identity as processIdentity, type Scope, type Child } from "./ui-processes.ts";
+import {
+  identityGone,
+  portClosed,
+  waitFor,
+  type Child as SelectedChild,
+  type Row,
+} from "../selected-backend-ci/drivers/common.ts";
+import {
+  FINAL_SPEC,
+  assertSelectedTargetWrites,
+  type SelectedNativeReceipt,
+  type SelectedSyncWrite,
+} from "./ui-selected-native-policy.ts";
+import type { Manifest } from "./ui-record.ts";
 import {
   canonical,
   decodeUtf8,
@@ -16,10 +41,14 @@ import {
   require,
   text,
   type Record_,
+  valueDigest,
+  uuidHex,
 } from "./ui-common.ts";
+export { uuidHex } from "./ui-common.ts";
 
 export const ON = "workspace-wiki-selected-backend.spec.ts";
 export const OFF = "workspace-off-selected-backend.spec.ts";
+export const RESTORE = "v060-turso-restore.acceptance.ts";
 
 export const AUDITED_COUNTERS = new Set([
   "event_sequence",
@@ -108,8 +137,32 @@ const truthy = (value: unknown) =>
 const subset = (items: unknown[], set: Set<string>) =>
   items.every((item) => typeof item === "string" && set.has(item));
 
+type SqliteAppendWitness = {
+  count: number;
+  rows: Record<string, Record<string, number>>;
+  eventOperations?: Record<string, unknown[]>;
+  eventIds?: Record<string, string>;
+  actors?: Record<string, string>;
+};
+
 export interface Audit {
   namespaces: string[];
+  /** Exact original actors used by the existing SQLite public preparation and
+   * unchanged restart readback; every admitted addition is in the native
+   * preparation snapshot and these actors' original whole rows remain. */
+  sqlitePreparation?: {
+    preparationActor: { id: string; email: string; rowFingerprint: string; sessionId: string };
+    readbackActor: { id: string; email: string; rowFingerprint: string; sessionId: string };
+    workspace: string;
+    document: string;
+    original: SerialObservation;
+    prepared: SerialObservation;
+    maintenance?: { server: Record_; leaseMicros: string };
+    /** Parent-derived wire/ACK/native full-row witness, never a browser grant. */
+    readback?: SqliteAppendWitness;
+    products?: (SqliteAppendWitness & { workspace: string; document: string })[];
+    state: { original: unknown[]; current: unknown[]; after: unknown[] };
+  };
   actors: Record<string, string>;
   workspaces: Record<string, string>;
   documents?: Record<string, string>;
@@ -117,6 +170,413 @@ export interface Audit {
   targetSha256: string;
   serverStarts: number;
   observedFences: unknown[][];
+  /** Final-only normal-server receipts collected directly by the parent. */
+  roomRetirements?: RoomRetirement[];
+  /** Members of dedicated auth allocations; only they may revoke sessions. */
+  authActors?: string[];
+  /** Exact phase actors and parent-held native snapshots, never browser claims. */
+  keycloak?: { actors: string[]; beforeUnlink: SerialObservation[] };
+  /** Private observations collected by the final caller, never CLI proof input. */
+  serial?: {
+    before: SerialObservation;
+    after: SerialObservation;
+    policy: SerialPolicy;
+    keycloakGroups?: 1 | 2 | 3;
+    expectedBackend?: "sqlite";
+  };
+}
+
+export interface SerialPolicy {
+  revisionKeep: number;
+  revisionSnapshotIntervalHours: number;
+}
+export interface SerialObservation {
+  dataset: Record_;
+  checks: Record_;
+  /** Parent-held history; native JSON and browser output cannot populate it. */
+  roomHistory?: RoomRetirement[];
+}
+
+export interface RoomRetirement {
+  identity: { pid: number; startTicks: string };
+  retiredIdentity: { pid: number; startTicks: string };
+  targetSha256: string;
+  logSha256: string;
+  receipts: Record_[];
+  source: string;
+  tree: string;
+  executable: { path: string; sha256: string };
+}
+
+/** Direct producer handles only; never serialized into a continuation or loaded from JSON. */
+export interface RoomLogOrigin {
+  source: string;
+  tree: string;
+  executable: { path: string; sha256: string };
+  targetSha256: string;
+  identity: { pid: number; startTicks: string };
+  retiredIdentity: { pid: number; startTicks: string };
+  child: Child;
+  mapping: {
+    native: { pid: number; startTicks: string };
+    host: { pid: number; startTicks: string };
+    clientPid: number;
+  };
+  log: { path: string; fd: number; dev: number; ino: number; uid: number; gid: number };
+}
+
+export function captureRoomLog(
+  scope: Scope,
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: Child,
+  identity: RoomLogOrigin["identity"],
+  targetSha256: string,
+  retiredIdentity = identity,
+): RoomLogOrigin {
+  const allocation = scope.allocations.findIndex((a) => a.process === child);
+  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
+  require(allocation >= 0 &&
+    entry?.allocation === allocation &&
+    !scope.retired(retiredIdentity), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return bindRoomLog(manifest, path, fd, child, identity, targetSha256, retiredIdentity);
+}
+
+function bindRoomLog(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: Child,
+  identity: { pid: number; startTicks: string },
+  targetSha256: string,
+  retiredIdentity: { pid: number; startTicks: string },
+): RoomLogOrigin {
+  const opened = fstatSync(fd),
+    file = lstatSync(path);
+  const executable = manifest.binaries["fvoci-server"];
+  require(executable !== undefined &&
+    /^[a-f0-9]{40}$/.test(manifest.sourceInputs.source) &&
+    /^[a-f0-9]{40}$/.test(manifest.sourceInputs.tree) &&
+    /^[a-f0-9]{64}$/.test(targetSha256) &&
+    identity.startTicks === retiredIdentity.startTicks &&
+    opened.isFile() &&
+    file.isFile() &&
+    !file.isSymbolicLink() &&
+    realpathSync(path) === path &&
+    file.dev === opened.dev &&
+    file.ino === opened.ino &&
+    file.uid === process.getuid?.() &&
+    file.gid === process.getgid?.() &&
+    (file.mode & 0o777) === 0o600 &&
+    file.nlink === 1 &&
+    digest(readFileSync(executable.path)) === executable.sha256, "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  return {
+    source: manifest.sourceInputs.source,
+    tree: manifest.sourceInputs.tree,
+    executable: { path: executable.path, sha256: executable.sha256 },
+    targetSha256,
+    identity,
+    retiredIdentity,
+    child,
+    mapping: { native: { ...identity }, host: { ...retiredIdentity }, clientPid: child.pid },
+    log: { path, fd, dev: file.dev, ino: file.ino, uid: file.uid, gid: file.gid },
+  };
+}
+
+/** Native SQL clock resolution is milliseconds; compare without JS rounding. */
+export function assertNativeClock(
+  observation: SerialObservation,
+  before: bigint,
+  after: bigint,
+): void {
+  const clock = decimal(observation.checks.clockMicros);
+  require(before > 0n &&
+    after >= before &&
+    clock >= before - 999n &&
+    clock <= after + 999n, "UI_FINAL_NATIVE_CLOCK_RELATION_REQUIRED");
+}
+
+const SERIAL_BACKGROUND = [
+  "magic-expiry",
+  "mfa-expiry",
+  "oidc-expiry",
+  "ics-expiry",
+  "github-install-expiry",
+  "withdrawn-users",
+  "deleted-workspaces",
+  "trashed-documents",
+  "unfinished-uploads",
+  "object-cleanup",
+  "imports",
+  "deferred-import-events",
+  "outbox-failures",
+  "push-deliveries",
+  "pending-webhooks",
+  "enabled-digests",
+  "notification-read-retention",
+  "notification-archived-retention",
+  "processed-retention",
+  "unknown-processed-consumer",
+  "webhook-retention",
+  "github-retention",
+  "maintenance-owners",
+  "document-room-owners",
+  "task-room-owners",
+  "automatic-revision-retention",
+];
+const decimal = (value: unknown): bigint => integer(["integer", value]);
+const rowHash = (cells: unknown) => digest(JSON.stringify(cells));
+const fingerprints = (rows: unknown[]) => {
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    const hash = rowHash(row);
+    result[hash] = (result[hash] ?? 0) + 1;
+  }
+  return result;
+};
+
+/** Match all current counter columns to their complete native row hashes. */
+function serialCounterRows(dataset: Record_): void {
+  for (const table of AUDITED_COUNTERS) {
+    const rows = list(dataset, "operations", table);
+    require(same(
+      record(dataset, "fingerprints", table),
+      fingerprints(rows),
+    ), "UI_SERIAL_COUNTER_FINGERPRINT_CHANGED");
+  }
+}
+
+/** The initial read may have no registered relays; later reads require all five. */
+export function validateSerialObservation(
+  value: unknown,
+  policy: SerialPolicy,
+  initial = false,
+  expectedBackend: "libsql-remote" | "sqlite" = "libsql-remote",
+): SerialObservation {
+  const dataset = record(value, "dataset"),
+    checks = record(value, "checks");
+  require(dataset.schema === 1 &&
+    dataset.backend === expectedBackend &&
+    dataset.schemaCurrent === true &&
+    dataset.lineage === "fvoci-sqlite-060" &&
+    list(dataset, "ledger").length === 12 &&
+    dataset.startupHazards === 0 &&
+    dataset.liveOutboxLeases === 0, "UI_SERIAL_CURRENT_SCHEMA_REQUIRED");
+  let total = 0;
+  const tables = record(dataset, "fingerprints");
+  require(same(
+    Object.keys(tables).sort(),
+    Object.keys(record(dataset, "allocations")).sort(),
+  ), "UI_SERIAL_TABLE_WITNESS_MISSING");
+  for (const [table, hashes] of Object.entries(tables)) {
+    let count = 0;
+    for (const [hash, multiplicity] of Object.entries(record(hashes))) {
+      require(/^[a-f0-9]{64}$/.test(hash) &&
+        typeof multiplicity === "number" &&
+        Number.isSafeInteger(multiplicity) &&
+        multiplicity > 0 &&
+        Object.hasOwn(
+          record(dataset, "allocations", table),
+          hash,
+        ), "UI_SERIAL_ROW_WITNESS_REFUSED");
+      count += multiplicity;
+    }
+    require(count <= 10000 &&
+      same(
+        Object.keys(record(hashes)).sort(),
+        Object.keys(record(dataset, "allocations", table)).sort(),
+      ), "UI_SERIAL_ROW_CAP_REFUSED");
+    total += count;
+  }
+  require(total <= 100000 && dataset.rows === total, "UI_SERIAL_ROW_CAP_REFUSED");
+  require(checks.schema === 1 &&
+    checks.policyBinding === "required-from-sealed-server" &&
+    same(checks.policy, policy) &&
+    checks.policySha256 ===
+      rowHash({
+        revisionKeep: policy.revisionKeep,
+        revisionSnapshotIntervalHours: policy.revisionSnapshotIntervalHours,
+      }) &&
+    Number.isSafeInteger(policy.revisionKeep) &&
+    policy.revisionKeep > 0 &&
+    policy.revisionKeep <= 4294967295 &&
+    Number.isSafeInteger(policy.revisionSnapshotIntervalHours) &&
+    policy.revisionSnapshotIntervalHours >= 0 &&
+    policy.revisionSnapshotIntervalHours <= 4294967295, "UI_SERIAL_SERVER_POLICY_REQUIRED");
+  const clock = decimal(checks.clockMicros),
+    end = decimal(checks.horizonEndMicros);
+  require(clock > 0n &&
+    decimal(checks.coverageMicros) === 2400000000n &&
+    end - clock === 2400000000n, "UI_SERIAL_CLOCK_HORIZON_REQUIRED");
+  serialCounterRows(dataset);
+  const head = decimal(checks.eventHead);
+  const events = list(dataset, "operations", "events");
+  require(head === singleton(get(dataset, "operations", "event_sequence")) &&
+    head === (events.length ? integer(get(events.at(-1), 0)) : 0n), "UI_SERIAL_EVENT_HEAD_CHANGED");
+  const facts = list(checks, "background");
+  require(same(
+    facts.map((fact) => get(fact, "kind")).sort(),
+    [...SERIAL_BACKGROUND].sort(),
+  ), "UI_SERIAL_BACKGROUND_COVERAGE_MISSING");
+  for (const fact of facts)
+    require(get(fact, "eligibility") === "clear" &&
+      get(fact, "now") === 0 &&
+      get(fact, "throughHorizon") === 0 &&
+      [
+        "eligible",
+        "pending",
+        "owner",
+        "unknown",
+        "conservative-blocker",
+        "eligible-conditional-on-policy",
+        "live-owner-overlaps-coverage",
+      ].includes(text(fact, "interpretation")), "UI_SERIAL_BACKGROUND_WORK_REFUSED");
+  for (const candidate of list(checks, "revisionCandidates"))
+    require(get(candidate, "dueNow") === false &&
+      get(candidate, "dueThroughHorizon") === false, "UI_SERIAL_REVISION_DUE");
+  for (const row of list(checks, "automaticRevisionRanks"))
+    require(list(row).length === 7 &&
+      integer(get(row, 6)) <= BigInt(policy.revisionKeep), "UI_SERIAL_REVISION_RETENTION_DUE");
+  const owners = record(checks, "owners");
+  require(same(
+    Object.keys(owners).sort(),
+    ["maintenance_job_claims", "collab_room_fences", "task_collab_room_fences"].sort(),
+  ), "UI_SERIAL_OWNER_COVERAGE_MISSING");
+  for (const [table, rows] of Object.entries(owners))
+    require(same(rows, get(dataset, "operations", table)), "UI_SERIAL_OWNER_ROWS_CHANGED");
+  for (const row of list(owners, "maintenance_job_claims"))
+    require(same(get(row, 1), ["null"]) && same(get(row, 3), ["null"]), "UI_SERIAL_OWNER_REMAINS");
+  require(checks.roomClosureBinding ===
+    "required-normal-release-and-parent-retirement", "UI_SERIAL_ROOM_CLOSURE_BINDING_REQUIRED");
+  for (const table of ["collab_room_fences", "task_collab_room_fences"]) {
+    const rows = list(owners, table);
+    require(same(
+      fingerprints(rows),
+      get(dataset, "fingerprints", table),
+    ), "UI_SERIAL_ROOM_FINGERPRINT_CHANGED");
+    for (const row of rows)
+      require(list(row).length === 5 &&
+        get(row, 0, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 0, 1)) &&
+        get(row, 1, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 1, 1)) &&
+        get(row, 2, 0) === "blob" &&
+        /^[a-f0-9]{32}$/.test(text(row, 2, 1)) &&
+        integer(get(row, 3)) > 0n &&
+        integer(get(row, 4)) <= clock, "UI_SERIAL_OWNER_REMAINS");
+  }
+  const relays = list(checks, "outbox");
+  if (initial && relays.length === 0) {
+    require(head === 0n &&
+      startupBlockers(dataset).length === 0 &&
+      checks.relayCompletion === "unknown-registry" &&
+      same(get(dataset, "operations", "outbox_consumers"), []) &&
+      same(
+        get(dataset, "fingerprints", "outbox_consumers"),
+        {},
+      ), "UI_SERIAL_INITIAL_RELAY_REFUSED");
+  } else {
+    require(checks.relayCompletion === "complete" &&
+      same(
+        relays.map((relay) => text(relay, "consumer")).sort(),
+        [...RELAYS].sort(),
+      ), "UI_SERIAL_RELAY_REGISTRY_CHANGED");
+    const rows = relays.map((value) => {
+      const relay = record(value);
+      const name = text(relay, "consumer"),
+        seq = text(relay, "lastSeq"),
+        updated = text(relay, "updatedAtMicros");
+      const row = [["text", name], ["integer", seq], ["null"], ["null"], ["integer", updated]];
+      require(decimal(seq) === head &&
+        relay.leaseOwner === null &&
+        relay.leaseUntilMicros === null &&
+        decimal(updated) <= clock &&
+        relay.immutableSha256 === rowHash([["text", name]]) &&
+        relay.rowSha256 === rowHash(row), "UI_SERIAL_RELAY_FINISH_UNCONFIRMED");
+      return row;
+    });
+    require(same(record(dataset, "fingerprints", "outbox_consumers"), fingerprints(rows)) &&
+      same(
+        list(dataset, "operations", "outbox_consumers"),
+        rows.map((row) => row.slice(0, 4)),
+      ), "UI_SERIAL_RELAY_FINGERPRINT_CHANGED");
+  }
+  for (const [field, table] of [
+    ["users", "users"],
+    ["memberships", "memberships"],
+  ] as const) {
+    const rows = list(checks, field);
+    const hashes = Object.fromEntries(rows.map((row) => [text(row, "rowFingerprint"), 1]));
+    require(rows.length === Object.keys(hashes).length &&
+      same(hashes, record(dataset, "fingerprints", table)), "UI_SERIAL_ACTOR_FINGERPRINT_CHANGED");
+  }
+  const users = list(checks, "users");
+  require(new Set(users.map((row) => text(row, "id"))).size === users.length &&
+    users.length ===
+      list(dataset, "operations", "users").length, "UI_SERIAL_ACTOR_IDENTITY_CHANGED");
+  for (const user of users) {
+    const id = uuidHex(get(user, "id")),
+      email = text(user, "email");
+    require(list(dataset, "operations", "users").filter(
+      (row) => same(get(row, 0), ["blob", id]) && same(get(row, 1), ["text", email]),
+    ).length === 1, "UI_SERIAL_ACTOR_IDENTITY_CHANGED");
+  }
+  const memberships = list(checks, "memberships");
+  require(new Set(
+    memberships.map((row) => canonical([get(row, "workspaceId"), get(row, "userId")])),
+  ).size === memberships.length, "UI_SERIAL_MEMBERSHIP_IDENTITY_CHANGED");
+  for (const membership of memberships) {
+    const workspace = uuidHex(get(membership, "workspaceId")),
+      user = uuidHex(get(membership, "userId"));
+    const allocation = record(
+      dataset,
+      "allocations",
+      "memberships",
+      text(membership, "rowFingerprint"),
+    );
+    require(users.some((row) => uuidHex(get(row, "id")) === user) &&
+      list(dataset, "operations", "workspaces").some((row) =>
+        same(get(row, 0), ["blob", workspace]),
+      ) &&
+      same(get(allocation, "workspaces"), [workspace]) &&
+      same(get(allocation, "actors"), [user]) &&
+      ["owner", "admin", "member", "guest"].includes(
+        text(membership, "role"),
+      ), "UI_SERIAL_MEMBERSHIP_IDENTITY_CHANGED");
+  }
+  return { dataset, checks };
+}
+
+function serialProgress(before: unknown, after: unknown, audit: Audit): void {
+  const serial = audit.serial;
+  require(serial !== undefined, "UI_SERIAL_OBSERVATION_REQUIRED");
+  validateSerialObservation(
+    serial.before,
+    serial.policy,
+    list(serial.before.checks, "outbox").length === 0,
+    serial.expectedBackend ?? "libsql-remote",
+  );
+  validateSerialObservation(
+    serial.after,
+    serial.policy,
+    false,
+    serial.expectedBackend ?? "libsql-remote",
+  );
+  assertRoomClosure(serial.before, audit.targetSha256);
+  assertRoomClosure(serial.after, audit.targetSha256);
+  require(valueDigest(before) === valueDigest(serial.before.dataset) &&
+    valueDigest(after) === valueDigest(serial.after.dataset), "UI_SERIAL_DATASET_CHANGED");
+  require(decimal(serial.after.checks.clockMicros) >=
+    decimal(serial.before.checks.clockMicros), "UI_SERIAL_CLOCK_REVERSED");
+  for (const old of list(serial.before.checks, "outbox")) {
+    const fresh = list(serial.after.checks, "outbox").find(
+      (row) => get(row, "consumer") === get(old, "consumer"),
+    );
+    require(get(fresh, "immutableSha256") === get(old, "immutableSha256") &&
+      decimal(get(fresh, "updatedAtMicros")) >=
+        decimal(get(old, "updatedAtMicros")), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  }
 }
 
 export function startupBlockers(baseline: unknown): string[] {
@@ -148,17 +608,16 @@ export function singleton(rows: unknown): bigint {
   return integer((rows[0] as unknown[])[1]);
 }
 
-const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export function uuidHex(value: unknown): string {
-  require(typeof value === "string", "UI_ALLOCATION_ID_REFUSED");
-  // Any accepted UUID spelling that is not the canonical lowercase form is refused.
-  const bare = value
-    .replaceAll("urn:", "")
-    .replaceAll("uuid:", "")
-    .replace(/^\{+|\}+$/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(bare.replaceAll("-", ""))) throw new TypeError("not a UUID");
-  require(canonicalUuid.test(value), "UI_ALLOCATION_ID_REFUSED");
-  return value.replaceAll("-", "");
+/** Existing whole-primary preservation runs before the shared wire policy. */
+export function auditSelectedFinalNative(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  audit: Audit,
+  targets: { workspaceId: string; documentId: string; receipts: SelectedNativeReceipt[] }[],
+  writes: SelectedSyncWrite[],
+): void {
+  assertPreserved(before, after, audit);
+  assertSelectedTargetWrites(targets, writes);
 }
 
 export function rememberActor(audit: Audit, actor: unknown, namespace: string): void {
@@ -188,29 +647,240 @@ const setEquals = (a: Set<unknown>, b: Set<unknown>) =>
 type ProjectionTargets = {
   documents: Map<string, string>;
   tasks: Map<string, string>;
+  identityLinks: Map<string, string>;
+  removedIdentityLinks: Set<string>;
 };
+
+function sqliteExtractedEvent(
+  refs: Record_,
+  audit: Audit,
+  targets: ProjectionTargets,
+  sha: string,
+  count: unknown,
+  before: unknown,
+  after: unknown,
+): unknown[] | null {
+  const selected = audit.sqlitePreparation,
+    witness = record(refs, "eventWitness"),
+    cells = list(witness, "cells"),
+    target = witness.target;
+  if (
+    !selected ||
+    audit.serial?.expectedBackend !== "sqlite" ||
+    get(before, "backend") !== "sqlite" ||
+    get(after, "backend") !== "sqlite" ||
+    count !== 1 ||
+    !same(Object.keys(witness).sort(), ["cells", "class", "columns", "sequence", "target"]) ||
+    !same(witness.columns, [
+      "id",
+      "seq",
+      "workspace_id",
+      "actor_user_id",
+      "verb",
+      "target_type",
+      "target_id",
+      "payload",
+      "channel",
+      "created_at",
+    ]) ||
+    cells.length !== 10 ||
+    rowHash(cells) !== sha ||
+    !same(cells[0], ["blob", refs.self]) ||
+    !/^[a-f0-9]{32}$/.test(String(refs.self)) ||
+    !same(cells[1], witness.sequence) ||
+    integer(cells[1]) <= 0n ||
+    !same(cells[2], ["blob", get(refs, "workspaces", 0)]) ||
+    list(refs, "workspaces").length !== 1 ||
+    list(refs, "actors").length !== 0 ||
+    !same(cells[3], ["null"]) ||
+    !same(cells[4], ["text", "attachment.extracted"]) ||
+    !same(cells[5], ["text", "attachment"]) ||
+    !same(cells[6], ["blob", target]) ||
+    typeof target !== "string" ||
+    !/^[a-f0-9]{32}$/.test(target) ||
+    !same(cells[8], ["text", "web"])
+  )
+    return null;
+  const uuid = target.replace(/^(........)(....)(....)(....)(............)$/, "$1-$2-$3-$4-$5");
+  if (!same(cells[7], ["text", JSON.stringify({ attachmentId: uuid, status: "ok" })])) return null;
+  const attachments = Object.entries(record(after, "allocations", "attachments")).filter(
+    ([, row]) => get(row, "self") === target,
+  );
+  if (
+    attachments.length !== 1 ||
+    attachments[0] === undefined ||
+    Object.values(record(before, "allocations", "attachments")).some(
+      (row) => get(row, "self") === target,
+    )
+  )
+    return null;
+  const [attachmentHash, attachment] = attachments[0],
+    extraction = record(attachment, "extraction"),
+    fields = list(extraction, "cells"),
+    workspace = text(cells, 2, 1),
+    uploader = text(fields, 4, 1),
+    document = text(fields, 2, 1);
+  if (
+    get(after, "fingerprints", "attachments", attachmentHash) !== 1 ||
+    Object.hasOwn(record(before, "fingerprints", "attachments"), attachmentHash) ||
+    extraction.sha256 !== attachmentHash ||
+    !same(Object.keys(extraction).sort(), ["cells", "columns", "sha256"]) ||
+    !same(extraction.columns, [
+      "id",
+      "workspace_id",
+      "document_id",
+      "task_id",
+      "uploader_id",
+      "status",
+      "extract_status",
+      "extract_attempts",
+      "extract_lease_token",
+      "extract_lease_expires_at",
+      "completed_at",
+    ]) ||
+    fields.length !== 11 ||
+    !same(fields[0], ["blob", target]) ||
+    !same(fields[1], ["blob", workspace]) ||
+    !same(fields[2], ["blob", document]) ||
+    !/^[a-f0-9]{32}$/.test(document) ||
+    !same(fields[3], ["null"]) ||
+    !same(fields[4], ["blob", uploader]) ||
+    !Object.hasOwn(audit.actors, uploader) ||
+    uploader === selected.preparationActor.id ||
+    uploader === selected.readbackActor.id ||
+    !Object.hasOwn(audit.workspaces, workspace) ||
+    targets.documents.get(document) !== workspace ||
+    !same(get(attachment, "workspaces"), [workspace]) ||
+    !same(get(attachment, "actors"), [uploader]) ||
+    !same(get(attachment, "events"), []) ||
+    !same(fields[5], ["text", "stored"]) ||
+    !same(fields[6], ["text", "ok"]) ||
+    integer(fields[7]) < 1n ||
+    integer(fields[7]) > 2n ||
+    !same(fields[8], ["null"]) ||
+    !same(fields[9], ["null"])
+  )
+    return null;
+  const completed = integer(fields[10]),
+    created = integer(cells[9]),
+    operation = [cells[1], cells[2], cells[3]];
+  if (
+    completed < decimal(selected.prepared.checks.clockMicros) ||
+    created < completed ||
+    created > decimal(audit.serial.after.checks.clockMicros) + 999n ||
+    list(after, "operations", "events").filter((row) => same(row, operation)).length !== 1 ||
+    Object.values(record(after, "allocations", "events")).filter(
+      (row) =>
+        isRecord(row) &&
+        isRecord(row.eventWitness) &&
+        row.eventWitness.class === "sqlite-attachment-extracted" &&
+        row.eventWitness.target === target,
+    ).length !== 1
+  )
+    return null;
+  return operation;
+}
+
 function witnessedEventOperation(
   refs: unknown,
   audit: Audit,
   workspaces: Set<string>,
   targets: ProjectionTargets,
+  sha: string,
+  count: unknown,
+  before: unknown,
+  after: unknown,
 ): unknown[] | null {
   if (!isRecord(refs) || !isRecord(refs.eventWitness)) return null;
   const witness = refs.eventWitness;
   const spaces = list(refs, "workspaces"),
     people = list(refs, "actors");
+  // Session revocation producers of a dedicated auth allocation member only.
+  // Logout has no stored target; its witness binds the actual actor instead.
+  if (
+    witness.class === "actor-logout" ||
+    witness.class === "actor-password-change" ||
+    witness.class === "actor-password-reset"
+  ) {
+    const logout = witness.class === "actor-logout";
+    const subject = logout ? witness.actor : witness.target;
+    return typeof subject === "string" &&
+      /^[a-f0-9]{32}$/.test(subject) &&
+      same(
+        Object.keys(witness).sort(),
+        logout ? ["actor", "class", "sequence"] : ["class", "sequence", "target"],
+      ) &&
+      integer(witness.sequence) > 0n &&
+      spaces.length === 0 &&
+      people.length === 1 &&
+      people[0] === subject &&
+      ((audit.authActors ?? []).includes(subject) ||
+        (audit.serial?.keycloakGroups !== undefined &&
+          witness.class === "actor-logout" &&
+          (audit.keycloak?.actors ?? []).includes(subject))) &&
+      Object.hasOwn(audit.actors, subject)
+      ? [witness.sequence, ["null"], ["blob", subject]]
+      : null;
+  }
   const target = witness.target;
   if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
   const sequence = witness.sequence;
   if (integer(sequence) <= 0n) return null;
+  if (witness.class === "sqlite-attachment-extracted")
+    return sqliteExtractedEvent(refs, audit, targets, sha, count, before, after);
+  if (witness.class === "actor-invitation-login") {
+    const selected = audit.sqlitePreparation;
+    return count === 1 &&
+      selected !== undefined &&
+      get(selected.original.dataset, "backend") === "sqlite" &&
+      get(selected.prepared.dataset, "backend") === "sqlite" &&
+      same(Object.keys(witness).sort(), ["class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      same(people, [target]) &&
+      Object.hasOwn(audit.actors, target) &&
+      target !== selected.preparationActor.id &&
+      target !== selected.readbackActor.id &&
+      get(selected.prepared.dataset, "fingerprints", "events", sha) === 1 &&
+      same(get(selected.prepared.dataset, "allocations", "events", sha), refs)
+      ? [sequence, ["null"], ["blob", target]]
+      : null;
+  }
   if (
     witness.class === "actor-login" &&
     spaces.length === 0 &&
     people.length === 1 &&
     people[0] === target &&
-    Object.hasOwn(audit.actors, target)
+    (Object.hasOwn(audit.actors, target) ||
+      (audit.sqlitePreparation !== undefined &&
+        [
+          audit.sqlitePreparation.preparationActor.id,
+          audit.sqlitePreparation.readbackActor.id,
+        ].includes(target)))
   )
     return [sequence, ["null"], ["blob", target]];
+  if (audit.serial?.keycloakGroups !== undefined && audit.keycloak !== undefined) {
+    if (
+      witness.class === "actor-oidc-login" &&
+      same(Object.keys(witness).sort(), ["class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      same(people, [target]) &&
+      audit.keycloak.actors.includes(target) &&
+      Object.hasOwn(audit.actors, target)
+    )
+      return [sequence, ["null"], ["blob", target]];
+    if (
+      (witness.class === "actor-identity-linked" || witness.class === "actor-identity-unlinked") &&
+      same(Object.keys(witness).sort(), ["actor", "class", "sequence", "target"]) &&
+      spaces.length === 0 &&
+      typeof witness.actor === "string" &&
+      same(people, [witness.actor]) &&
+      audit.keycloak.actors.includes(witness.actor) &&
+      Object.hasOwn(audit.actors, witness.actor) &&
+      targets.identityLinks.get(target) === witness.actor &&
+      (witness.class === "actor-identity-linked" || targets.removedIdentityLinks.has(target))
+    )
+      return [sequence, ["null"], ["blob", witness.actor]];
+  }
   if (
     (witness.class === "document-projection" || witness.class === "task-projection") &&
     spaces.length === 1 &&
@@ -224,10 +894,256 @@ function witnessedEventOperation(
   return null;
 }
 
+function preparationNotification(
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  audit: Audit,
+  after: unknown,
+  phase: "prepared" | "after",
+): boolean {
+  const selected = audit.sqlitePreparation;
+  if (!selected || !isRecord(refs) || !isRecord(refs.notification)) return false;
+  const row = refs.notification,
+    cells = list(row, "cells");
+  if (
+    !same(get(row, "columns"), [
+      "id",
+      "workspace_id",
+      "user_id",
+      "event_id",
+      "verb",
+      "actor_user_id",
+      "target_type",
+      "target_id",
+      "payload",
+      "read_at",
+      "archived_at",
+      "created_at",
+    ]) ||
+    cells.length !== 12 ||
+    count !== 1 ||
+    get(row, "sha256") !== sha ||
+    rowHash(cells) !== sha ||
+    Object.hasOwn(record(selected.original.dataset, "fingerprints", "notifications"), sha) ||
+    get(after, "fingerprints", "notifications", sha) !== 1 ||
+    !same(get(after, "allocations", "notifications", sha), refs)
+  )
+    return false;
+  for (const index of [0, 1, 2, 3, 5, 7])
+    if (
+      !same(cells[index], ["blob", get(cells, index, 1)]) ||
+      !/^[a-f0-9]{32}$/.test(text(cells, index, 1)) ||
+      /^0+$/.test(text(cells, index, 1))
+    )
+      return false;
+  const workspace = text(cells, 1, 1),
+    recipient = text(cells, 2, 1),
+    eventId = text(cells, 3, 1),
+    performer = text(cells, 5, 1),
+    target = text(cells, 7, 1);
+  if (
+    (recipient !== selected.preparationActor.id && !Object.hasOwn(audit.actors, recipient)) ||
+    !Object.hasOwn(audit.actors, performer) ||
+    recipient === performer ||
+    !Object.hasOwn(audit.workspaces, workspace) ||
+    !same(get(refs, "actors"), [recipient, performer]) ||
+    !same(get(refs, "workspaces"), [workspace]) ||
+    !same(get(refs, "events"), [eventId]) ||
+    !same(cells[4], ["text", "invitation.accepted"]) ||
+    !same(cells[6], ["text", "invitation"]) ||
+    !same(cells[8], ["text", "{}"]) ||
+    !same(cells[9], ["null"]) ||
+    !same(cells[10], ["null"])
+  )
+    return false;
+  const sourceEvents = Object.entries(
+    record(selected.prepared.dataset, "allocations", "events"),
+  ).filter(([, event]) => get(event, "self") === eventId);
+  if (sourceEvents.length !== 1 || sourceEvents[0] === undefined) return false;
+  const [eventHash, event] = sourceEvents[0],
+    witness = get(event, "eventWitness");
+  if (
+    !isRecord(witness) ||
+    !same(Object.keys(witness).sort(), [
+      "actor",
+      "class",
+      "createdAt",
+      "email",
+      "sequence",
+      "target",
+      "workspace",
+    ]) ||
+    witness.class !== "workspace-invitation-accepted" ||
+    witness.actor !== performer ||
+    witness.workspace !== workspace ||
+    witness.target !== target ||
+    witness.email !== audit.actors[performer] ||
+    !same(get(event, "actors"), [performer]) ||
+    !same(get(event, "workspaces"), [workspace]) ||
+    Object.hasOwn(record(selected.original.dataset, "fingerprints", "events"), eventHash) ||
+    get(selected.prepared.dataset, "fingerprints", "events", eventHash) !== 1 ||
+    get(after, "fingerprints", "events", eventHash) !== 1 ||
+    !same(get(after, "allocations", "events", eventHash), event)
+  )
+    return false;
+  const invitations = Object.entries(
+    record(selected.prepared.dataset, "allocations", "invitations"),
+  ).filter(
+    ([, invitation]) =>
+      isRecord(invitation) &&
+      isRecord(invitation.invitation) &&
+      invitation.invitation.id === target,
+  );
+  if (invitations.length !== 1 || invitations[0] === undefined) return false;
+  const [invitationHash, invitation] = invitations[0],
+    fields = get(invitation, "invitation");
+  if (
+    !isRecord(fields) ||
+    !same(Object.keys(fields).sort(), [
+      "acceptedAt",
+      "email",
+      "expiresAt",
+      "id",
+      "inviter",
+      "role",
+      "workspace",
+    ]) ||
+    fields.workspace !== workspace ||
+    fields.inviter !== recipient ||
+    fields.email !== audit.actors[performer] ||
+    fields.role !== (recipient === selected.preparationActor.id ? "owner" : "member") ||
+    !same(get(invitation, "actors"), [recipient]) ||
+    !same(get(invitation, "workspaces"), [workspace]) ||
+    Object.hasOwn(
+      record(selected.original.dataset, "fingerprints", "invitations"),
+      invitationHash,
+    ) ||
+    get(selected.prepared.dataset, "fingerprints", "invitations", invitationHash) !== 1 ||
+    get(after, "fingerprints", "invitations", invitationHash) !== 1 ||
+    !same(get(after, "allocations", "invitations", invitationHash), invitation)
+  )
+    return false;
+  const memberships = list(selected.prepared.checks, "memberships");
+  const role = (id: string, expected: unknown) =>
+    memberships.filter(
+      (member) =>
+        uuidHex(get(member, "workspaceId")) === workspace &&
+        uuidHex(get(member, "userId")) === id &&
+        get(member, "role") === expected &&
+        get(
+          selected.prepared.dataset,
+          "fingerprints",
+          "memberships",
+          text(member, "rowFingerprint"),
+        ) === 1,
+    ).length === 1;
+  if (!role(recipient, "owner") || !role(performer, fields.role)) return false;
+  const originalClock = decimal(selected.original.checks.clockMicros),
+    preparedClock = decimal(selected.prepared.checks.clockMicros);
+  const observedChecks =
+    phase === "prepared" ? selected.prepared.checks : audit.serial?.after.checks;
+  if (observedChecks === undefined) return false;
+  const accepted = integer(fields.acceptedAt),
+    eventTime = integer(witness.createdAt),
+    created = integer(cells[11]),
+    sequence = integer(witness.sequence);
+  if (
+    accepted < originalClock ||
+    accepted > preparedClock + 999n ||
+    accepted > eventTime + 999n ||
+    accepted >= integer(fields.expiresAt) ||
+    eventTime < originalClock ||
+    eventTime > preparedClock + 999n ||
+    created < eventTime ||
+    created > decimal(get(observedChecks, "clockMicros")) + 999n ||
+    sequence <= singleton(get(selected.original.dataset, "operations", "event_sequence")) ||
+    sequence > singleton(get(selected.prepared.dataset, "operations", "event_sequence")) ||
+    list(after, "operations", "events").filter((operation) =>
+      same(operation, [witness.sequence, ["blob", workspace], ["blob", performer]]),
+    ).length !== 1
+  )
+    return false;
+  const matching = (dataset: unknown) =>
+    Object.entries(record(dataset, "allocations", "notifications")).filter(
+      ([, candidate]) =>
+        isRecord(candidate) &&
+        isRecord(candidate.notification) &&
+        Array.isArray(candidate.notification.cells) &&
+        same(candidate.notification.cells[2], cells[2]) &&
+        same(candidate.notification.cells[3], cells[3]),
+    );
+  const preparedNotes = matching(selected.prepared.dataset),
+    currentNotes = matching(after);
+  if (
+    currentNotes.length !== 1 ||
+    (preparedNotes.length === 0
+      ? phase !== "after"
+      : preparedNotes.length !== 1 ||
+        preparedNotes[0]?.[0] !== sha ||
+        get(selected.prepared.dataset, "fingerprints", "notifications", sha) !== 1)
+  )
+    return false;
+  return !Object.values(record(selected.original.dataset, "allocations", "notifications")).some(
+    (old) =>
+      isRecord(old) &&
+      isRecord(old.notification) &&
+      Array.isArray(old.notification.cells) &&
+      same(old.notification.cells[0], cells[0]),
+  );
+}
+
+/** Only the bootstrap actor may produce the named new-namespace public
+ * preparation effects. The readback actor has only one login and session. */
+export function selectedOriginalActorEffect(
+  table: string,
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  actor: { id: string; sessionId: string },
+  bootstrap: boolean,
+  audit: Audit,
+  after?: unknown,
+  phase: "prepared" | "after" = "prepared",
+): boolean {
+  const selected = audit.sqlitePreparation;
+  if (table === "notifications" && selected !== undefined)
+    return (
+      bootstrap &&
+      actor.id === selected.preparationActor.id &&
+      get(refs, "notification", "cells", 2, 1) === actor.id &&
+      preparationNotification(sha, count, refs, audit, after ?? selected.prepared.dataset, phase)
+    );
+  if (
+    selected === undefined ||
+    !same(get(refs, "actors"), [actor.id]) ||
+    get(selected.prepared.dataset, "fingerprints", table, sha) !== count
+  )
+    return false;
+  if (table === "sessions")
+    return same(get(refs, "workspaces"), []) && get(refs, "self") === actor.sessionId;
+  const login =
+    table === "events" &&
+    isRecord(refs) &&
+    isRecord(refs.eventWitness) &&
+    refs.eventWitness.class === "actor-login" &&
+    refs.eventWitness.target === actor.id &&
+    same(get(refs, "workspaces"), []);
+  if (login) return true;
+  return (
+    bootstrap &&
+    ["memberships", "invitations", "audit_log", "events"].includes(table) &&
+    list(refs, "workspaces").length === 1 &&
+    Object.hasOwn(audit.workspaces, String(get(refs, "workspaces", 0))) &&
+    (table !== "events" || get(refs, "eventWitness") === null)
+  );
+}
+
 export function allocatedRows(
   before: unknown,
   after: unknown,
   audit: Audit,
+  phase: "prepared" | "after" = "after",
 ): [Set<string>, Set<string>, ProjectionTargets] {
   const oldUsers = ids(list(before, "operations", "users"));
   const oldSpaces = ids(list(before, "operations", "workspaces"));
@@ -268,10 +1184,88 @@ export function allocatedRows(
         same(row[2], ["text", "team"]), "UI_WORKSPACE_ROWS_CHANGED");
   }
   const actors = new Set(Object.keys(audit.actors));
+  const selected = audit.sqlitePreparation;
+  if (selected !== undefined) {
+    require((phase === "prepared" || audit.serial?.expectedBackend === "sqlite") &&
+      get(before, "backend") === "sqlite" &&
+      get(after, "backend") === "sqlite" &&
+      get(selected.prepared.dataset, "backend") === "sqlite" &&
+      selected.preparationActor.id !==
+        selected.readbackActor.id, "UI_SQLITE_PREPARATION_ACTOR_REFUSED");
+    for (const actor of [selected.preparationActor, selected.readbackActor]) {
+      const original = list(before, "operations", "users").filter(
+        (row) => same(get(row, 0), ["blob", actor.id]) && same(get(row, 1), ["text", actor.email]),
+      );
+      require(original.length === 1 &&
+        !actors.has(actor.id) &&
+        get(before, "fingerprints", "users", actor.rowFingerprint) === 1 &&
+        get(before, "allocations", "users", actor.rowFingerprint, "self") === actor.id &&
+        get(after, "fingerprints", "users", actor.rowFingerprint) ===
+          1, "UI_SQLITE_PREPARATION_ACTOR_REFUSED");
+      const sessions = Object.entries(record(after, "allocations", "sessions")).filter(
+        ([hash, refs]) =>
+          !Object.hasOwn(record(before, "fingerprints", "sessions"), hash) &&
+          list(refs, "actors").includes(actor.id),
+      );
+      require(sessions.length === 1 &&
+        sessions[0] !== undefined &&
+        get(sessions[0][1], "self") === actor.sessionId &&
+        get(selected.prepared.dataset, "fingerprints", "sessions", sessions[0][0]) ===
+          1, "UI_SQLITE_PREPARATION_SESSION_REFUSED");
+      const logins = Object.entries(record(after, "allocations", "events")).filter(
+        ([hash, refs]) =>
+          !Object.hasOwn(record(before, "fingerprints", "events"), hash) &&
+          isRecord(refs) &&
+          isRecord(refs.eventWitness) &&
+          refs.eventWitness.class === "actor-login" &&
+          refs.eventWitness.target === actor.id,
+      );
+      require(logins.length === 1 &&
+        logins[0] !== undefined &&
+        get(selected.prepared.dataset, "fingerprints", "events", logins[0][0]) ===
+          1, "UI_SQLITE_PREPARATION_LOGIN_REFUSED");
+      actors.add(actor.id);
+    }
+  }
   const targets: ProjectionTargets = {
     documents: new Map(Object.entries(audit.documents ?? {})),
     tasks: new Map(),
+    identityLinks: new Map(),
+    removedIdentityLinks: new Set(),
   };
+  if (audit.keycloak !== undefined) {
+    require(audit.serial?.keycloakGroups !== undefined, "UI_KEYCLOAK_SERIAL_CONTEXT_REQUIRED");
+    const oldLinks = record(before, "allocations", "identity_links");
+    const oldIds = new Set(Object.values(oldLinks).map((row) => get(row, "self")));
+    const snapshots = [after, ...audit.keycloak.beforeUnlink.map((snapshot) => snapshot.dataset)];
+    const finalIds = new Set(
+      Object.values(record(after, "allocations", "identity_links")).map((row) => get(row, "self")),
+    );
+    for (const snapshot of snapshots) {
+      require(same(get(before, "ledger"), get(snapshot, "ledger")) &&
+        same(
+          get(before, "schemaSha256"),
+          get(snapshot, "schemaSha256"),
+        ), "UI_CURRENT_LEDGER_CHANGED");
+      for (const [hash, row] of Object.entries(record(snapshot, "allocations", "identity_links"))) {
+        if (Object.hasOwn(oldLinks, hash)) continue;
+        const id = get(row, "self"),
+          people = list(row, "actors");
+        require(typeof id === "string" &&
+          /^[a-f0-9]{32}$/.test(id) &&
+          !oldIds.has(id) &&
+          get(snapshot, "fingerprints", "identity_links", hash) === 1 &&
+          people.length === 1 &&
+          typeof people[0] === "string" &&
+          actors.has(people[0]) &&
+          audit.keycloak.actors.includes(people[0]), "UI_KEYCLOAK_LINK_ALLOCATION_REFUSED");
+        const previous = targets.identityLinks.get(id);
+        require(previous === undefined || previous === people[0], "UI_KEYCLOAK_LINK_ACTOR_CHANGED");
+        targets.identityLinks.set(id, people[0]);
+        if (snapshot !== after && !finalIds.has(id)) targets.removedIdentityLinks.add(id);
+      }
+    }
+  }
   // A projection exception needs either the ON browser/native seed or a new
   // complete native resource row created by this run's allocated actor in its
   // allocated team/personal workspace. A preexisting or foreign resource is
@@ -298,21 +1292,75 @@ export function allocatedRows(
     }
   }
   const events = new Set<string>();
+  if (selected !== undefined && phase === "after")
+    for (const [sha, refs] of Object.entries(
+      record(selected.prepared.dataset, "allocations", "notifications"),
+    ))
+      if (
+        isRecord(refs) &&
+        isRecord(refs.notification) &&
+        Array.isArray(refs.notification.cells) &&
+        same(refs.notification.cells[4], ["text", "invitation.accepted"])
+      )
+        require(Object.hasOwn(record(after, "fingerprints", "notifications"), sha) &&
+          get(after, "fingerprints", "notifications", sha) === 1 &&
+          same(
+            get(after, "allocations", "notifications", sha),
+            refs,
+          ), "UI_SQLITE_PREPARATION_NOTIFICATION_CHANGED");
+  for (const seal of [selected?.readback, ...(selected?.products ?? [])]) {
+    if (seal === undefined) continue;
+    for (const [table, hashes] of Object.entries(seal.rows))
+      for (const [sha, count] of Object.entries(hashes))
+        require(selectedReadbackAppendEffect(
+          before,
+          after,
+          table,
+          sha,
+          count,
+          get(after, "allocations", table, sha),
+          audit,
+        ), "UI_SQLITE_READBACK_APPEND_REFUSED");
+  }
   const beforeEvents = record(before, "fingerprints", "events");
   for (const [sha, refs] of Object.entries(record(after, "allocations", "events"))) {
     if (!Object.hasOwn(beforeEvents, sha)) {
       const spaces = list(refs, "workspaces"),
         people = list(refs, "actors");
-      require((spaces.length > 0 &&
-        subset(spaces, workspaces) &&
-        people.length > 0 &&
-        subset(people, actors)) ||
-        witnessedEventOperation(refs, audit, workspaces, targets) !== null, "UI_FOREIGN_EVENT");
+      require(selectedReadbackAppendEffect(
+        before,
+        after,
+        "events",
+        sha,
+        get(after, "fingerprints", "events", sha),
+        refs,
+        audit,
+      ) ||
+        ((!isRecord(refs) ||
+          !isRecord(refs.eventWitness) ||
+          refs.eventWitness.class !== "actor-invitation-login") &&
+          spaces.length > 0 &&
+          subset(spaces, workspaces) &&
+          people.length > 0 &&
+          subset(people, actors)) ||
+        witnessedEventOperation(
+          refs,
+          audit,
+          workspaces,
+          targets,
+          sha,
+          get(after, "fingerprints", "events", sha),
+          before,
+          after,
+        ) !== null, "UI_FOREIGN_EVENT");
       events.add(get(refs, "self") as string);
     }
   }
   for (const [table, hashes] of Object.entries(record(after, "fingerprints"))) {
     if (AUDITED_COUNTERS.has(table)) continue;
+    // serialProgress binds every current outbox column and both full row maps.
+    if ((phase === "prepared" || audit.serial !== undefined) && table === "outbox_consumers")
+      continue;
     if (table === "instance_config" && vapidInitialization(before, after)) continue;
     const previous = record(before, "fingerprints", table);
     for (const [sha, count] of Object.entries(record(hashes))) {
@@ -322,6 +1370,73 @@ export function allocatedRows(
         continue;
       }
       const refs = get(after, "allocations", table, sha);
+      if (selectedReadbackAppendEffect(before, after, table, sha, count, refs, audit)) continue;
+      const preparedInvitationNotice =
+        selected !== undefined &&
+        table === "notifications" &&
+        Object.values(record(selected.prepared.dataset, "allocations", "events")).some(
+          (event) =>
+            isRecord(event) &&
+            isRecord(event.eventWitness) &&
+            event.eventWitness.class === "workspace-invitation-accepted" &&
+            list(refs, "events").includes(event.self),
+        );
+      if (
+        selected !== undefined &&
+        table === "notifications" &&
+        (phase === "prepared" ||
+          preparedInvitationNotice ||
+          (isRecord(refs) &&
+            isRecord(refs.notification) &&
+            Array.isArray(refs.notification.cells) &&
+            same(refs.notification.cells[4], ["text", "invitation.accepted"])))
+      )
+        require(preparationNotification(
+          sha,
+          count,
+          refs,
+          audit,
+          after,
+          phase,
+        ), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
+      if (selected !== undefined) {
+        for (const actor of [selected.preparationActor, selected.readbackActor]) {
+          if (!list(refs, "actors").includes(actor.id)) continue;
+          require(selectedOriginalActorEffect(
+            table,
+            sha,
+            count,
+            refs,
+            actor,
+            actor === selected.preparationActor,
+            audit,
+            after,
+            phase,
+          ), "UI_SQLITE_PREPARATION_EFFECT_REFUSED");
+        }
+      }
+      if (
+        selected !== undefined &&
+        table === "document_states" &&
+        rowHash(phase === "prepared" ? selected.state.current : selected.state.after) === sha &&
+        count === 1
+      )
+        continue;
+      if (
+        selected !== undefined &&
+        table === "collab_room_fences" &&
+        same(get(refs, "workspaces"), [selected.workspace])
+      ) {
+        const related = list(after, "operations", table).filter(
+          (row) =>
+            same(get(row, 0), ["blob", selected.workspace]) &&
+            same(get(row, 1), ["blob", selected.document]),
+        );
+        require(related.length === 1 &&
+          rowHash(related[0]) === sha &&
+          count === 1, "UI_SQLITE_READBACK_FENCE_REFUSED");
+        continue;
+      }
       require(subset(list(refs, "workspaces"), workspaces) &&
         subset(list(refs, "actors"), actors) &&
         subset(list(refs, "events"), events), "UI_FOREIGN_ROW_ADDITION");
@@ -363,6 +1478,284 @@ export function leadingObject(value: string): unknown {
 }
 
 const RECEIPT_KEYS = ["generation", "key", "outcome", "ownerSha256", "pid", "schema"];
+const ROOM_RECEIPT_KEYS = [
+  "commit",
+  "expiresAtMicros",
+  "fence",
+  "kind",
+  "ownerSha256",
+  "pid",
+  "schema",
+  "targetId",
+  "workspaceId",
+];
+const uuidFromHex = (hex: string) =>
+  hex.slice(0, 8) +
+  "-" +
+  hex.slice(8, 12) +
+  "-" +
+  hex.slice(12, 16) +
+  "-" +
+  hex.slice(16, 20) +
+  "-" +
+  hex.slice(20);
+
+/** Called only after actual normal stop and the parent's process observation. */
+export function roomRetirement(
+  scope: Scope,
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  origin: RoomLogOrigin,
+  targetSha256: string,
+): RoomRetirement {
+  const { retiredIdentity } = origin;
+  const allocation = scope.allocations.findIndex((a) => a.process === origin.child);
+  const entry = scope.entries.get(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks);
+  require(scope.closure() &&
+    allocation >= 0 &&
+    entry?.allocation === allocation &&
+    scope.allocations[allocation]?.closed === true &&
+    scope.allocations.every((allocation) => !allocation.forced) &&
+    scope.entries.has(String(retiredIdentity.pid) + ":" + retiredIdentity.startTicks) &&
+    scope.retired(retiredIdentity), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
+  return readRoomRetirement(manifest, origin, targetSha256);
+}
+
+function readRoomRetirement(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  origin: RoomLogOrigin,
+  targetSha256: string,
+): RoomRetirement {
+  const { identity, retiredIdentity, log } = origin;
+  require(origin.source === manifest.sourceInputs.source &&
+    same(origin.identity, origin.mapping.native) &&
+    same(origin.retiredIdentity, origin.mapping.host) &&
+    origin.child.pid === origin.mapping.clientPid &&
+    origin.tree === manifest.sourceInputs.tree &&
+    same(origin.executable, {
+      path: manifest.binaries["fvoci-server"]?.path,
+      sha256: manifest.binaries["fvoci-server"]?.sha256,
+    }) &&
+    digest(readFileSync(origin.executable.path)) === origin.executable.sha256 &&
+    origin.targetSha256 === targetSha256, "UI_SERIAL_ROOM_ORIGIN_CHANGED");
+  const inspect = () => {
+    try {
+      const opened = fstatSync(log.fd),
+        file = lstatSync(log.path);
+      require(file.isFile() &&
+        opened.isFile() &&
+        !file.isSymbolicLink() &&
+        realpathSync(log.path) === log.path &&
+        file.dev === log.dev &&
+        file.ino === log.ino &&
+        opened.dev === log.dev &&
+        opened.ino === log.ino &&
+        file.uid === log.uid &&
+        file.gid === log.gid &&
+        file.uid === process.getuid?.() &&
+        file.gid === process.getgid?.() &&
+        (file.mode & 0o777) === 0o600 &&
+        file.nlink === 1 &&
+        file.size === opened.size &&
+        file.size <= 32 * 1024 * 1024, "UI_SERIAL_ROOM_LOG_CHANGED");
+      return { size: file.size, mtime: file.mtimeMs, ctime: file.ctimeMs };
+    } catch {
+      throw new Error("UI_SERIAL_ROOM_LOG_CHANGED");
+    }
+  };
+  const before = inspect();
+  // Reopen this exact parent's numeric descriptor read-only; do not move its write offset.
+  const descriptor = "/proc/self/fd/" + String(log.fd);
+  const readBound = () => {
+    const reader = openSync(descriptor, "r"),
+      bytes = Buffer.alloc(before.size + 1);
+    try {
+      const file = fstatSync(reader);
+      require(file.dev === log.dev && file.ino === log.ino, "UI_SERIAL_ROOM_LOG_CHANGED");
+      let total = 0;
+      while (total < bytes.length) {
+        const count = readSync(reader, bytes, total, bytes.length - total, total);
+        if (count === 0) break;
+        total += count;
+      }
+      return bytes.subarray(0, total);
+    } finally {
+      closeSync(reader);
+    }
+  };
+  const bytes = readBound(),
+    receipts: Record_[] = [];
+  require(bytes.length === before.size && same(before, inspect()), "UI_SERIAL_ROOM_LOG_CHANGED");
+  const marker = "FVOCI_ROOM_RELEASE ";
+  for (const line of pySplitlines(decodeUtf8(bytes))) {
+    const at = line.indexOf(marker);
+    if (at < 0) continue;
+    const item = leadingObject(line.slice(at + marker.length));
+    require(isRecord(item) &&
+      same(Object.keys(item).sort(), ROOM_RECEIPT_KEYS) &&
+      item.schema === 1 &&
+      item.commit === "confirmed" &&
+      item.pid === identity.pid &&
+      (item.kind === "document" || item.kind === "task") &&
+      typeof item.workspaceId === "string" &&
+      uuidHex(item.workspaceId).length === 32 &&
+      typeof item.targetId === "string" &&
+      uuidHex(item.targetId).length === 32 &&
+      /^[a-f0-9]{64}$/.test(text(item, "ownerSha256")) &&
+      decimal(item.fence) > 0n &&
+      decimal(item.expiresAtMicros) > 0n, "UI_SERIAL_ROOM_RECEIPT_REFUSED");
+    receipts.push(item);
+  }
+  require(receipts.length <= 10000 &&
+    /^[a-f0-9]{64}$/.test(targetSha256) &&
+    /^[0-9]+$/.test(identity.startTicks), "UI_SERIAL_ROOM_RECEIPT_REFUSED");
+  const logSha256 = digest(bytes);
+  require(same(before, inspect()) &&
+    digest(readBound()) === logSha256 &&
+    same(before, inspect()), "UI_SERIAL_ROOM_LOG_CHANGED");
+  return {
+    identity,
+    retiredIdentity,
+    targetSha256,
+    logSha256,
+    receipts,
+    source: origin.source,
+    tree: origin.tree,
+    executable: { ...origin.executable },
+  };
+}
+
+/** Existing selected driver ownership, retained in parent memory across stop.
+ * No serialized completion flag can supply the child, PID/start ticks or FD. */
+export interface SelectedRoomOrigin {
+  origin: RoomLogOrigin;
+  child: SelectedChild;
+  row: Row;
+  base: string;
+}
+
+export function captureSelectedRoomLog(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  path: string,
+  fd: number,
+  child: SelectedChild,
+  row: Row,
+  base: string,
+  targetSha256: string,
+): SelectedRoomOrigin {
+  require("pid" in child &&
+    typeof child.pid === "number" &&
+    child.pid > 0 &&
+    child.exitCode === null &&
+    child.signalCode === null &&
+    row.uid === 1000 &&
+    row.gid === 1000 &&
+    row.args === "/fvoci/bin/fvoci-server" &&
+    row.already_retired_at_observation !== true &&
+    typeof row.namespace_pid === "number" &&
+    row.namespace_pid > 0 &&
+    typeof row.start_ticks === "string" &&
+    /^[0-9]+$/.test(row.start_ticks) &&
+    /^http:\/\/127\.0\.0\.1:[1-9][0-9]*$/.test(base), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  const actual = processIdentity(row.pid);
+  require(actual.startTicks === row.start_ticks &&
+    actual.comm === "fvoci-server" &&
+    (actual.exeInspection === "UNAVAILABLE" ||
+      actual.exe === "/fvoci/bin/fvoci-server"), "UI_SERIAL_ROOM_ORIGIN_REQUIRED");
+  const native = { pid: row.namespace_pid, startTicks: row.start_ticks },
+    retired = { pid: row.pid, startTicks: row.start_ticks };
+  const origin = bindRoomLog(manifest, path, fd, child as Child, native, targetSha256, retired);
+  return { origin, child, row: { ...row }, base };
+}
+
+export async function selectedRoomRetirement(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  selected: SelectedRoomOrigin,
+  targetSha256: string,
+  rows: Row[],
+): Promise<RoomRetirement> {
+  require(selected.origin.child === selected.child &&
+    rows.some(
+      (row) => row.pid === selected.row.pid && row.start_ticks === selected.row.start_ticks,
+    ) &&
+    (await waitFor(selected.child, 10000)) === 0 &&
+    identityGone(selected.row) &&
+    rows.every((row) => identityGone(row)) &&
+    (await portClosed(Number(new URL(selected.base).port))), "UI_SERIAL_ROOM_RETIREMENT_REQUIRED");
+  return readRoomRetirement(manifest, selected.origin, targetSha256);
+}
+
+/** Rebind the live parent-owned producer/FD before reading startup receipts. */
+export function selectedMaintenanceSnapshot(
+  manifest: Pick<Manifest, "sourceInputs" | "binaries">,
+  selected: SelectedRoomOrigin,
+  target: string,
+): Record_ {
+  const current = captureSelectedRoomLog(
+    manifest,
+    selected.origin.log.path,
+    selected.origin.log.fd,
+    selected.child,
+    selected.row,
+    selected.base,
+    target,
+  );
+  require(same(current.origin.log, selected.origin.log) &&
+    current.origin.source === selected.origin.source &&
+    current.origin.tree === selected.origin.tree &&
+    same(current.origin.identity, selected.origin.identity) &&
+    same(current.origin.executable, selected.origin.executable), "UI_SERIAL_ROOM_ORIGIN_CHANGED");
+  return maintenanceReceipts(current.origin.log.path, current.origin.identity, target);
+}
+
+/** Expiry is necessary, but only a real confirmed release and retirement authorize it. */
+export function assertRoomClosure(observation: SerialObservation, target: string): void {
+  const history = observation.roomHistory ?? [];
+  const identities = new Set<string>();
+  for (const server of history) {
+    const key = JSON.stringify(server.identity);
+    require(!identities.has(key) &&
+      server.targetSha256 === target &&
+      /^[a-f0-9]{64}$/.test(server.logSha256) &&
+      server.identity.pid > 0 &&
+      /^[0-9]+$/.test(server.identity.startTicks) &&
+      server.retiredIdentity.pid > 0 &&
+      /^[0-9]+$/.test(server.retiredIdentity.startTicks), "UI_SERIAL_ROOM_HISTORY_REFUSED");
+    identities.add(key);
+  }
+  for (const [table, kind] of [
+    ["collab_room_fences", "document"],
+    ["task_collab_room_fences", "task"],
+  ])
+    for (const row of list(observation.checks, "owners", table as string)) {
+      const owner = digest(Buffer.from(text(row, 2, 1), "hex"));
+      const matches = history.flatMap((server) =>
+        server.receipts.filter(
+          (receipt) =>
+            receipt.schema === 1 &&
+            receipt.commit === "confirmed" &&
+            receipt.pid === server.identity.pid &&
+            receipt.kind === kind &&
+            receipt.workspaceId === uuidFromHex(text(row, 0, 1)) &&
+            receipt.targetId === uuidFromHex(text(row, 1, 1)) &&
+            receipt.ownerSha256 === owner &&
+            decimal(receipt.fence) === integer(get(row, 3)),
+        ),
+      );
+      require(matches.length > 0 &&
+        decimal(matches.at(-1)?.expiresAtMicros) ===
+          integer(get(row, 4)), "UI_SERIAL_ROOM_RELEASE_UNWITNESSED");
+    }
+}
+
+export function retainRoomHistory(
+  observation: SerialObservation,
+  previous: SerialObservation,
+  ...retirements: RoomRetirement[]
+): SerialObservation {
+  observation.roomHistory = [...(previous.roomHistory ?? []), ...retirements];
+  return observation;
+}
+
 export function maintenanceReceipts(
   logpath: string,
   serverIdentity: { pid: number; startTicks: string },
@@ -399,8 +1792,12 @@ export function auditMaintenance(before: unknown[], after: unknown[], audit: Aud
       keys,
     ), "UI_MAINTENANCE_KEYS_CHANGED");
   const current = new Map(before.map((row) => [integer(get(row, 0)), integer(get(row, 2))]));
+  const keycloakGroups = audit.serial?.keycloakGroups;
   require(audit.servers.length === audit.serverStarts &&
-    [1, 2, 3].includes(audit.serverStarts), "UI_START_COUNT_REFUSED");
+    (keycloakGroups === undefined
+      ? [1, 2, 3].includes(audit.serverStarts)
+      : [1, 2, 3].includes(keycloakGroups) &&
+        audit.serverStarts === 3 + keycloakGroups), "UI_START_COUNT_REFUSED");
   const identitiesSeen = new Set<string>(),
     ownersSeen = new Set<unknown>();
   for (const server of audit.servers) {
@@ -445,13 +1842,115 @@ export function auditMaintenance(before: unknown[], after: unknown[], audit: Aud
   });
 }
 
-export function auditCounters(before: unknown, after: unknown, audit: Audit): void {
+/** Live preparation permits only this restarted producer's exact startup
+ * prefixes. Unscheduled keys keep all four native cells, not just generation. */
+function auditPreparedMaintenance(before: unknown, prepared: unknown, audit: Audit): void {
+  const selected = audit.sqlitePreparation;
+  require(selected?.maintenance !== undefined, "UI_SQLITE_MAINTENANCE_PRODUCER_REQUIRED");
+  const { server, leaseMicros } = selected.maintenance;
+  const original = list(before, "operations", "maintenance_job_claims"),
+    current = list(prepared, "operations", "maintenance_job_claims");
+  const keys = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
+  require(same(
+    original.map((r) => integer(get(r, 0))),
+    keys,
+  ) &&
+    same(
+      current.map((r) => integer(get(r, 0))),
+      keys,
+    ) &&
+    same(fingerprints(original), get(before, "fingerprints", "maintenance_job_claims")) &&
+    same(fingerprints(current), get(prepared, "fingerprints", "maintenance_job_claims")) &&
+    same(
+      current,
+      get(selected.prepared.checks, "owners", "maintenance_job_claims"),
+    ), "UI_SQLITE_MAINTENANCE_ROWS_REFUSED");
+  const start = decimal(selected.original.checks.clockMicros),
+    now = decimal(selected.prepared.checks.clockMicros),
+    lease = decimal(leaseMicros);
+  require(start > 0n &&
+    now >= start &&
+    lease === 300000000n &&
+    get(server, "targetSha256") === audit.targetSha256 &&
+    typeof get(server, "identity", "pid") === "number" &&
+    (get(server, "identity", "pid") as number) > 0 &&
+    /^[0-9]+$/.test(
+      text(server, "identity", "startTicks"),
+    ), "UI_SQLITE_MAINTENANCE_PRODUCER_REQUIRED");
+  const records = list(server, "receipts"),
+    owners = new Set<unknown>();
+  require(records.length >= 3 &&
+    records.length <= 9 &&
+    records.every((r) =>
+      [1, 8, 9].includes(get(r, "key") as number),
+    ), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+  original.forEach((old, index) => {
+    const row = list(current[index]),
+      key = integer(get(old, 0));
+    require(list(old).length === 4 &&
+      row.length === 4 &&
+      same(get(old, 1), ["null"]) &&
+      same(get(old, 3), ["null"]) &&
+      integer(get(old, 2)) >= 0n, "UI_SQLITE_MAINTENANCE_ROWS_REFUSED");
+    if (![1n, 8n, 9n].includes(key)) {
+      require(same(old, row), "UI_SQLITE_UNSCHEDULED_MAINTENANCE_CHANGED");
+      return;
+    }
+    const receipts = records.filter((r) => get(r, "key") === Number(key));
+    const outcomes = receipts.map((r) => get(r, "outcome")),
+      owner = get(receipts[0], "ownerSha256");
+    require(receipts.length >= 1 &&
+      receipts.length <= 3 &&
+      same(outcomes, ["prepared", "acquired", "released"].slice(0, receipts.length)) &&
+      typeof owner === "string" &&
+      /^[a-f0-9]{64}$/.test(owner) &&
+      !owners.has(owner) &&
+      receipts.every(
+        (r) =>
+          get(r, "schema") === 1 &&
+          get(r, "pid") === get(server, "identity", "pid") &&
+          get(r, "ownerSha256") === owner,
+      ) &&
+      get(receipts[0], "generation") === null, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    owners.add(owner);
+    const previous = integer(get(old, 2)),
+      next = previous + 1n;
+    require(receipts
+      .slice(1)
+      .every(
+        (r) => get(r, "generation") === String(next),
+      ), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    if (integer(row[2]) === previous) {
+      require(same(row, old), "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+    } else {
+      require(integer(row[2]) === next &&
+        receipts.length >= 2, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      if (same(row[1], ["null"])) {
+        require(same(row[3], ["null"]) &&
+          receipts.length === 3, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      } else {
+        const token = text(row[1], 1),
+          expiry = integer(row[3]);
+        require(get(row[1], 0) === "blob" &&
+          /^[a-f0-9]{32}$/.test(token) &&
+          digest(Buffer.from(token, "hex")) === owner &&
+          expiry > now &&
+          expiry - lease >= start &&
+          expiry - lease <= now, "UI_SQLITE_MAINTENANCE_TRANSITION_REFUSED");
+      }
+    }
+  });
+}
+
+function auditEventAndFenceCounters(
+  before: unknown,
+  after: unknown,
+  audit: Audit,
+  phase: "prepared" | "after" = "after",
+): void {
   const b = record(before, "operations"),
     a = record(after, "operations");
-  require(get(before, "startupHazards") === 0 &&
-    get(after, "startupHazards") === 0 &&
-    get(after, "liveOutboxLeases") === 0, "UI_FOREIGN_OR_UNRELEASED_OWNER");
-  const [workspaces, actors, targets] = allocatedRows(before, after, audit);
+  const [workspaces, actors, targets] = allocatedRows(before, after, audit, phase);
   const first = singleton(get(b, "event_sequence")),
     last = singleton(get(a, "event_sequence"));
   require(first <= last && last <= first + 10000n, "UI_EVENT_COUNTER_RESET");
@@ -465,8 +1964,31 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   const witnessed = new Set(
     Object.entries(record(after, "allocations", "events"))
       .filter(([hash]) => !Object.hasOwn(record(before, "fingerprints", "events"), hash))
-      .flatMap(([, refs]) => {
-        const row = witnessedEventOperation(refs, audit, workspaces, targets);
+      .flatMap(([hash, refs]) => {
+        const row = selectedReadbackAppendEffect(
+          before,
+          after,
+          "events",
+          hash,
+          get(after, "fingerprints", "events", hash),
+          refs,
+          audit,
+        )
+          ? (audit.sqlitePreparation?.readback?.eventOperations?.[hash] ??
+            audit.sqlitePreparation?.products?.find((seal) =>
+              Object.hasOwn(seal.rows.events ?? {}, hash),
+            )?.eventOperations?.[hash] ??
+            null)
+          : witnessedEventOperation(
+              refs,
+              audit,
+              workspaces,
+              targets,
+              hash,
+              get(after, "fingerprints", "events", hash),
+              before,
+              after,
+            );
         return row === null ? [] : [canonical(row)];
       }),
   );
@@ -486,7 +2008,10 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   for (const row of audit.observedFences) {
     require(row.length === 5 &&
       same(row[0], ["blob", get(row, 0, 1)]) &&
-      workspaces.has(get(row, 0, 1) as string) &&
+      (workspaces.has(get(row, 0, 1) as string) ||
+        (audit.sqlitePreparation !== undefined &&
+          same(row[0], ["blob", audit.sqlitePreparation.workspace]) &&
+          same(row[1], ["blob", audit.sqlitePreparation.document]))) &&
       get(row, 2, 0) === "blob" &&
       /^[a-f0-9]{32}$/.test(text(row, 2, 1)), "UI_FOREIGN_ROOM_FENCE");
     const value = integer(row[3]);
@@ -502,7 +2027,22 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   let complete = fences.size === Number(lastFence - firstFence);
   for (let n = firstFence; complete && n < lastFence; n++) complete = fences.has(n);
   require(complete, "UI_FENCE_COUNTER_UNOBSERVED");
+}
+
+export function auditCounters(before: unknown, after: unknown, audit: Audit): void {
+  const b = record(before, "operations"),
+    a = record(after, "operations");
+  require(get(before, "startupHazards") === 0 &&
+    get(after, "startupHazards") === 0 &&
+    get(after, "liveOutboxLeases") === 0, "UI_FOREIGN_OR_UNRELEASED_OWNER");
+  auditEventAndFenceCounters(before, after, audit);
   auditMaintenance(list(b, "maintenance_job_claims"), list(a, "maintenance_job_claims"), audit);
+  if (audit.serial !== undefined) {
+    serialProgress(before, after, audit);
+    return;
+  }
+  const first = singleton(get(b, "event_sequence")),
+    last = singleton(get(a, "event_sequence"));
   require(same(get(b, "outbox_consumers"), []), "UI_PREEXISTING_RELAY_REFUSED");
   const consumers = list(a, "outbox_consumers");
   const names = consumers.map((row) => canonical(get(row, 0))).sort();
@@ -521,7 +2061,141 @@ export function auditCounters(before: unknown, after: unknown, audit: Audit): vo
   }
 }
 
-export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
+/** Full typed seeded row, with only its actual one-claim generation/time
+ * transition admitted; every complete hash remains in its native primary. */
+export function selectedReadbackState(
+  before: unknown,
+  after: unknown,
+  audit: Audit,
+  phase: "prepared" | "after" = "after",
+): string {
+  const selected = audit.sqlitePreparation;
+  require(selected !== undefined &&
+    (phase === "prepared" || audit.serial?.expectedBackend === "sqlite") &&
+    same(before, selected.original.dataset) &&
+    get(before, "backend") === "sqlite" &&
+    get(after, "backend") === "sqlite" &&
+    get(selected.prepared.dataset, "backend") === "sqlite", "UI_SQLITE_READBACK_STATE_REFUSED");
+  const table = "document_states";
+  const state = selected.state;
+  require((selected.readback === undefined || selected.readback.count === 2) &&
+    state.original.length === 10 &&
+    state.current.length === 10 &&
+    (phase === "prepared" || state.after.length === 10) &&
+    same(state.original[0], ["blob", selected.workspace]) &&
+    same(state.original[1], ["blob", selected.document]) &&
+    (phase === "prepared" || same(state.current, state.after)) &&
+    state.original.every(
+      (value, index) =>
+        index === 6 || index === 7 || index === 9 || same(value, state.current[index]),
+    ) &&
+    integer(state.current[9]) ===
+      integer(state.original[9]) + BigInt(selected.readback?.count ?? 0) &&
+    integer(state.current[7]) === integer(state.original[7]) + 1n &&
+    integer(state.current[6]) >= decimal(selected.original.checks.clockMicros) &&
+    integer(state.current[6]) <= decimal(selected.prepared.checks.clockMicros) &&
+    get(before, "fingerprints", table, rowHash(state.original)) === 1 &&
+    get(selected.prepared.dataset, "fingerprints", table, rowHash(state.current)) === 1 &&
+    get(
+      after,
+      "fingerprints",
+      table,
+      rowHash(phase === "prepared" ? state.current : state.after),
+    ) === 1, "UI_SQLITE_READBACK_STATE_REFUSED");
+  return rowHash(state.original);
+}
+
+/** Only exact parent-proven append hashes can cross the old actor/workspace
+ * boundary; all prior rows and unrelated actor effects retain their guards. */
+export function selectedReadbackAppendEffect(
+  before: unknown,
+  after: unknown,
+  table: string,
+  sha: string,
+  count: unknown,
+  refs: unknown,
+  audit: Audit,
+): boolean {
+  const selected = audit.sqlitePreparation;
+  const readback = selected?.readback;
+  const product = selected?.products?.find((seal) => Object.hasOwn(seal.rows[table] ?? {}, sha));
+  const seal = readback && Object.hasOwn(readback.rows[table] ?? {}, sha) ? readback : product;
+  if (!selected || !seal) return false;
+  const originalReader = seal === readback;
+  const workspace = originalReader ? selected.workspace : product?.workspace;
+  const prepared = originalReader ? selected.prepared.dataset : audit.serial?.after.dataset;
+  const expectedActor = originalReader ? selected.readbackActor.id : seal.actors?.[sha];
+  require(Number.isSafeInteger(seal.count) &&
+    seal.count >= 0 &&
+    seal.count <= 10000 &&
+    (originalReader
+      ? seal.count === 2
+      : product !== undefined &&
+        audit.serial?.expectedBackend === "sqlite" &&
+        audit.documents?.[product.document] === workspace) &&
+    same(
+      Object.keys(seal.rows).sort(),
+      originalReader
+        ? ["audit_log", "document_collab_op_receipts", "document_collab_updates", "events"]
+        : ["audit_log", "events"],
+    ) &&
+    Object.entries(seal.rows).every(
+      ([name, hashes]) =>
+        Object.keys(hashes).length === seal.count &&
+        Object.entries(hashes).every(
+          ([hash, n]) =>
+            /^[a-f0-9]{64}$/.test(hash) &&
+            n === 1 &&
+            !Object.hasOwn(record(before, "fingerprints", name), hash) &&
+            get(prepared, "fingerprints", name, hash) === 1 &&
+            get(after, "fingerprints", name, hash) === 1,
+        ),
+    ) &&
+    same(
+      Object.keys(seal.eventOperations ?? {}).sort(),
+      Object.keys(seal.rows.events ?? {}).sort(),
+    ) &&
+    same(Object.keys(seal.eventIds ?? {}).sort(), Object.keys(seal.rows.events ?? {}).sort()) &&
+    (originalReader ||
+      same(
+        Object.keys(seal.actors ?? {}).sort(),
+        Object.values(seal.rows)
+          .flatMap((hashes) => Object.keys(hashes))
+          .sort(),
+      )) &&
+    Object.entries(seal.eventOperations ?? {}).every(
+      ([hash, operation]) =>
+        operation.length === 3 &&
+        integer(operation[0]) > 0n &&
+        same(operation[1], ["blob", workspace]) &&
+        same(operation[2], [
+          "blob",
+          originalReader ? selected.readbackActor.id : seal.actors?.[hash],
+        ]) &&
+        (originalReader || Object.hasOwn(audit.actors, seal.actors?.[hash] ?? "")) &&
+        /^[a-f0-9]{32}$/.test(seal.eventIds?.[hash] ?? "") &&
+        list(prepared, "operations", "events").filter((row) => same(row, operation)).length === 1 &&
+        list(after, "operations", "events").filter((row) => same(row, operation)).length === 1,
+    ) &&
+    new Set(Object.values(seal.eventIds ?? {})).size === seal.count &&
+    new Set(Object.values(seal.eventOperations ?? {}).map((row) => canonical(row[0]))).size ===
+      seal.count &&
+    count === 1 &&
+    same(get(refs, "workspaces"), [workspace]) &&
+    same(get(refs, "actors"), table === "document_collab_updates" ? [] : [expectedActor]) &&
+    (originalReader || Object.hasOwn(audit.actors, expectedActor ?? "")) &&
+    (table !== "events" ||
+      (get(refs, "self") === seal.eventIds?.[sha] &&
+        get(refs, "eventWitness") === null)), "UI_SQLITE_READBACK_APPEND_REFUSED");
+  return true;
+}
+
+function preservedPrimaryRows(
+  before: unknown,
+  after: unknown,
+  audit: Audit | undefined,
+  phase: "prepared" | "after" = "after",
+): void {
   require(same(get(before, "ledger"), get(after, "ledger")) &&
     same(get(before, "schemaSha256"), get(after, "schemaSha256")) &&
     same(get(before, "lineage"), get(after, "lineage")), "UI_CURRENT_LEDGER_CHANGED");
@@ -530,20 +2204,132 @@ export function assertPreserved(before: unknown, after: unknown, audit?: Audit):
   require(same(Object.keys(old).sort(), Object.keys(current).sort()), "UI_CURRENT_TABLES_CHANGED");
   for (const [table, rows] of Object.entries(old)) {
     if (audit !== undefined && AUDITED_COUNTERS.has(table)) continue;
+    if ((phase === "prepared" || audit?.serial !== undefined) && table === "outbox_consumers")
+      continue;
     if (audit !== undefined && table === "instance_config" && vapidInitialization(before, after))
       continue;
     const now = record(current, table);
+    const selected = audit?.sqlitePreparation;
+    const related =
+      table === "collab_room_fences" && selected !== undefined
+        ? list(before, "operations", table).filter(
+            (row) =>
+              same(get(row, 0), ["blob", selected.workspace]) &&
+              same(get(row, 1), ["blob", selected.document]),
+          )
+        : [];
+    let relatedHash: string | undefined;
+    if (selected !== undefined && table === "document_states") {
+      relatedHash = selectedReadbackState(before, after, audit as Audit, phase);
+    }
+    if (selected !== undefined && table === "collab_room_fences") {
+      require(related.length === 1, "UI_SQLITE_READBACK_FENCE_REFUSED");
+      const original = list(related[0]);
+      relatedHash = rowHash(original);
+      const prepared = list(selected.prepared.dataset, "operations", table).filter(
+        (row) => same(get(row, 0), original[0]) && same(get(row, 1), original[1]),
+      );
+      const final = list(after, "operations", table).filter(
+        (row) => same(get(row, 0), original[0]) && same(get(row, 1), original[1]),
+      );
+      require(prepared.length === 1 &&
+        final.length === 1 &&
+        same(list(prepared[0]).slice(0, 4), list(final[0]).slice(0, 4)) &&
+        integer(get(prepared[0], 3)) > integer(original[3]) &&
+        (phase === "prepared" ||
+          integer(get(final[0], 4)) <=
+            decimal(audit?.serial?.after.checks.clockMicros)), "UI_SQLITE_READBACK_FENCE_REFUSED");
+    }
     for (const [sha, count] of Object.entries(record(rows)))
-      require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
+      if (sha !== relatedHash)
+        require((Object.hasOwn(now, sha) ? now[sha] : 0) === count, "UI_PREEXISTING_ROW_CHANGED");
   }
+}
+
+/** Live prepared owners are not a final-quiescence claim. All original typed
+ * business rows and both exact original actors must already be preserved here. */
+export function assertSqlitePreparedPreserved(
+  before: unknown,
+  prepared: unknown,
+  audit: Audit,
+): void {
+  const selected = audit.sqlitePreparation;
+  require(selected !== undefined &&
+    same(before, selected.original.dataset) &&
+    same(prepared, selected.prepared.dataset) &&
+    get(prepared, "backend") === "sqlite" &&
+    get(prepared, "schemaCurrent") === true, "UI_SQLITE_PREPARATION_SNAPSHOT_REFUSED");
+  preservedPrimaryRows(before, prepared, audit, "prepared");
+  auditPreparedMaintenance(before, prepared, audit);
+  auditEventAndFenceCounters(before, prepared, audit, "prepared");
+  const prior = list(selected.original.checks, "outbox"),
+    current = list(selected.prepared.checks, "outbox");
+  require(same(
+    prior.map((row) => get(row, "consumer")).sort(),
+    current.map((row) => get(row, "consumer")).sort(),
+  ), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  for (const row of prior) {
+    const now = current.find((candidate) => get(candidate, "consumer") === get(row, "consumer"));
+    require(get(now, "immutableSha256") === get(row, "immutableSha256") &&
+      decimal(get(now, "lastSeq")) >= decimal(get(row, "lastSeq")) &&
+      decimal(get(now, "lastSeq")) <= decimal(selected.prepared.checks.eventHead) &&
+      decimal(get(now, "updatedAtMicros")) >=
+        decimal(get(row, "updatedAtMicros")), "UI_SERIAL_RELAY_IMMUTABLE_CHANGED");
+  }
+}
+
+export function assertPreserved(before: unknown, after: unknown, audit?: Audit): void {
+  if (audit?.serial !== undefined) serialProgress(before, after, audit);
+  preservedPrimaryRows(before, after, audit);
   if (audit !== undefined) auditCounters(before, after, audit);
 }
 
+/** Eager prepared actors belong to the one Keycloak phase. Each completed group
+ * must preserve all preceding business rows AND explain the entire phase's
+ * operational progress using the actual cumulative server and actor witnesses. */
+export function assertSerialGroupPreserved(
+  origin: SerialObservation,
+  previous: SerialObservation,
+  after: SerialObservation,
+  audit: Audit,
+  policy: SerialPolicy,
+  completedGroups: 1 | 2 | 3,
+): void {
+  audit.serial = { before: origin, after, policy, keycloakGroups: completedGroups };
+  assertPreserved(origin.dataset, after.dataset, audit);
+  serialProgress(previous.dataset, after.dataset, {
+    ...audit,
+    serial: { before: previous, after, policy },
+  });
+  require(same(get(previous.dataset, "ledger"), get(after.dataset, "ledger")) &&
+    same(get(previous.dataset, "schemaSha256"), get(after.dataset, "schemaSha256")) &&
+    same(
+      Object.keys(record(previous.dataset, "fingerprints")).sort(),
+      Object.keys(record(after.dataset, "fingerprints")).sort(),
+    ), "UI_CURRENT_LEDGER_CHANGED");
+  for (const [table, rows] of Object.entries(record(previous.dataset, "fingerprints"))) {
+    // All current columns of these globals were checked above, with exact
+    // cumulative maintenance/event/fence receipts. No business row is exempt.
+    if (AUDITED_COUNTERS.has(table) || table === "outbox_consumers") continue;
+    for (const [hash, count] of Object.entries(record(rows)))
+      require(get(after.dataset, "fingerprints", table, hash) ===
+        count, "UI_PREEXISTING_ROW_CHANGED");
+  }
+}
+
 export type Case = [string, Record_];
-export function reportCases(report: unknown, spec: string, titles: string[]): Case[] {
+export function reportCases(
+  report: unknown,
+  spec: string,
+  titles: string[],
+  backend: "libsql-remote" | "sqlite" = "libsql-remote",
+): Case[] {
+  require(backend === "libsql-remote" ||
+    spec === RESTORE ||
+    spec === FINAL_SPEC, "UI_BROWSER_BACKEND_REFUSED");
   require(get(report, "config", "workers") === 1 &&
     same(get(report, "errors"), []) &&
-    get(report, "config", "metadata", "selectedBackend") === "libsql-remote" &&
+    get(report, "config", "metadata", "selectedBackend") === backend &&
     get(report, "stats", "expected") === titles.length &&
     ["unexpected", "flaky", "skipped"].every(
       (k) => get(report, "stats", k) === 0,

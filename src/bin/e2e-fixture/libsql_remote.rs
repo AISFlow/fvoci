@@ -21,7 +21,10 @@ pub async fn run() -> Result<(), &'static str> {
         return Err("TURSO_UI_ALLOCATION_REQUIRED");
     }
     let mode = std::env::args().nth(1).ok_or("TURSO_UI_MODE_REQUIRED")?;
-    if !matches!(mode.as_str(), "baseline" | "owner" | "member" | "observe") {
+    if !matches!(
+        mode.as_str(),
+        "baseline" | "owner" | "member" | "observe" | "serial-observe"
+    ) {
         return Err("TURSO_UI_MODE_INVALID");
     }
     if matches!(mode.as_str(), "owner" | "member")
@@ -30,6 +33,19 @@ pub async fn run() -> Result<(), &'static str> {
     {
         return Err("TURSO_UI_MUTATION_NOT_GRANTED");
     }
+    let policy = if mode == "serial-observe" {
+        if std::env::args().len() != 2 {
+            return Err("TURSO_UI_SERIAL_INPUT");
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "TURSO_UI_SERIAL_INPUT")?;
+        Some(serial_policy(&bytes)?)
+    } else {
+        None
+    };
     let remote = RemoteDatabase::connect(
         required("FVOCI_LIBSQL_URL")?,
         required("FVOCI_LIBSQL_AUTH_TOKEN")?,
@@ -42,6 +58,18 @@ pub async fn run() -> Result<(), &'static str> {
         json!({"operation":"failed","rollback":"not-attempted","commit":"not-attempted"});
     let result = async {
         let value = match mode.as_str() {
+            "serial-observe" => {
+                let observation = e2e_fixture::capture_serial_observation(
+                    &backend,
+                    policy.ok_or("TURSO_UI_SERIAL_INPUT")?,
+                )
+                .await
+                .map_err(|error| {
+                    native_outcome = e2e_fixture::failure_receipt(&error);
+                    "TURSO_UI_SERIAL_OBSERVATION_FAILED"
+                })?;
+                serde_json::to_value(observation).map_err(|_| "TURSO_UI_SERIAL_OUTPUT")?
+            }
             "baseline" => e2e_fixture::capture_baseline(&backend)
                 .await
                 .map_err(|error| {
@@ -136,4 +164,42 @@ pub async fn run() -> Result<(), &'static str> {
         return Err("TURSO_UI_DRAIN_FAILED");
     }
     Ok(())
+}
+
+fn serial_policy(bytes: &[u8]) -> Result<e2e_fixture::SerialPolicy, &'static str> {
+    if bytes.len() > 4096 {
+        return Err("TURSO_UI_SERIAL_INPUT");
+    }
+    serde_json::from_slice(bytes).map_err(|_| "TURSO_UI_SERIAL_INPUT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serial_policy;
+
+    #[test]
+    fn serial_policy_refuses_forged_completion_and_horizon() {
+        let valid = r#"{"revisionKeep":200,"revisionSnapshotIntervalHours":24}"#;
+        assert!(serial_policy(valid.as_bytes()).is_ok());
+        for extra in [
+            "verified",
+            "completed",
+            "prefix",
+            "digest",
+            "file",
+            "horizonMicros",
+        ] {
+            let forged = format!("{},\"{extra}\":true}}", &valid[..valid.len() - 1]);
+            assert!(serial_policy(forged.as_bytes()).is_err(), "{extra}");
+        }
+        for invalid in [
+            b"{}".as_slice(),
+            br#"{"revisionKeep":0,"revisionSnapshotIntervalHours":24}"#,
+            br#"{"revisionKeep":200,"revisionSnapshotIntervalHours":-1}"#,
+            br#"{"revisionKeep":200,"revisionKeep":300,"revisionSnapshotIntervalHours":24}"#,
+        ] {
+            assert!(serial_policy(invalid).is_err());
+        }
+        assert!(serial_policy(&vec![b' '; 4097]).is_err());
+    }
 }

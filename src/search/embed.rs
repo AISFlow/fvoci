@@ -175,7 +175,7 @@ impl Embedder {
         let url = Url::parse(&format!("{}/embeddings", self.inner.base_url))
             .map_err(|_| EmbedError::Url)?;
         let pinned = pin(&url, self.inner.allow_private).await?;
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::http_client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .timeout(EMBED_TIMEOUT)

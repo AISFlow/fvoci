@@ -24,7 +24,7 @@ async fn zotero_graph(run: &TestRun, ws: Uuid) -> Value {
         "zotero_links",
     ] {
         let sql = format!("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) FROM fvoci.{table} r WHERE workspace_id=$1");
-        let rows: Value = sqlx::query_scalar(&sql)
+        let rows: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(ws)
             .fetch_one(&admin)
             .await

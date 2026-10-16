@@ -5,8 +5,8 @@ import { createE2eUser, login, logout } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -18,17 +18,15 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const memberListSchema = z
   .object({
-    items: z.array(
-      z.object({ email: z.string(), userId: z.string(), role: z.string() }).passthrough(),
-    ),
+    items: z.array(z.object({ email: z.string(), userId: z.string(), role: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const documentTreeSchema = z
   .object({
     items: z.array(
@@ -39,10 +37,10 @@ const documentTreeSchema = z
           projectId: z.string().nullable(),
           number: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const numberedDocumentTreeSchema = z
   .object({
     items: z.array(
@@ -53,23 +51,21 @@ const numberedDocumentTreeSchema = z
           parentId: z.string().nullable(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
+  .loose();
 const nameListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()) })
-  .passthrough();
-const itemListSchema = z.object({ items: z.array(z.unknown()) }).passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), name: z.string() }).loose()) })
+  .loose();
+const itemListSchema = z.object({ items: z.array(z.unknown()) }).loose();
 
 test.describe.configure({ mode: "serial" });
 

@@ -36,7 +36,7 @@ const RUST_FAST_CACHES = [
 ] as const;
 const SAFE_CARGO_DOWNLOAD = {
   path: "~/.cargo/registry\n~/.cargo/git\n",
-  key: "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.98.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
+  key: "v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}",
 };
 const PRODUCER_STRATEGY = {
   "fail-fast": false,
@@ -215,8 +215,12 @@ export function verifyRustBinaryHandoff(jobs: Mapping): string[] {
     } else {
       require(!list.some(
         (step) =>
-          str(step, "run").includes("--bin collab-engine") ||
-          field(step.with, "path") === "crates/collab-engine/target",
+          ["cargo ", '"cargo"', "'cargo'"].some((word) => str(step, "run").includes(word)) ||
+          (isCacheStep(step) &&
+            !contains(consumerPrefix, step) &&
+            !["~/.cargo/registry\n~/.cargo/git\n", "~/.cargo/registry\n~/.cargo/git"].includes(
+              String(field(step.with, "path")),
+            )),
       ), "collaboration must reuse helper without build/cache fallback");
     }
   }

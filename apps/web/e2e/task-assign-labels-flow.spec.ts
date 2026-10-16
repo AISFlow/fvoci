@@ -5,8 +5,8 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const lookupSchema = z
   .object({
     items: z.array(
@@ -17,11 +17,11 @@ const lookupSchema = z
           displayId: z.string(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const meSchema = z.object({ userId: z.string() }).passthrough();
+  .loose();
+const meSchema = z.object({ userId: z.string() }).loose();
 const projectListSchema = z
   .object({
     items: z.array(
@@ -33,14 +33,14 @@ const projectListSchema = z
           taskCount: z.number(),
           openTaskCount: z.number(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
 const taskAssignmentSchema = z
   .object({ assigneeIds: z.array(z.string()), labelIds: z.array(z.string()) })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 

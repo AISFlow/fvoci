@@ -125,7 +125,7 @@ then exits.
 ## Commands
 
 ```sh
-# Rust 1.98.1 from rust-toolchain.toml; for a non-default toolchain set
+# Rust 1.99.0 from rust-toolchain.toml; for a non-default toolchain set
 # CARGO_HOME, RUSTUP_HOME and PATH as in RUNNING.md.
 cd crates/collab-engine
 export CARGO_TARGET_DIR="$PWD/target"

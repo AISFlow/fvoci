@@ -51,7 +51,7 @@ const error = ref<string | null>(null);
 const revealed = ref<{ id: string; token: string } | null>(null);
 const schema = apiTokenCreateInput
   .pick({ name: true, scopes: true })
-  .extend({ workspaceId: z.string().uuid("i18n:form.invalid") });
+  .extend({ workspaceId: z.guid("i18n:form.invalid") });
 
 async function reloadTokens(): Promise<void> {
   await Promise.all([

@@ -249,7 +249,7 @@ async fn transfer_graph(run: &TestRun, workspace: Uuid) -> Value {
         "personal_input_commands",
     ] {
         let sql=format!("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) FROM fvoci.{table} r WHERE workspace_id=$1");
-        let rows: Value = sqlx::query_scalar(&sql)
+        let rows: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(workspace)
             .fetch_one(&mut conn)
             .await
@@ -347,7 +347,7 @@ async fn personal_transfer_same_ids_real_rls_triggers_and_repeat() {
     let baseline:(Uuid,Uuid,Value)=sqlx::query_as("SELECT i.id,a.id,a.changes FROM fvoci.collection_items i JOIN fvoci.task_activity a ON a.workspace_id=i.workspace_id AND a.task_id=i.task_id WHERE i.workspace_id=$1 AND i.task_id=$2").bind(source).bind(task).fetch_one(&mut conn).await.unwrap();sqlx::query("COMMIT").execute(&mut conn).await.unwrap();drop(conn);
     // Receive actual status then discard successful body. A fresh connection
     // establishes commit before exact repeated/concurrent product commands.
-    let response=reqwest::Client::new().post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();assert_eq!(response.status(),StatusCode::OK);drop(response);
+    let response=fvoci_server::http_client::client().post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();assert_eq!(response.status(),StatusCode::OK);drop(response);
     let committed=counts(&run,actor.workspace_id,doc,task).await;assert_eq!((committed.0,committed.1,committed.2,committed.3,committed.4,committed.5),(1,1,1,1,1,1));
     let replay_path=path(source);
     let a=session_call(addr,Method::POST,&replay_path,&actor.session_token,Some(body.clone()));let b=session_call(addr,Method::POST,&replay_path,&actor.session_token,Some(body.clone()));let(a,b)=tokio::join!(a,b);
@@ -436,9 +436,9 @@ async fn personal_transfer_receipt_failure_rolls_back_both_graphs_and_triggers()
     run_test("personal_transfer_receipt_failure_rolls_back_both_graphs_and_triggers",async{
     let mut run=TestRun::new(TestDb::bootstrap().await);let(addr,actor,source,_,capture,selection)=setup_transfer(&mut run).await;let doc=Uuid::parse_str(selection["documentId"].as_str().unwrap()).unwrap();let task=Uuid::parse_str(selection["taskId"].as_str().unwrap()).unwrap();let source_before=counts(&run,source,doc,task).await;let target_before=counts(&run,actor.workspace_id,doc,task).await;let body=command(addr,&actor,source,&selection).await;
     let request=Uuid::parse_str(body["requestId"].as_str().unwrap()).unwrap();let admin=admin_pool(&run.harness).await;
-    sqlx::raw_sql(&format!(r#"CREATE FUNCTION fvoci.fixture_transfer_receipt_fail() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,fvoci AS $$ BEGIN
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(r#"CREATE FUNCTION fvoci.fixture_transfer_receipt_fail() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,fvoci AS $$ BEGIN
       IF NEW.request_id='{request}'::uuid AND EXISTS(SELECT 1 FROM fvoci.task_activity WHERE workspace_id=NEW.destination_workspace_id AND task_id=NEW.task_id) AND EXISTS(SELECT 1 FROM fvoci.events WHERE workspace_id=NEW.destination_workspace_id AND target_id=NEW.task_id AND verb='task.created') THEN RAISE EXCEPTION 'fixture_transfer_after_activity_event_before_receipt'; END IF;RETURN NEW;END $$;
-      CREATE TRIGGER fixture_transfer_receipt_fail BEFORE INSERT ON fvoci.personal_transfer_commands FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_receipt_fail();"#)).execute(&admin).await.unwrap();
+      CREATE TRIGGER fixture_transfer_receipt_fail BEFORE INSERT ON fvoci.personal_transfer_commands FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_receipt_fail();"#))).execute(&admin).await.unwrap();
     let(status,_)=session_call(addr,Method::POST,&path(source),&actor.session_token,Some(body.clone())).await;assert_eq!(status,StatusCode::INTERNAL_SERVER_ERROR);
     sqlx::raw_sql("DROP TRIGGER fixture_transfer_receipt_fail ON fvoci.personal_transfer_commands;DROP FUNCTION fvoci.fixture_transfer_receipt_fail();").execute(&admin).await.unwrap();admin.close().await;
     assert_eq!(counts(&run,source,doc,task).await,source_before);assert_eq!(counts(&run,actor.workspace_id,doc,task).await,target_before);
@@ -649,9 +649,9 @@ async fn personal_transfer_operation_first_holds_source_owner_until_commit() {
         // Fixture-only request-guarded barrier after graph/event/activity writes
         // and before the receipt insertion. No product hook or definer bypass.
         let admin = admin_pool(&run.harness).await;
-        sqlx::raw_sql(&format!(r#"CREATE FUNCTION fvoci.fixture_transfer_commit_barrier() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,fvoci AS $$ BEGIN
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(r#"CREATE FUNCTION fvoci.fixture_transfer_commit_barrier() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,fvoci AS $$ BEGIN
           IF NEW.request_id='{request_id}'::uuid THEN PERFORM pg_advisory_xact_lock(1465135717,13); END IF; RETURN NEW; END $$;
-          CREATE TRIGGER fixture_transfer_commit_barrier BEFORE INSERT ON fvoci.personal_transfer_commands FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_commit_barrier();"#))
+          CREATE TRIGGER fixture_transfer_commit_barrier BEFORE INSERT ON fvoci.personal_transfer_commands FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_commit_barrier();"#)))
             .execute(&admin).await.unwrap();
         let mut hold = scoped_observer(&run, source).await;
         let hold_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -740,11 +740,11 @@ async fn personal_transfer_incoming_current_native_refs_refuse_move_copy_keeps_p
             apply_and_persist(addr,&actor.session_token,&key,91,&seed).await;
             let table=if source_kind==CollabKind::Document {"documents"} else {"tasks"};
             let admin=admin_pool(&run.harness).await;
-            sqlx::raw_sql(&format!(r#"CREATE FUNCTION fvoci.fixture_transfer_stale_projection() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,fvoci AS $$ BEGIN IF NEW.id='{referrer}'::uuid THEN NEW.content_json='{{"type":"doc","content":[{{"type":"paragraph"}}]}}'::jsonb; END IF;RETURN NEW;END $$; CREATE TRIGGER fixture_transfer_stale_projection BEFORE UPDATE OF content_json ON fvoci.{table} FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_stale_projection();"#)).execute(&admin).await.unwrap();
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(r#"CREATE FUNCTION fvoci.fixture_transfer_stale_projection() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,fvoci AS $$ BEGIN IF NEW.id='{referrer}'::uuid THEN NEW.content_json='{{"type":"doc","content":[{{"type":"paragraph"}}]}}'::jsonb; END IF;RETURN NEW;END $$; CREATE TRIGGER fixture_transfer_stale_projection BEFORE UPDATE OF content_json ON fvoci.{table} FOR EACH ROW EXECUTE FUNCTION fvoci.fixture_transfer_stale_projection();"#))).execute(&admin).await.unwrap();
             let mut conn=scoped_observer(&run,source).await;
-            sqlx::query(&format!("UPDATE fvoci.{table} SET content_json=$2 WHERE workspace_id=$1 AND id=$3"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE fvoci.{table} SET content_json=$2 WHERE workspace_id=$1 AND id=$3")))
                 .bind(source).bind(fvoci_server::db::documents::empty_document_json()).bind(referrer).execute(&mut conn).await.unwrap();
-            let cached:Value=sqlx::query_scalar(&format!("SELECT content_json FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2"))
+            let cached:Value=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT content_json FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2")))
                 .bind(source).bind(referrer).fetch_one(&mut conn).await.unwrap();
             assert!(fvoci_server::collab::derived_body::extract_internal_refs(&cached).is_empty());
             sqlx::query("COMMIT").execute(&mut conn).await.unwrap();
@@ -769,7 +769,7 @@ async fn personal_transfer_incoming_current_native_refs_refuse_move_copy_keeps_p
             let source_path=if source_kind==CollabKind::Document {document_api(source,referrer,"")} else {task_path(&personal,referrer,"")};
             let(status,_)=session_call(addr,Method::GET,&source_path,&outsider.session_token,None).await;
             assert_eq!(status,StatusCode::NOT_FOUND);
-            sqlx::raw_sql(&format!("DROP TRIGGER fixture_transfer_stale_projection ON fvoci.{table};DROP FUNCTION fvoci.fixture_transfer_stale_projection();")).execute(&admin).await.unwrap();admin.close().await;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TRIGGER fixture_transfer_stale_projection ON fvoci.{table};DROP FUNCTION fvoci.fixture_transfer_stale_projection();"))).execute(&admin).await.unwrap();admin.close().await;
             eprintln!("current native incoming edge refused with cached JSON empty; COPY retained private source: {source_kind:?}->{target_kind} {node_kind}");
             run.finish().await.unwrap();
         }
@@ -876,9 +876,9 @@ async fn stored_refs(
     id: Uuid,
 ) -> (Value, Vec<fvoci_server::collab::derived_body::InternalRef>) {
     let mut conn = scoped_observer(run, workspace).await;
-    let body: Value = sqlx::query_scalar(&format!(
+    let body: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT content_json FROM fvoci.{table} WHERE workspace_id=$1 AND id=$2"
-    ))
+    )))
     .bind(workspace)
     .bind(id)
     .fetch_one(&mut conn)
@@ -1239,7 +1239,7 @@ async fn personal_transfer_copy_current_native_content_has_new_blocks_and_preser
         assert!(preview["dispositions"].as_array().unwrap().contains(&json!({"item":"history","outcome":"retained_private","count":observed})),"{preview}");
         assert!(preview["dispositions"].as_array().unwrap().contains(&json!({"item":"activity","outcome":"not_included","count":preview["activityCount"]})),"{preview}");
         assert_eq!(transfer_graph(&run,source).await,before,"preview seeds no source state and changes no history");
-        let client=reqwest::Client::new();
+        let client=fvoci_server::http_client::client();
         let response=client.post(format!("http://{addr}{}",path(source))).header("origin",PUBLIC_ORIGIN).header("cookie",format!("fvoci_session={}",actor.session_token)).json(&body).send().await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);drop(response);
         let(status,copied)=session_call(addr,Method::POST,&path(source),&actor.session_token,Some(body.clone())).await;
@@ -1730,7 +1730,7 @@ async fn personal_transfer_move_without_staging_privilege_refuses_before_effects
             let (status, preview) = session_call(addr, Method::POST, &format!("{}/preview", path(source)), &actor.session_token, Some(selection.clone())).await;
             assert_eq!(status, StatusCode::OK, "{preview}");
             let admin = admin_pool(&run.harness).await;
-            sqlx::query(&format!("REVOKE TEMPORARY ON DATABASE \"{}\" FROM PUBLIC", run.harness.db_name()))
+            sqlx::query(sqlx::AssertSqlSafe(format!("REVOKE TEMPORARY ON DATABASE \"{}\" FROM PUBLIC", run.harness.db_name())))
                 .execute(&admin)
                 .await
                 .unwrap();
@@ -2089,9 +2089,9 @@ async fn personal_transfer_move_retained_tail_restores_and_scope_denials() {
             ("documents", "document_states", "document_collab_updates", "document_id", document),
             ("tasks", "task_states", "task_collab_updates", "task_id", task),
         ] {
-            let (state, stored): (Vec<u8>, Value) = sqlx::query_as(&format!("SELECT s.state, r.content_json FROM fvoci.{states} s JOIN fvoci.{kind} r ON r.workspace_id=s.workspace_id AND r.id=s.{column} WHERE s.workspace_id=$1 AND s.{column}=$2"))
+            let (state, stored): (Vec<u8>, Value) = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT s.state, r.content_json FROM fvoci.{states} s JOIN fvoci.{kind} r ON r.workspace_id=s.workspace_id AND r.id=s.{column} WHERE s.workspace_id=$1 AND s.{column}=$2")))
                 .bind(team).bind(id).fetch_one(&mut conn).await.unwrap();
-            let tail: Vec<Vec<u8>> = sqlx::query_scalar(&format!("SELECT payload FROM fvoci.{updates} WHERE workspace_id=$1 AND {column}=$2 ORDER BY seq"))
+            let tail: Vec<Vec<u8>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT payload FROM fvoci.{updates} WHERE workspace_id=$1 AND {column}=$2 ORDER BY seq")))
                 .bind(team).bind(id).fetch_all(&mut conn).await.unwrap();
             assert!(!tail.is_empty());
             let projected = fvoci_server::collab::revision::project_persisted_offline(hub.engine_bin(), hub.limits(), state, tail).unwrap();
@@ -2660,18 +2660,18 @@ async fn drive_native_rows(
                     let write_started = std::time::Instant::now();
                     let mut tx = pool.begin().await.unwrap();
                     fvoci_server::db::context::set_tenant(&mut tx, source).await.unwrap();
-                    let (current_generation, current_tail, cutoff, snapshot_len): (i64, i64, i64, i64) = sqlx::query_as(&format!(
+                    let (current_generation, current_tail, cutoff, snapshot_len): (i64, i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                         "SELECT writer_generation, tail_seq, snapshot_cutoff_seq, octet_length(state)::bigint FROM fvoci.{states} WHERE workspace_id=$1 AND {id_column}=$2 FOR UPDATE"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .fetch_one(&mut *tx)
                     .await
                     .unwrap();
                     assert_eq!((current_generation, current_tail), (generation, tail_seq), "writer fence");
-                    let (tail_rows, tail_bytes): (i64, i64) = sqlx::query_as(&format!(
+                    let (tail_rows, tail_bytes): (i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                         "SELECT count(*)::bigint, coalesce(sum(octet_length(payload)),0)::bigint FROM fvoci.{updates} WHERE workspace_id=$1 AND {id_column}=$2 AND seq > $3"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .bind(cutoff)
@@ -2680,9 +2680,9 @@ async fn drive_native_rows(
                     .unwrap();
                     assert!(tail_rows + count < MAX_COLLAB_TAIL_UPDATES, "tail + batch < cap");
                     assert!(snapshot_len + tail_bytes + batch_bytes <= MAX_COLLAB_LOAD_BYTES, "load bytes bound");
-                    let moved: i64 = sqlx::query_scalar(&format!(
+                    let moved: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                         "UPDATE fvoci.{states} SET tail_seq = tail_seq + $4, updated_at = now() WHERE workspace_id=$1 AND {id_column}=$2 AND writer_generation=$3 RETURNING tail_seq"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .bind(generation)
@@ -2691,9 +2691,9 @@ async fn drive_native_rows(
                     .await
                     .unwrap();
                     assert_eq!(moved, tail_seq + count);
-                    sqlx::query(&format!(
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
                         "INSERT INTO fvoci.{updates}(workspace_id,{id_column},seq,op_id,payload) SELECT $1,$2,s,o,p FROM unnest($3::bigint[],$4::uuid[],$5::bytea[]) AS b(s,o,p)"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .bind(&seqs)
@@ -2702,9 +2702,9 @@ async fn drive_native_rows(
                     .execute(&mut *tx)
                     .await
                     .unwrap();
-                    sqlx::query(&format!(
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
                         "INSERT INTO fvoci.{receipts}(workspace_id,{id_column},op_id,seq,payload_len,payload_sha256,actor_user_id) SELECT $1,$2,o,s,l,h,$7 FROM unnest($3::uuid[],$4::bigint[],$5::bigint[],$6::bytea[]) AS b(o,s,l,h)"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .bind(&ops)
@@ -2728,9 +2728,9 @@ async fn drive_native_rows(
                     let mut check = pool.begin().await.unwrap();
                     fvoci_server::db::context::set_tenant(&mut check, source).await.unwrap();
                     type Stored = (i64, Uuid, Vec<u8>, i64, Vec<u8>, Uuid);
-                    let stored: Vec<Stored> = sqlx::query_as(&format!(
+                    let stored: Vec<Stored> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                         "SELECT u.seq, u.op_id, u.payload, r.payload_len, r.payload_sha256, r.actor_user_id FROM fvoci.{updates} u JOIN fvoci.{receipts} r ON r.workspace_id=u.workspace_id AND r.{id_column}=u.{id_column} AND r.seq=u.seq AND r.op_id=u.op_id WHERE u.workspace_id=$1 AND u.{id_column}=$2 AND u.seq > $3 AND u.seq <= $4 ORDER BY u.seq"
-                    ))
+                    )))
                     .bind(source)
                     .bind(target)
                     .bind(tail_seq)
@@ -3320,12 +3320,13 @@ mod sqlite_family {
                 "task_timer_runs" => run,
                 _ => segment,
             };
-            let ws: Vec<u8> =
-                sqlx::query_scalar(&format!("SELECT workspace_id FROM {table} WHERE id=?1"))
-                    .bind(id.as_bytes().as_slice())
-                    .fetch_one(&fresh)
-                    .await
-                    .unwrap();
+            let ws: Vec<u8> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT workspace_id FROM {table} WHERE id=?1"
+            )))
+            .bind(id.as_bytes().as_slice())
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
             assert_eq!(ws, team.as_bytes(), "{table}");
         }
         assert_eq!(

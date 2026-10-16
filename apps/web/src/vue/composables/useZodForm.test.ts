@@ -16,7 +16,7 @@ function mount<T>(use: () => T): { result: T; stop: () => void } {
 }
 
 const emailSchema = z.object({
-  newEmail: z.string().trim().email("i18n:form.email"),
+  newEmail: z.string().trim().check(z.email("i18n:form.email")),
 });
 
 await test("nothing is checked until the first submit", async () => {

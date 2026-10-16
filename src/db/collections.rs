@@ -252,7 +252,7 @@ async fn find_collection(
         "SELECT {COLLECTION_COLUMNS} FROM fvoci.collections WHERE workspace_id = $1 AND id = $2{}",
         if lock { " FOR UPDATE" } else { "" }
     );
-    let row: Option<CollectionTuple> = sqlx::query_as(&sql)
+    let row: Option<CollectionTuple> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(workspace_id)
         .bind(collection_id)
         .fetch_optional(&mut **tx)
@@ -376,10 +376,10 @@ pub async fn list_collections(
     let mut tx = pool.begin().await?;
     let role = check!(tx, begin_member(&mut tx, workspace_id, actor, false).await?);
     let acl = load_search_acl(&mut tx, workspace_id, actor.user_id, role, None).await?;
-    let rows: Vec<CollectionTuple> = sqlx::query_as(&format!(
+    let rows: Vec<CollectionTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLLECTION_COLUMNS} FROM fvoci.collections \
          WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY name, id"
-    ))
+    )))
     .bind(workspace_id)
     .fetch_all(&mut *tx)
     .await?;
@@ -451,10 +451,10 @@ pub async fn create_collection(
     if access.archived {
         bail!(tx, CollectionDbError::ProjectArchived);
     }
-    let row: CollectionTuple = sqlx::query_as(&format!(
+    let row: CollectionTuple = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO fvoci.collections (id, workspace_id, project_id, kind, name) \
          VALUES ($1, $2, $3, $4, $5) RETURNING {COLLECTION_COLUMNS}"
-    ))
+    )))
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(input.project_id)
@@ -1300,9 +1300,9 @@ async fn write_value(
         "collection_choices",
         "collection_people",
     ] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM fvoci.{table} WHERE workspace_id = $1 AND item_id = $2 AND field_id = $3"
-        ))
+        )))
         .bind(workspace_id)
         .bind(item.id)
         .bind(field.id)
@@ -1474,11 +1474,11 @@ async fn visible_views(
     collection_id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<CollectionViewRow>, sqlx::Error> {
-    let rows: Vec<ViewTuple> = sqlx::query_as(&format!(
+    let rows: Vec<ViewTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {VIEW_COLUMNS} FROM fvoci.collection_views \
          WHERE workspace_id = $1 AND collection_id = $2 AND (owner_id = $3 OR visibility = 'shared') \
          ORDER BY name, id"
-    ))
+    )))
     .bind(workspace_id)
     .bind(collection_id)
     .bind(user_id)
@@ -1611,11 +1611,11 @@ pub async fn save_view(
     let config = input.config.to_json();
     let row: Option<ViewTuple> = match view_id {
         None => Some(
-            sqlx::query_as(&format!(
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO fvoci.collection_views \
                  (id, workspace_id, collection_id, owner_id, visibility, name, type, config) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {VIEW_COLUMNS}"
-            ))
+            )))
             .bind(Uuid::now_v7())
             .bind(workspace_id)
             .bind(collection_id)
@@ -1647,11 +1647,11 @@ pub async fn save_view(
             let Some(expected) = input.expected_version else {
                 bail!(tx, CollectionDbError::InvalidInput);
             };
-            sqlx::query_as(&format!(
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE fvoci.collection_views \
                  SET name = $4, type = $5, visibility = $6, config = $7, version = version + 1, updated_at = now() \
                  WHERE workspace_id = $1 AND id = $2 AND version = $3 RETURNING {VIEW_COLUMNS}"
-            ))
+            )))
             .bind(workspace_id)
             .bind(view_id)
             .bind(expected)
@@ -1870,10 +1870,10 @@ pub async fn project_collection(
     if !access.permission.at_least(ProjectPermission::View) {
         bail!(tx, CollectionDbError::NotFound);
     }
-    let row: Option<CollectionTuple> = sqlx::query_as(&format!(
+    let row: Option<CollectionTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLLECTION_COLUMNS} FROM fvoci.collections \
          WHERE workspace_id = $1 AND project_id = $2 AND kind = 'task'"
-    ))
+    )))
     .bind(workspace_id)
     .bind(project_id)
     .fetch_optional(&mut *tx)
@@ -2087,10 +2087,10 @@ pub(crate) async fn copy_task_collection(
         };
         insert_field(tx, workspace_id, dest_id, &copy).await?;
     }
-    let views: Vec<ViewTuple> = sqlx::query_as(&format!(
+    let views: Vec<ViewTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {VIEW_COLUMNS} FROM fvoci.collection_views \
          WHERE workspace_id = $1 AND collection_id = $2 AND visibility = 'shared' ORDER BY name, id"
-    ))
+    )))
     .bind(workspace_id)
     .bind(source_id)
     .fetch_all(&mut **tx)

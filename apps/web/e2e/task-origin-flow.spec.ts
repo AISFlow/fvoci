@@ -5,8 +5,8 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const documentTreeSchema = z
   .object({
     items: z.array(
@@ -17,13 +17,13 @@ const documentTreeSchema = z
           parentId: z.string().nullable(),
           projectId: z.string().nullable(),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 const originListSchema = z
-  .object({ items: z.array(z.object({ taskId: z.string() }).passthrough()), count: z.number() })
-  .passthrough();
+  .object({ items: z.array(z.object({ taskId: z.string() }).loose()), count: z.number() })
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 

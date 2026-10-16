@@ -325,6 +325,15 @@ fn masked(block: &str) -> bool {
 }
 
 const IDENTITY: &str = "${{ steps.sqlite.outputs.cache_identity }}";
+/// The former run-scoped cache key's arch/toolchain/SHA/attempt/SQLite parts.
+const NATIVE_IDENTITY: &str = "${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}";
+/// Finished native cohorts consumed from postgres-build, without output caches.
+const RUST_HANDOFFS: [(&str, &str); 2] = [("postgres", "postgres"), ("collaboration", "helper")];
+/// (consumer, producer) of the web preparation target artifacts.
+const NATIVE_HANDOFFS: [(&str, &str); 2] = [
+    ("collaboration-test-build", "collaboration-main-build"),
+    ("collaboration-build", "collaboration-test-build"),
+];
 const COLLAB_LANES: [&str; 5] = [
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -384,14 +393,25 @@ fn contract(root: &Path) -> Check {
             let body = job(&text, name).ok_or_else(|| format!("missing job {name}"))?;
             let what = format!("{workflow}/{name}");
             let what = what.as_str();
-            if workflow == "rust" && *name == "postgres" {
+            if let Some((_, cohort)) = RUST_HANDOFFS
+                .iter()
+                .find(|(consumer, _)| workflow == "rust" && consumer == name)
+            {
                 excludes(body, "path: target", what)?;
+                contains(body, "needs: [ci-plan, postgres-build]", what)?;
                 contains(body, "Restore prepared SQLite prefix", what)?;
-                less(
-                    find(body, "Verify cached SQLite prefix")?,
-                    find(body, "Download required postgres")?,
+                contains(
+                    body,
+                    &format!("name: rust-{cohort}-${{{{ runner.arch }}}}-${{{{ github.sha }}}}-${{{{ github.run_attempt }}}}\n"),
                     what,
                 )?;
+                let download = find(body, &format!("Download required {cohort}"))?;
+                let unpack = find(
+                    body,
+                    &format!("rust-binaries unpack --cohort {cohort} --directory \"$RUNNER_TEMP/rust-binaries\" --sqlite-identity \"{IDENTITY}\""),
+                )?;
+                less(find(body, "Verify cached SQLite prefix")?, download, what)?;
+                less(download, unpack, what)?;
             } else if workflow == "web" && *name == "workspace-browser-shard" {
                 excludes(body, "path: target", what)?;
                 contains(body, "needs: [ci-plan, workspace-browser-build]", what)?;
@@ -442,6 +462,42 @@ fn contract(root: &Path) -> Check {
                 less(
                     find(body, "Download this run")?,
                     find(body, "id: browser")?,
+                    what,
+                )?;
+            } else if let Some((_, producer)) = NATIVE_HANDOFFS
+                .iter()
+                .find(|(consumer, _)| workflow == "web" && consumer == name)
+            {
+                // The phase target arrives as this run's exact producer
+                // artifact, admitted only for this job's own SQLite identity.
+                excludes(body, "path: target", what)?;
+                contains(
+                    body,
+                    &format!("artifact-ids: ${{{{ needs.{producer}.outputs.artifact_id }}}}\n"),
+                    what,
+                )?;
+                contains(
+                    body,
+                    &format!(
+                        "PRODUCER_IDENTITY: ${{{{ needs.{producer}.outputs.native_identity }}}}\n"
+                    ),
+                    what,
+                )?;
+                contains(
+                    body,
+                    &format!("CURRENT_IDENTITY: {NATIVE_IDENTITY}\n"),
+                    what,
+                )?;
+                let require = find(
+                    body,
+                    "      - name: Require exact current native preparation",
+                )?;
+                let download = find(body, "      - name: Download this run")?;
+                less(find(body, "id: sqlite")?, require, what)?;
+                less(require, download, what)?;
+                less(
+                    download,
+                    find(body, "      - name: Restore current native preparation")?,
                     what,
                 )?;
             } else {
@@ -496,42 +552,47 @@ fn contract(root: &Path) -> Check {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
             }
+            let phase = match (workflow, *name) {
+                ("web", "collaboration-main-build") => Some("main"),
+                ("web", "collaboration-test-build") => Some("tests"),
+                _ => None,
+            };
+            if let Some(phase) = phase {
+                // New run-scoped, unqualified preparation output; it advances
+                // the phase as an artifact bound to this job's SQLite identity.
+                contains(
+                    body,
+                    &format!("      native_identity: {NATIVE_IDENTITY}\n"),
+                    what,
+                )?;
+                let step_named = |line: &str| {
+                    steps
+                        .iter()
+                        .copied()
+                        .find(|b| has_line(text_of(*b), line))
+                        .ok_or_else(|| format!("{what}: missing {line:?}"))
+                };
+                let compile = step_named("      - name: Compile native preparation")?;
+                let save = step_named("      - name: Save current native preparation")?;
+                for block in [compile, save] {
+                    ensure(!masked(text_of(block)), || {
+                        format!("{what}: current preparation must be unmasked")
+                    })?;
+                }
+                less_equal(ready.1, compile.0, what)?;
+                less_equal(compile.1, save.0, what)?;
+                contains(text_of(save), "uses: actions/upload-artifact@", what)?;
+                contains(
+                    text_of(save),
+                    &format!("name: web-native-{phase}-${{{{ github.run_attempt }}}}\n"),
+                    what,
+                )?;
+            }
             for block in &steps {
                 let step = text_of(*block);
                 if step.lines().any(is_target_path_line) {
                     less_equal(ready.1, block.0, what)?;
                     if step.contains("actions/cache/save@") {
-                        let phase = match (workflow, *name) {
-                            ("web", "collaboration-main-build") => Some("main"),
-                            ("web", "collaboration-test-build") => Some("tests"),
-                            _ => None,
-                        };
-                        if let Some(phase) = phase.filter(|_| {
-                            has_line(step, "      - name: Save current native preparation")
-                        }) {
-                            // New run-scoped, unqualified preparation output;
-                            // it advances the phase instead of replacing a seed.
-                            contains(step, &format!("key: v2-web-selected-{phase}-ubuntu-26.04-${{{{ runner.arch }}}}-1.98.1-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}-${{{{ github.sha }}}}-{IDENTITY}"), what)?;
-                            ensure(!masked(step), || {
-                                format!("{what}: current preparation save must be unmasked")
-                            })?;
-                            let compile = *steps
-                                .iter()
-                                .find(|b| {
-                                    has_line(
-                                        text_of(**b),
-                                        "      - name: Compile native preparation",
-                                    )
-                                })
-                                .ok_or("missing native preparation compilation")?;
-                            ensure(!masked(text_of(compile)), || {
-                                format!("{what}: current preparation compile must be unmasked")
-                            })?;
-                            less_equal(compile.1, block.0, what)?;
-                            contains(step, "          path: target\n", what)?;
-                            excludes(step, "restore-keys:", what)?;
-                            continue;
-                        }
                         let primary = step.split("key: ${{ steps.").nth(1).and_then(|rest| {
                             rest.split_once(".outputs.cache-primary-key }}")
                                 .map(|(id, _)| id)
@@ -844,17 +905,60 @@ fn new_producer_mutations_fail_same_wiring_contract() {
 fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
+    let rust_path = root.join(".github/workflows/rust.yml");
+    let rust = fs::read_to_string(&rust_path).unwrap();
+    for (name, cohort) in RUST_HANDOFFS {
+        let span = job_span(&rust, name);
+        let body = &rust[span.0..span.1];
+        let steps = blocks(body);
+        let text_of = |(s, e): (usize, usize)| &body[s..e];
+        let verify = *steps
+            .iter()
+            .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
+            .unwrap();
+        let download = *steps
+            .iter()
+            .find(|b| text_of(**b).contains(&format!("name: Download required {cohort}")))
+            .unwrap();
+        let changes = vec![
+            ("missing consumer preparation".into(), replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"), None),
+            ("missing consumer verification".into(), format!("{}{}", &body[..verify.0], &body[verify.1..]), None),
+            ("artifact before usable preparation".into(), format!("{}{}{}{}", &body[..verify.0], text_of(download), &body[verify.0..download.0], &body[download.1..]), None),
+            ("foreign cohort artifact".into(), replace_once(body, &format!("name: rust-{cohort}-"), "name: rust-foreign-"), None),
+            ("artifact omits current attempt".into(), replace_once(body, text_of(download), &text_of(download).replace("github.run_attempt", "foreign_attempt")), None),
+            ("unpack omits SQLite binding".into(), replace_once(body, &format!("--sqlite-identity \"{IDENTITY}\""), "--sqlite-identity foreign"), None),
+            ("consumer borrows root output cache".into(), format!("{body}      - uses: actions/cache@fixture\n        with:\n          path: target/db-tests\n          key: unqualified\n"), None),
+        ];
+        assert_mutations_fail(&rust_path, &root, &rust, span, changes);
+    }
     let path = root.join(".github/workflows/web.yml");
     let original = fs::read_to_string(&path).unwrap();
     contract(&root).unwrap();
     for (name, old, new) in [
         ("collaboration-main-build", "id: sqlite", "id: missing-sqlite"),
         ("collaboration-test-build", "id: sqlite", "id: missing-sqlite"),
-        ("collaboration-main-build", "v2-web-selected-main-", "v2-web-selected-foreign-"),
-        ("collaboration-test-build", "v2-web-selected-tests-", "v2-web-selected-foreign-"),
+        ("collaboration-main-build", "name: web-native-main-", "name: web-native-foreign-"),
+        ("collaboration-test-build", "name: web-native-tests-", "name: web-native-foreign-"),
+        ("collaboration-main-build", "      native_identity: ${{ runner.arch }}", "      native_identity: ${{ runner.os }}"),
         ("collaboration-main-build", "name: Save current native preparation\n", "name: Save current native preparation\n        if: false\n"),
         ("collaboration-test-build", "name: Compile native preparation\n", "name: Compile native preparation\n        continue-on-error: true\n"),
+        ("collaboration-test-build", "CURRENT_IDENTITY: ${{ runner.arch }}", "CURRENT_IDENTITY: ${{ runner.os }}"),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
+        (
+            "collaboration-build",
+            "artifact-ids: ${{ needs.collaboration-test-build.outputs.artifact_id }}",
+            "artifact-ids: foreign",
+        ),
+        (
+            "collaboration-build",
+            "PRODUCER_IDENTITY: ${{ needs.collaboration-test-build.outputs.native_identity }}",
+            "PRODUCER_IDENTITY: ${{ needs.collaboration-main-build.outputs.native_identity }}",
+        ),
+        (
+            "collaboration-build",
+            "      - name: Download this run",
+            "      - uses: actions/cache/restore@fixture\n        with:\n          path: target\n          key: fixture\n      - name: Download this run",
+        ),
         ("collaboration-install-on", "id: sqlite", "id: missing-sqlite"),
         (
             "collaboration-install-on",
@@ -881,8 +985,7 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     }
 }
 
-/// The requested rust.yml wiring (xtask checks where test-wiring.py ran,
-/// before SQLite preparation) satisfies the contract: xtask is an
+/// The current xtask checks can precede SQLite preparation: xtask is an
 /// independent workspace, like crates/. A root build in the same place
 /// still fails.
 #[test]
@@ -891,15 +994,34 @@ fn xtask_steps_before_preparation_are_independent_work() {
     let (_temp, root) = contract_copy();
     let path = root.join(".github/workflows/rust.yml");
     let original = fs::read_to_string(&path).unwrap();
-    let old = "        run: python3 scripts/fixtures/sqlite-ci/test-wiring.py\n";
-    let xtask = "        run: cargo fmt --check --manifest-path xtask/Cargo.toml\n      - run: cargo test --locked --manifest-path xtask/Cargo.toml\n";
-    if original.contains(old) {
-        fs::write(&path, original.replacen(old, xtask, 1)).unwrap();
-        contract(&root).unwrap();
-    }
     let span = job_span(&original, "fast");
     let body = &original[span.0..span.1];
-    let first_step = blocks(body)[0];
+    let steps = blocks(body);
+    let first_step = steps[0];
+    let xtask = *steps
+        .iter()
+        .find(|(s, e)| {
+            body[*s..*e]
+                .contains("name: Pinned SQLite build wiring (xtask, no native compilation)\n")
+        })
+        .unwrap();
+    let independent = format!(
+        "{}{}{}{}",
+        &body[..first_step.0],
+        &body[xtask.0..xtask.1],
+        &body[first_step.0..xtask.0],
+        &body[xtask.1..]
+    );
+    fs::write(
+        &path,
+        format!(
+            "{}{independent}{}",
+            &original[..span.0],
+            &original[span.1..]
+        ),
+    )
+    .unwrap();
+    contract(&root).unwrap();
     let changed = format!(
         "{}      - run: cargo test --locked --manifest-path ./Cargo.toml\n{}",
         &body[..first_step.0],

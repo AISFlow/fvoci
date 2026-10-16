@@ -30,7 +30,7 @@ export const TURSO_COMMANDS = {
 } as const;
 
 const CHECKOUT = {
-  uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+  uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   with: { ref: "${{ github.sha }}", "persist-credentials": false },
 };
 // Every job runs a Bun tool, so each one sets up the same pinned Bun.
@@ -52,7 +52,7 @@ const SQLITE_PREPARATION =
 const CONNECTION_PREPARATION =
   "set -euo pipefail\n" +
   TARGET_INIT +
-  "rustup toolchain install 1.98.1 --profile minimal\n" +
+  "rustup toolchain install 1.99.0 --profile minimal\n" +
   SQLITE_PREPARATION;
 
 const CONNECTION_COMPILE =
@@ -64,7 +64,7 @@ const CONNECTION_COMPILE =
 const DISPATCH_INPUTS = {
   phase: {
     description:
-      "Connection, inventory and ui-baseline read-only; migration, reset and ui-ack require both destructive gates; others NOT IMPLEMENTED",
+      "Connection, inventory and ui-baseline read-only; migration, reset, ui-ack, main-only restore, main-only ui-auth and main-only ui-final require both destructive gates; others NOT IMPLEMENTED",
     type: "choice",
     default: "connection",
     options: [
@@ -78,6 +78,8 @@ const DISPATCH_INPUTS = {
       "restore",
       "ui-ack",
       "ui-baseline",
+      "ui-auth",
+      "ui-final",
     ],
   },
   destructive: {
@@ -87,17 +89,20 @@ const DISPATCH_INPUTS = {
     default: false,
   },
   ui_source_sha: {
-    description: "ROOT reviewed exact UI source SHA (ui-baseline and ui-ack only)",
+    description:
+      "ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore, ui-auth and ui-final only)",
     type: "string",
     default: "",
   },
   ui_baseline_sha256: {
-    description: "ROOT verified just-observed current dataset digest (ui-ack only)",
+    description:
+      "ROOT verified just-observed current dataset digest (ui-ack, restore, ui-auth and ui-final only)",
     type: "string",
     default: "",
   },
   ui_target_sha256: {
-    description: "ROOT verified just-observed primary target digest (ui-ack only)",
+    description:
+      "ROOT verified just-observed primary target digest (ui-ack, restore, ui-auth and ui-final only)",
     type: "string",
     default: "",
   },
@@ -111,14 +116,15 @@ const BOOTSTRAP_ADMISSION =
 const RUNTIME_IF =
   TRUSTED.replace(
     "github.event_name == 'workflow_dispatch'",
-    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack'",
+    "github.event_name == 'workflow_dispatch' && github.event.inputs.phase != 'ui-baseline' && github.event.inputs.phase != 'ui-ack' && github.event.inputs.phase != 'restore' && github.event.inputs.phase != 'ui-auth' && github.event.inputs.phase != 'ui-final'",
   ) + " && needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''";
 
 const UI_JOB = {
   needs: "admission",
   if:
     "github.event_name == 'workflow_dispatch' && (github.event.inputs.phase == 'ui-baseline' || " +
-    `github.event.inputs.phase == 'ui-ack') && github.repository == '${REPOSITORY}' && (github.ref == ` +
+    "github.event.inputs.phase == 'ui-ack' || (github.event.inputs.phase == 'restore' && github.ref == 'refs/heads/main') || " +
+    `(github.event.inputs.phase == 'ui-auth' && github.ref == 'refs/heads/main') || (github.event.inputs.phase == 'ui-final' && github.ref == 'refs/heads/main')) && github.repository == '${REPOSITORY}' && (github.ref == ` +
     `'refs/heads/main' || github.ref == '${REVIEWED_REF}' || github.ref == '${UI_REVIEWED_REF}') && ` +
     "needs.admission.result == 'success' && needs.admission.outputs.environment_id != ''",
   environment: "fvoci-turso-test",
@@ -126,6 +132,7 @@ const UI_JOB = {
   "timeout-minutes": 40,
   env: {
     FVOCI_BUILD_SHA: "${{ github.sha }}",
+    FVOCI_TURSO_UI_FINAL: "${{ github.event.inputs.phase == 'ui-final' && '1' || '0' }}",
     LIBCLANG_PATH: "/usr/lib/llvm-18/lib",
     CARGO_BUILD_JOBS: 2,
     CARGO_INCREMENTAL: 0,
@@ -143,7 +150,7 @@ const UI_JOB = {
         `  printf 'BUN_INSTALL_CACHE_DIR=%s/turso-bun-cache\\n' "$RUNNER_TEMP"\n` +
         `  printf 'PLAYWRIGHT_BROWSERS_PATH=%s/turso-browsers\\n' "$RUNNER_TEMP"\n` +
         '} >> "$GITHUB_ENV"\n' +
-        "rustup toolchain install 1.98.1 --profile minimal\n" +
+        "rustup toolchain install 1.99.0 --profile minimal\n" +
         SQLITE_PREPARATION +
         "cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml\n",
     },
@@ -153,7 +160,11 @@ const UI_JOB = {
       run:
         "set -euo pipefail\n" +
         "bun install --frozen-lockfile\n" +
-        "bun --bun x playwright install --with-deps chromium\n" +
+        'if [ "$FVOCI_TURSO_UI_FINAL" = 1 ]; then\n' +
+        "  bun --bun x playwright install --with-deps chromium firefox webkit\n" +
+        "else\n" +
+        "  bun --bun x playwright install --with-deps chromium\n" +
+        "fi\n" +
         `${TURSO_COMMANDS.uiRecordBefore}\n` +
         "bun --bun run --cwd apps/web build\n",
     },
@@ -170,7 +181,7 @@ const UI_JOB = {
         `${TURSO_COMMANDS.uiFreeze}\n`,
     },
     {
-      name: "Actual current primary UI baseline or guarded ON restart OFF consumer",
+      name: "Actual current primary UI baseline, guarded ON restart OFF, six-case restore or dedicated auth consumer",
       env: {
         FVOCI_DATABASE_BACKEND: "libsql-remote",
         FVOCI_LIBSQL_URL: "${{ secrets.FVOCI_TEST_TURSO_DATABASE_URL }}",
@@ -343,7 +354,7 @@ export function verifyTursoWorkflowText(text: string, name = TURSO_MANUAL_WORKFL
     !text.slice(0, secret).includes("secrets."), "no secret before the secret step");
 
   for (const literal of [
-    "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline]",
+    "options: [connection, crud, transactions, migration, inventory, reset, persistence, restore, ui-ack, ui-baseline, ui-auth, ui-final]",
     "        default: connection\n",
     "        type: boolean\n        default: false\n",
     "  group: fvoci-turso-test-database\n  cancel-in-progress: false\n",

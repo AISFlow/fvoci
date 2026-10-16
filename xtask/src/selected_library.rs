@@ -28,7 +28,8 @@ use std::process::{Command, Stdio};
 
 pub const FILTERS_FILE: &str = "xtask/selected-library-filters.txt";
 
-const USAGE: &str = "usage: xtask selected-library [-h] [--target-dir TARGET_DIR]";
+const USAGE: &str =
+    "usage: xtask selected-library [-h] [--target-dir TARGET_DIR] [--cohort no-input]";
 const HELP: &str = "\
 Build the root library tests once and run each selected SQLite library
 control as one exact libtest filter
@@ -36,6 +37,7 @@ control as one exact libtest filter
 options:
   -h, --help                show this help message and exit
   --target-dir TARGET_DIR   Cargo target directory for the library build
+  --cohort no-input         Additional input-free exact controls (same build)
 ";
 
 /// The registered filters: LF-terminated lines, each a nonempty, unique
@@ -232,6 +234,16 @@ fn package_env(command: &mut Command, package: &Path) {
 /// Run one exact filter with stdout and stderr on one pipe, copying the output
 /// through as it arrives; returns the status and the captured bytes.
 pub fn run_filter(executable: &Path, cwd: &Path, filter: &str) -> Result<(i32, Vec<u8>), String> {
+    run_filter_mode(executable, cwd, filter, false, false)
+}
+
+fn run_filter_mode(
+    executable: &Path,
+    cwd: &Path,
+    filter: &str,
+    ignored: bool,
+    migration: bool,
+) -> Result<(i32, Vec<u8>), String> {
     let spawn_error = |e: io::Error| format!("{}: {e}", executable.display());
     let (mut reader, writer) = io::pipe().map_err(spawn_error)?;
     let mut command = Command::new(executable);
@@ -242,6 +254,28 @@ pub fn run_filter(executable: &Path, cwd: &Path, filter: &str) -> Result<(i32, V
         .stdout(writer.try_clone().map_err(spawn_error)?)
         .stderr(writer);
     package_env(&mut command, cwd);
+    // Preparation authority belongs to the fixture parent, never its app test.
+    command
+        .env_remove("PREPARATION_DATABASE_URL")
+        .env_remove("PG_CONTAINER");
+    if ignored {
+        command.args(["--ignored", "--test-threads=1"]);
+    }
+    for key in [
+        "FVOCI_TEST_TURSO_MIGRATION_SELECTED",
+        "FVOCI_TEST_TURSO_PHASE",
+        "FVOCI_TEST_TURSO_DESTRUCTIVE",
+        "FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE",
+    ] {
+        command.env_remove(key);
+    }
+    if migration {
+        command
+            .env("FVOCI_TEST_TURSO_MIGRATION_SELECTED", "1")
+            .env("FVOCI_TEST_TURSO_PHASE", "migration")
+            .env("FVOCI_TEST_TURSO_DESTRUCTIVE", "true")
+            .env("FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE", "true");
+    }
     let mut child = command.spawn().map_err(spawn_error)?;
     // The command holds the parent's write ends; EOF needs them closed.
     drop(command);
@@ -271,11 +305,24 @@ pub fn run_filter(executable: &Path, cwd: &Path, filter: &str) -> Result<(i32, V
 
 /// Run every filter in order and stop at the first one that is not an exact pass.
 pub fn run_filters(executable: &Path, cwd: &Path, filters: &[&str]) -> Result<(), String> {
+    run_filters_with_mode(executable, cwd, filters, false, false)
+}
+
+pub(crate) fn run_filters_with_mode(
+    executable: &Path,
+    cwd: &Path,
+    filters: &[&str],
+    ignored: bool,
+    migration: bool,
+) -> Result<(), String> {
     if filters.is_empty() {
         return Err("selected library filters are empty".into());
     }
+    if filters.iter().collect::<BTreeSet<_>>().len() != filters.len() {
+        return Err("selected library filters are repeated".into());
+    }
     for filter in filters {
-        let (code, output) = run_filter(executable, cwd, filter)?;
+        let (code, output) = run_filter_mode(executable, cwd, filter, ignored, migration)?;
         let error = match std::str::from_utf8(&output) {
             Ok(text) => result_error(filter, code, text),
             Err(_) => Some("rust: selected library output is not UTF-8"),
@@ -287,7 +334,19 @@ pub fn run_filters(executable: &Path, cwd: &Path, filters: &[&str]) -> Result<()
     Ok(())
 }
 
-fn execute(target_dir: Option<&str>) -> Result<(), String> {
+fn execute(target_dir: Option<&str>, cohort: Option<&str>) -> Result<(), String> {
+    if let Some(cohort) = cohort {
+        if cohort != "no-input" {
+            return Err("selected-library only accepts the no-input additional cohort".into());
+        }
+        let list = crate::native_library::cohort_filters(cohort)?;
+        let (executable, package) = library_executable(&build(target_dir)?)?;
+        return run_filters(
+            &executable,
+            &package,
+            &list.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+    }
     let text = fs::read(FILTERS_FILE).map_err(|e| format!("{FILTERS_FILE}: {e}"))?;
     let text = String::from_utf8(text).map_err(|_| format!("{FILTERS_FILE} is not UTF-8"))?;
     let list = filters(&text)?;
@@ -302,7 +361,11 @@ fn usage(message: &str) -> i32 {
 
 /// Process entry: real environment, stdout and stderr.
 pub fn main(argv: Vec<OsString>) -> i32 {
-    let parsed = match args::parse(argv, &[args::value("target-dir")], false) {
+    let parsed = match args::parse(
+        argv,
+        &[args::value("target-dir"), args::value("cohort")],
+        false,
+    ) {
         Outcome::Parsed(parsed) => parsed,
         Outcome::Help => {
             print!("{USAGE}\n\n{HELP}");
@@ -310,7 +373,7 @@ pub fn main(argv: Vec<OsString>) -> i32 {
         }
         Outcome::Usage(message) => return usage(&message),
     };
-    match execute(parsed.get("target-dir")) {
+    match execute(parsed.get("target-dir"), parsed.get("cohort")) {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("{message}");

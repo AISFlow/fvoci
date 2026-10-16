@@ -303,10 +303,10 @@ pub async fn list_views(
         tx.rollback().await?;
         return Ok(Err(err));
     }
-    let rows: Vec<ViewTuple> = sqlx::query_as(&format!(
+    let rows: Vec<ViewTuple> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {VIEW_COLUMNS} FROM fvoci.views \
          WHERE workspace_id = $1 AND project_id = $2 AND user_id = $3 ORDER BY name, id"
-    ))
+    )))
     .bind(workspace_id)
     .bind(project_id)
     .bind(actor.user_id)
@@ -380,10 +380,10 @@ pub async fn create_view(
         tx.rollback().await?;
         return Ok(Err(ViewDbError::InvalidInput));
     }
-    let row: ViewTuple = sqlx::query_as(&format!(
+    let row: ViewTuple = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO fvoci.views (id, workspace_id, project_id, user_id, name, type, config) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {VIEW_COLUMNS}"
-    ))
+    )))
     .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(project_id)

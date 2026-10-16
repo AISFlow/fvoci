@@ -88,11 +88,22 @@ const leaseModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/drivers/common.ts",
+  "tools/selected-backend-ci/drivers/equal-work.ts",
+  "tools/selected-backend-ci/drivers/equal-work-policy.ts",
   "tools/selected-backend-ci/drivers/binding.ts",
   "tools/selected-backend-ci/drivers/restart.ts",
   "tools/selected-backend-ci/drivers/install.ts",
   "tools/selected-backend-ci/drivers/postgres.ts",
   "tools/selected-backend-ci/drivers/sqlite.ts",
+  "tools/turso/ui-auth-session.ts",
+  "tools/turso/ui-audit.ts",
+  "tools/turso/ui-common.ts",
+  "tools/turso/ui-processes.ts",
+  "tools/turso/ui-selected-native-policy.ts",
+  "apps/web/e2e-pending/collab-wire.ts",
+  "tools/web-e2e/compat.ts",
+  "tools/web-e2e/smtp-sink.ts",
+  "apps/web/e2e-pending/auth-session-contract.ts",
 ];
 const temporary: string[] = [];
 function directory(): string {
@@ -972,6 +983,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     "foreign-source",
     "foreign-tree",
     "bad-registration",
+    "bad-purpose",
     "extra-mode",
     "same-terminal",
     "bad-task",
@@ -1022,6 +1034,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
       if (mutation === "bad-owner") grant.owner = "foreign";
+      if (mutation === "bad-purpose") Reflect.set(grant, "purpose", "skip-normal-server");
       if (mutation === "root-uid") grant.uid = 0;
       if (mutation === "foreign-uid") grant.uid = uid() + 1;
       if (mutation === "foreign-gid") grant.gid = gid() + 1;

@@ -136,6 +136,43 @@ export interface LocalGrant {
   outputRoot: string;
   registrationHashes: Record<string, string>;
   stageCommands: Record<string, string[]>;
+  purpose?: "equal-work" | "auth-session" | "turso-ui" | "keycloak";
+}
+
+/** Controller-issued local consumer allocation; never an endpoint credential. */
+export interface LocalConsumerGrant extends LocalGrant {
+  [key: string]: unknown;
+  purpose: "turso-ui" | "keycloak";
+  heavy: Reference;
+  inputSha256: string;
+  build?: { manifest: Reference; physical: Reference };
+  localLibsql?: {
+    binary: Reference;
+    directory: string;
+    label: string;
+    host: "127.0.0.1";
+    port: 0;
+    tls: "generated-private-san-ip-loopback";
+    childOnlyTrust: true;
+  };
+  canonicalRuntime?: {
+    imageId: string;
+    networkAuthorized: true;
+    shellProof: Reference;
+  };
+  keycloak?: {
+    backends: ("postgres" | "sqlite" | "libsql-remote")[];
+    sqld?: Reference;
+    heavy: string;
+    chromiumTmp?: string;
+    sso?: Reference;
+    processObserver?: {
+      directory: string;
+      bun: Reference;
+      module: Reference;
+      config: Reference;
+    };
+  };
 }
 export interface AccessReceipt {
   source: string;

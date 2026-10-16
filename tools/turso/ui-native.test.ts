@@ -11,16 +11,19 @@ import {
   unlinkSync,
   writeFileSync,
   existsSync,
+  fstatSync,
+  closeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { sha, write } from "../selected-backend-ci/io.ts";
 import { OFF, ON } from "./ui-audit.ts";
+import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
 import { failureCode, UiError, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
-import { browser, fixture, stop } from "./ui-native.ts";
+import { browser, fixture, start, stop } from "./ui-native.ts";
 import { linuxKernel, UiProcesses, withProcesses } from "./ui-processes.ts";
 import type { Manifest } from "./ui-record.ts";
 
@@ -276,7 +279,7 @@ function browserInputs(): BrowserInputs {
   mkdirSync(join(workspace, "node_modules/playwright"), { recursive: true });
   writeFileSync(cli, "/* pure fixture; never executed */");
   const pkg = join(workspace, "node_modules/playwright/package.json");
-  writeFileSync(pkg, JSON.stringify({ version: "1.63.0", bin: { playwright: "cli.js" } }));
+  writeFileSync(pkg, JSON.stringify({ version: "1.64.0", bin: { playwright: "cli.js" } }));
   const physical = join(workspace, "physical.private.json");
   write(physical, { files: { external: { [cli]: sha(cli), [pkg]: sha(pkg) } } });
   const manifest = {
@@ -481,6 +484,64 @@ describe("browser", () => {
     }
   });
 
+  test("the dedicated auth spec runs only with its own config and keeps the actual flow", async () => {
+    for (const flow of ["on", "off"] as const) {
+      const inputs = browserInputs();
+      const output = new Captured();
+      const { scope, calls } = fakeScope({ spawn: () => exitedChild(1), output });
+      expect(
+        await failureOf(
+          browser(
+            scope,
+            inputs.manifest,
+            inputs.run,
+            { FVOCI_E2E_SELECTED_FLOW: flow },
+            AUTH_SPEC,
+            undefined,
+            inputs.workspace,
+            "auth-session-playwright.config.ts",
+          ),
+        ),
+      ).toBe("UI_ACTUAL_BROWSER_FAILED");
+      const [args] = must(calls.spawn[0]);
+      expect(args.slice(-4)).toEqual([
+        "--config",
+        "e2e-pending/auth-session-playwright.config.ts",
+        "--reporter=line,json",
+        "e2e-pending/" + AUTH_SPEC,
+      ]);
+      const diagnostic = JSON.parse(
+        must(output.stderr.find((line) => line.includes("browserFailure"))),
+      ) as { browserFailure: { stage: string } };
+      expect(diagnostic.browserFailure.stage).toBe(flow);
+    }
+    for (const [spec, config, flow] of [
+      [AUTH_SPEC, "collab-playwright.config.ts", "on"],
+      [ON, "auth-session-playwright.config.ts", "on"],
+      [OFF, "auth-session-playwright.config.ts", "off"],
+      [AUTH_SPEC, "auth-session-playwright.config.ts", "restart"],
+      [AUTH_SPEC, "auth-session-playwright.config.ts", undefined],
+    ] as const) {
+      const inputs = browserInputs();
+      const { scope, calls } = fakeScope({ spawn: () => exitedChild(0) });
+      expect(
+        await failureOf(
+          browser(
+            scope,
+            inputs.manifest,
+            inputs.run,
+            flow === undefined ? {} : { FVOCI_E2E_SELECTED_FLOW: flow },
+            spec,
+            undefined,
+            inputs.workspace,
+            config,
+          ),
+        ),
+      ).toBe("UI_BROWSER_CONFIG_REFUSED");
+      expect(calls.spawn).toHaveLength(0);
+    }
+  });
+
   test("a missing, symlinked, nonregular, drifted or unadmitted CLI is refused before the child", async () => {
     for (const fault of [
       "missing",
@@ -508,7 +569,7 @@ describe("browser", () => {
         writeFileSync(
           inputs.pkg,
           JSON.stringify({
-            version: fault === "package-version" ? "1.62.0" : "1.63.0",
+            version: fault === "package-version" ? "1.62.0" : "1.64.0",
             bin: { playwright: fault === "package-bin" ? "other.js" : "cli.js" },
           }),
         );
@@ -669,3 +730,47 @@ describe.skipIf(process.platform !== "linux")("browser child environment", () =>
     });
   });
 });
+
+test.each(["spawn", "clock"] as const)(
+  "FD ownership covers native startup %s failure",
+  async (fault) => {
+    let fd: number | undefined;
+    const original = new UiError("UI_START_INITIALIZATION_FAULT");
+    const { scope, calls } = fakeScope({
+      spawn: (_args, _label, options) => {
+        fd = options.stdout as number;
+        if (fault === "spawn") throw original;
+        return exitedChild(0);
+      },
+      finish: () => {
+        throw new UiError("UI_CLEANUP_FAULT");
+      },
+    });
+    try {
+      const caught = await start(
+        scope,
+        { binaries: { "fvoci-migrate": { path: "/never-executed" } } } as unknown as Manifest,
+        {},
+        directory,
+        false,
+        () => {
+          throw original;
+        },
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(caught).toBe(original);
+      expect(() => fstatSync(must(fd))).toThrow(expect.objectContaining({ code: "EBADF" }));
+      expect(calls.finish).toHaveLength(fault === "clock" ? 1 : 0);
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* already closed */
+        }
+      }
+    }
+  },
+);

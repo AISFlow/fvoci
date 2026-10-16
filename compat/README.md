@@ -8,8 +8,8 @@ Source inspected locally (read-only) at `393795261322b916e588043cf94feca99917584
 
 | Piece | Version |
 | --- | --- |
-| rustc / cargo | 1.98.1 (`rust-toolchain.toml`) |
-| yrs | 0.23.5 (`skip_gc`, update V1) |
+| rustc / cargo | 1.99.0 (`rust-toolchain.toml`) |
+| yrs | 0.28.0 registry archive, features of `crates/collab-engine` (`small-client`); `skip_gc`, `cleanup_formatting: false`, update V1 |
 | yjs | 13.6.33 |
 | y-protocols | 1.0.7 |
 | @hocuspocus/provider + common | 4.7.0 |
@@ -27,7 +27,7 @@ JS deps are dev-only (`compat/js`). `node_modules/` and `target/` are gitignored
 # Use the checked-in fixtures. Optional synthetic specimens go elsewhere:
 # bun fixtures/gen.ts --output-dir /tmp/fvoci-synthetic-fixtures
 npm --prefix js ci --ignore-scripts
-# Rust 1.98.1 from rust-toolchain.toml; for a non-default toolchain set
+# Rust 1.99.0 from rust-toolchain.toml; for a non-default toolchain set
 # CARGO_HOME, RUSTUP_HOME and PATH as in RUNNING.md.
 export CARGO_TARGET_DIR="$PWD/target"
 cargo build --locked --bins
@@ -39,6 +39,8 @@ node js/hocuspocus-handshake.mjs
 After preparing dependencies, `bash run.sh` builds with `--locked --offline` and bounds each Node probe to 30 seconds. It uses the caller's Rust environment.
 
 ## Results (this worktree)
+
+Timings below are from the original yrs 0.23.5 run. After the move to 0.28.0, `bash run.sh` again exited 0 with all 6 `probe.mjs` cases passing and the same 125-byte persisted snapshot.
 
 | Check | Exit | Wall | What happened |
 | --- | --- | --- | --- |

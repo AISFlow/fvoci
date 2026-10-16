@@ -324,7 +324,7 @@ impl Harness {
         totp::totp_code(secret, totp::totp_step(self.now_ms()))
     }
 
-    pub async fn count(&self, sql: &str, id: Uuid) -> i64 {
+    pub async fn count(&self, sql: &'static str, id: Uuid) -> i64 {
         sqlx::query_scalar(sql)
             .bind(id)
             .fetch_one(&self.admin)
@@ -1193,7 +1193,7 @@ async fn mfa_rows_are_owner_scoped_for_the_app_role() {
     assert!(forced);
     // Challenges and flow state are not readable at all.
     for table in ["fvoci.mfa_challenges", "fvoci.oidc_states"] {
-        let err = sqlx::query(&format!("SELECT count(*) FROM {table}"))
+        let err = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(&h.app_pool)
             .await
             .expect_err("app role must not read");
@@ -4905,7 +4905,7 @@ async fn email_change_invalidates_links_mailed_before_it() {
 // `license_fixture::signed_license()`, signed by a key generated in this
 // process and trusted only by this app state. Release builds trust no license
 // key (src/license-trust.json is empty), so this is not a release-server run.
-// `scripts/keycloak-oidc-e2e.sh --workspace-sso` starts Keycloak with two
+// `bun tools/keycloak/run.ts --backend=postgres --workspace-sso` starts Keycloak with two
 // realms (two issuers, one confidential client each) and names their settings
 // in FVOCI_KC_SSO_E2E_CONFIG.
 
@@ -4937,7 +4937,7 @@ struct KcSso {
 }
 
 fn kc_http() -> reqwest::Client {
-    reqwest::Client::builder()
+    fvoci_server::http_client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -4947,7 +4947,7 @@ fn kc_http() -> reqwest::Client {
 impl KcSso {
     fn from_env() -> Self {
         let path = std::env::var("FVOCI_KC_SSO_E2E_CONFIG")
-            .expect("FVOCI_KC_SSO_E2E_CONFIG: run scripts/keycloak-oidc-e2e.sh --workspace-sso");
+            .expect("FVOCI_KC_SSO_E2E_CONFIG: run bun tools/keycloak/run.ts --backend=postgres --workspace-sso");
         serde_json::from_str(&std::fs::read_to_string(path).expect("config")).expect("config json")
     }
 
@@ -5072,7 +5072,7 @@ fn kc_login_form_action(html: &str) -> Option<String> {
 impl KcBrowser {
     fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
+            http: fvoci_server::http_client::builder()
                 .no_proxy()
                 .cookie_store(true)
                 .redirect(reqwest::redirect::Policy::none())
@@ -5172,7 +5172,7 @@ fn assert_workspace_authorization(url: &str, realm: &KcRealm, workspace: Uuid) {
 }
 
 #[tokio::test]
-#[ignore = "needs a real Keycloak: scripts/keycloak-oidc-e2e.sh --workspace-sso"]
+#[ignore = "needs a real Keycloak: bun tools/keycloak/run.ts --backend=postgres --workspace-sso"]
 async fn keycloak_workspace_sso_with_a_test_entitlement() {
     let kc = KcSso::from_env();
     let [realm_a, realm_b] = &kc.realms[..] else {

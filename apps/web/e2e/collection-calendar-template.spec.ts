@@ -7,20 +7,18 @@ import { readFileSync } from "node:fs";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const projectSchema = z
   .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
-  .passthrough();
+  .loose();
 const workflowSchema = z
   .object({
     id: z.string(),
-    statuses: z.array(
-      z.object({ id: z.string(), name: z.string(), category: z.string() }).passthrough(),
-    ),
+    statuses: z.array(z.object({ id: z.string(), name: z.string(), category: z.string() }).loose()),
   })
-  .passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+  .loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
 const taskDatesSchema = z
   .object({
     id: z.string(),
@@ -28,9 +26,9 @@ const taskDatesSchema = z
     dueDate: z.string().nullable(),
     dueAt: z.string().nullable(),
   })
-  .passthrough();
-const idSchema = z.object({ id: z.string() }).passthrough();
-const versionedSchema = z.object({ id: z.string(), version: z.number() }).passthrough();
+  .loose();
+const idSchema = z.object({ id: z.string() }).loose();
+const versionedSchema = z.object({ id: z.string(), version: z.number() }).loose();
 const collectionQuerySchema = z
   .object({
     items: z.array(
@@ -39,12 +37,12 @@ const collectionQuerySchema = z
           id: z.string(),
           taskId: z.string().nullable(),
           version: z.number(),
-          values: z.record(z.unknown()),
+          values: z.record(z.string(), z.unknown()),
         })
-        .passthrough(),
+        .loose(),
     ),
   })
-  .passthrough();
+  .loose();
 
 test.describe.configure({ mode: "serial" });
 async function fixture(page: Page, key: string) {
@@ -519,8 +517,11 @@ async function offlineCalendarScenario(
       await expect(fieldsError).toBeVisible();
       await expect(fieldsError.getByRole("button", { name: "다시 시도" })).toBeVisible();
       expect(patches).toBe(0);
-      await page.unroute(`**${fieldsPath}`);
-      for (const sibling of siblings) await page.unroute(`**${sibling.path}`);
+      // A sibling handler can still be inside route.fetch() for a later
+      // invalidation round; unroute would continue that request under it and
+      // its fulfill would throw. These are the page's only routes here, so
+      // remove them together after the running handlers finish.
+      await page.unrouteAll({ behavior: "wait" });
       const recovered = page.waitForResponse(
         (response) => response.url().endsWith(fieldsPath) && response.ok(),
       );

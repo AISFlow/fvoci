@@ -1,5 +1,8 @@
 #![cfg(feature = "db-tests")]
 
+#[path = "collab_product/auth_session_family.rs"]
+mod auth_session_family;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -293,10 +296,13 @@ impl TestDb {
             .connect(&server_url)
             .await
             .expect("connect admin");
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&admin_pool)
-            .await
-            .expect("create database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{}\"",
+            db_name
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("create database");
         admin_pool.close().await;
 
         let admin_url = join_db_url(&server_url, &db_name);
@@ -307,10 +313,10 @@ impl TestDb {
             .connect(&admin_url)
             .await
             .expect("connect migration db");
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{}\" LOGIN PASSWORD '{}' NOSUPERUSER NOBYPASSRLS",
             role_name, role_password
-        ))
+        )))
         .execute(&migration_pool)
         .await
         .expect("create role");
@@ -341,18 +347,24 @@ impl TestDb {
             .await
             .ok();
         if let Some(pool) = pool {
-            let _ = sqlx::query(&format!(
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}'",
                 self.db_name
-            ))
+            )))
             .execute(&pool)
             .await;
-            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{}\"", self.db_name))
-                .execute(&pool)
-                .await;
-            let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{}\"", self.role_name))
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS \"{}\"",
+                self.db_name
+            )))
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP ROLE IF EXISTS \"{}\"",
+                self.role_name
+            )))
+            .execute(&pool)
+            .await;
             pool.close().await;
         }
         assert_eq!(
@@ -1184,7 +1196,7 @@ async fn collab_unavailable_without_helper_config() {
     let harness = TestDb::bootstrap().await;
     let server = start_product_test_server(&harness.app_url, false).await;
     let addr = server.addr;
-    let response = reqwest::Client::new()
+    let response = fvoci_server::http_client::client()
         .get(format!("http://{addr}/collab"))
         .header("origin", PUBLIC_ORIGIN)
         .send()
@@ -6434,7 +6446,7 @@ async fn collab_authenticated_peer_fanout_records_observed_delivery() {
     ));
 
     let http_started = std::time::Instant::now();
-    let http = reqwest::Client::new()
+    let http = fvoci_server::http_client::client()
         .get(format!("http://{addr}/collab"))
         .header("origin", PUBLIC_ORIGIN)
         .send()

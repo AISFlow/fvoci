@@ -9,8 +9,8 @@ failure and old-image rollback; ordinary PR and main CI does not run it, only an
 
 ## Toolchain
 
-Install Rust 1.98.1 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
-Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.98.1, and
+Install Rust 1.99.0 (see `rust-toolchain.toml`) or point `CARGO_HOME`, `RUSTUP_HOME`, and `PATH` at your toolchain.
+Development and native CI use Ubuntu 26.04 (x64 and ARM64), Rust 1.99.0, and
 Bun 1.4.3. The Docker Rust/web builders and final runtime use the same pinned
 Ubuntu 26.04 base. Native SQLite builds require `libclang-18-dev=1:18.1.8-20ubuntu8`
 with `LIBCLANG_PATH=/usr/lib/llvm-18/lib`, GCC, binutils, and curl.
@@ -66,7 +66,7 @@ toolchain, and build features.
 | `FVOCI_AI_EMBEDDINGS_BASE_URL`, `FVOCI_AI_EMBEDDINGS_MODEL`, `FVOCI_AI_EMBEDDINGS_DIM` | Semantic search (source contract). With `FVOCI_AI_ENABLED=1` and a base URL, the server calls an OpenAI-compatible `POST {base}/embeddings` (model default `text-embedding-3-small`, `FVOCI_AI_SECRET` as the optional bearer, never logged). The extract job embeds extracted attachment text chunks (stored in `attachment_text.embedding`, copied to Meili `_vectors.attachments`), so vectors need `FVOCI_EXTRACTOR_BIN`; older chunks and failed calls are backfilled with backoff. Workspace search with `mode=hybrid` (the web command palette) RRF-merges Meili lexical hits with the nearest chunks; global search and any embedder failure answer lexically. `FVOCI_AI_EMBEDDINGS_DIM` must be `1536` (startup refuses anything else). A bad base URL refuses startup. |
 | `FVOCI_AI_EMBEDDINGS_ALLOW_PRIVATE` | `1` lets the embeddings URL resolve to a private or loopback address (a local model server) and only then use plain `http`; public hosts must use `https`. Link-local/metadata addresses are always refused, redirects are never followed and each call is pinned to the checked address. Default `0` (FVOCI hardening; the source has no such rule). |
 
-Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. The crate uses SQLx `runtime-tokio-rustls`.
+Remote PostgreSQL with TLS: use `sslmode=require` (or stricter) in both URLs. `require` encrypts but does not authenticate the server: it accepts any certificate, even when `sslrootcert` is set (unlike libpq). `verify-ca` also checks that the certificate chains to `sslrootcert` or a bundled Mozilla root, but not the host name. `verify-full` is the mode that also checks that the certificate names the host in the URL. The crate uses SQLx with rustls and the ring provider (`runtime-tokio`, `tls-rustls-ring-webpki`).
 
 ## Migrate and grant before server
 
@@ -1251,6 +1251,22 @@ selects local storage; a storage doctor probe cannot detect that wrong choice.
 4. Run `--doctor` using the same files, project name and env file (see "Operator
    commands"), then confirm login and an existing document and attachment.
 
+The `meilisearch` service sets `MEILI_UPGRADE_DB=true` in every Compose file,
+the user `compose.yml` of "Release images (0.x)" included. When the new checkout
+or release pins a newer Meilisearch, its first start upgrades the existing
+`searchdata` volume in place; without the setting a newer Meilisearch refuses a
+database written by an older one, so `init` (or the user install's `fvoci`)
+never starts. The upgrade is irreversible: an older Meilisearch cannot open the
+upgraded volume, so going back still means restoring the pre-upgrade backup into
+a new project, whose empty `searchdata` the restore rebuilds. The search index
+is derived from PostgreSQL. If the search upgrade itself fails, stop `server`
+and `meilisearch`, remove this project's `searchdata` volume, repeat step 3
+(`init` recreates the index settings and the scoped key on the empty volume),
+then rebuild the index with the same Compose flags:
+`docker compose ... run --rm --no-deps --entrypoint /opt/fvoci/bin/fvoci-migrate init --rebuild-search`
+(user install: `fvoci` in place of `init` and `server`). Search results are
+incomplete until the rebuild finishes.
+
 If init fails, leave the server stopped. Run `logs init` with the same Compose
 flags, fix the cause and repeat step 3: already applied migrations are skipped
 and the grant commits all or nothing. If init fails with `outbox consumer seed
@@ -1565,49 +1581,50 @@ unregistered redirect URI) and remove the old one once no instance `generic`
 provider shares that client. Sign-ins started before the upgrade fail once
 with `oidc_state_mismatch`. Instance providers keep their URIs.
 
-Local check against a real Keycloak (opt-in, not in CI): the official image
-in `start-dev` with one imported test realm (`scripts/keycloak/`), published on
-`127.0.0.1` only, as the instance `generic` provider of the release server built
-from the checkout, driven by Playwright Chromium through the web UI
-(`apps/web/e2e-keycloak/`; sign-in and the other pages are the Vue app). Secrets are
-generated per run; the Keycloak compose project is removed on exit. It does not cover external providers, HTTPS or a
-reverse proxy, or the container deployment path. Workspace SSO needs a
-`workspaceSso` license, which published builds cannot load; `--workspace-sso`
-adds two workspace realms and runs the ignored Rust test
-`keycloak_workspace_sso_with_a_test_entitlement` (in-process app with a test
-license, not the release server) against them.
+Local real-Keycloak check (allocated local execution, outside the ordinary CI
+browser groups): `bun --no-env-file tools/keycloak/run.ts --backend=postgres`
+selects the instance OIDC witness. Select `--backend=sqlite` or
+`--backend=libsql-remote` for the same 16 Chromium cases (8 flows, 7 failure
+boundaries, 1 wrong client secret). Every mode uses a fresh database and normal
+`fvoci-migrate --start` process under the allocated nonroot actor. PostgreSQL
+uses a restricted app role; its owner connection belongs only to preparation
+and the fixed native read-only observer. SQLite observers open read-only files;
+libSQL observations use the existing Rust adapter and SDK, with explicit
+rollback and connection drain. Selected-mode skips, retries and zero tests fail.
+A reviewed root-owned process reader checks the protected server environment
+without changing server privileges; it accepts only process identities and
+digests and returns boolean facts.
 
-Needs docker with compose, openssl, git, cargo, bun, setsid (util-linux),
-realpath (coreutils), the web dependencies and Chromium from
-`scripts/prepare-web-e2e.sh` (`bun ci`), and access to quay.io for the first
-image pull. As in the web e2e harness, the web build (`bun --bun run build`)
-and Playwright (`bun --bun x --no-install playwright test`) run under Bun;
-node and npm are not used. The script exits non-zero when a group
-fails or when its compose project `fvoci-kc-e2e-<run id>` could not be removed
-completely; the last command below removes a leftover one (the two variables
-only satisfy the compose file). A failing group's
-Playwright output and server log are copied, redacted, to
-`$FVOCI_KC_E2E_EVIDENCE_DIR/failure-<group>/`. The groups run with a TMPDIR
-inside the run directory (`$TMPDIR/fvoci-kc-e2e.*/tmp`, so `$TMPDIR` must be
-at most 36 characters), which is removed on exit together with the raw copies
-the web e2e harness keeps; Ctrl-C stops the run once the current group has
-cleaned up; a further Ctrl-C, or a closed pipe on stderr, during the script's
-own cleanup is ignored, so the run directory (per-run secrets) and the
-Keycloak project are always removed. The
-script refuses to run under `set -x`. `--skip-build` checks only that
-`fvoci-server --version` reports the checked-out commit; `fvoci-migrate` (no
-version output) and `apps/web/dist` are used as they are. The clean-tree
-check (`versions.json`) looks at tracked files only; untracked files under
-`apps/web/public` still end up in `dist`.
+The runner imports per-run realms into the digest-pinned official Keycloak
+image in `scripts/keycloak/compose.yml`, published on loopback only. It owns
+and removes that compose project, server and browser children, database fixtures
+and private files on completion, failure and interruption. Evidence is redacted
+before retention; passwords, tokens, callback state, connection URLs and hosts
+are excluded. Chromium trace, screenshot and video recording remain disabled.
+Cleanup failures fail the run. The local libSQL fixture uses the pinned official
+sqld and a standard TLS forwarder with a run-only certificate, IP SAN and token;
+only native children receive its CA file. It is a local protocol witness, not a
+hosted Turso acceptance result. Hosted credentials and dispatch remain behind
+the existing main-only admission and explicit destructive gates.
 
-```sh
-bash scripts/prepare-web-e2e.sh    # once
-TMPDIR=/tmp FVOCI_KC_E2E_EVIDENCE_DIR=/tmp/kc-evidence bash scripts/keycloak-oidc-e2e.sh
-bash scripts/keycloak-oidc-e2e.sh --skip-build    # reuse target/release and apps/web/dist
-bash scripts/keycloak-oidc-e2e.sh --workspace-sso    # also the workspace SSO test
-KC_BOOTSTRAP_ADMIN_PASSWORD=x FVOCI_KC_REALM_DIR=/nonexistent \
-  docker compose -p fvoci-kc-e2e-<run id> -f scripts/keycloak/compose.yml down -v
-```
+A maintained purpose-specific local allocation is required. It binds the exact
+source/tree, actor, output root, registered consumer modules and native/web/
+Bun/Chromium inputs. The existing current-build recorder supplies
+`--record-before` and `--freeze`; the consumer rechecks that frozen cohort
+before and after execution. Builds use the recorder's dev profile
+(`api-schema,db-tests`, opt0 with debug assertions), so these results establish
+functional behavior, not release optimization or performance. A version string
+alone is insufficient to reuse binaries or web assets. Prepare locked web
+dependencies and Chromium with `scripts/prepare-web-e2e.sh`; build the native
+cohort and web assets between recording and freezing the inputs.
+
+`--backend=postgres --workspace-sso` additionally imports two workspace realms
+and runs the separately compiled ignored Rust test
+`keycloak_workspace_sso_with_a_test_entitlement` with a test entitlement.
+This single in-process PostgreSQL test is separate from the 16 public-instance
+browser cases and does not enable enterprise SSO in the normal server. These
+checks do not cover external providers, HTTPS for browser OIDC, reverse proxies,
+container deployment or other browsers.
 
 `scripts/backup-restore-smoke.sh` takes the same image, seeds an isolated
 source project (setup/login, wiki collab body, HWPX upload and extraction,

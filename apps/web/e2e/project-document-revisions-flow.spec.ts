@@ -5,17 +5,15 @@ import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
 const projectSchema = z
   .object({ id: z.string(), key: z.string(), rootDocumentId: z.string().nullable() })
-  .passthrough();
-const taskSchema = z
-  .object({ id: z.string(), number: z.number(), displayId: z.string() })
-  .passthrough();
-const bodySchema = z.object({ contentJson: z.unknown() }).passthrough();
-const errorSchema = z.object({ code: z.string() }).passthrough();
-const titleSchema = z.object({ title: z.string() }).passthrough();
+  .loose();
+const taskSchema = z.object({ id: z.string(), number: z.number(), displayId: z.string() }).loose();
+const bodySchema = z.object({ contentJson: z.unknown().optional() }).loose();
+const errorSchema = z.object({ code: z.string() }).loose();
+const titleSchema = z.object({ title: z.string() }).loose();
 
 test.describe.configure({ mode: "serial" });
 

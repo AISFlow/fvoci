@@ -45,7 +45,7 @@ const text = ["./useOffWikiBodySlots.ts", "./useOffWikiBody.ts"]
   .join("\n")
   .replace(/^import[\s\S]*?from ["'][^"']+["'];\s*/gm, "")
   .replaceAll("export function", "function");
-const script = `${ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None })}
+const script = `${ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext })}
 ({ useOffWikiBody, listRetainedOffDrafts, holdsRetainedDrafts })`;
 const original = {
   actorId: "A",
@@ -607,7 +607,7 @@ for (const host of [
     expect(copy).toBeDefined();
     const copyScript = ts.transpile(required(copy).getText(setup), {
       target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.None,
+      module: ts.ModuleKind.ESNext,
     });
     const h = harness();
     required(h.reads[0]).pending.resolve(source(original));

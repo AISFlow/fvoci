@@ -179,12 +179,12 @@ impl OperationTx<'_, '_> {
         user: Uuid,
     ) -> Result<Option<ProjectMemberRole>, sqlx::Error> {
         let roles = match self {
-            Self::Postgres(tx) => sqlx::query_as::<_, (String,)>(&format!(
+            Self::Postgres(tx) => sqlx::query_as::<_, (String,)>(sqlx::AssertSqlSafe(format!(
                 r#"SELECT role FROM fvoci.project_members
                    WHERE workspace_id=$1 AND project_id=$2 AND user_id=$3
                    UNION ALL {}"#,
                 group_project_grant_roles_select_sql(1, 2, 3)
-            ))
+            )))
             .bind(workspace)
             .bind(project)
             .bind(user)
@@ -2545,7 +2545,7 @@ pub async fn list_projects(
             DateTime<Utc>,
             i64,
         ),
-    >(&list_sql)
+    >(sqlx::AssertSqlSafe(list_sql))
     .bind(workspace_id)
     .bind(guest)
     .bind(actor_user_id)
@@ -5154,7 +5154,7 @@ mod selected_project_create_tests {
             ("audit_log", "reject_project_audit"),
         ] {
             let before = counts(&f).await;
-            sqlx::query(&format!("CREATE TRIGGER {trigger} BEFORE INSERT ON {table} WHEN NEW.verb='project.created' BEGIN SELECT RAISE(ABORT,'project publication failure'); END;"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER {trigger} BEFORE INSERT ON {table} WHEN NEW.verb='project.created' BEGIN SELECT RAISE(ABORT,'project publication failure'); END;")))
                 .execute(&f.pool).await.unwrap();
             assert!(create(&f, session, "ROLLBACK", None).await.is_err());
             assert_eq!(counts(&f).await, before);
@@ -5164,7 +5164,7 @@ mod selected_project_create_tests {
                     .await
                     .unwrap();
             assert_eq!(missing.0, 0);
-            sqlx::query(&format!("DROP TRIGGER {trigger}"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TRIGGER {trigger}")))
                 .execute(&f.pool)
                 .await
                 .unwrap();

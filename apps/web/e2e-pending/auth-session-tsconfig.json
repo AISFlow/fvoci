@@ -1,0 +1,6 @@
+{
+  "extends": "./collab-tsconfig.json",
+  "compilerOptions": { "allowImportingTsExtensions": true },
+  "include": ["./auth-session-*.ts", "../../../tools/turso/ui-auth-session.ts"],
+  "exclude": ["./**/*.test.ts"]
+}

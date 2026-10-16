@@ -2,10 +2,10 @@
 #![allow(dead_code)]
 
 //! The app pool (`db::pool::connect_app*`) never hands out a connection that
-//! is still inside a server-side transaction. sqlx 0.8's `Transaction::begin`
-//! counts the transaction only after `BEGIN` completes, so a begin future
-//! dropped in between (a client abort) returns its connection with the
-//! transaction open and no `ROLLBACK` queued. In CI run 36472820268 an aborted
+//! is still inside a server-side transaction. sqlx's PostgreSQL `begin`
+//! (0.8.6 and 0.9.0) counts the transaction only after `BEGIN` completes, so a
+//! begin future dropped in between (a client abort) returns its connection
+//! with the transaction open and no `ROLLBACK` queued. In CI run 36472820268 an aborted
 //! `GET /api/v1/me/workspaces` leaked `pool.begin()`'s `BEGIN` that way; a later
 //! `begin_read` on that connection failed and aborted it, and every later user
 //! of the connection got `current transaction is aborted`. Run as the

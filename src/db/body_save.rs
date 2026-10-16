@@ -2094,6 +2094,8 @@ mod sqlite_native_tests {
         .await
         .unwrap();
         let mut tx = f.backend.begin_off_body().await.unwrap();
+        // Same tenant binding as renew_family_task_room before the named fence call.
+        tx.operation().set_tenant(f.workspace).await.unwrap();
         assert!(!tx
             .operation()
             .renew_family_task_room_fence(claim.fence, lease)
@@ -2498,7 +2500,7 @@ mod sqlite_native_tests {
             .unwrap();
         assert_eq!(replay.revision_id, saved.revision_id);
         assert_eq!(counts(&f).await, before);
-        sqlx::query("UPDATE projects SET archived_at=1 WHERE workspace_id=?1 AND id=?2")
+        sqlx::query("UPDATE projects SET status='archived' WHERE workspace_id=?1 AND id=?2")
             .bind(f.workspace.as_bytes().as_slice())
             .bind(project.as_bytes().as_slice())
             .execute(&f.pool)
@@ -2629,10 +2631,12 @@ mod pg_draft_native_tests {
         let database = format!("fvoci_off_copy_{}", Uuid::now_v7().simple());
         let role = format!("fvoci_off_app_{}", Uuid::now_v7().simple());
         let password = crate::auth::token::new_token().hash;
-        sqlx::query(&format!("CREATE DATABASE \"{database}\""))
-            .execute(&admin_server)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database}\""
+        )))
+        .execute(&admin_server)
+        .await
+        .unwrap();
         let mut database_url = server.clone();
         database_url.set_path(&format!("/{database}"));
         crate::db::migrate::run_migrations(database_url.as_str())
@@ -2643,9 +2647,9 @@ mod pg_draft_native_tests {
             .connect(database_url.as_str())
             .await
             .unwrap();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS"
-        ))
+        )))
         .execute(&admin)
         .await
         .unwrap();
@@ -2842,11 +2846,11 @@ mod pg_draft_native_tests {
         );
         app.close().await;
         admin.close().await;
-        sqlx::query(&format!("DROP DATABASE \"{database}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE \"{database}\"")))
             .execute(&admin_server)
             .await
             .unwrap();
-        sqlx::query(&format!("DROP ROLE \"{role}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE \"{role}\"")))
             .execute(&admin_server)
             .await
             .unwrap();

@@ -10,7 +10,7 @@ export type SettingsWidget =
   "boolean" | "enum" | "number" | "text" | "list" | "duration" | "i18n_override" | "asset";
 
 export type SettingsEntry = {
-  readonly schema: z.ZodTypeAny;
+  readonly schema: z.ZodType;
   readonly safety: "live" | "restart_required";
   readonly widgets: Readonly<Record<string, SettingsWidget>>;
   readonly group: string;
@@ -79,20 +79,29 @@ const securityContact = z
   .regex(NO_CONTROL, "invalid input")
   .refine(
     (v) =>
-      (v.startsWith("mailto:") && z.string().email().safeParse(v.slice(7)).success) ||
+      (v.startsWith("mailto:") && z.email().safeParse(v.slice(7)).success) ||
       (v.startsWith("https://") && v.length > "https://".length),
     { message: "invalid input" },
   );
+// Zod 4's url() trims the value before the https: check; parse it as typed.
 const httpsUrl = z
   .string()
   .max(2048)
   .regex(NO_CONTROL, "invalid input")
-  .url()
+  .refine(
+    (v) => {
+      try {
+        new URL(v);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "Invalid URL" },
+  )
   .refine((v) => v.startsWith("https:"), { message: "invalid input" });
 
-const brandingAsset = z
-  .object({ key: z.string().uuid(), sha256: z.string(), mime: z.string() })
-  .strict();
+const brandingAsset = z.object({ key: z.guid(), sha256: z.string(), mime: z.string() }).strict();
 
 export const BRANDING_ASSET_MIME = ["image/png", "image/apng", "image/webp", "image/jpeg"] as const;
 export const BRANDING_ASSET_KINDS = ["logo", "favicon"] as const;
@@ -226,7 +235,7 @@ export const SETTINGS_CATALOG = {
         mailOrderNumber: operatorText.nullable(),
         address: operatorText.nullable(),
         phone: operatorText.nullable(),
-        supportEmail: z.string().email().max(320).nullable(),
+        supportEmail: z.email().max(320).nullable(),
         businessInfoUrl: httpsUrl.nullable(),
         hostingProvider: operatorText.nullable(),
       })

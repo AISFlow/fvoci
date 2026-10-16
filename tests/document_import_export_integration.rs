@@ -221,7 +221,7 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
     // Deterministic cut: `page-1`'s INSERT waits on a lock the test holds,
     // so the abort always lands with `page-0` committed, `page-1` in flight
     // and `page-2` never reached, however fast the import runs.
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"CREATE FUNCTION fvoci.test_gate_import_page() RETURNS trigger LANGUAGE plpgsql AS $$
            BEGIN
                IF NEW.title = 'page-1' THEN
@@ -229,7 +229,7 @@ async fn cancelled_markdown_zip_request_is_failed_by_the_stale_sweep() {
                END IF;
                RETURN NEW;
            END $$"#
-    ))
+    )))
     .execute(&fx.admin)
     .await
     .unwrap();

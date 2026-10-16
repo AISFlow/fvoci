@@ -107,7 +107,7 @@ function installProbe(): void {
     }
   };
   observe("event", { durationThreshold: 16 }, (raw) => {
-    const e = raw as PerformanceEventTiming & { interactionId?: number };
+    const e = raw as Omit<PerformanceEventTiming, "interactionId"> & { interactionId?: number };
     st.ev.push({
       n: e.name,
       s: e.startTime,

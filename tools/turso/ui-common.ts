@@ -5,6 +5,8 @@ import process from "node:process";
 import { digest, env, parseJson, root as checkout, uid } from "../selected-backend-ci/io.ts";
 import { pyJsonDumps } from "../web-e2e/compat.ts";
 
+export const FIXTURE_BUDGET = 120;
+
 /** Fixed codes only; no SDK, URL, token, actor password or raw trace. */
 export class UiError extends Error {
   constructor(code: string) {
@@ -17,9 +19,22 @@ export function require(condition: unknown, code: string): asserts condition {
   if (!condition) throw new UiError(code);
 }
 
+const canonicalUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export function uuidHex(value: unknown): string {
+  require(typeof value === "string", "UI_ALLOCATION_ID_REFUSED");
+  // Any accepted UUID spelling that is not the canonical lowercase form is refused.
+  const bare = value
+    .replaceAll("urn:", "")
+    .replaceAll("uuid:", "")
+    .replace(/^\{+|\}+$/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(bare.replaceAll("-", ""))) throw new TypeError("not a UUID");
+  require(canonicalUuid.test(value), "UI_ALLOCATION_ID_REFUSED");
+  return value.replaceAll("-", "");
+}
+
 export function failureCode(error: unknown): string {
   const value = error instanceof UiError ? error.message : "";
-  return /^(?:UI|TURSO_UI)_[A-Z_]+$/.test(value) ? value : "UI_CONSUMER_FAILED";
+  return /^(?:UI|TURSO_UI|RESTORE)_[A-Z_]+$/.test(value) ? value : "UI_CONSUMER_FAILED";
 }
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -160,3 +175,71 @@ export function cleanEnv(): Record<string, string> {
 
 export const token = (bytes: number): string =>
   Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
+
+/** Public requests are confined to this actual owned normal server. */
+export async function requestPublic(base: string, path: string, body?: Record_, cookie?: string) {
+  require(/^http:\/\/127\.0\.0\.1:[1-9][0-9]*$/.test(base) &&
+    path.startsWith("/api/v1/") &&
+    !path.includes(".."), "UI_FINAL_PUBLIC_TARGET_REFUSED");
+  const response = await fetch(base + path, {
+    method: body ? "POST" : "GET",
+    redirect: "manual",
+    signal: AbortSignal.timeout(10000),
+    headers: {
+      Origin: base,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  require(response.ok, "UI_FINAL_PUBLIC_PREPARATION_FAILED");
+  const value: unknown = await response.json();
+  return {
+    value,
+    cookie: response.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0])
+      .join("; "),
+  };
+}
+
+export async function inviteFinalActor(
+  base: string,
+  workspace: string,
+  ownerCookie: string,
+  email: string,
+  password: string,
+  role: "owner" | "member",
+  name: string,
+) {
+  const invitation = await requestPublic(
+    base,
+    "/api/v1/workspaces/" + workspace + "/invitations",
+    { email, role },
+    ownerCookie,
+  );
+  const accepted = new URL(String(get(invitation.value, "acceptUrl")), base);
+  require(accepted.origin === base &&
+    /^\/invite\/[a-zA-Z0-9_-]+$/.test(accepted.pathname), "UI_FINAL_INVITATION_TARGET_REFUSED");
+  const inviteToken = accepted.pathname.slice("/invite/".length);
+  const preview = await requestPublic(base, "/api/v1/invitations/" + inviteToken);
+  const consents = list(preview.value, "requiredLegal").map((item) => ({
+    kind: get(item, "kind"),
+    version: get(item, "version"),
+  }));
+  const issued = await requestPublic(base, "/api/v1/invitations/" + inviteToken + "/accept", {
+    email,
+    password,
+    givenName: "Selected",
+    familyName: name,
+    consents,
+  });
+  require(issued.cookie.length > 0, "UI_FINAL_OWNER_INVITATION_FAILED");
+  const owner = await requestPublic(base, "/api/v1/auth/login", { email, password });
+  require(owner.cookie.length > 0 &&
+    get(owner.value, "userId") ===
+      get(issued.value, "userId"), "UI_FINAL_PREPARED_OWNER_LOGIN_FAILED");
+  const userId = String(get(owner.value, "userId"));
+  uuidHex(userId);
+  return { userId, email, password, cookie: owner.cookie };
+}

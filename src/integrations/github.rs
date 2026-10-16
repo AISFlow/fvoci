@@ -342,7 +342,7 @@ async fn github_call(
     bearer: &str,
     body: Option<Value>,
 ) -> Result<(u16, Option<Value>), GithubApiError> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(GITHUB_REQUEST_TIMEOUT)
         .build()

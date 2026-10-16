@@ -27,6 +27,7 @@ import {
   lease,
   localFixture,
   localServerStart,
+  mountSpec,
   nativeFailureCode,
   openReferencedGrant,
   parseNspid,
@@ -36,6 +37,7 @@ import {
   publishContainer,
   qualifyDaemonExit,
   readShellProof,
+  readStatOnce,
   releaseFailedPublish,
   reportCleanup,
   runningDaemonSample,
@@ -45,6 +47,7 @@ import {
 } from "./ui-container.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import type { Child } from "./ui-processes.ts";
+import { fixture } from "./ui-native.ts";
 import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
 import { constants } from "node:fs";
 
@@ -68,6 +71,68 @@ const argvArgs: [string, string, string, string, string[], string[]] = [
   ["--start"],
 ];
 const ids = () => [1000, 1000, 1000, 1000];
+// Invented immutable identity; these receipts are fixtures, not image qualification.
+const LOCAL_IMAGE = "sha256:" + "d".repeat(64);
+const shellReceipt = (image = LOCAL_IMAGE) => ({
+  Id: "b".repeat(64),
+  Image: image,
+  Path: "/bin/sh",
+  Args: ["-c", "exit 0"],
+  State: {
+    Status: "exited",
+    Pid: 0,
+    Running: false,
+    OOMKilled: false,
+    ExitCode: 0,
+    Error: "",
+    FinishedAt: "2026-10-14T00:00:01Z",
+  },
+  Config: {
+    Image: image,
+    Entrypoint: ["/bin/sh"],
+    Cmd: ["-c", "exit 0"],
+    Env: ["PATH=/usr/bin:/bin"],
+    User: "1000:1000",
+  },
+});
+const qualifiedGrant = (image = LOCAL_IMAGE, receipt: unknown = shellReceipt(image)) => {
+  const path = join(directory, "shell-proof.json");
+  writeFileSync(path, JSON.stringify(receipt));
+  return {
+    canonicalRuntime: {
+      imageId: image,
+      networkAuthorized: true,
+      shellProof: { path, sha256: sha(path) },
+    },
+  };
+};
+const createdReceipt = (image = LOCAL_IMAGE) => {
+  const receipt = shellReceipt(image);
+  const command = [
+    "/fvoci-current/launcher.sh",
+    "/fvoci-private/native-env.sh",
+    "/fvoci-current/bin/fvoci-e2e-fixture",
+    "baseline",
+  ];
+  return {
+    ...receipt,
+    Id: "a".repeat(64),
+    Args: command,
+    State: { Status: "created", Pid: 0, Running: false, OOMKilled: false },
+    Config: { ...receipt.Config, Cmd: command },
+    HostConfig: {
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      Privileged: false,
+      SecurityOpt: ["no-new-privileges"],
+      PidsLimit: 128,
+      NetworkMode: "host",
+      CpuQuota: 0,
+      NanoCpus: 0,
+      CpusetCpus: "",
+    },
+  };
+};
 const paused = (clientPid = 77) =>
   bindPausedShell(
     "1 (sh) S 0 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 20 0 1 999",
@@ -80,6 +145,67 @@ const paused = (clientPid = 77) =>
   );
 
 describe("container shape", () => {
+  test("native fixtures keep stdin open at create while normal servers do not", () => {
+    expect(containerArgv(...argvArgs)).not.toContain("--interactive");
+    for (const mode of ["baseline", "owner", "member", "observe"]) {
+      const argv = containerArgv(
+        argvArgs[0],
+        argvArgs[1],
+        argvArgs[2],
+        "/fvoci-current/bin/fvoci-e2e-fixture",
+        [],
+        [mode],
+      );
+      expect(argv.slice(0, argv.indexOf(QUALIFIED_CANONICAL_IMAGE))).toContain("--interactive");
+      expect(argv.slice(argv.indexOf(QUALIFIED_CANONICAL_IMAGE) + 1)).toEqual([
+        "/fvoci-current/launcher.sh",
+        "/fvoci-private/native-env.sh",
+        "/fvoci-current/bin/fvoci-e2e-fixture",
+        mode,
+      ]);
+    }
+  });
+
+  test("SQLite restore capsule binds the independent file and refuses source credentials", () => {
+    const environment = {
+      FVOCI_DATABASE_BACKEND: "sqlite",
+      FVOCI_STORAGE_DIR: directory,
+      FVOCI_SQLITE_PATH: join(directory, "app.sqlite"),
+    };
+    expect(capsuleText(environment)).toContain("FVOCI_DATABASE_BACKEND=sqlite");
+    for (const changed of [
+      { ...environment, FVOCI_SQLITE_PATH: join(directory, "foreign.sqlite") },
+      { ...environment, FVOCI_LIBSQL_URL: "libsql://invented.invalid" },
+      { ...environment, FVOCI_LIBSQL_AUTH_TOKEN: "invented" },
+    ])
+      expect(() => capsuleText(changed)).toThrow("UI_SQLITE_DESTINATION_REFUSED");
+  });
+
+  test("selected SQLite observer capsule admits only its owned explicit backend and file", () => {
+    const environment = {
+      E2E_DATABASE_BACKEND: "sqlite",
+      FVOCI_DATABASE_BACKEND: "sqlite",
+      FVOCI_E2E_SQLITE_OBSERVER_SELECTED: "1",
+      FVOCI_E2E_SQLITE_RUN_ROOT: directory,
+      FVOCI_E2E_SQLITE_PATH: join(directory, "app.sqlite"),
+      FVOCI_STORAGE_DIR: join(directory, "storage"),
+    };
+    expect(capsuleText(environment)).toContain("FVOCI_E2E_SQLITE_OBSERVER_SELECTED=1");
+    const changes: Record<string, string>[] = [
+      { E2E_DATABASE_BACKEND: "libsql-remote" },
+      { FVOCI_DATABASE_BACKEND: "postgres" },
+      { FVOCI_E2E_SQLITE_RUN_ROOT: "relative" },
+      { FVOCI_E2E_SQLITE_PATH: join(directory, "foreign.sqlite") },
+      { PASSWORD_PEPPER_KEYS: "private" },
+      { FVOCI_LIBSQL_URL: "private" },
+      { ENCRYPTION_KEYS: "private" },
+    ];
+    for (const change of changes)
+      expect(() => capsuleText({ ...environment, ...change })).toThrow(
+        "UI_SQLITE_OBSERVER_TARGET_REFUSED",
+      );
+  });
+
   test("the shell proof comes only from the grant and the config env stays clean", () => {
     const environment = {
       FVOCI_LIBSQL_URL: "libsql://invented.invalid",
@@ -98,6 +224,8 @@ describe("container shape", () => {
     expect(shellQuote("")).toBe("''");
     expect(shellQuote("plain/path-1.0")).toBe("plain/path-1.0");
     const argv = containerArgv(...argvArgs);
+    expect(argv).toContain(QUALIFIED_CANONICAL_IMAGE);
+    expect(argv).not.toContain("--pull");
     for (const flag of ["--cpus", "--cpu-quota", "--cpu-period", "--cpuset-cpus"])
       expect(argv).not.toContain(flag);
     expect(argv[argv.indexOf("--memory") + 1]).toBe("12884901888");
@@ -123,16 +251,7 @@ describe("container shape", () => {
       "UI_CANONICAL_SHELL_UNAVAILABLE",
     );
     const proof = join(directory, "shell-proof.json");
-    writeFileSync(
-      proof,
-      JSON.stringify({
-        Config: {
-          Image: QUALIFIED_CANONICAL_IMAGE,
-          Cmd: ["/bin/sh", "/acceptance/run.sh"],
-          Env: ["PATH=/usr/bin:/bin"],
-        },
-      }),
-    );
+    writeFileSync(proof, JSON.stringify(shellReceipt(QUALIFIED_CANONICAL_IMAGE)));
     expect(
       readShellProof({
         imageId: QUALIFIED_CANONICAL_IMAGE,
@@ -145,6 +264,35 @@ describe("container shape", () => {
         shellProof: { path: proof, sha256: "0".repeat(64) },
       }),
     ).toThrow("UI_CANONICAL_SHELL_UNAVAILABLE");
+  });
+
+  test("every bind mount reaches docker create behind its own --mount flag", () => {
+    const mounts = [
+      mountSpec("/host/launcher.sh", "/fvoci-current/launcher.sh", true),
+      mountSpec("/host/storage", "/host/storage", false),
+    ];
+    const [name, launcher, capsule, binary, , command] = argvArgs;
+    const argv = containerArgv(name, launcher, capsule, binary, mounts, command);
+    const positions = mounts.map((mount) => argv.indexOf(mount));
+    for (const position of positions) {
+      expect(position).toBeGreaterThan(0);
+      expect(argv[position - 1]).toBe("--mount");
+    }
+    // docker reads the first bare argument as the image reference.
+    expect(argv.indexOf(QUALIFIED_CANONICAL_IMAGE)).toBe(Math.max(...positions) + 1);
+  });
+
+  test("the normal server capsule carries the owned SMTP relay settings", () => {
+    const environment = {
+      FVOCI_LIBSQL_URL: "u",
+      FVOCI_LIBSQL_AUTH_TOKEN: "t",
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: "2525",
+      SMTP_FROM: "auth-session@example.invalid",
+    };
+    const text = capsuleText(environment);
+    for (const [key, value] of Object.entries(environment).slice(2))
+      expect(text).toContain(key + "=" + shellQuote(value) + "\n");
   });
 
   test("the capsule refuses LOCPATH, unlisted secrets and multi-line values", () => {
@@ -163,7 +311,7 @@ describe("container shape", () => {
   });
 
   test("the local profile removes only the hosted memory flags", () => {
-    const grant = { canonicalRuntime: { networkAuthorized: true } };
+    const grant = qualifiedGrant();
     process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
     expect(() => containerArgv(...argvArgs)).toThrow("UI_LOCAL_ALLOCATION_REFUSED");
     const argv = containerArgv(...argvArgs, grant);
@@ -312,24 +460,145 @@ describe("container shape", () => {
 });
 
 describe("local grant and publish", () => {
+  test("an aborted native fixture publishes no resource and reads no FIFO", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT");
+    signal.abort(original);
+    const { scope } = fakeScope({ root: () => directory });
+    let published = false;
+    const publish: typeof publishContainer = () => {
+      published = true;
+      throw Error("must not publish");
+    };
+    const manifest = { binaries: {} };
+    expect(
+      await localFixture(
+        scope,
+        manifest,
+        "observe",
+        {},
+        undefined,
+        undefined,
+        publish,
+        signal.signal,
+      ).catch((error: unknown) => error),
+    ).toBe(original);
+    expect(published).toBe(false);
+    expect(await readStatOnce(-1, 0, signal.signal).catch((error: unknown) => error)).toBe(
+      original,
+    );
+  });
+
+  test("interrupt after native FIFO publication removes only its owned container and FIFOs", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT");
+    const { scope } = fakeScope({ root: () => directory });
+    const calls: string[][] = [],
+      container = "c".repeat(64);
+    docker.client = (_scope, args) => {
+      calls.push(args);
+      return Promise.resolve(new Uint8Array());
+    };
+    let output = "";
+    const publish: typeof publishContainer = (_owned, path) => {
+      output = path;
+      preparePrivateFifos(path);
+      signal.abort(original);
+      return Promise.resolve([
+        container,
+        {
+          phase: "created",
+          liveDaemon: "unsupported-before-execution",
+          qualification: "BLOCKED",
+          cgroupCaps: "not-observed",
+          shell: "/bin/sh",
+          image: QUALIFIED_CANONICAL_IMAGE,
+        },
+        {},
+      ]);
+    };
+    expect(
+      await localFixture(
+        scope,
+        { binaries: {} },
+        "observe",
+        {},
+        undefined,
+        undefined,
+        publish,
+        signal.signal,
+      ).catch((error: unknown) => error),
+    ).toBe(original);
+    expect(calls).toEqual([["docker", "rm", container]]);
+    expect(existsSync(join(output, "stat.ready"))).toBe(false);
+    expect(existsSync(join(output, "exec.go"))).toBe(false);
+    expect(scope.allocations).toHaveLength(0);
+  });
+
+  test("interrupt after owned native child start still waits cleanup and closes its FIFOs", async () => {
+    const signal = new AbortController(),
+      original = new UiError("UI_PARENT_INTERRUPT"),
+      child = exitedChild(null, "", 321),
+      container = "d".repeat(64),
+      commands: string[][] = [];
+    const { scope, calls } = fakeScope({
+      root: () => directory,
+      spawn: () => {
+        signal.abort(original);
+        return child;
+      },
+    });
+    docker.client = (_scope, args) => {
+      commands.push(args);
+      if (args[1] === "stop") Object.defineProperty(child, "exitCode", { value: 0 });
+      return Promise.resolve(new Uint8Array());
+    };
+    let output = "";
+    const publish: typeof publishContainer = (_owned, path) => {
+      output = path;
+      preparePrivateFifos(path);
+      return Promise.resolve([
+        container,
+        {
+          phase: "created",
+          liveDaemon: "unsupported-before-execution",
+          qualification: "BLOCKED",
+          cgroupCaps: "not-observed",
+          shell: "/bin/sh",
+          image: QUALIFIED_CANONICAL_IMAGE,
+        },
+        {},
+      ]);
+    };
+    const result = await localFixture(
+      scope,
+      { binaries: {} },
+      "observe",
+      {},
+      undefined,
+      undefined,
+      publish,
+      signal.signal,
+    ).catch((error: unknown) => error);
+    expect(result).toBe(original);
+    expect(commands).toEqual([
+      ["docker", "stop", "-t", "10", container],
+      ["docker", "rm", container],
+    ]);
+    expect(calls.finish).toEqual([[child, undefined]]);
+    expect(scope.allocations[0]?.closed).toBe(true);
+    expect(scope.allocations[0]?.forced).toBe(false);
+    expect(existsSync(join(output, "stat.ready"))).toBe(false);
+    expect(existsSync(join(output, "exec.go"))).toBe(false);
+  });
+
   test("repeated local fixtures of one mode each get their own allocation directory", async () => {
     // A consumer calls owner, observe and baseline more than once per run.
-    const proof = join(directory, "shell-proof.json");
-    writeFileSync(
-      proof,
-      JSON.stringify({ Config: { Image: QUALIFIED_CANONICAL_IMAGE, Cmd: ["/bin/sh"], Env: [] } }),
-    );
+    const grant = qualifiedGrant();
     const binary = join(directory, "fvoci-e2e-fixture");
     writeFileSync(binary, "");
     process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
-    lease.load = () =>
-      ({
-        canonicalRuntime: {
-          imageId: QUALIFIED_CANONICAL_IMAGE,
-          networkAuthorized: true,
-          shellProof: { path: proof, sha256: sha(proof) },
-        },
-      }) as never;
+    lease.load = () => grant as never;
     const created: string[][] = [];
     docker.client = (_scope, args) => {
       created.push([...args]);
@@ -349,7 +618,53 @@ describe("local grant and publish", () => {
         expect(await failureOf(localFixture(scope, manifest, "owner", environment))).toBe(
           "UI_DOCKER_CLIENT_FAILED",
         );
-      expect(created.map((args) => args[1])).toEqual(["create", "create"]);
+      expect(created.map((args) => args.slice(0, 3))).toEqual([
+        ["docker", "image", "inspect"],
+        ["docker", "image", "inspect"],
+      ]);
+    } finally {
+      lease.load = undefined;
+    }
+  });
+
+  test("a local fixture capsule selects the libSQL fixture like the hosted child env", async () => {
+    // Without these two keys the native fixture takes its postgres branch.
+    const grant = qualifiedGrant();
+    const binary = join(directory, "fvoci-e2e-fixture");
+    writeFileSync(binary, "");
+    process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
+    lease.load = () => grant as never;
+    const capsules: string[] = [];
+    docker.client = (_scope, args) => {
+      if (args[1] === "image")
+        return Promise.resolve(
+          new TextEncoder().encode(JSON.stringify([{ Id: LOCAL_IMAGE, Config: { Env: [] } }])),
+        );
+      const capsule = args.find((arg) =>
+        arg.endsWith(",dst=/fvoci-private/native-env.sh,readonly"),
+      );
+      if (capsule !== undefined)
+        capsules.push(
+          readFileSync(capsule.slice("type=bind,src=".length, capsule.indexOf(",dst=")), "utf8"),
+        );
+      return Promise.reject(new UiError("UI_DOCKER_CLIENT_FAILED"));
+    };
+    const root = join(directory, "root");
+    mkdirSync(root, 0o700);
+    const { scope } = fakeScope({ root: () => root });
+    const environment = {
+      FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+      FVOCI_LIBSQL_AUTH_TOKEN: "invented",
+      FVOCI_STORAGE_DIR: "/work/storage",
+    };
+    const manifest = { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never;
+    try {
+      expect(await failureOf(fixture(scope, manifest, "baseline", environment))).toBe(
+        "UI_DOCKER_CLIENT_FAILED",
+      );
+      expect(capsules).toHaveLength(1);
+      expect(capsules[0]).toContain("E2E_DATABASE_BACKEND=libsql-remote\n");
+      expect(capsules[0]).toContain("FVOCI_E2E_TURSO_UI_SELECTED=1\n");
     } finally {
       lease.load = undefined;
     }
@@ -395,6 +710,8 @@ describe("local grant and publish", () => {
       ),
     ).toContain("UI_EXECUTION_MODE_REFUSED");
     const created = {
+      Image: QUALIFIED_CANONICAL_IMAGE,
+      Path: "/bin/sh",
       State: { Pid: 0, Running: false, OOMKilled: false },
       Config: {
         Image: QUALIFIED_CANONICAL_IMAGE,
@@ -416,7 +733,13 @@ describe("local grant and publish", () => {
       calls.push([...args]);
       return Promise.resolve(
         new TextEncoder().encode(
-          args[1] === "create" ? "a".repeat(64) + "\n" : JSON.stringify([created]),
+          args[1] === "create"
+            ? "a".repeat(64) + "\n"
+            : JSON.stringify(
+                args[1] === "image"
+                  ? [{ Id: QUALIFIED_CANONICAL_IMAGE, Config: { Env: [] } }]
+                  : [created],
+              ),
         ),
       );
     };
@@ -428,7 +751,7 @@ describe("local grant and publish", () => {
       tree: "b".repeat(40),
       runId: "run_a1",
       dispatchId: "ctx_b2",
-      canonicalRuntime: { imageId: QUALIFIED_CANONICAL_IMAGE, networkAuthorized: true },
+      ...qualifiedGrant(QUALIFIED_CANONICAL_IMAGE),
     };
     const { scope } = fakeScope();
     await publishContainer(
@@ -440,6 +763,9 @@ describe("local grant and publish", () => {
         FVOCI_STORAGE_DIR: "/work/storage",
         ENCRYPTION_KEYS: "PRIVATE_UNUSED_KEYRING",
         ENCRYPTION_ACTIVE_KEY_ID: "turso-test",
+        SMTP_HOST: "127.0.0.1",
+        SMTP_PORT: "2525",
+        SMTP_FROM: "auth-session@example.invalid",
       },
       { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never,
       "fvoci-e2e-fixture",
@@ -449,6 +775,7 @@ describe("local grant and publish", () => {
     );
     const blob = calls.flat().join("\n");
     expect(readFileSync(join(directory, "native-env.sh"), "utf8")).not.toContain("ENCRYPTION_");
+    expect(readFileSync(join(directory, "native-env.sh"), "utf8")).not.toContain("SMTP_");
     expect(blob).not.toContain("PRIVATE_UNUSED_KEYRING");
     expect(blob).not.toContain(token);
     expect(JSON.stringify(created.Config.Env)).not.toContain(token);
@@ -471,6 +798,188 @@ describe("local grant and publish", () => {
     expect(existsSync(join(directory, "stat.ready"))).toBe(false);
     expect(existsSync(join(directory, "exec.go"))).toBe(false);
   });
+});
+
+describe("local immutable runtime qualification", () => {
+  beforeEach(() => {
+    process.env.FVOCI_SELECTED_EXECUTION_MODE = "orca-local";
+  });
+
+  test("a matching controller digest replaces the unavailable machine pin", () => {
+    const grant = qualifiedGrant();
+    expect(openReferencedGrant("fixture", () => grant as never)).toBe(grant);
+    const argv = containerArgv(...argvArgs, grant);
+    expect(argv).toContain(LOCAL_IMAGE);
+    expect(argv).not.toContain(QUALIFIED_CANONICAL_IMAGE);
+    expect(argv.slice(argv.indexOf("--pull"), argv.indexOf("--pull") + 2)).toEqual([
+      "--pull",
+      "never",
+    ]);
+    const created = createdReceipt();
+    expect(creationIdentity(created, argv, [], "fixture", grant).image).toBe(LOCAL_IMAGE);
+    for (const changed of [
+      { ...created, Image: QUALIFIED_CANONICAL_IMAGE },
+      { ...created, Config: { ...created.Config, Image: QUALIFIED_CANONICAL_IMAGE } },
+      { ...created, Image: undefined },
+    ])
+      expect(() => creationIdentity(changed, argv, [], "fixture", grant)).toThrow(
+        "UI_CANONICAL_SHELL_UNAVAILABLE",
+      );
+  });
+
+  test("malformed digests and missing or altered proof refuse before Docker", async () => {
+    const grant = qualifiedGrant();
+    let dockerCalls = 0;
+    docker.client = () => {
+      dockerCalls++;
+      throw new Error("unexpected Docker");
+    };
+    for (const imageId of [
+      "ubuntu:latest",
+      "sha256:" + "D".repeat(64),
+      "sha256:abcd",
+      "",
+      undefined,
+    ])
+      expect(() => readShellProof({ ...grant.canonicalRuntime, imageId })).toThrow(
+        "UI_CANONICAL_SHELL_UNAVAILABLE",
+      );
+    for (const runtime of [
+      { imageId: LOCAL_IMAGE, networkAuthorized: true },
+      {
+        ...grant.canonicalRuntime,
+        shellProof: { path: grant.canonicalRuntime.shellProof.path, sha256: "0".repeat(64) },
+      },
+    ]) {
+      expect(
+        await failureOf(
+          publishContainer(
+            null,
+            directory,
+            {},
+            { binaries: {} },
+            "fvoci-e2e-fixture",
+            [],
+            "fixture",
+            () => ({ canonicalRuntime: runtime }),
+          ),
+        ),
+      ).toBe("UI_CANONICAL_SHELL_UNAVAILABLE");
+    }
+    expect(dockerCalls).toBe(0);
+  });
+
+  test("qualification binds actual shell execution and successful finished state", () => {
+    const receipt = shellReceipt();
+    // Real --entrypoint /bin/sh receipts have arguments in Cmd, not /bin/sh.
+    expect(receipt.Config.Cmd).not.toContain("/bin/sh");
+    expect(readShellProof(qualifiedGrant().canonicalRuntime)).toBe("/bin/sh");
+    for (const changed of [
+      { ...receipt, Image: QUALIFIED_CANONICAL_IMAGE },
+      { ...receipt, Config: { ...receipt.Config, Image: QUALIFIED_CANONICAL_IMAGE } },
+      { ...receipt, Path: "/bin/false" },
+      { ...receipt, Config: { ...receipt.Config, Entrypoint: ["/bin/false"], Cmd: ["/bin/sh"] } },
+      { ...receipt, State: { ...receipt.State, ExitCode: 127 } },
+      { ...receipt, State: { ...receipt.State, Running: true } },
+      { ...receipt, State: { ...receipt.State, Status: "created" } },
+      { ...receipt, State: { ...receipt.State, OOMKilled: true } },
+      { ...receipt, State: { ...receipt.State, FinishedAt: "0001-01-01T00:00:00Z" } },
+      { ...receipt, State: undefined },
+    ])
+      expect(() => readShellProof(qualifiedGrant(LOCAL_IMAGE, changed).canonicalRuntime)).toThrow(
+        "UI_CANONICAL_SHELL_UNAVAILABLE",
+      );
+    for (const key of [
+      "FVOCI_LIBSQL_URL",
+      "ENCRYPTION_KEYS",
+      "PASSWORD_PEPPER_KEYS",
+      "GITHUB_TOKEN",
+    ])
+      expect(() =>
+        readShellProof(
+          qualifiedGrant(LOCAL_IMAGE, {
+            ...receipt,
+            Config: { ...receipt.Config, Env: [key + "=invented"] },
+          }).canonicalRuntime,
+        ),
+      ).toThrow("UI_DOCKER_ENV_SECRET_REFUSED");
+  });
+
+  test.each(["matching", "missing", "foreign", "secret", "hidden-secret", "forged-created"])(
+    "publish preflights the owned image: %s",
+    async (scenario) => {
+      const grant = qualifiedGrant();
+      const calls: string[][] = [];
+      const created = {
+        ...createdReceipt(),
+        Image: scenario === "forged-created" ? QUALIFIED_CANONICAL_IMAGE : LOCAL_IMAGE,
+      };
+      docker.client = (_scope, args) => {
+        calls.push([...args]);
+        if (args[1] === "image" && scenario === "missing")
+          return Promise.reject(new UiError("UI_DOCKER_CLIENT_FAILED"));
+        const output =
+          args[1] === "image"
+            ? JSON.stringify([
+                {
+                  Id: scenario === "foreign" ? QUALIFIED_CANONICAL_IMAGE : LOCAL_IMAGE,
+                  Config: {
+                    Env:
+                      scenario === "secret"
+                        ? ["FVOCI_LIBSQL_AUTH_TOKEN=invented"]
+                        : scenario === "hidden-secret"
+                          ? ["INNOCENT=invented-token"]
+                          : [],
+                  },
+                },
+              ])
+            : args[1] === "create"
+              ? "a".repeat(64)
+              : JSON.stringify([created]);
+        return Promise.resolve(new TextEncoder().encode(output));
+      };
+      const binary = join(directory, "fvoci-e2e-fixture");
+      writeFileSync(binary, "");
+      const { scope } = fakeScope();
+      const publication = publishContainer(
+        scope,
+        directory,
+        {
+          FVOCI_LIBSQL_URL: "libsql://invented.invalid",
+          FVOCI_LIBSQL_AUTH_TOKEN: "invented-token",
+          FVOCI_STORAGE_DIR: "/work/storage",
+        },
+        { binaries: { "fvoci-e2e-fixture": { path: binary } } } as never,
+        "fvoci-e2e-fixture",
+        ["baseline"],
+        "fixture",
+        () => grant,
+      );
+      if (scenario === "matching") {
+        const [id, creation] = await publication;
+        expect(id).toBe("a".repeat(64));
+        expect(creation.image).toBe(LOCAL_IMAGE);
+        expect(creation.qualification).toBe("BLOCKED");
+        expect(calls.map((args) => args[1])).toEqual(["image", "create", "inspect"]);
+        expect(calls[1]).toContain(LOCAL_IMAGE);
+      } else {
+        expect(await failureOf(publication)).toBe(
+          scenario === "missing"
+            ? "UI_DOCKER_CLIENT_FAILED"
+            : ["secret", "hidden-secret"].includes(scenario)
+              ? "UI_DOCKER_ENV_SECRET_REFUSED"
+              : "UI_CANONICAL_SHELL_UNAVAILABLE",
+        );
+        expect(calls.map((args) => args[1])).toEqual(
+          scenario === "forged-created" ? ["image", "create", "inspect", "rm"] : ["image"],
+        );
+        expect(existsSync(join(directory, "stat.ready"))).toBe(false);
+        expect(existsSync(join(directory, "exec.go"))).toBe(false);
+      }
+      expect(calls[0]).toEqual(["docker", "image", "inspect", LOCAL_IMAGE]);
+      expect(calls.some((args) => args[1] === "start" || args[1] === "pull")).toBe(false);
+    },
+  );
 });
 
 describe("paused shell release", () => {
@@ -659,7 +1168,10 @@ describe("paused shell release", () => {
     const serverSource = localServerStart.toString();
     expect(serverSource.indexOf("try {")).toBeLessThan(serverSource.indexOf("openSync(logpath"));
     const publishSource = publishContainer.toString();
-    expect(publishSource.indexOf("try {")).toBeLessThan(publishSource.indexOf("docker.client"));
+    // Read-only image preflight allocates no container; create remains inside cleanup.
+    expect(publishSource.indexOf("try {")).toBeLessThan(
+      publishSource.indexOf("containerId = decodeUtf8"),
+    );
     expect(publishSource).toContain("releaseFailedPublish");
   });
 });

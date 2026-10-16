@@ -1018,11 +1018,13 @@ mod selected_task_origin_http_tests {
             ),
         ] {
             let id = if table == "tasks" { task } else { project };
-            sqlx::query(&format!("UPDATE {table} SET {assignment} WHERE id=?1"))
-                .bind(id.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {assignment} WHERE id=?1"
+            )))
+            .bind(id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
             let (code, body) = call(
                 app.clone(),
                 "PATCH",
@@ -1034,11 +1036,13 @@ mod selected_task_origin_http_tests {
             .await;
             assert_eq!(code, StatusCode::CONFLICT);
             assert_eq!(body["code"], expected);
-            sqlx::query(&format!("UPDATE {table} SET {restore} WHERE id=?1"))
-                .bind(id.as_bytes().as_slice())
-                .execute(&f.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET {restore} WHERE id=?1"
+            )))
+            .bind(id.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
         }
         let live = hub.project_live(key, f.user, credential).await.unwrap();
         let seed = SeedEngine::from_hub(&hub)

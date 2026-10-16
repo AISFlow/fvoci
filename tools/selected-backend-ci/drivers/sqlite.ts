@@ -7,14 +7,17 @@
 import { deepEquals } from "bun";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -37,6 +40,8 @@ import {
   restoreSpec,
   validateOffReport,
   validateRestoreReport,
+  productSpec,
+  validateProductReport,
   type Current,
 } from "./binding.ts";
 import {
@@ -74,7 +79,34 @@ import {
   type Receipt,
   type Row,
 } from "./common.ts";
-import { browserArgs } from "./postgres.ts";
+import { AUTH_SPEC, authEventRows } from "../../turso/ui-auth-session.ts";
+import * as auditModule from "../../turso/ui-audit.ts";
+import {
+  FIXTURE_BUDGET,
+  get,
+  list,
+  record,
+  requestPublic,
+  inviteFinalActor,
+  token,
+} from "../../turso/ui-common.ts";
+import {
+  assertSelectedSuccessfulWrites,
+  type SelectedNativeReceipt,
+  type SelectedSyncWrite,
+} from "../../turso/ui-selected-native-policy.ts";
+
+import {
+  authBrowserEnvironment,
+  authConfig,
+  authLaneVerdict,
+  authServerEnvironment,
+  browserArgs,
+  startAuthSink,
+  stopAuthSink,
+  type AuthSink,
+} from "./postgres.ts";
+import { equalSpec, measureBrowser, measurementInputs, validateEqualReport } from "./equal-work.ts";
 import {
   browserPort,
   restartSameApp,
@@ -85,6 +117,330 @@ import {
 export const sqliteDriver = import.meta.path;
 export const image =
   "ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7";
+
+/** Bind only the two existing fresh-open/reload writes to complete native rows.
+ * Original bytes and every original receipt/update remain independently exact. */
+export async function sqliteReadbackAppendWitness(input: {
+  original: unknown;
+  current: unknown;
+  before: unknown;
+  prepared: unknown;
+  workspaceId: string;
+  documentId: string;
+  actorId: string;
+  writes: unknown;
+  clocks: [string, string];
+}) {
+  const { integer, uuidHex } = auditModule;
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const original = input.original,
+    current = input.current;
+  for (const key of ["state", "cutoff", "content", "text", "version", "revisions"])
+    assert.ok(
+      deepEquals(get(original, key), get(current, key), true),
+      "original wiki bytes changed",
+    );
+  const oldTail = get(original, "tail");
+  assert.ok(Number.isSafeInteger(oldTail) && Number(oldTail) >= 0);
+  assert.ok(get(current, "tail") === Number(oldTail) + 2);
+  const added: Record<string, unknown[]> = {};
+  for (const key of ["updates", "receipts"]) {
+    const old = list(original, key),
+      now = list(current, key);
+    assert.ok(now.length === old.length + 2 && deepEquals(now.slice(0, old.length), old, true));
+    const delta = now.slice(old.length);
+    added[key] = delta;
+    assert.ok(delta.every((row, i) => get(row, "seq") === Number(oldTail) + i + 1));
+  }
+  const receipts = added.receipts as SelectedNativeReceipt[];
+  assert.ok(Array.isArray(input.writes) && input.writes.length <= 10000);
+  const writes = input.writes as SelectedSyncWrite[];
+  assert.ok(
+    writes.every(
+      (w) =>
+        w.workspaceId === input.workspaceId &&
+        w.documentId === input.documentId &&
+        w.actorId === input.actorId,
+    ),
+  );
+  assertSelectedSuccessfulWrites(receipts, writes, input.workspaceId, input.documentId);
+  assert.ok(receipts.every((r) => r.actor === input.actorId));
+  for (let i = 0; i < 2; i++) {
+    const update = added.updates?.[i],
+      receipt = receipts[i];
+    const hex = get(update, "hex");
+    assert.ok(typeof hex === "string" && /^(?:[a-f0-9]{2})+$/.test(hex) && receipt !== undefined);
+    assert.ok(
+      get(update, "op") === receipt.op &&
+        get(update, "seq") === receipt.seq &&
+        Buffer.from(hex, "hex").length === receipt.len &&
+        createHash("sha256").update(Buffer.from(hex, "hex")).digest("hex") === receipt.sha,
+    );
+  }
+  const rows: Record<string, Record<string, number>> = {};
+  for (const [table, columns, key] of [
+    [
+      "document_collab_updates",
+      ["workspace_id", "document_id", "seq", "op_id", "payload", "created_at"],
+      "updates",
+    ],
+    [
+      "document_collab_op_receipts",
+      [
+        "workspace_id",
+        "document_id",
+        "op_id",
+        "seq",
+        "payload_len",
+        "payload_sha256",
+        "actor_user_id",
+        "created_at",
+      ],
+      "receipts",
+    ],
+  ] as const) {
+    const old = list(original, "appendRows", table),
+      now = list(current, "appendRows", table);
+    assert.ok(now.length === old.length + 2 && deepEquals(now.slice(0, old.length), old, true));
+    rows[table] = {};
+    for (const [index, row] of now.entries()) {
+      const cells = list(row, "cells"),
+        sha = get(row, "sha256");
+      assert.ok(
+        deepEquals(get(row, "columns"), columns, true) &&
+          cells.length === columns.length &&
+          sha === hash(cells),
+      );
+      assert.ok(
+        deepEquals(cells[0], ["blob", uuidHex(input.workspaceId)], true) &&
+          deepEquals(cells[1], ["blob", uuidHex(input.documentId)], true),
+      );
+      assert.ok(get(input.prepared, "fingerprints", table, sha) === 1);
+      if (index < old.length) {
+        assert.ok(get(input.before, "fingerprints", table, sha) === 1);
+        continue;
+      }
+      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), sha));
+      const delta = index - old.length,
+        receipt = receipts[delta];
+      assert.ok(receipt !== undefined);
+      const expected =
+        key === "updates"
+          ? [
+              ["integer", String(receipt.seq)],
+              ["blob", uuidHex(receipt.op)],
+              ["blob", get(added.updates?.[delta], "hex")],
+            ]
+          : [
+              ["blob", uuidHex(receipt.op)],
+              ["integer", String(receipt.seq)],
+              ["integer", String(receipt.len)],
+              ["blob", receipt.sha],
+              ["blob", uuidHex(input.actorId)],
+            ];
+      assert.ok(deepEquals(cells.slice(2, -1), expected, true));
+      const time = integer(cells.at(-1));
+      assert.ok(
+        time >= integer(["integer", input.clocks[0]]) &&
+          time <= integer(["integer", input.clocks[1]]),
+      );
+      assert.ok(!Object.hasOwn(rows[table], sha));
+      rows[table][sha] = 1;
+    }
+    assert.ok(Object.keys(rows[table]).length === 2);
+  }
+  const publications = sqliteAppendPublicationWitness({ ...input, receipts });
+  return Promise.resolve({
+    ...publications,
+    count: 2 as const,
+    rows: { ...rows, ...publications.rows },
+  });
+}
+
+/** The same complete native publication contract serves readback and PRODUCT4. */
+export function sqliteAppendPublicationWitness(input: {
+  original: unknown;
+  current: unknown;
+  before: unknown;
+  prepared: unknown;
+  workspaceId: string;
+  documentId: string;
+  receipts: SelectedNativeReceipt[];
+  clocks: [string, string];
+}) {
+  const rows: Record<string, Record<string, number>> = {};
+  const actors: Record<string, string> = {};
+  const { original, current, receipts } = input;
+  const { integer, uuidHex } = auditModule;
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  assert.ok(receipts.length <= 10000);
+  const eventOperations: Record<string, unknown[]> = {};
+  const eventIds: Record<string, string> = {};
+  const generation = get(current, "writer_generation");
+  assert.ok(Number.isSafeInteger(generation) && Number(generation) > 0);
+  const publicationIds = new Set<string>(),
+    eventSequences = new Set<string>();
+  for (const [table, columns] of [
+    [
+      "events",
+      [
+        "id",
+        "seq",
+        "workspace_id",
+        "actor_user_id",
+        "verb",
+        "target_type",
+        "target_id",
+        "payload",
+        "channel",
+        "created_at",
+      ],
+    ],
+    [
+      "audit_log",
+      [
+        "id",
+        "actor_user_id",
+        "workspace_id",
+        "verb",
+        "target_type",
+        "target_id",
+        "payload",
+        "ip",
+        "created_at",
+      ],
+    ],
+  ] as const) {
+    const old = list(original, "appendRows", table),
+      now = list(current, "appendRows", table);
+    assert.ok(
+      now.length === old.length + receipts.length &&
+        deepEquals(now.slice(0, old.length), old, true),
+    );
+    rows[table] = {};
+    const matched = new Set<string>();
+    for (const [index, row] of now.entries()) {
+      const cells = list(row, "cells"),
+        sha = get(row, "sha256");
+      assert.ok(
+        deepEquals(get(row, "columns"), columns, true) &&
+          cells.length === columns.length &&
+          sha === hash(cells),
+      );
+      assert.ok(get(input.prepared, "fingerprints", table, sha) === 1);
+      if (index < old.length) {
+        assert.ok(get(input.before, "fingerprints", table, sha) === 1);
+        continue;
+      }
+      assert.ok(!Object.hasOwn(record(input.before, "fingerprints", table), sha));
+      const event = table === "events",
+        offset = event ? 1 : 0;
+      const id = get(cells, 0, 1);
+      assert.ok(
+        deepEquals(cells[0], ["blob", id], true) &&
+          typeof id === "string" &&
+          /^[a-f0-9]{32}$/.test(id) &&
+          !/^0+$/.test(id) &&
+          !publicationIds.has(id),
+      );
+      publicationIds.add(id);
+      assert.ok(deepEquals(cells[2], ["blob", uuidHex(input.workspaceId)], true));
+      assert.ok(
+        deepEquals(cells[3 + offset], ["text", "document.collab_update_appended"], true) &&
+          deepEquals(cells[4 + offset], ["text", "document"], true) &&
+          deepEquals(cells[5 + offset], ["blob", uuidHex(input.documentId)], true),
+      );
+      const matches = receipts.filter(
+        (receipt) =>
+          deepEquals(cells[event ? 3 : 1], ["blob", uuidHex(receipt.actor)], true) &&
+          deepEquals(
+            cells[6 + offset],
+            [
+              "text",
+              JSON.stringify({
+                documentId: input.documentId,
+                opId: receipt.op,
+                seq: receipt.seq,
+                writerGeneration: generation,
+              }),
+            ],
+            true,
+          ),
+      );
+      assert.ok(matches.length === 1 && matches[0] !== undefined && !matched.has(matches[0].op));
+      matched.add(matches[0].op);
+      actors[sha] = uuidHex(matches[0].actor);
+      const time = integer(cells.at(-1));
+      assert.ok(
+        time >= integer(["integer", input.clocks[0]]) &&
+          time <= integer(["integer", input.clocks[1]]),
+      );
+      if (event) {
+        assert.ok(deepEquals(cells[8], ["text", "web"], true));
+        const sequence = integer(cells[1]);
+        assert.ok(sequence > 0n && !eventSequences.has(sequence.toString()));
+        eventSequences.add(sequence.toString());
+        const operation = cells.slice(1, 4);
+        assert.ok(
+          list(input.prepared, "operations", "events").filter((value) =>
+            deepEquals(value, operation, true),
+          ).length === 1,
+        );
+        eventOperations[sha] = operation;
+        eventIds[sha] = id;
+      } else {
+        assert.ok(
+          deepEquals(cells[7], ["null"], true) ||
+            (Array.isArray(cells[7]) &&
+              cells[7].length === 2 &&
+              cells[7][0] === "text" &&
+              typeof cells[7][1] === "string"),
+        );
+      }
+      assert.ok(!Object.hasOwn(rows[table], sha));
+      rows[table][sha] = 1;
+    }
+    assert.ok(
+      matched.size === receipts.length && Object.keys(rows[table]).length === receipts.length,
+    );
+  }
+  return { count: receipts.length, rows, eventOperations, eventIds, actors };
+}
+
+/** Read only the separate, completed observer packet, never its mixed log. */
+export function readSelectedSqlitePacket(path: string): Record<string, unknown> {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(fd);
+    assert.ok(
+      before.isFile() &&
+        before.nlink === 1 &&
+        before.uid === process.getuid?.() &&
+        before.gid === process.getgid?.() &&
+        (before.mode & 0o777) === 0o600 &&
+        before.size > 0 &&
+        before.size < 64 * 1024 * 1024,
+      "SQLite native packet ownership/bound refused",
+    );
+    const bytes = readFileSync(fd),
+      after = fstatSync(fd);
+    assert.ok(
+      bytes.length === before.size &&
+        after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        after.ctimeMs === before.ctimeMs,
+      "SQLite native packet changed",
+    );
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    assert.ok(
+      typeof value === "object" && value !== null && !Array.isArray(value),
+      "SQLite native packet object required",
+    );
+    return value as Record<string, unknown>;
+  } finally {
+    closeSync(fd);
+  }
+}
 const checkpointKeys = [
   "known_driver_checkpoint",
   "preparation_command_exit",
@@ -92,6 +448,8 @@ const checkpointKeys = [
 ] as const;
 
 // The I/O this driver owns, replaceable as one boundary in tests.
+type ProductCallbacks = NonNullable<RestartContext["sqliteProducts"]> &
+  Pick<RestartContext, "beforeRestartStop">;
 export interface Seam extends RestartSeam {
   trap: () => void;
   loadCurrent: (lane: "sqlite", driver: string) => Promise<Current>;
@@ -100,6 +458,7 @@ export interface Seam extends RestartSeam {
   migrationRows: (db: string) => unknown[][];
   validateOffReport: (report: unknown, backend: "sqlite") => string[];
   restart: (context: RestartContext, seam: RestartSeam) => Promise<Receipt>;
+  products: (state: State, seam: Seam) => Promise<ProductCallbacks>;
 }
 export interface State {
   current: Current;
@@ -137,6 +496,7 @@ export interface State {
   browserInputs: Browser | null;
   databaseInode: Inode | null;
   code: number;
+  sink?: AuthSink;
 }
 
 // ---- pure decisions -------------------------------------------------------
@@ -455,7 +815,7 @@ async function startServer(state: State, seam: Seam): Promise<void> {
   const { receipt, run } = state;
   receipt.phase = "server-startup";
   const log = join(run, "normal-server.log");
-  state.serverLog = openSync(log, "w");
+  state.serverLog = openSync(log, "wx", 0o600);
   // prettier-ignore
   const server = seam.spawnServer(["docker", "exec", state.name, "/bin/sh", "-ec",
     ". /fvoci/inputs/environment.sh; exec /fvoci/bin/fvoci-migrate --start"], state.serverLog);
@@ -534,6 +894,12 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     db,
     serverEnv: state.serverEnv,
   });
+  const equal = state.current.manifest.purpose === "equal-work";
+  const measurements = join(run, "equal-work-samples");
+  if (equal) state.browserEnv.FVOCI_E2E_EQUAL_WORK_DIR = measurements;
+  const sink = state.sink;
+  if (sink !== undefined)
+    Object.assign(state.browserEnv, authBrowserEnvironment(state.head, state.tree, sink));
   const web = join(root, "apps/web");
   // prettier-ignore
   const chromium = (await seam.command([state.bun, "--eval",
@@ -548,6 +914,9 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   state.browserInputs = browserInputs;
   writeJson(join(run, "actual-browser-inputs.json"), browserInputs);
   const args = browserArgs(state.bun, join(root, "node_modules/playwright/cli.js"), state.spec);
+  if (equal) args[args.indexOf("--config") + 1] = "e2e-pending/equal-work-playwright.config.ts";
+  if (sink !== undefined) args[args.indexOf("--config") + 1] = authConfig;
+  const eventsBefore = sink === undefined ? null : authEventRows(authEvents(db), "sqlite");
   receipt.phase = "browser";
   Object.assign(receipt, {
     browser_command: args,
@@ -558,10 +927,17 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   const started = performance.now();
   const log = join(run, "browser.log");
   // prettier-ignore
-  const result = await seam.command(args,
-    { log, required: false, env: state.browserEnv, cwd: web });
+  const invoke = async () => {
+    const result = await seam.command(args, { log, required: false, env: state.browserEnv, cwd: web });
+    state.code = result.returncode;
+    if (state.code !== 0) recordFailure(state, state.code, undefined, log);
+    return result;
+  };
+  const measured = equal
+    ? await measureBrowser(measurements, state.name, state.base as string, invoke, seam.command)
+    : null;
+  const result = measured?.result ?? (await invoke());
   state.code = result.returncode;
-  if (state.code !== 0) recordFailure(state, state.code, undefined, log);
   const report = join(run, "playwright-result.private.json");
   if (existsSync(report)) {
     chmodSync(report, 0o600);
@@ -582,10 +958,50 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
   if (state.code !== 0) return;
   assert.ok(actors.length === 1, "exactly one fresh selected actor fixture");
   assertActorReceipt(read(join(dbroot, actors[0] as string)));
+  assert.ok(deepEquals(inodeOf(db), state.databaseInode), "no replacement/reset DB");
+  if (equal) {
+    receipt.purpose = "equal-work";
+    receipt.equal_work = {
+      inputs: measurementInputs(
+        state.before,
+        state.current.build,
+        state.current.assets,
+        browserInputs,
+        image,
+      ),
+      browser: validateEqualReport(read(report), "sqlite", flow),
+      samples: measured?.samples,
+    };
+    Object.assign(receipt, {
+      actual_browser_tests: 1,
+      retries: 0,
+      ignored: 0,
+      actual_fixture_pin_checks_completed: true,
+    });
+    return;
+  }
+  if (eventsBefore !== null) {
+    const after = authEventRows(authEvents(db), "sqlite");
+    const binding = { backend: "sqlite", flow, source: state.head, tree: state.tree } as const;
+    const verdict = authLaneVerdict(read(report), binding, eventsBefore, after);
+    privateText(join(run, "auth-session-verdict.private.json"), JSON.stringify(verdict));
+    Object.assign(receipt, {
+      purpose: "auth-session",
+      auth_session: {
+        cases: verdict.cases,
+        events: verdict.events,
+        verdict_sha256: sha(join(run, "auth-session-verdict.private.json")),
+      },
+      actual_browser_tests: 3,
+      retries: 0,
+      ignored: 0,
+      actual_fixture_pin_checks_completed: true,
+    });
+    return;
+  }
   if (flow === "on")
     assert.ok(/\b1 passed\b/.test(readText(log)), "exact one selected browser test");
   else receipt.actual_off_titles = seam.validateOffReport(read(report), "sqlite");
-  assert.ok(deepEquals(inodeOf(db), state.databaseInode), "no replacement/reset DB");
   Object.assign(receipt, {
     actual_browser_tests: flow === "off" ? 8 : 1,
     retries: 0,
@@ -623,10 +1039,11 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     receipt.sqlite_restore_browser = { exit: 0, actual_tests: 1, skipped: 0, retries: 0 };
     receipt.sqlite_restore_report_sha256 = sha(restoreReport);
     receipt.phase = "restart";
-    receipt.current_schema_server_restart = await seam.restart(
-      restartContext(state, browserInputs, seam),
-      seam,
-    );
+    const context = restartContext(state, browserInputs, seam);
+    const { beforeRestartStop, ...products } = await seam.products(state, seam);
+    context.beforeRestartStop = beforeRestartStop;
+    context.sqliteProducts = products;
+    receipt.current_schema_server_restart = await seam.restart(context, seam);
   }
 }
 function restartContext(state: State, browserInputs: Browser, seam: Seam): RestartContext {
@@ -760,6 +1177,13 @@ export function finalize(state: State, seam: Seam): Promise<number> {
       if (receipt.owned_loopback_port_closed !== true)
         cleanupErrors.push("owned-loopback-port-closure-unconfirmed");
     } else cleanupErrors.push("owned loopback port never observed; retirement remains unqualified");
+    const sink = state.sink;
+    if (sink !== undefined) {
+      const stopped = await attempt("smtp-sink-stop-failed", () => stopAuthSink(sink));
+      receipt.auth_smtp_sink = stopped;
+      if (stopped === null || stopped.exit !== -15 || stopped.forced || !stopped.listenerAbsent)
+        cleanupErrors.push("owned-smtp-sink-retirement-unconfirmed");
+    }
     try {
       const after = await seam.inputCheck(state.before, state.head, state.tree);
       writeJson(join(run, "source-inputs-after.json"), after);
@@ -824,9 +1248,13 @@ export async function main(
     tree = manifest.tree;
   const owner = env("FVOCI_CI_OWNER", source);
   const spec =
-    flow === "off"
-      ? "workspace-off-selected-backend.spec.ts"
-      : "workspace-wiki-selected-backend.spec.ts";
+    current.manifest.purpose === "equal-work"
+      ? equalSpec
+      : current.manifest.purpose === "auth-session"
+        ? AUTH_SPEC
+        : flow === "off"
+          ? "workspace-off-selected-backend.spec.ts"
+          : "workspace-wiki-selected-backend.spec.ts";
   const bun = env("FVOCI_CI_BUN", source);
   assert.ok(source.FVOCI_ROOT_RUN_OWNER === owner);
   const before = current.before;
@@ -859,8 +1287,15 @@ export async function main(
   assert.ok(!existsSync(db));
   const name = "fvoci-v060-vue-sqlite-current-" + randomBytes(6).toString("hex");
   const serverEnv = serverEnvironment(flow, () => randomBytes(32).toString("hex"));
-  privateText(join(run, "environment.private.json"), JSON.stringify(serverEnv));
-  privateText(join(run, "environment.private.sh"), shellExports(serverEnv));
+  if (current.manifest.purpose === "equal-work") serverEnv.METRICS_ALLOW_IPS = "127.0.0.1";
+  const auth = current.manifest.purpose === "auth-session";
+  if (auth) Object.assign(serverEnv, authServerEnvironment(null));
+  const environmentFiles = () => {
+    privateText(join(run, "environment.private.json"), JSON.stringify(serverEnv));
+    privateText(join(run, "environment.private.sh"), shellExports(serverEnv));
+  };
+  // The auth files wait for the owned sink, which finalize then retires.
+  if (!auth) environmentFiles();
   const state: State = {
     current,
     driver,
@@ -941,6 +1376,11 @@ export async function main(
   writeJson(join(run, "start.json"), state.receipt);
   seam.trap();
   try {
+    if (auth) {
+      state.sink = await startAuthSink(run, bun);
+      Object.assign(serverEnv, authServerEnvironment(state.sink));
+      environmentFiles();
+    }
     await prepareContainer(state, seam);
     await startServer(state, seam);
     await qualifyServer(state, seam);
@@ -962,7 +1402,684 @@ export function migrationRows(path: string): unknown[][] {
     observer.close();
   }
 }
+// Read-only `auth.%` event observation; a full bound is refused by the caller.
+export function authEvents(path: string): unknown[][] {
+  const observer = new Database(path, { readonly: true });
+  try {
+    return observer
+      .query(
+        "SELECT seq,verb,channel,workspace_id,actor_user_id,target_type,target_id,payload FROM events WHERE verb LIKE 'auth.%' ORDER BY seq LIMIT 10001",
+      )
+      .values();
+  } finally {
+    observer.close();
+  }
+}
+/** Source-bound adapter for the existing restart owner, with separate exact
+ * PRODUCT4 browser/report/native receipts and no second normal server manager. */
+export async function productCallbacks(state: State, seam: Seam): Promise<ProductCallbacks> {
+  assert.ok(
+    state.flow === "on" &&
+      state.current.manifest.purpose === undefined &&
+      state.serverRow !== null &&
+      state.serverProcess !== null &&
+      state.serverLog !== null &&
+      state.base !== null,
+  );
+  const manifest = {
+    sourceInputs: { source: state.head, tree: state.tree, files: state.before.tracked },
+    binaries: Object.fromEntries(
+      Object.entries(state.current.build.binaries).map(([path, binary]) => [
+        binary.target.name,
+        { ...binary, path },
+      ]),
+    ),
+  };
+  const target = failureDigest(
+    JSON.stringify({ source: state.head, tree: state.tree, inode: state.databaseInode }),
+  );
+  const oldOrigin = auditModule.captureSelectedRoomLog(
+    manifest,
+    join(state.run, "normal-server.log"),
+    state.serverLog,
+    state.serverProcess,
+    state.serverRow,
+    state.base,
+    target,
+  );
+  const directory = join(state.run, "products");
+  mkdirSync(directory, 0o700);
+  const sourceConfig = join(root, "src/config.rs");
+  assert.ok(sha(sourceConfig) === state.before.tracked["src/config.rs"]);
+  const config = readText(sourceConfig);
+  const constant = (name: string) => {
+    const match = new RegExp("pub const " + name + ": u32 = ([0-9]+);").exec(config);
+    assert.ok(match !== null);
+    return Number(match[1]);
+  };
+  const policy = {
+    revisionKeep: constant("DEFAULT_REVISION_KEEP"),
+    revisionSnapshotIntervalHours: constant("DEFAULT_REVISION_SNAPSHOT_INTERVAL_HOURS"),
+  };
+  const mainSource = join(root, "src/main.rs");
+  assert.ok(
+    sha(mainSource) === state.before.tracked["src/main.rs"] &&
+      /FamilyMaintenanceLeasePolicy::new\(\s*std::time::Duration::from_secs\(300\),\s*std::time::Duration::from_secs\(60\),\s*\)/.test(
+        readText(mainSource),
+      ),
+    "selected native maintenance policy changed",
+  );
+  assert.ok(
+    (state.serverEnv.REVISION_KEEP ?? String(policy.revisionKeep)) ===
+      String(policy.revisionKeep) &&
+      (state.serverEnv.REVISION_SNAPSHOT_INTERVAL_HOURS ??
+        String(policy.revisionSnapshotIntervalHours)) ===
+        String(policy.revisionSnapshotIntervalHours),
+  );
+  const namespace = "tui-" + token(10);
+  const audit: import("../../turso/ui-audit.ts").Audit = {
+    namespaces: [namespace],
+    actors: {},
+    workspaces: {},
+    documents: {},
+    servers: [],
+    targetSha256: target,
+    serverStarts: 1,
+    observedFences: [],
+  };
+  const nativeEnvironment: Record<string, string> = {};
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LD_LIBRARY_PATH",
+    "TMPDIR",
+    "RUNNER_TEMP",
+    "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITHUB_SHA",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "FVOCI_CI_BUN",
+    "FVOCI_CI_OWNER",
+    "FVOCI_CI_SELECTED_RUNS",
+    "FVOCI_ROOT_RUN_OWNER",
+    "FVOCI_ROOT_CURRENT_BINDING",
+    "FVOCI_ROOT_CURRENT_ALLOCATION",
+    "FVOCI_ROOT_RESTART_GRANT",
+    "FVOCI_SELECTED_EXECUTION_MODE",
+    "FVOCI_SELECTED_LOCAL_ALLOCATION",
+    "FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256",
+    "FVOCI_LOCAL_RUN_ID",
+    "FVOCI_LOCAL_DISPATCH_ID",
+    "FVOCI_LOCAL_TASK_ID",
+    "FVOCI_LOCAL_ROOT_TERMINAL",
+    "ORCA_TERMINAL_HANDLE",
+  ]) {
+    const value = state.source[key];
+    if (value !== undefined) nativeEnvironment[key] = value;
+  }
+  assert.ok(sha(process.execPath) === state.browserInputs?.bun.sha256);
+  const native = async (
+    mode: string,
+    input: Record<string, unknown>,
+    label: string,
+    signal?: AbortSignal,
+  ) => {
+    assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
+    const nativeLog = join(directory, label + ".native.private.log");
+    const packetPath = join(directory, label + ".native.private.json");
+    privateText(nativeLog, "");
+    const result = await seam.command(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--config=" + join(root, "bunfig.toml"),
+        join(root, "tools/turso/ui-container.ts"),
+        "--selected-sqlite-observe",
+        mode,
+        packetPath,
+      ],
+      {
+        env: nativeEnvironment,
+        input: JSON.stringify({ container: state.name, inode: state.databaseInode, input }),
+        cwd: root,
+        log: nativeLog,
+        waitOnInterrupt: true,
+        signal,
+      },
+    );
+    assert.ok(result.returncode === 0 && result.stdout === "" && result.stderr === "");
+    const parsed = readSelectedSqlitePacket(packetPath);
+    assert.ok(
+      parsed.connectionClose === "confirmed" &&
+        parsed.lifecycleDrain === "confirmed" &&
+        parsed.leases === 0,
+    );
+    assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
+    return parsed;
+  };
+  const serial = async (label: string, validate: boolean, signal?: AbortSignal) => {
+    const start = BigInt(Date.now()) * 1000n;
+    const observation = await native("serial-observe", policy, label, signal);
+    const end = BigInt(Date.now()) * 1000n;
+    if (validate) {
+      const checked = auditModule.validateSerialObservation(observation, policy, false, "sqlite");
+      auditModule.assertNativeClock(checked, start, end);
+      return checked;
+    }
+    const checked = {
+      dataset: record(observation, "dataset"),
+      checks: record(observation, "checks"),
+    };
+    auditModule.assertNativeClock(checked, start, end);
+    return checked;
+  };
+  let original: import("../../turso/ui-audit.ts").SerialObservation | undefined;
+  let current: import("../../turso/ui-audit.ts").SerialObservation | undefined;
+  let restartedOrigin: import("../../turso/ui-audit.ts").SelectedRoomOrigin | undefined;
+  let originalSeed: Record<string, unknown> | undefined;
+  let preparedSeed: unknown;
+  let storageOriginal: Record<string, string> | undefined;
+  const targets: {
+    workspaceId: string;
+    documentId: string;
+    receipts: SelectedNativeReceipt[];
+  }[] = [];
+  const writes: SelectedSyncWrite[] = [];
+  let productPassed = false;
+  let productReadbacks: unknown[] = [];
+  return Promise.resolve({
+    async afterSeedStopped(rows, seed) {
+      const retired = await auditModule.selectedRoomRetirement(manifest, oldOrigin, target, rows);
+      original = await serial("original", true);
+      original.roomHistory = [retired];
+      auditModule.assertRoomClosure(original, target);
+      storageOriginal = seam.treeHashes(state.storage);
+      const seedId = String(get(seed, "document", "id")),
+        workspaceId = String(get(seed, "workspaceId"));
+      originalSeed = await native(
+        "observe",
+        { workspaceId, documentIds: [seedId] },
+        "original-seed",
+      );
+    },
+    async afterReadback(server) {
+      assert.ok(original !== undefined && originalSeed !== undefined);
+      assert.ok(
+        get(server.readback, "source") === state.head &&
+          get(server.readback, "tree") === state.tree &&
+          get(server.readback, "freshActorId") === get(server.seed, "freshActorId"),
+      );
+      restartedOrigin = auditModule.captureSelectedRoomLog(
+        manifest,
+        server.logpath,
+        server.log,
+        server.child,
+        server.row,
+        server.base,
+        target,
+      );
+      const logged = await requestPublic(server.base, "/api/v1/auth/login", {
+        email: "Admin@Example.COM",
+        password: "supersecret1",
+      });
+      const bootstrap = await requestPublic(
+        server.base,
+        "/api/v1/auth/me",
+        undefined,
+        logged.cookie,
+      );
+      assert.ok(
+        get(bootstrap.value, "isInstanceAdmin") === true &&
+          get(bootstrap.value, "userId") === get(logged.value, "userId"),
+      );
+      const workspace = await requestPublic(
+        server.base,
+        "/api/v1/workspaces",
+        { name: namespace, slug: namespace },
+        logged.cookie,
+      );
+      const workspaceId = String(get(workspace.value, "id"));
+      const owner = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        logged.cookie,
+        namespace + "-owner@example.invalid",
+        "Aa1!" + token(16),
+        "owner",
+        "owner",
+      );
+      const member = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        owner.cookie,
+        namespace + "-member@example.invalid",
+        "Aa1!" + token(16),
+        "member",
+        "member",
+      );
+      const outsider = await inviteFinalActor(
+        server.base,
+        workspaceId,
+        owner.cookie,
+        namespace + "-outsider@example.invalid",
+        "Aa1!" + token(16),
+        "member",
+        "outsider",
+      );
+      for (const actor of [owner, member, outsider]) {
+        const actual = await requestPublic(server.base, "/api/v1/auth/me", undefined, actor.cookie);
+        assert.ok(
+          get(actual.value, "userId") === actor.userId &&
+            get(actual.value, "email") === actor.email,
+        );
+        audit.actors[auditModule.uuidHex(actor.userId)] = actor.email;
+      }
+      audit.workspaces[auditModule.uuidHex(workspaceId)] = namespace;
+      current = await serial("prepared", false);
+      const nativeActor = (id: string, email?: string) => {
+        const rows = list(current, "checks", "users").filter((row) => get(row, "id") === id);
+        assert.ok(rows.length === 1 && (email === undefined || get(rows[0], "email") === email));
+        return rows[0];
+      };
+      for (const [actor, role] of [
+        [owner, "owner"],
+        [member, "member"],
+        [outsider, "member"],
+      ] as const) {
+        nativeActor(actor.userId, actor.email);
+        assert.ok(
+          list(current, "checks", "memberships").filter(
+            (row) =>
+              get(row, "workspaceId") === workspaceId &&
+              get(row, "userId") === actor.userId &&
+              get(row, "role") === role,
+          ).length === 1,
+        );
+      }
+      const originalActor = (id: string) => {
+        const rows = list(original, "checks", "users").filter((row) => get(row, "id") === id);
+        assert.ok(rows.length === 1);
+        const sessions = Object.entries(
+          record(current, "dataset", "allocations", "sessions"),
+        ).filter(
+          ([hash, refs]) =>
+            !Object.hasOwn(record(original, "dataset", "fingerprints", "sessions"), hash) &&
+            list(refs, "actors").includes(auditModule.uuidHex(id)),
+        );
+        assert.ok(sessions.length === 1 && sessions[0] !== undefined);
+        return {
+          id: auditModule.uuidHex(id),
+          email: String(get(rows[0], "email")),
+          rowFingerprint: String(get(rows[0], "rowFingerprint")),
+          sessionId: String(get(sessions[0][1], "self")),
+        };
+      };
+      const preparationActor = originalActor(String(get(bootstrap.value, "userId")));
+      assert.ok(
+        preparationActor.email === get(bootstrap.value, "email") &&
+          preparationActor.sessionId === auditModule.uuidHex(get(bootstrap.value, "sessionId")),
+      );
+      audit.sqlitePreparation = {
+        preparationActor,
+        readbackActor: originalActor(String(get(server.seed, "freshActorId"))),
+        workspace: auditModule.uuidHex(get(server.seed, "workspaceId")),
+        document: auditModule.uuidHex(get(server.seed, "document", "id")),
+        original,
+        prepared: current,
+        state: {
+          original: list(
+            get(originalSeed, "rows", String(get(server.seed, "document", "id"))),
+            "stateRow",
+          ),
+          current: [],
+          after: [],
+        },
+      };
+      const seedWorkspace = String(get(server.seed, "workspaceId")),
+        seedId = String(get(server.seed, "document", "id"));
+      const seedNative = await native(
+        "observe",
+        { workspaceId: seedWorkspace, documentIds: [seedId] },
+        "current-seed",
+      );
+      const seedRow = get(seedNative, "rows", seedId),
+        oldSeed = get(originalSeed, "rows", seedId);
+      audit.sqlitePreparation.readback = await sqliteReadbackAppendWitness({
+        original: oldSeed,
+        current: seedRow,
+        before: original.dataset,
+        prepared: current.dataset,
+        workspaceId: seedWorkspace,
+        documentId: seedId,
+        actorId: String(get(server.seed, "freshActorId")),
+        writes: get(server.readback, "readbackWrites"),
+        clocks: [String(original.checks.clockMicros), String(current.checks.clockMicros)],
+      });
+      preparedSeed = seedRow;
+      assert.ok(
+        deepEquals(get(seedRow, "stateColumns"), [
+          "workspace_id",
+          "document_id",
+          "state",
+          "encoding",
+          "compacted_at",
+          "created_at",
+          "updated_at",
+          "writer_generation",
+          "snapshot_cutoff_seq",
+          "tail_seq",
+        ]),
+      );
+      audit.sqlitePreparation.state.current = list(seedRow, "stateRow");
+      audit.observedFences.push(...(list(seedRow, "roomFences") as unknown[][]));
+      audit.sqlitePreparation.maintenance = {
+        server: auditModule.selectedMaintenanceSnapshot(manifest, restartedOrigin, target),
+        leaseMicros: "300000000",
+      };
+      auditModule.assertSqlitePreparedPreserved(original.dataset, current.dataset, audit);
+      assert.ok(storageOriginal !== undefined);
+      const storagePrepared = seam.treeHashes(state.storage);
+      for (const [path, hash] of Object.entries(storageOriginal))
+        assert.ok(
+          storagePrepared[path] === hash,
+          "original storage bytes changed during preparation",
+        );
+      privateText(
+        join(directory, "prepared-storage.private.json"),
+        JSON.stringify(storagePrepared),
+      );
+      const binding: import("../../../apps/web/e2e-pending/selected-final-contract.ts").FinalBinding =
+        {
+          schema: 1,
+          backend: "sqlite",
+          source: state.head,
+          tree: state.tree,
+          browser: "chromium",
+          flow: "on",
+          suite: "products",
+          namespace,
+          workspaceId,
+          workspaceSlug: namespace,
+          setupNeeded: false,
+          schemaCurrent: true,
+          commit: "confirmed",
+          lifecycleDrain: "confirmed",
+          leases: 0,
+          owner: { userId: owner.userId, email: owner.email, password: owner.password },
+          member: { userId: member.userId, email: member.email, password: member.password },
+          outsider: { userId: outsider.userId, email: outsider.email, password: outsider.password },
+        };
+      const bindingPath = join(directory, "actors.private.json"),
+        reportPath = join(directory, "playwright.private.json");
+      privateText(bindingPath, JSON.stringify(binding));
+      const bindingHash = sha(bindingPath);
+      const browserEnv: Record<string, string> = {};
+      for (const key of [
+        "PATH",
+        "LANG",
+        "TMPDIR",
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH",
+      ])
+        if (state.browserEnv[key] !== undefined) browserEnv[key] = state.browserEnv[key];
+      Object.assign(browserEnv, {
+        CI: "true",
+        PLAYWRIGHT_BASE_URL: server.base,
+        FVOCI_E2E_SELECTED_BACKEND: "sqlite",
+        FVOCI_E2E_SELECTED_FLOW: "on",
+        FVOCI_E2E_SELECTED_SOURCE: state.head,
+        FVOCI_E2E_SELECTED_TREE: state.tree,
+        FVOCI_E2E_FINAL_BROWSER: "chromium",
+        FVOCI_E2E_FINAL_SUITE: "products",
+        FVOCI_E2E_TURSO_NAMESPACE: namespace,
+        FVOCI_E2E_FINAL_ACTOR_BINDING: bindingPath,
+        FVOCI_E2E_FINAL_BROWSER_BIN: state.browserInputs?.chromium.path ?? "",
+        FVOCI_E2E_RESULT_DIR: directory,
+        PLAYWRIGHT_JSON_OUTPUT_FILE: reportPath,
+      });
+      const args = browserArgs(
+        process.execPath,
+        join(root, "node_modules/playwright/cli.js"),
+        productSpec,
+      );
+      args[args.indexOf("--config") + 1] = "e2e-pending/selected-final-playwright.config.ts";
+      privateText(join(directory, "browser.private.log"), "");
+      const result = await seam.command(args, {
+        env: browserEnv,
+        cwd: join(root, "apps/web"),
+        required: false,
+        log: join(directory, "browser.private.log"),
+      });
+      state.code = result.returncode;
+      if (state.code !== 0)
+        recordFailure(state, state.code, undefined, join(directory, "browser.private.log"));
+      assert.ok(state.code === 0, "SQLite PRODUCT4 browser failed");
+      chmodSync(reportPath, 0o600);
+      const report = read(reportPath);
+      assert.ok(sha(bindingPath) === bindingHash, "PRODUCT4 actor binding changed");
+      const titles = validateProductReport(report, binding, bindingHash);
+      const cases = auditModule.reportCases(
+        report,
+        "selected-final-acceptance.ts",
+        titles,
+        "sqlite",
+      );
+      productReadbacks = cases.map((item) => {
+        const wire = auditModule.attachment([item], "selected-final-writes.json"),
+          readback = auditModule.attachment([item], "selected-final-native-readback.json");
+        for (const evidence of [wire, readback])
+          assert.ok(
+            get(evidence, "source") === state.head &&
+              get(evidence, "tree") === state.tree &&
+              get(evidence, "browser") === "chromium" &&
+              get(evidence, "flow") === "on",
+          );
+        for (const actor of list(wire, "actors")) {
+          assert.ok(Object.hasOwn(audit.actors, auditModule.uuidHex(get(actor, "actorId"))));
+          writes.push(...(list(actor, "writes") as typeof writes));
+        }
+        return readback;
+      });
+      productPassed = true;
+      state.receipt.sqlite_products_browser = {
+        exit: 0,
+        actual_tests: 4,
+        skipped: 0,
+        retries: 0,
+        titles,
+        report_sha256: sha(reportPath),
+        binding_sha256: bindingHash,
+      };
+    },
+    async beforeRestartStop() {
+      // Browser actors have closed; let the live dispatcher finish their
+      // committed tail before cancellation deliberately leaves queued work.
+      checkInterrupt(true);
+      const signal = AbortSignal.timeout(FIXTURE_BUDGET * 1000);
+      for (let sample = 0; ; sample++) {
+        checkInterrupt(true);
+        signal.throwIfAborted();
+        const observation = await serial("settlement-" + String(sample), false, signal);
+        const checks = observation.checks;
+        const head = get(checks, "eventHead");
+        const relays = list(checks, "outbox");
+        assert.ok(typeof head === "string" && /^(0|[1-9][0-9]*)$/.test(head));
+        assert.ok(
+          deepEquals(relays.map((relay) => get(relay, "consumer")).sort(), [
+            "github",
+            "mail",
+            "notifications",
+            "push",
+            "webhooks",
+          ]),
+          "SQLite relay settlement requires the exact current registry",
+        );
+        const uploads = list(checks, "background").filter(
+          (fact) => get(fact, "kind") === "unfinished-uploads",
+        );
+        assert.ok(uploads.length === 1, "SQLite upload settlement requires its current fact");
+        if (
+          get(uploads[0], "eligibility") === "clear" &&
+          get(uploads[0], "now") === 0 &&
+          get(uploads[0], "throughHorizon") === 0 &&
+          relays.every((relay) => {
+            const seq = get(relay, "lastSeq");
+            assert.ok(typeof seq === "string" && /^(0|[1-9][0-9]*)$/.test(seq));
+            return BigInt(seq) === BigInt(head);
+          })
+        ) {
+          signal.throwIfAborted();
+          return;
+        }
+      }
+    },
+    async afterRestartStopped(rows) {
+      assert.ok(
+        original !== undefined &&
+          current !== undefined &&
+          restartedOrigin !== undefined &&
+          storageOriginal !== undefined,
+      );
+      const retired = await auditModule.selectedRoomRetirement(
+        manifest,
+        restartedOrigin,
+        target,
+        rows,
+      );
+      const after = await serial("after", true);
+      auditModule.retainRoomHistory(after, original, retired);
+      auditModule.assertRoomClosure(after, target);
+      audit.servers.push(
+        auditModule.maintenanceReceipts(
+          restartedOrigin.origin.log.path,
+          restartedOrigin.origin.identity,
+          target,
+        ),
+      );
+      audit.serial = { before: original, after, policy, expectedBackend: "sqlite" };
+      assert.ok(
+        productPassed && audit.sqlitePreparation !== undefined && originalSeed !== undefined,
+        "PRODUCT4 did not complete before normal retirement",
+      );
+      const finalSeed = await native(
+        "observe",
+        {
+          workspaceId: audit.sqlitePreparation.workspace.replace(
+            /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+            "$1-$2-$3-$4-$5",
+          ),
+          documentIds: [
+            audit.sqlitePreparation.document.replace(
+              /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+              "$1-$2-$3-$4-$5",
+            ),
+          ],
+        },
+        "after-seed",
+      );
+      const finalRow = get(finalSeed, "rows", Object.keys(record(finalSeed, "rows"))[0] as string);
+      assert.ok(preparedSeed !== undefined);
+      const oldRow = preparedSeed;
+      for (const key of [
+        "state",
+        "cutoff",
+        "tail",
+        "content",
+        "text",
+        "version",
+        "updates",
+        "receipts",
+        "revisions",
+        "appendRows",
+      ])
+        assert.ok(
+          deepEquals(get(oldRow, key), get(finalRow, key), true),
+          "original wiki native bytes/receipts changed after retirement",
+        );
+      audit.sqlitePreparation.state.after = list(finalRow, "stateRow");
+      audit.sqlitePreparation.products = [];
+      const documents = new Map<string, Set<string>>();
+      for (const row of productReadbacks) {
+        const workspace = String(get(row, "workspaceId")),
+          document = String(get(row, "targetId"));
+        auditModule.uuidHex(workspace);
+        auditModule.uuidHex(document);
+        if (!documents.has(workspace)) documents.set(workspace, new Set());
+        documents.get(workspace)?.add(document);
+      }
+      for (const write of writes) {
+        if (!documents.has(write.workspaceId)) documents.set(write.workspaceId, new Set());
+        documents.get(write.workspaceId)?.add(write.documentId);
+      }
+      for (const [workspaceId, ids] of documents) {
+        const observed = await native(
+          "observe",
+          { workspaceId, documentIds: [...ids] },
+          "after-products-" + token(4),
+        );
+        for (const documentId of ids) {
+          const row = get(observed, "rows", documentId);
+          if (audit.documents !== undefined)
+            audit.documents[auditModule.uuidHex(documentId)] = auditModule.uuidHex(workspaceId);
+          audit.observedFences.push(...(list(row, "roomFences") as unknown[][]));
+          const receipts = list(row, "receipts") as SelectedNativeReceipt[];
+          assertSelectedSuccessfulWrites(receipts, writes, workspaceId, documentId);
+          assert.ok(
+            !Object.values(record(original.dataset, "allocations", "documents")).some(
+              (refs) => get(refs, "self") === auditModule.uuidHex(documentId),
+            ),
+            "PRODUCT4 target was preexisting",
+          );
+          const publications = sqliteAppendPublicationWitness({
+            original: { appendRows: { events: [], audit_log: [] } },
+            current: row,
+            before: original.dataset,
+            prepared: after.dataset,
+            workspaceId,
+            documentId,
+            receipts,
+            clocks: [String(current.checks.clockMicros), String(after.checks.clockMicros)],
+          });
+          audit.sqlitePreparation.products.push({
+            ...publications,
+            workspace: auditModule.uuidHex(workspaceId),
+            document: auditModule.uuidHex(documentId),
+          });
+          targets.push({
+            workspaceId,
+            documentId,
+            receipts: list(row, "receipts") as (typeof targets)[number]["receipts"],
+          });
+          for (const readback of productReadbacks.filter(
+            (row) => get(row, "workspaceId") === workspaceId && get(row, "targetId") === documentId,
+          ))
+            assert.ok(
+              deepEquals(get(row, "content"), get(readback, "content"), true) &&
+                get(row, "text") === get(readback, "text"),
+            );
+        }
+      }
+
+      auditModule.auditSelectedFinalNative(original.dataset, after.dataset, audit, targets, writes);
+      const storageAfter = seam.treeHashes(state.storage);
+      for (const [path, hash] of Object.entries(storageOriginal))
+        assert.ok(storageAfter[path] === hash, "original storage bytes changed");
+      privateText(join(directory, "audit.private.json"), JSON.stringify(audit));
+      state.receipt.sqlite_products_native = {
+        observation: "PASS",
+        preservation: "PASS",
+        wire_receipts: "PASS",
+        normal_room_retirement: "PASS",
+        audit_sha256: sha(join(directory, "audit.private.json")),
+      };
+    },
+  });
+}
+
 export const sqliteSeam: Seam = {
+  products: productCallbacks,
   trap: trapInterrupts,
   loadCurrent,
   inputCheck: (before, head, tree) => inputCheck(before, head, tree),

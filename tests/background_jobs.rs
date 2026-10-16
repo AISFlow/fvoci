@@ -2453,7 +2453,7 @@ async fn install_gc_promotion_race_gate(admin: &PgPool) {
         ns = GC_PROMOTION_RACE_LOCK_NS,
         key = GC_PROMOTION_RACE_LOCK_KEY,
     );
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(admin)
         .await
         .expect("promotion gate fn");

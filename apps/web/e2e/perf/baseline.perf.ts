@@ -46,19 +46,19 @@ const uploadSchema = z
   .object({
     attachmentId: z.string(),
     partSizeBytes: z.number(),
-    parts: z.array(z.object({ partNumber: z.number(), url: z.string() }).passthrough()),
+    parts: z.array(z.object({ partNumber: z.number(), url: z.string() }).loose()),
   })
-  .passthrough();
-const taskSchema = z.object({ id: z.string(), number: z.number() }).passthrough();
+  .loose();
+const taskSchema = z.object({ id: z.string(), number: z.number() }).loose();
 const workspaceListSchema = z
-  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).passthrough()) })
-  .passthrough();
-const projectSchema = z.object({ id: z.string(), key: z.string() }).passthrough();
-const documentSchema = z.object({ id: z.string(), displayId: z.string() }).passthrough();
+  .object({ items: z.array(z.object({ id: z.string(), slug: z.string() }).loose()) })
+  .loose();
+const projectSchema = z.object({ id: z.string(), key: z.string() }).loose();
+const documentSchema = z.object({ id: z.string(), displayId: z.string() }).loose();
 const taskListSchema = z
-  .object({ items: z.array(z.object({ title: z.string() }).passthrough()) })
-  .passthrough();
-const documentDisplayIdSchema = z.object({ displayId: z.string() }).passthrough();
+  .object({ items: z.array(z.object({ title: z.string() }).loose()) })
+  .loose();
+const documentDisplayIdSchema = z.object({ displayId: z.string() }).loose();
 
 test.describe.configure({ mode: "serial" });
 

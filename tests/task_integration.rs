@@ -7482,7 +7482,7 @@ mod sqlite_task_port {
             ] {
                 let values = columns.split(',').map(|name| format!("quote({name})")).collect::<Vec<_>>().join(",");
                 let sql = format!("SELECT coalesce(json_group_array(json_array({values})),'[]') FROM (SELECT * FROM {table} ORDER BY {columns})");
-                result.push(sqlx::query_scalar(&sql).fetch_one(&self.pool).await.unwrap());
+                result.push(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).fetch_one(&self.pool).await.unwrap());
             }
             result.push(sqlx::query_scalar("SELECT json_array((SELECT count(*) FROM task_activity),(SELECT count(*) FROM events),(SELECT count(*) FROM audit_log),(SELECT count(*) FROM task_timer_audit))").fetch_one(&self.pool).await.unwrap());
             result

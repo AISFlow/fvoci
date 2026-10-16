@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { contextFromTexts } from "./load.ts";
 import { pyRepr, pySplitlines, pyStrip, type Mapping } from "./py.ts";
@@ -15,6 +15,7 @@ import { RUST_SCHEMA_BASELINE_STEP, schemaBaselineInventory } from "./rust-schem
 import {
   RUST_COLLAB_CI_SCRIPT,
   RUST_COLLAB_INTEGRATION_STEP,
+  RUST_COLLAB_INTEGRATION_RUN,
   RUST_NATIVE_ARM64_RUN,
   RUST_POSTGRES_INTEGRATION_STEP,
   RUST_S3_INTEGRATION_STEP,
@@ -271,71 +272,26 @@ test("collaboration script inventory parses the maintained script", () => {
   expect(tests).toContain("collab_product");
 });
 
-const prefix = "cargo test --locked --offline --no-fail-fast --features db-tests \\\n";
-
-test("collaboration script target in two invocations fails", () => {
-  const body =
-    prefix +
-    "  --test collab_product \\\n  --test task_collab_integration \\\n  | tee log\n" +
-    prefix +
-    "  --test task_collab_integration \\\n  -- --test-threads=1 \\\n  | tee -a log\n";
-  expect(collaborationScriptInventoryFromText("#!/usr/bin/env bash\n" + body)).toEqual([
-    null,
-    "rust: collaboration CI script runs --test targets more than once: task_collab_integration",
-  ]);
-});
-
-test("collaboration script libtest suffix allows only scheduling", () => {
-  for (const [suffix, allowed] of [
-    ["--test-threads=1", true],
-    ["--nocapture", true],
-    ["some_filter", false],
-    ["--skip personal_transfer", false],
-    ["--ignored", false],
-    ["--test-threads=4", false],
-  ] as const) {
-    const body =
-      prefix + "  --test task_collab_integration \\\n  -- " + suffix + " \\\n  | tee log\n";
-    const [tests, err] = collaborationScriptInventoryFromText("#!/usr/bin/env bash\n" + body);
-    if (allowed) expect([tests, err], suffix).toEqual([new Set(["task_collab_integration"]), null]);
-    else expect(err, suffix).toContain("libtest filter");
-  }
-});
-
-test("collaboration script shape refusals", () => {
-  const cases: [string, string][] = [
-    ["echo nothing\n", "rust: collaboration CI script missing cargo test invocation"],
-    [
-      "cargo test --locked --offline --features db-tests \\\n  --test a\n",
-      "must invoke cargo test with --features db-tests",
-    ],
-    [
-      "cargo test --locked --offline --no-fail-fast --features db-tests --exclude x \\\n  --test a\n",
-      "must not use --exclude",
-    ],
-    [prefix + "  --exclude x\n", "must declare at least one --test target"],
-    [
-      "cargo test --locked --offline --no-fail-fast --features db-tests --release \\\n  --test a\n",
-      "unknown cargo test flag '--release'",
-    ],
-    [
-      "cargo test --locked --offline --no-fail-fast --features db-tests \n",
-      "must declare at least one --test target",
-    ],
-    [prefix + "  --test a \\\n  --test a\n", ""],
-  ];
-  for (const [body, needle] of cases) {
-    const [, err] = collaborationScriptInventoryFromText(body);
-    if (needle) expect(err, body).toContain(needle);
-    else expect(err, body).toBeNull();
-  }
+test("collaboration inventory rejects duplicate, missing, filter and scheduling changes", () => {
+  const text = readFileSync(join(ROOT, RUST_COLLAB_CI_SCRIPT), "utf8");
+  for (const mutation of [
+    text + "parallel\tcollab_product\n",
+    text.replace("parallel\tcollab_product\n", ""),
+    text.replace("serial\ttask_collab_integration", "parallel\ttask_collab_integration"),
+    text.replace("parallel\tcollab_product", "--ignored\tcollab_product"),
+    text.replace("parallel\tcollab_product", "parallel\t--skip collab_product"),
+    text.replace("parallel\tcollab_product", "parallel\tcollab_product\textra"),
+    "",
+    "cargo test --locked --offline --no-fail-fast --features db-tests --test collab_product\n",
+  ])
+    expect(collaborationScriptInventoryFromText(mutation)[1]).not.toBeNull();
 });
 
 test("missing collaboration script fails", () => {
   using tree = new RegistryTree([]);
   rmSync(join(tree.root, RUST_COLLAB_CI_SCRIPT));
   expect(verifyRustSuiteRegistry(tree.context())).toEqual([
-    "rust: missing collaboration CI script scripts/run-rust-collaboration-ci-tests.sh",
+    "rust: missing collaboration suite inventory xtask/collaboration-suites.tsv",
   ]);
 });
 
@@ -451,9 +407,9 @@ test("execution step weakening fails", () => {
       stepMutation(
         "collaboration",
         RUST_COLLAB_INTEGRATION_STEP,
-        (s) => void (s["run"] = "echo bash scripts/run-rust-collaboration-ci-tests.sh"),
+        (s) => void (s["run"] = "echo " + RUST_COLLAB_INTEGRATION_RUN),
       ),
-      "collaboration integration step must execute bash scripts/run-rust-collaboration-ci-tests.sh",
+      "collaboration integration step must execute " + RUST_COLLAB_INTEGRATION_RUN,
     ],
     [
       "collab runner",
@@ -511,7 +467,7 @@ const INVALID_UTF8_LINE = Buffer.from([0x0a, 0x23, 0x20, 0xff, 0x0a]);
 
 test("invalid UTF-8 in read inputs is a refusal", () => {
   for (const [rel, expected] of [
-    [RUST_COLLAB_CI_SCRIPT, "rust: scripts/run-rust-collaboration-ci-tests.sh is not valid UTF-8"],
+    [RUST_COLLAB_CI_SCRIPT, "rust: xtask/collaboration-suites.tsv is not valid UTF-8"],
     ["Cargo.toml", "rust: Cargo.toml is not valid UTF-8"],
   ] as const) {
     using tree = new RegistryTree([]);

@@ -4,8 +4,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use fvoci_server::auth::password::{hash_password, Keyring};
-use fvoci_server::db::{backend::Backend, migrate, pool};
+use fvoci_server::db::{backend::Backend, e2e_fixture, migrate, pool};
+use serde::Deserialize;
+use serde_json::json;
 use sqlx::Connection;
+use std::io::Read;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,141 @@ fn required(name: &str) -> Result<String, FixtureError> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| FixtureError::Input(format!("{name} is required")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    Actor,
+    Baseline,
+    Observe,
+    SerialObserve,
+}
+
+fn mode(args: &[String]) -> Result<Mode, FixtureError> {
+    match args {
+        [] => Ok(Mode::Actor),
+        [value] => match value.as_str() {
+            "baseline" => Ok(Mode::Baseline),
+            "observe" => Ok(Mode::Observe),
+            "serial-observe" => Ok(Mode::SerialObserve),
+            _ => Err(FixtureError::Input("SQLite fixture mode invalid".into())),
+        },
+        _ => Err(FixtureError::Input("SQLite fixture mode invalid".into())),
+    }
+}
+
+pub async fn run() -> Result<(), FixtureError> {
+    // Reject unknown modes before reading credentials or opening the target.
+    // An observer invocation must never fall through to actor INSERTs.
+    let selected = mode(&std::env::args().skip(1).collect::<Vec<_>>())?;
+    match selected {
+        Mode::Actor => create_user().await,
+        mode => observe(mode).await,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeInput {
+    workspace_id: Uuid,
+    document_ids: Vec<Uuid>,
+}
+
+fn observation_input(
+    mode: Mode,
+    bytes: &[u8],
+) -> Result<e2e_fixture::OwnedSqliteObservation, FixtureError> {
+    let invalid = || FixtureError::Input("SQLite observer input invalid".into());
+    match mode {
+        Mode::Baseline if bytes.is_empty() => Ok(e2e_fixture::OwnedSqliteObservation::Baseline),
+        Mode::Observe if bytes.len() <= 16384 => {
+            let input: NativeInput = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+            if input.document_ids.is_empty()
+                || input.document_ids.len() > 100
+                || input
+                    .document_ids
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != input.document_ids.len()
+            {
+                return Err(invalid());
+            }
+            Ok(e2e_fixture::OwnedSqliteObservation::Native {
+                workspace: input.workspace_id,
+                ids: input.document_ids,
+            })
+        }
+        Mode::SerialObserve if bytes.len() <= 4096 => serde_json::from_slice(bytes)
+            .map(e2e_fixture::OwnedSqliteObservation::Serial)
+            .map_err(|_| invalid()),
+        _ => Err(invalid()),
+    }
+}
+
+async fn observe(mode: Mode) -> Result<(), FixtureError> {
+    if required("FVOCI_E2E_SQLITE_OBSERVER_SELECTED")? != "1" {
+        return Err(FixtureError::Input(
+            "SQLite observer allocation required".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::stdin().take(16385).read_to_end(&mut bytes)?;
+    let input = observation_input(mode, &bytes)?;
+    let owned = OwnedFile::check(
+        Path::new(&required("FVOCI_E2E_SQLITE_RUN_ROOT")?),
+        Path::new(&required("FVOCI_E2E_SQLITE_PATH")?),
+    )?;
+    let pool = pool::connect_sqlite_app(&owned.path, 1).await?;
+    let current = match migrate::assert_sqlite_schema_current(&Backend::Sqlite(pool.clone())).await
+    {
+        Ok(current) => current,
+        Err(error) => {
+            pool.close().await;
+            return Err(FixtureError::Database(error));
+        }
+    };
+    let mut connection = match pool.acquire().await {
+        Ok(connection) => connection.detach(),
+        Err(error) => {
+            pool.close().await;
+            return Err(FixtureError::Database(error));
+        }
+    };
+    pool.close().await;
+    // The detached connection owns every observation read, explicit rollback
+    // and actual awaited native shutdown; no pool replacement proves close.
+    let result = e2e_fixture::observe_owned_sqlite(&mut connection, &current, input).await;
+    let close = connection.close().await;
+    let mut value = result.as_ref().cloned().unwrap_or_else(|error| {
+        json!({
+            "originalFailure":"UI_SQLITE_OBSERVATION_FAILED",
+            "nativeOutcome":e2e_fixture::failure_receipt(error),
+        })
+    });
+    if result.is_ok() {
+        value["nativeOutcome"] =
+            json!({"operation":"confirmed","rollback":"confirmed","commit":"not-attempted"});
+    }
+    value["connectionClose"] = json!(if close.is_ok() { "confirmed" } else { "failed" });
+    value["lifecycleDrain"] = json!(if close.is_ok() {
+        "confirmed"
+    } else {
+        "unconfirmed"
+    });
+    value["leases"] = json!(0);
+    value["serverCloseReceipt"] = json!("not-exposed-by-sdk");
+    println!("{value}");
+    match (result, close) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(FixtureError::Database(error)),
+        (original, Err(cleanup)) => Err(FixtureError::Cleanup {
+            original: original
+                .err()
+                .map(|error| Box::new(FixtureError::Database(error))),
+            cleanup,
+        }),
+    }
 }
 
 struct OwnedFile {
@@ -206,6 +344,53 @@ pub async fn create_user() -> Result<(), FixtureError> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn sqlite_fixture_mode_never_falls_through_to_actor() {
+        assert_eq!(mode(&[]).unwrap(), Mode::Actor);
+        for (name, expected) in [
+            ("baseline", Mode::Baseline),
+            ("observe", Mode::Observe),
+            ("serial-observe", Mode::SerialObserve),
+        ] {
+            assert_eq!(mode(&[name.into()]).unwrap(), expected);
+            assert!(mode(&[name.into(), "extra".into()]).is_err());
+        }
+        for name in ["owner", "member", "observer", "", "unknown"] {
+            assert!(mode(&[name.into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn sqlite_observer_input_refuses_unknown_duplicate_and_unbounded_targets() {
+        let workspace = Uuid::from_u128(1);
+        let document = Uuid::from_u128(2);
+        let valid = json!({"workspaceId":workspace,"documentIds":[document]}).to_string();
+        assert!(observation_input(Mode::Observe, valid.as_bytes()).is_ok());
+        for invalid in [
+            json!({"workspaceId":workspace,"documentIds":[]}),
+            json!({"workspaceId":workspace,"documentIds":[document,document]}),
+            json!({"workspaceId":workspace,"documentIds":[document],"verified":true}),
+            json!({"workspaceId":workspace,"documentIds":vec![document;101]}),
+        ] {
+            assert!(observation_input(Mode::Observe, invalid.to_string().as_bytes()).is_err());
+        }
+        assert!(observation_input(Mode::Observe, &vec![b' '; 16385]).is_err());
+        assert!(observation_input(Mode::Baseline, b"{}").is_err());
+        assert!(observation_input(Mode::Baseline, b"").is_ok());
+        assert!(observation_input(
+            Mode::SerialObserve,
+            br#"{"revisionKeep":200,"revisionSnapshotIntervalHours":24}"#
+        )
+        .is_ok());
+        for invalid in [
+            br#"{"revisionKeep":0,"revisionSnapshotIntervalHours":24}"#.as_slice(),
+            br#"{"revisionKeep":200,"revisionSnapshotIntervalHours":24,"verified":true}"#,
+            br#"{"revisionKeep":200,"revisionKeep":300,"revisionSnapshotIntervalHours":24}"#,
+        ] {
+            assert!(observation_input(Mode::SerialObserve, invalid).is_err());
+        }
+    }
 
     #[test]
     fn sqlite_actor_fixture_path_requires_existing_private_owned_single_file() {

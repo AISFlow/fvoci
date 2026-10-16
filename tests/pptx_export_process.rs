@@ -58,7 +58,7 @@ fn check_parts(name: &str, bytes: &[u8]) -> usize {
     let mut slides = 0;
     for i in 0..zip.len() {
         let mut part = zip.by_index(i).unwrap();
-        let part_name = part.name().to_string();
+        let part_name = part.name().unwrap().into_owned();
         assert!(!part_name.ends_with('/'), "{name}: directory entry");
         if part_name.starts_with("ppt/slides/slide") {
             slides += 1;

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { parseJson, root } from "../io.ts";
-import { engineFeaturesMatch, loadCurrent, validateOffReport } from "./binding.ts";
+import { PRODUCT_TITLES } from "../../turso/ui-selected-native-policy.ts";
+import {
+  engineFeaturesMatch,
+  loadCurrent,
+  validateOffReport,
+  validateProductReport,
+} from "./binding.ts";
 
 const titles = [
   ...readFileSync(
@@ -174,6 +180,136 @@ describe("current binding refusals before any resource", () => {
       ).not.toBe("accepted");
     } finally {
       rmSync(directory, { recursive: true });
+    }
+  });
+});
+
+describe("SQLite ON PRODUCT4 report", () => {
+  const binding: import("../../../apps/web/e2e-pending/selected-final-contract.ts").FinalBinding = {
+    schema: 1,
+    backend: "sqlite",
+    source: "a".repeat(40),
+    tree: "b".repeat(40),
+    browser: "chromium",
+    flow: "on",
+    suite: "products",
+    namespace: "tui-" + "c".repeat(20),
+    workspaceId: "00000000-0000-0000-0000-000000000001",
+    workspaceSlug: "tui-" + "c".repeat(20),
+    setupNeeded: false,
+    schemaCurrent: true,
+    commit: "confirmed",
+    lifecycleDrain: "confirmed",
+    leases: 0,
+    owner: {
+      userId: "00000000-0000-0000-0000-000000000002",
+      email: "tui-" + "c".repeat(20) + "-owner@example.invalid",
+      password: "fixture-owner",
+    },
+    member: {
+      userId: "00000000-0000-0000-0000-000000000003",
+      email: "tui-" + "c".repeat(20) + "-member@example.invalid",
+      password: "fixture-member",
+    },
+    outsider: {
+      userId: "00000000-0000-0000-0000-000000000004",
+      email: "tui-" + "c".repeat(20) + "-outsider@example.invalid",
+      password: "fixture-outsider",
+    },
+  };
+  test("exact current metadata and four unchanged cases are required", () => {
+    const report = () => ({
+      config: {
+        workers: 1,
+        metadata: {
+          actorBindingSha256: "d".repeat(64),
+          source: binding.source,
+          tree: binding.tree,
+          selectedBackend: "sqlite",
+          selectedFlow: "on",
+          browser: "chromium",
+          suite: "products",
+          titles: [...PRODUCT_TITLES],
+        },
+      },
+      errors: [],
+      stats: { expected: 4, unexpected: 0, flaky: 0, skipped: 0 },
+      suites: [
+        {
+          specs: PRODUCT_TITLES.map((title) => ({
+            file: "selected-final-acceptance.ts",
+            title,
+            ok: true,
+            tests: [
+              { expectedStatus: "passed", results: [{ status: "passed", retry: 0, errors: [] }] },
+            ],
+          })),
+        },
+      ],
+    });
+    expect(
+      validateProductReport(parseJson(JSON.stringify(report())), binding, "d".repeat(64)),
+    ).toEqual([...PRODUCT_TITLES]);
+    // The parent validates the public policy without loading the browser SDK.
+    // The web contract tests cover the Zod adapter with the same metadata faults.
+    const checkMetadata = (metadata: unknown) => {
+      const value = report();
+      return validateProductReport(
+        parseJson(JSON.stringify({ ...value, config: { ...value.config, metadata } })),
+        binding,
+        "d".repeat(64),
+      );
+    };
+    const extended = { ...report().config.metadata, unrelated: true };
+    expect(checkMetadata(extended)).toEqual([...PRODUCT_TITLES]);
+    for (const key of Object.keys(report().config.metadata)) {
+      for (const fault of ["missing", "wrong-value", "wrong-type"]) {
+        const metadata = structuredClone(report().config.metadata) as Record<string, unknown>;
+        if (fault === "missing") Reflect.deleteProperty(metadata, key);
+        else metadata[key] = fault === "wrong-type" ? 1 : key === "titles" ? ["wrong"] : "wrong";
+        expect(() => checkMetadata(metadata)).toThrow();
+      }
+    }
+    const changes: ((value: ReturnType<typeof report>) => void)[] = [
+      (r) => {
+        r.config.metadata.selectedBackend = "libsql-remote";
+      },
+      (r) => {
+        r.config.metadata.source = "e".repeat(40);
+      },
+      (r) => {
+        r.config.metadata.actorBindingSha256 = "f".repeat(64);
+      },
+      (r) => {
+        r.stats.skipped = 1;
+      },
+      (r) => {
+        r.stats.flaky = 1;
+      },
+      (r) => {
+        r.stats.expected = 3;
+      },
+      (r) => {
+        r.suites[0]?.specs.reverse();
+      },
+      (r) => {
+        r.suites[0]?.specs.pop();
+      },
+      (r) => {
+        const result = r.suites[0]?.specs[0]?.tests[0]?.results[0];
+        if (result) result.retry = 1;
+      },
+      (r) => {
+        const result = r.suites[0]?.specs[0]?.tests[0]?.results[0];
+        if (result) result.status = "skipped";
+      },
+    ];
+    for (const change of changes) {
+      const changed = report();
+      change(changed);
+      expect(() =>
+        validateProductReport(parseJson(JSON.stringify(changed)), binding, "d".repeat(64)),
+      ).toThrow();
     }
   });
 });

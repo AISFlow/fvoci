@@ -484,21 +484,17 @@ fn prepare(
                 .any(|p| k.starts_with(p))
         })
         .collect();
-    let packages_path = parent.join("build-packages.txt");
-    let packages = if packages_path.is_file() {
-        json!(fs::read_to_string(&packages_path)?)
-    } else {
-        Value::Null
-    };
+    // The full host package inventory remains build-packages.txt diagnostics.
+    // Actual native bytes, not unrelated package text, bind cache admission.
     let identity = json!({
         "inputs": inputs,
         "exports": env,
         "wrapper_sha256": wrapper_sha256(),
         "os_release": fs::read_to_string("/etc/os-release")?,
         "architecture": machine,
-        "packages": packages,
         "libclang_path": clang.to_string_lossy(),
         "libclang_sha256": sha256_hex(&fs::read(&clang)?),
+        "libclang_files": crate::sqlite::native_files(&[&clang_dir])?,
         // Fingerprint build overrides without publishing their values.
         "build_environment_sha256": sha256_hex(json!(build_env).to_string().as_bytes()),
         "rustc": rustc,

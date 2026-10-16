@@ -8,6 +8,20 @@ export function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/**
+ * Each mapped import stands for an ES module. TypeScript 6's CommonJS emit
+ * always reads imports through its interop helpers, which take a module by
+ * its `__esModule` marker; without it a default import gets the whole map
+ * entry. The proxy adds only the marker and reads the entry live.
+ */
+function esModule(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  return new Proxy(value, {
+    get: (target, key, receiver): unknown =>
+      key === "__esModule" ? true : Reflect.get(target, key, receiver),
+  });
+}
+
 /** Execute our compiler output, then check the module and component boundaries. */
 export function evaluate(code: string, imports: Record<string, unknown>): Record<string, unknown> {
   const js = ts.transpileModule(code, {
@@ -19,7 +33,7 @@ export function evaluate(code: string, imports: Record<string, unknown>): Record
   Reflect.apply(execute as (...args: unknown[]) => unknown, undefined, [
     (name: string) => {
       assert.ok(name in imports, `unmapped component import: ${name}`);
-      return imports[name];
+      return esModule(imports[name]);
     },
     module,
     module.exports,

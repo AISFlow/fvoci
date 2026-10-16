@@ -18,7 +18,7 @@ type Adapter = Pick<
 const text = readFileSync(new URL("./versioned-body-api.ts", import.meta.url), "utf8")
   .replace(/^import[^\n]+\n/gm, "")
   .replace(/export /g, "");
-const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+const script = ts.transpile(text, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
 test("project and wiki native body requests bind exact route scope, command and abort signal", async () => {
   const calls: { method: string; path: string; options: RequestOptions }[] = [];
   const capture = (method: string) => (path: string, options: RequestOptions) =>

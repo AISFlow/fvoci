@@ -24,6 +24,7 @@ import {
   assertRuntimeJob,
   browserInventory,
   identity,
+  localAllocation,
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
@@ -180,6 +181,7 @@ export function laneRetirement(
   tree: string,
   owner: string,
   driverExit: number,
+  purpose?: "equal-work" | "auth-session",
 ): Retirement {
   const facts: Retirement = {
     qualified: false,
@@ -221,20 +223,40 @@ export function laneRetirement(
         assert.equal(parent.all_owned_fixtures_closed, true);
       }
       if (driverExit === 0) {
-        if (flow === "on")
-          assert.equal(receipt.current_schema_server_restart?.restartBrowserExit, 0);
-        assert.ok(
-          receipt.actual_browser_tests === (flow === "off" ? 8 : 1) && receipt.retries === 0,
-        );
-        if (lane === "sqlite" && flow === "on")
+        if (purpose === "equal-work") {
+          assert.equal(receipt.purpose, purpose);
           assert.ok(
-            deepEquals(receipt.sqlite_restore_browser, {
-              exit: 0,
-              actual_tests: 1,
-              skipped: 0,
-              retries: 0,
-            }),
+            receipt.equal_work && receipt.actual_browser_tests === 1 && receipt.retries === 0,
           );
+        } else if (purpose === "auth-session") {
+          // Exactly the three dedicated auth cases with their event oracle; no
+          // restart, restore or original suite runs in this lane.
+          assert.equal(receipt.purpose, purpose);
+          assert.ok(
+            typeof receipt.auth_session === "object" &&
+              receipt.auth_session !== null &&
+              (receipt.auth_session as Record<string, unknown>).cases === 3 &&
+              (receipt.auth_session as Record<string, unknown>).events === "PASS" &&
+              receipt.actual_browser_tests === 3 &&
+              receipt.retries === 0 &&
+              receipt.current_schema_server_restart === undefined,
+          );
+        } else {
+          if (flow === "on")
+            assert.equal(receipt.current_schema_server_restart?.restartBrowserExit, 0);
+          assert.ok(
+            receipt.actual_browser_tests === (flow === "off" ? 8 : 1) && receipt.retries === 0,
+          );
+          if (lane === "sqlite" && flow === "on")
+            assert.ok(
+              deepEquals(receipt.sqlite_restore_browser, {
+                exit: 0,
+                actual_tests: 1,
+                skipped: 0,
+                retries: 0,
+              }),
+            );
+        }
       }
     }
     facts.qualified = true;
@@ -585,6 +607,13 @@ export async function run(
     FVOCI_ROOT_RUN_OWNER: owner,
   };
   const local = process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local";
+  const purpose = local ? localAllocation("run").purpose : undefined;
+  assert.ok(purpose === undefined || purpose === "equal-work" || purpose === "auth-session");
+  if (purpose)
+    assert.ok(
+      deepEquals(runs, selectedRuns),
+      "a lane purpose requires both complete backend pairs",
+    );
   const authority = local
     ? {
         executionMode: "orca-local",
@@ -607,6 +636,7 @@ export async function run(
   }
   let code = 0;
   const results: RunResult[] = [];
+  const equalPairs: object[] = [];
   let launcherFailure: {
     code: string;
     originalOutcomeSha256: string;
@@ -627,6 +657,7 @@ export async function run(
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),
         driver = laneDriver(lane);
       const manifest: Record<string, unknown> = {
+        ...(lane !== "install" && purpose ? { purpose } : {}),
         schema: 1,
         ready: true,
         flow,
@@ -726,6 +757,7 @@ export async function run(
         before.tree,
         owner,
         exit,
+        lane === "install" ? undefined : purpose,
       );
       if (!result.retirement.qualified) code ||= 1;
       if (exit !== 0 || !result.retirement.qualified) break;
@@ -735,6 +767,20 @@ export async function run(
         // Exclusive private copy: never replace an occupied destination.
         if (runs.length === 1)
           writeFileSync(closedInstall, readFileSync(receipt), { flag: "wx", mode: 0o600 });
+      }
+    }
+    if (purpose === "equal-work") {
+      // The registered consumer is loaded only after identity/lease validation
+      // and successful driver retirement; CLI discovery loads no driver code.
+      const consumer = join(root, "tools/selected-backend-ci/drivers/equal-work.ts");
+      const { comparePair } = (await import(consumer)) as typeof import("./drivers/equal-work.ts");
+      for (const backend of ["postgres", "sqlite"] as const) {
+        const receipt = (flow: Flow) => {
+          const result = results.find((r) => r.lane === backend && r.flow === flow);
+          assert.ok(result && result.exit === 0 && result.retirement?.qualified === true);
+          return read(join(result.runRoot, "receipt.json")) as DriverReceipt;
+        };
+        equalPairs.push(comparePair(receipt("on"), receipt("off")));
       }
     }
   } catch (error) {
@@ -773,9 +819,11 @@ export async function run(
         exit: code,
         allRequestedRunsExecuted: complete,
         launcherFailure,
-        normalBothAndRestartRequired: true,
-        offBothRequired: true,
-        offTestsPerBackend: 8,
+        purpose: purpose ?? null,
+        equalPairs,
+        ...(purpose === "auth-session"
+          ? { authCasesPerBackendRun: 3, hostedAuth: "NOT_CONNECTED" }
+          : { normalBothAndRestartRequired: true, offBothRequired: true, offTestsPerBackend: 8 }),
         sqliteAuxiliary: "BLOCKED: normal writers unported",
         whole060Complete: false,
       });

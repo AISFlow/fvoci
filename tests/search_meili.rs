@@ -45,7 +45,7 @@ fn document_source(
 
 async fn fetch_settings(config: &MeiliConfig) -> serde_json::Value {
     let url = format!("{}/indexes/{}/settings", config.url, config.index_uid);
-    let resp = reqwest::Client::new()
+    let resp = fvoci_server::http_client::client()
         .get(url)
         .bearer_auth(config.api_key())
         .send()
@@ -311,7 +311,7 @@ async fn ensure_upsert_search_scope_and_delete_by_filter() {
 }
 
 async fn keys_status(url: &str, key: &str) -> u16 {
-    reqwest::Client::new()
+    fvoci_server::http_client::client()
         .get(format!("{}/keys", url.trim_end_matches('/')))
         .bearer_auth(key)
         .send()

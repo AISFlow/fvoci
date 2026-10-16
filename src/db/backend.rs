@@ -1,6 +1,6 @@
 //! Closed driver boundary. PostgreSQL-only callers are rejected explicitly
 //! during the staged port; no synthetic PostgreSQL pool exists for SQLite.
-use super::codec::{remote_error, Cell, FamilyRow};
+use super::codec::{remote_error, Cell, FamilyRow, PostgresRefusal};
 use sqlx::{PgPool, Postgres, Sqlite, SqlitePool, Transaction};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -395,6 +395,7 @@ impl FamilyTx {
         statement: &'static str,
         args: &[Cell],
     ) -> Result<u64, sqlx::Error> {
+        refuse_nul_text(args)?;
         match self {
             Self::Local(tx) => local_query(statement, args)
                 .execute(&mut *tx.tx)
@@ -444,6 +445,7 @@ impl FamilyTx {
         statement: &'static str,
         args: &[Cell],
     ) -> Result<Vec<FamilyRow>, sqlx::Error> {
+        refuse_nul_text(args)?;
         match self {
             Self::Local(tx) => local_query(statement, args)
                 .fetch_all(&mut *tx.tx)
@@ -483,10 +485,24 @@ impl FamilyTx {
     }
 }
 
-fn local_query<'a>(
-    sql: &'a str,
+/// PostgreSQL refuses U+0000 in any text bind with SQLSTATE 22021 before the
+/// statement runs; SQLite and libSQL would store it. The family refuses the
+/// same bind before either driver sees the statement, so no family path keeps
+/// a value PostgreSQL cannot hold. Blobs carry NUL bytes and pass unchanged.
+fn refuse_nul_text(args: &[Cell]) -> Result<(), sqlx::Error> {
+    if args
+        .iter()
+        .any(|cell| matches!(cell, Cell::Text(text) if text.contains('\0')))
+    {
+        return Err(PostgresRefusal::NUL_TEXT.into());
+    }
+    Ok(())
+}
+
+fn local_query(
+    sql: &'static str,
     args: &[Cell],
-) -> sqlx::query::Query<'a, Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+) -> sqlx::query::Query<'static, Sqlite, sqlx::sqlite::SqliteArguments> {
     let mut query = sqlx::query(sql);
     for value in args {
         query = match value {
@@ -1733,7 +1749,7 @@ pub(crate) mod maintenance_claim_driver_tests {
     )]
     async fn sqlite_statement(stream: &mut Stream, stmt: &Value) -> Result<Value, sqlx::Error> {
         let sql = stmt["sql"].as_str().unwrap();
-        let mut query = sqlx::query(sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for arg in stmt["args"].as_array().unwrap() {
             query = match arg["type"].as_str().unwrap() {
                 "null" => query.bind(Option::<i64>::None),
@@ -2331,7 +2347,7 @@ pub(crate) mod maintenance_claim_driver_tests {
                 .expect("actual SDK describe reached its original stream");
             request["baton"].as_str().unwrap().to_owned()
         };
-        let client = reqwest::Client::new();
+        let client = crate::http_client::client();
         let describe = |request: Value| {
             client
                 .post(format!("{}/v3/pipeline", f.endpoint))
@@ -2444,7 +2460,7 @@ pub(crate) mod maintenance_claim_driver_tests {
             assert_eq!(control_sql(sql), None);
         }
         let f = Fixture::new().await;
-        let malformed = reqwest::Client::new()
+        let malformed = crate::http_client::client()
             .post(format!("{}/v3/pipeline", f.endpoint))
             .body("{")
             .send()
@@ -2969,5 +2985,186 @@ mod remote_tls {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod nul_text_guard_tests {
+    use super::*;
+
+    pub(super) fn family(tx: &mut DbTx) -> &mut FamilyTx {
+        match tx {
+            DbTransaction::SqliteFamily(family) => family,
+            DbTransaction::Postgres(_) => panic!("family transaction required"),
+        }
+    }
+
+    /// The PostgreSQL 22021 classification: not a constraint, no bound value.
+    pub(super) fn assert_refused(error: sqlx::Error) {
+        let database = error.as_database_error().expect("database error");
+        assert_eq!(database.code().as_deref(), Some("22021"));
+        assert_eq!(
+            database.message(),
+            "invalid byte sequence for encoding \"UTF8\": 0x00"
+        );
+        assert!(matches!(database.kind(), sqlx::error::ErrorKind::Other));
+        assert!(database.constraint().is_none());
+    }
+
+    async fn local() -> Backend {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        Backend::Sqlite(pool)
+    }
+
+    #[tokio::test]
+    async fn nul_text_is_refused_before_sql_while_blob_and_plain_text_pass() {
+        let backend = local().await;
+        let mut tx = backend.begin_write().await.unwrap();
+        let f = family(&mut tx);
+        f.execute("CREATE TABLE probe(v TEXT, b BLOB)", &[])
+            .await
+            .unwrap();
+        let written = f
+            .execute(
+                "INSERT INTO probe(v,b) VALUES(?1,?2)",
+                &[Cell::text("plain"), Cell::Blob(vec![0, 1, 0])],
+            )
+            .await
+            .unwrap();
+        assert_eq!(written, 1);
+        // The driver refuses this statement on its own; the guard runs first.
+        let driver = f
+            .execute("NOT SQL ?1", &[Cell::text("a")])
+            .await
+            .unwrap_err();
+        assert!(driver
+            .as_database_error()
+            .is_some_and(|error| error.code().as_deref() != Some("22021")));
+        assert_refused(
+            f.execute("NOT SQL ?1", &[Cell::text("a\0b")])
+                .await
+                .unwrap_err(),
+        );
+        assert_refused(
+            f.query("NOT SQL ?2", &[Cell::Null, Cell::text("\0")])
+                .await
+                .err()
+                .expect("NUL text query refused"),
+        );
+        assert_refused(
+            f.execute(
+                "INSERT INTO probe(v,b) VALUES(?1,?2)",
+                &[Cell::text("next"), Cell::text("tail\0")],
+            )
+            .await
+            .unwrap_err(),
+        );
+        let rows = f.query("SELECT v,b FROM probe", &[]).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::text("plain"));
+        assert_eq!(rows[0].cell(1).unwrap(), Cell::Blob(vec![0, 1, 0]));
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn refused_nul_text_leaves_no_partial_write() {
+        let backend = local().await;
+        let mut tx = backend.begin_write().await.unwrap();
+        family(&mut tx)
+            .execute("CREATE TABLE probe(v TEXT NOT NULL)", &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = backend.begin_write().await.unwrap();
+        let written = async {
+            let f = family(&mut tx);
+            f.execute("INSERT INTO probe(v) VALUES(?1)", &[Cell::text("first")])
+                .await?;
+            f.execute("INSERT INTO probe(v) VALUES(?1)", &[Cell::text("second\0")])
+                .await
+        }
+        .await;
+        assert_refused(written.unwrap_err());
+        tx.rollback().await.unwrap();
+        let mut tx = backend.begin_read().await.unwrap();
+        let rows = family(&mut tx)
+            .query("SELECT count(*) FROM probe", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(0));
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "db-tests"))]
+mod nul_text_guard_sqld_tests {
+    use super::nul_text_guard_tests::{assert_refused, family};
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "explicit pinned official sqld selection required"]
+    async fn remote_nul_text_is_refused_before_the_stream_and_rolls_back() {
+        use crate::db::libsql_finish_fixture::LibsqlFinishFixture;
+        let sqld = std::path::PathBuf::from(
+            std::env::var_os("FVOCI_TEST_SQLD").expect("pinned official sqld required; no skip"),
+        );
+        let root = std::env::temp_dir().join(format!("fvoci-nul-text-{}", uuid::Uuid::now_v7()));
+        let driver = LibsqlFinishFixture::start(&sqld, &root).await.unwrap();
+        let backend = Backend::LibsqlRemote(Arc::new(RemoteDatabase::from_test_driver(
+            driver.database().await.unwrap(),
+            std::num::NonZeroU32::MIN,
+        )));
+        let mut tx = backend.begin_write().await.unwrap();
+        family(&mut tx)
+            .execute("CREATE TABLE probe(v TEXT NOT NULL, b BLOB)", &[])
+            .await
+            .unwrap();
+        tx.commit_with_cleanup().await.unwrap();
+        let mut tx = backend.begin_write().await.unwrap();
+        let f = family(&mut tx);
+        f.execute(
+            "INSERT INTO probe(v,b) VALUES(?1,?2)",
+            &[Cell::text("first"), Cell::Blob(vec![0, 1, 0])],
+        )
+        .await
+        .unwrap();
+        assert_refused(
+            f.execute(
+                "INSERT INTO probe(v) SELECT ?1 AS nul_guard_probe",
+                &[Cell::text("second\0")],
+            )
+            .await
+            .unwrap_err(),
+        );
+        assert_refused(
+            f.query("SELECT ?1 AS nul_guard_probe", &[Cell::text("\0")])
+                .await
+                .err()
+                .expect("NUL text query refused"),
+        );
+        // The refusal leaves the stream usable: the transaction sees its row.
+        let rows = f.query("SELECT count(*) FROM probe", &[]).await.unwrap();
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(1));
+        tx.rollback().await.unwrap();
+        let mut tx = backend.begin_read().await.unwrap();
+        let rows = family(&mut tx)
+            .query("SELECT count(*) FROM probe", &[])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].cell(0).unwrap(), Cell::Integer(0));
+        tx.rollback().await.unwrap();
+        assert!(driver
+            .exchanges()
+            .iter()
+            .all(|exchange| !exchange.request.to_string().contains("nul_guard_probe")));
+        let closed = backend.close().await;
+        let receipt = driver.finish().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(receipt.sqld_reaped && receipt.proxy_joined);
+        closed.unwrap();
     }
 }

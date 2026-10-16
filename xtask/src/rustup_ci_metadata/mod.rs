@@ -24,7 +24,7 @@ use std::process::Command;
 
 pub use guard::Owner;
 
-pub const TOOLCHAIN: &str = "1.98.1-x86_64-unknown-linux-gnu";
+pub const TOOLCHAIN: &str = "1.99.0-x86_64-unknown-linux-gnu";
 /// Installed component rows in canonical order.
 pub const ROWS: [&str; 4] = [
     "cargo-x86_64-unknown-linux-gnu",
@@ -286,7 +286,7 @@ mod tests {
                 "list",
                 "--installed",
                 "--toolchain",
-                "1.98.1-x86_64-unknown-linux-gnu"
+                "1.99.0-x86_64-unknown-linux-gnu"
             ]
             .map(OsStr::new)
         );

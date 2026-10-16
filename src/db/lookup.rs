@@ -677,7 +677,7 @@ pub(crate) mod selected_lookup_tests {
         ] {
             // Static test-only alternatives; no product dynamic SQL path.
             let sql = format!("UPDATE sessions SET {column}={dead} WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(credential.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -687,7 +687,7 @@ pub(crate) mod selected_lookup_tests {
                 LookupDbError::Forbidden
             );
             let sql = format!("UPDATE sessions SET {column}={restored} WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(credential.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -695,7 +695,7 @@ pub(crate) mod selected_lookup_tests {
         }
         for column in ["suspended_at", "deleted_at"] {
             let sql = format!("UPDATE users SET {column}=1 WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(f.user.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await
@@ -705,7 +705,7 @@ pub(crate) mod selected_lookup_tests {
                 LookupDbError::Forbidden
             );
             let sql = format!("UPDATE users SET {column}=NULL WHERE id=?1");
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(f.user.as_bytes().as_slice())
                 .execute(&f.pool)
                 .await

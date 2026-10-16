@@ -7,8 +7,10 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  watch,
   writeFileSync,
 } from "node:fs";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import process from "node:process";
@@ -485,6 +487,88 @@ test("a waited wrapper that cannot be executed fails its setup, not with an exit
       `owned wrapper exec setup failed; executable=${join(directory, "missing")}`,
     );
   } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+test("an already aborted operation never launches its fixture wrapper", async () => {
+  const directory = temporary();
+  try {
+    const reason = new DOMException("owned fixture deadline", "TimeoutError");
+    const log = join(directory, "wrapper.log");
+    const failure = await command([process.execPath, "-e", "throw new Error('launched')"], {
+      log,
+      waitOnInterrupt: true,
+      signal: AbortSignal.abort(reason),
+    }).catch((error: unknown) => error);
+    expect(failure).toBe(reason);
+    expect(existsSync(log)).toBe(false);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+test("a prior SIGINT refuses readiness but still allows normal cleanup", async () => {
+  const script =
+    `import {trapInterrupts,cleanupScope,command} from ${JSON.stringify(join(import.meta.dir, "common.ts"))};` +
+    'trapInterrupts();const interrupted=new Promise(resolve=>process.once("SIGINT",resolve));' +
+    'process.kill(process.pid,"SIGINT");await interrupted;' +
+    "await cleanupScope(async()=>{let readiness;" +
+    'try{await command([process.execPath,"--no-env-file","-e","throw new Error(\'launched\')"],' +
+    "{signal:new AbortController().signal})}catch(error){readiness=error.name}" +
+    'const cleanup=await command([process.execPath,"--no-env-file","-e","process.exit(0)"]);' +
+    "console.log(JSON.stringify({readiness,cleanup:cleanup.returncode}))});";
+  const child = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).toBe(0);
+  expect(stderr).toBe("");
+  expect(JSON.parse(stdout) as unknown).toEqual({ readiness: "KeyboardInterrupt", cleanup: 0 });
+});
+test("an external operation abort awaits fixture cleanup and reaping", async () => {
+  const directory = temporary();
+  const controller = new AbortController();
+  const reason = new DOMException("owned fixture deadline", "TimeoutError");
+  const log = join(directory, "wrapper.log");
+  const pidPath = join(directory, "fixture.pid");
+  const cleaned = join(directory, "cleaned");
+  writeFileSync(log, "");
+  const ready = Promise.withResolvers<undefined>();
+  const watcher = watch(log, () => {
+    if (!readFileSync(log, "utf8").includes("ready\n")) return;
+    controller.abort(reason);
+    ready.resolve(undefined);
+  });
+  let pid: number | undefined;
+  try {
+    const script =
+      'import {writeFileSync} from "node:fs";' +
+      `process.on("SIGINT",()=>{writeFileSync(${JSON.stringify(cleaned)},"closed");process.exit(0)});` +
+      `writeFileSync(${JSON.stringify(pidPath)},String(process.pid));` +
+      'console.log("ready");setInterval(()=>{},10000);';
+    const result = command([process.execPath, "--no-env-file", "-e", script], {
+      log,
+      waitOnInterrupt: true,
+      signal: controller.signal,
+    }).catch((error: unknown) => error);
+    await Promise.race([
+      ready.promise,
+      result.then(() => {
+        throw new Error("fixture exited before readiness");
+      }),
+    ]);
+    pid = Number(readFileSync(pidPath, "utf8"));
+    expect(await result).toBe(reason);
+    expect(readFileSync(cleaned, "utf8")).toBe("closed");
+    expect(alive(pid)).toBe(false);
+    expect(getEventListeners(controller.signal, "abort")).toEqual([]);
+  } finally {
+    watcher.close();
+    if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
     rmSync(directory, { recursive: true });
   }
 });

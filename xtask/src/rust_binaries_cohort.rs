@@ -25,10 +25,48 @@ pub const HELPER: &str = "collab-engine";
 pub const SCHEMA: &str = "schema-migrate";
 pub const SCHEMA_TARGET: &str = "fvoci-migrate";
 pub const DB_TESTS: &str = "db-tests";
+/// Root db-tests libtest harness, shared by native-input consumers.
+pub const LIBRARY: &str = "db-tests-library";
+
+/// The single inventory of collaboration executables and their scheduling.
+pub const COLLABORATION_SUITES: &str = include_str!("../collaboration-suites.tsv");
+
+pub fn collaboration_suites(text: &str) -> Result<Vec<(&str, &str)>, String> {
+    let mut names = BTreeSet::new();
+    let mut suites = Vec::new();
+    for line in text.lines().filter(|line| !line.starts_with('#')) {
+        let Some((mode, name)) = line.split_once('\t') else {
+            return Err("rust: invalid collaboration suite row".into());
+        };
+        if !matches!(mode, "parallel" | "serial")
+            || name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || !names.insert(name)
+        {
+            return Err("rust: invalid or duplicate collaboration suite".into());
+        }
+        suites.push((mode, name));
+    }
+    if suites
+        .iter()
+        .filter(|(mode, _)| *mode == "parallel")
+        .count()
+        != 9
+        || suites.iter().filter(|(mode, _)| *mode == "serial").count() != 1
+        || suites.last() != Some(&("serial", "task_collab_integration"))
+        || !names.contains("collab_product")
+    {
+        return Err(
+            "rust: collaboration requires nine parallel suites and the serial task suite".into(),
+        );
+    }
+    Ok(suites)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Test,
+    Lib,
     Bin,
 }
 
@@ -36,6 +74,7 @@ impl Kind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Test => "test",
+            Self::Lib => "lib",
             Self::Bin => "bin",
         }
     }
@@ -56,9 +95,12 @@ pub fn expectation(name: &str, products: &[String]) -> Expectation {
     let (target, features): (&str, &'static [&'static str]) = match name {
         HELPER => (HELPER, &["default", "worker"]),
         SCHEMA => (SCHEMA_TARGET, &[]),
+        LIBRARY => ("fvoci_server", &[DB_TESTS]),
         _ => (name, &[DB_TESTS]),
     };
-    let kind = if name == HELPER || name == SCHEMA || products.iter().any(|p| p == name) {
+    let kind = if name == LIBRARY {
+        Kind::Lib
+    } else if name == HELPER || name == SCHEMA || products.iter().any(|p| p == name) {
         Kind::Bin
     } else {
         Kind::Test
@@ -209,7 +251,7 @@ pub fn record_matches(record: &Value, expectation: &Expectation) -> bool {
         && record["profile"]["opt_level"] == "0"
         && (debuginfo.is_null() && record["profile"].get("debuginfo").is_some()
             || debuginfo.as_u64() == Some(0))
-        && record["profile"]["test"] == (expectation.kind == Kind::Test)
+        && record["profile"]["test"] == (expectation.kind != Kind::Bin)
         && record["target"]["kind"] == serde_json::json!([expectation.kind.as_str()])
         && record["target"]["name"] == expectation.target.as_str()
 }
@@ -240,7 +282,7 @@ pub fn entry(
     let mut matches = records.iter().filter(|r| {
         r["target"]["name"] == expectation.target.as_str()
             && r["target"]["kind"] == kind
-            && r["profile"]["test"] == (expectation.kind == Kind::Test)
+            && r["profile"]["test"] == (expectation.kind != Kind::Bin)
     });
     let (Some(record), None) = (matches.next(), matches.next()) else {
         return Err(format!(

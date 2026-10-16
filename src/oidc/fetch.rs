@@ -154,7 +154,7 @@ impl FetchPolicy {
         let pinned = tokio::time::timeout(remaining, self.pin(url))
             .await
             .map_err(|_| FetchError::Transport("resolve timeout".into()))??;
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::http_client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .timeout(remaining)

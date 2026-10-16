@@ -164,7 +164,7 @@ export function recordBefore(output: string): void {
   const release = readFileSync("/etc/os-release", "utf8");
   assert.ok(/^ID="?ubuntu"?$/m.test(release) && /^VERSION_ID="?26\.04"?$/m.test(release));
   const rust = call(["rustc", "-Vv"]);
-  assert.ok(rust.includes("release: 1.98.1") && rust.includes("host: x86_64-unknown-linux-gnu"));
+  assert.ok(rust.includes("release: 1.99.0") && rust.includes("host: x86_64-unknown-linux-gnu"));
   assert.equal(
     process.env.CARGO_BUILD_TARGET ?? "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",

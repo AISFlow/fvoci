@@ -574,7 +574,7 @@ mod tests {
         seed_subscriptions(&fixture).await;
         for table in ["events", "audit_log"] {
             // Test-only failure injection, never exposed by a product route.
-            sqlx::raw_sql(&format!("CREATE TRIGGER reject_rotation BEFORE INSERT ON {table} WHEN NEW.verb='instance.vapid_rotated' BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END;"))
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TRIGGER reject_rotation BEFORE INSERT ON {table} WHEN NEW.verb='instance.vapid_rotated' BEGIN SELECT RAISE(ABORT,'injected rotation failure'); END;")))
                 .execute(&fixture.pool).await.unwrap();
             assert!(rotate_vapid_keys_backend(&fixture.backend(), &keys)
                 .await

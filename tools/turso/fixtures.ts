@@ -21,12 +21,18 @@ export const FIXTURE_SUITES = [
   "tools/turso/guard-receipts.test.ts",
   "tools/turso/guard.test.ts",
   "tools/turso/ui-audit.test.ts",
+  "tools/turso/ui-auth-session.test.ts",
   "tools/turso/ui-cli.test.ts",
   "tools/turso/ui-container.test.ts",
+  "tools/turso/ui-equal-work.test.ts",
+  "tools/turso/ui-final.test.ts",
   "tools/turso/ui-flow.test.ts",
   "tools/turso/ui-native.test.ts",
   "tools/turso/ui-processes.test.ts",
   "tools/turso/ui-start.test.ts",
+  "tools/turso/ui-server.test.ts",
+  "tools/turso/ui-restore.test.ts",
+  "tools/turso/ui-restore-observe.test.ts",
   "tools/ci/verify/registry.test.ts",
 ] as const;
 
