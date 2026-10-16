@@ -355,7 +355,7 @@ type EditorElement = HTMLElement & { editor: Editor };
 function appRoleRead(connection: string, tenant: string, select: string): unknown {
   const app = new URL(connection);
   if (!UUID.test(tenant)) throw new Error("Refusing a non-fixture tenant");
-  const result = spawnSync(process.execPath, fixtureQueryArgs("owned-app"), {
+  const result = spawnSync(process.execPath, fixtureQueryArgs("app", false, true), {
     env: {
       ...process.env,
       DB_NAME: app.pathname.slice(1),
@@ -901,7 +901,7 @@ class Installation {
       throw new Error("Refusing a foreign installation database");
     const result = spawnSync(
       process.execPath,
-      fixtureQueryArgs(database === "postgres" ? "owned-maintenance" : "owned-admin"),
+      fixtureQueryArgs(database === "postgres" ? "maintenance" : "admin", false, true),
       {
         env: { ...process.env, DB_NAME: this.database, ROLE_NAME: this.role },
         input: sql,

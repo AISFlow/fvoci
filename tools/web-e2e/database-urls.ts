@@ -74,19 +74,24 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
 }
 
 /** Native Bun child argv; SQL stays on stdin and credentials stay in env. */
-type FixtureQueryRole = "admin" | "app" | "owned-admin" | "owned-app" | "owned-maintenance";
+type FixtureQueryRole = "admin" | "app" | "maintenance";
 
-export function fixtureQueryArgs(role: FixtureQueryRole, commandTag = false): string[] {
+export function fixtureQueryArgs(
+  role: FixtureQueryRole,
+  commandTag = false,
+  owned = false,
+): string[] {
   return [
     "--no-env-file",
     import.meta.path,
     "fixture-query",
     role,
+    ...(owned ? ["owned"] : []),
     ...(commandTag ? ["command-tag"] : []),
   ];
 }
 
-export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv): string {
+export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv, owned = false): string {
   try {
     const admin = new URL(required(env, "FVOCI_E2E_ADMIN_DATABASE_URL"));
     const container = required(env, "FVOCI_TEST_PG_CONTAINER");
@@ -97,8 +102,7 @@ export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv): string
       !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(admin.pathname)
     )
       throw new Error();
-    if (role === "admin") return admin.toString();
-    if (["owned-admin", "owned-app", "owned-maintenance"].includes(role)) {
+    if (owned) {
       // Archive installations own another generated pair on this same fixture
       // service. Maintenance never accepts an arbitrary database destination.
       const database = required(env, "DB_NAME");
@@ -107,12 +111,12 @@ export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv): string
         required(env, "ROLE_NAME") !== `fvoci_app_${database}`
       )
         throw new Error();
-      admin.pathname = role === "owned-maintenance" ? "/postgres" : `/${database}`;
-      if (role !== "owned-app") return admin.toString();
+      admin.pathname = role === "maintenance" ? "/postgres" : `/${database}`;
     }
+    if (role === "admin" || (role === "maintenance" && owned)) return admin.toString();
     const app = new URL(required(env, "DATABASE_APP_URL"));
     if (
-      !["app", "owned-app"].includes(role) ||
+      role !== "app" ||
       !["postgres:", "postgresql:"].includes(app.protocol) ||
       app.username !== "fvoci_app_" + admin.pathname.slice(1) ||
       app.pathname !== admin.pathname ||
@@ -141,8 +145,8 @@ export function fixtureRows(value: unknown): string {
   return lines.join("\n");
 }
 
-async function fixtureQuery(role: string, commandTag: boolean): Promise<void> {
-  const connection = new SQL(fixtureDatabaseUrl(role, process.env), {
+async function fixtureQuery(role: string, commandTag: boolean, owned: boolean): Promise<void> {
+  const connection = new SQL(fixtureDatabaseUrl(role, process.env, owned), {
     max: 1,
     connectionTimeout: 10,
   });
@@ -262,15 +266,15 @@ async function groupDatabase(action: string): Promise<void> {
 if (import.meta.main) {
   if (process.argv[2] === "fixture-query") {
     try {
+      const owned = process.argv[4] === "owned";
+      const option = owned ? 5 : 4;
       if (
-        !["admin", "app", "owned-admin", "owned-app", "owned-maintenance"].includes(
-          process.argv[3] ?? "",
-        ) ||
-        process.argv.length > 5 ||
-        (process.argv[4] !== undefined && process.argv[4] !== "command-tag")
+        !["admin", "app", "maintenance"].includes(process.argv[3] ?? "") ||
+        process.argv.length > option + 1 ||
+        (process.argv[option] !== undefined && process.argv[option] !== "command-tag")
       )
         throw new DatabaseUrlError("invalid fixture query arguments");
-      await fixtureQuery(process.argv[3] ?? "", process.argv[4] === "command-tag");
+      await fixtureQuery(process.argv[3] ?? "", process.argv[option] === "command-tag", owned);
       process.exit(0);
     } catch {
       process.stderr.write("database-urls: isolated PostgreSQL fixture query failed\n");
