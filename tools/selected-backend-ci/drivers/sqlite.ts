@@ -1079,7 +1079,7 @@ function restartContext(state: State, browserInputs: Browser, seam: Seam): Resta
     serverProcess: state.serverProcess,
     base: state.base,
     receipt: state.receipt,
-    projectBrowser: false,
+    projectBrowser: true,
     db: state.db,
     dbroot: state.dbroot,
   };
