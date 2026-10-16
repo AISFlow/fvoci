@@ -1,15 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -43,8 +33,6 @@ const isDownload = (step: Mapping) => usesOf(step).startsWith("actions/download-
 const unitStep = (jobs: Mapping) =>
   stepWith(jobs, "web-checks", (step) => step["name"] === "Web and editor unit regressions");
 
-const requireStep = (step: Mapping) => step["name"] === "Require exact current native preparation";
-const restoreStep = (step: Mapping) => step["name"] === "Restore current native preparation";
 const runOf = (step: Mapping): string => {
   const run = step["run"];
   if (typeof run !== "string") throw new Error("step has no run script");
@@ -173,7 +161,7 @@ test("SQLite diagnostics publish only the exact hash file after original mandato
 
 test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replace the original producer refusal", () => {
   const jobs = realJobs("web.yml");
-  const run = runOf(stepWith(jobs, "collaboration-test-build", byId("sqlite_diagnostics")));
+  const run = runOf(stepWith(jobs, "collaboration-build", byId("sqlite_diagnostics")));
   const match =
     /^bun --no-env-file - <<'SQLITE_INPUT_HASHES'\n([\s\S]+)SQLITE_INPUT_HASHES\n$/.exec(run);
   expect(match).not.toBeNull();
@@ -302,17 +290,20 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
     expect(occupied.text).toBe(canary);
     expect(occupied.output).toBe(""); // An occupied destination can never be uploaded.
     expect(occupied.stderr).toContain("MISSING");
-    const original = runOf(stepWith(jobs, "collaboration-test-build", requireStep));
-    const identity = `X64-1.99.0-${"a".repeat(40)}-1-${"b".repeat(64)}`;
+    const original = runOf(
+      stepWith(
+        jobs,
+        "collaboration-install-on",
+        (step) => step["name"] === "Require a successful exact producer artifact",
+      ),
+    );
     expect(
       Bun.spawnSync(["bash", "-c", original], {
         env: {
           PATH: "/usr/bin:/bin",
           PRODUCER_RESULT: "success",
           PRODUCER_ARTIFACT: "123",
-          PRODUCER_DIGEST: "c".repeat(64),
-          PRODUCER_IDENTITY: identity,
-          CURRENT_IDENTITY: identity.replace(/b$/, "c"),
+          PRODUCER_DIGEST: "",
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -323,168 +314,48 @@ test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replac
   }
 });
 
-test("collaboration preparation hands exact current-run targets over by artifact and compiles completely", () => {
+test("one collaboration producer rejects obsolete stages and keeps complete qualification", () => {
   const jobs = realJobs("web.yml");
   expect(verifyCollaborationPreparationJobs(jobs)).toEqual([]);
-  const fails = (bad: Mapping, message: string) => {
-    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(message);
-  };
   for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
     const bad = clone(jobs);
-    Reflect.deleteProperty(bad, name);
-    fails(bad, "must exist");
+    bad[name] = clone(jobs["collaboration-build"]);
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "obsolete preparation job must be absent",
+    );
   }
-  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
-    for (const [key, value] of [
-      ["name", "web-native-shared"],
-      ["path", "target"],
-      ["compression-level", 6],
-      ["if-no-files-found", "warn"],
-      ["retention-days", 7],
-    ] as const) {
-      const bad = clone(jobs);
-      const save = stepWith(
-        bad,
-        name,
-        (step) => step["name"] === "Save current native preparation",
-      );
-      (save["with"] as Mapping)[key] = value;
-      fails(bad, "save only the packed current-run target as a run-scoped artifact");
-    }
-    for (const output of ["artifact_id", "target_sha256", "native_identity"]) {
-      const bad = clone(jobs);
-      ((bad[name] as Mapping)["outputs"] as Mapping)[output] = "${{ github.run_id }}";
-      fails(bad, "outputs the artifact ID, digest and arch/SHA/attempt/SQLite identity");
-    }
+  for (const needs of [[], ["ci-plan", "collaboration-test-build"], ["ci-plan", "foreign"]]) {
     const bad = clone(jobs);
-    stepWith(bad, name, byId("native"))["run"] = "true\n";
-    fails(bad, "pack the compiled target with its modes, mtimes and digest");
+    (bad["collaboration-build"] as Mapping)["needs"] = needs;
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "single producer needs only ci-plan",
+    );
   }
-  for (const name of ["collaboration-test-build", "collaboration-build"]) {
-    for (const [key, value] of [
-      ["artifact-ids", "${{ needs.foreign.outputs.artifact_id }}"],
-      ["name", "web-native-main-1"],
-      ["run-id", "1"],
-      ["merge-multiple", false],
-    ] as const) {
-      const bad = clone(jobs);
-      (stepWith(bad, name, isDownload)["with"] as Mapping)[key] = value;
-      fails(bad, "exact current-run producer artifact ID");
-    }
-    const masked = clone(jobs);
-    stepWith(masked, name, isDownload)["continue-on-error"] = true;
-    fails(masked, "exact current-run producer artifact ID");
-    for (const key of ["PRODUCER_RESULT", "PRODUCER_IDENTITY", "CURRENT_IDENTITY"]) {
-      const bad = clone(jobs);
-      (stepWith(bad, name, requireStep)["env"] as Mapping)[key] = "${{ github.run_id }}";
-      fails(bad, "producer must match this run's arch/SHA/attempt/SQLite identity");
-    }
-    const unverified = clone(jobs);
-    stepWith(unverified, name, restoreStep)["run"] = 'zstd -dc -- "$1" | tar -xf -\n';
-    fails(unverified, "digest-verified current-run artifact restore before compilation");
-  }
-  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+  for (const edit of [
+    "true\n",
+    "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-browser\n",
+  ]) {
     const bad = clone(jobs);
-    stepWith(bad, name, (step) => step["name"] === "Compile native preparation")["run"] = "true\n";
-    fails(bad, "complete unmasked compiler");
+    stepWith(bad, "collaboration-build", byId("prepare"))["run"] = edit;
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "complete unmasked compiler and packet qualification",
+    );
   }
-});
-
-test("the producer check admits only this run's attempt, SHA and SQLite identity", () => {
-  const jobs = realJobs("web.yml");
-  const identity = `X64-1.99.0-${"a".repeat(40)}-1-${"b".repeat(64)}`;
-  const good = {
-    PRODUCER_RESULT: "success",
-    PRODUCER_ARTIFACT: "4242",
-    PRODUCER_DIGEST: "c".repeat(64),
-    PRODUCER_IDENTITY: identity,
-    CURRENT_IDENTITY: identity,
-  };
-  const noSqlite = identity.replace(/[0-9a-f]{64}$/, "");
-  const cases: [Record<string, string>, number][] = [
-    [good, 0],
-    [{ ...good, PRODUCER_RESULT: "skipped" }, 1],
-    [{ ...good, PRODUCER_ARTIFACT: "" }, 1],
-    [{ ...good, PRODUCER_DIGEST: "" }, 1],
-    [{ ...good, PRODUCER_IDENTITY: identity.replace("-1-", "-2-") }, 1],
-    [{ ...good, PRODUCER_IDENTITY: identity.replace(/b$/, "c") }, 1],
-    [{ ...good, PRODUCER_IDENTITY: identity.replace("a", "d") }, 1],
-    [{ ...good, PRODUCER_IDENTITY: noSqlite, CURRENT_IDENTITY: noSqlite }, 1],
-  ];
-  for (const name of ["collaboration-test-build", "collaboration-build"]) {
-    const run = runOf(stepWith(jobs, name, requireStep));
-    for (const [env, code] of cases) {
-      const result = Bun.spawnSync(["bash", "-c", run], {
-        env: { PATH: "/usr/bin:/bin", ...env },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(result.exitCode, `${name} ${JSON.stringify(env)}`).toBe(code);
-    }
+  for (const key of ["GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "CARGO_TARGET_DIR"]) {
+    const bad = clone(jobs);
+    (stepWith(bad, "collaboration-build", byId("prepare"))["env"] as Mapping)[key] = "foreign";
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "complete unmasked compiler and packet qualification",
+    );
   }
-});
-
-// The artifact zip drops file modes; Cargo needs the build scripts' and test
-// binaries' modes and the outputs' mtimes back exactly as compiled.
-test("a packed target restores modes and mtimes only under the producer digest", () => {
-  const jobs = realJobs("web.yml");
-  const base = mkdtempSync(join(tmpdir(), "web-native-handoff-"));
-  try {
-    for (const [producer, consumer] of [
-      ["collaboration-main-build", "collaboration-test-build"],
-      ["collaboration-test-build", "collaboration-build"],
-    ] as const) {
-      const temp = join(base, `${producer}-temp`);
-      const source = join(base, producer);
-      const executable = "target/debug/build/x-1/build-script-build";
-      const depInfo = "target/debug/deps/x-1.d";
-      mkdirSync(temp);
-      mkdirSync(join(source, "target/debug/build/x-1"), { recursive: true });
-      mkdirSync(join(source, "target/debug/deps"), { recursive: true });
-      writeFileSync(join(source, executable), "#!/bin/sh\n");
-      chmodSync(join(source, executable), 0o755);
-      writeFileSync(join(source, depInfo), "x-1.d: src/lib.rs\n");
-      utimesSync(join(source, depInfo), 1_700_000_000.25, 1_700_000_000.25);
-      const output = join(temp, "github-output");
-      writeFileSync(output, "");
-      const env = { PATH: "/usr/bin:/bin", RUNNER_TEMP: temp, GITHUB_OUTPUT: output };
-      const pack = Bun.spawnSync(["bash", "-c", runOf(stepWith(jobs, producer, byId("native")))], {
-        cwd: source,
-        env,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(pack.exitCode, pack.stderr.toString()).toBe(0);
-      const digest = /^target_sha256=([0-9a-f]{64})$/m.exec(readFileSync(output, "utf8"))?.[1];
-      if (digest === undefined) throw new Error("pack wrote no digest");
-      const restore = runOf(stepWith(jobs, consumer, restoreStep));
-      // The consumer downloads into the same RUNNER_TEMP path the producer packed.
-      for (const [value, code] of [
-        ["0".repeat(64), 1],
-        ["", 1],
-        [digest, 0],
-      ] as const) {
-        const work = join(base, `${consumer}-${String(code)}-${String(value.length)}`);
-        mkdirSync(work);
-        const result = Bun.spawnSync(["bash", "-c", restore], {
-          cwd: work,
-          env: { ...env, PRODUCER_DIGEST: value },
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        expect(result.exitCode).toBe(code);
-        expect(existsSync(join(work, "target"))).toBe(code === 0);
-      }
-      const restored = join(base, `${consumer}-0-64`);
-      expect(statSync(join(restored, executable)).mode & 0o777).toBe(0o755);
-      expect(statSync(join(restored, depInfo), { bigint: true }).mtimeNs).toBe(
-        statSync(join(source, depInfo), { bigint: true }).mtimeNs,
-      );
-      expect(readFileSync(join(restored, executable), "utf8")).toBe("#!/bin/sh\n");
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  const borrowed = clone(jobs);
+  steps(borrowed, "collaboration-build").push({
+    uses: "actions/download-artifact@fixture",
+    with: { name: "old-target" },
+  });
+  expect(verifyCollaborationPreparationJobs(borrowed).join("\n")).toContain(
+    "cannot borrow an intermediate target",
+  );
 });
 
 test("no web job hands outputs over through a run-scoped cache key", () => {
@@ -495,12 +366,12 @@ test("no web job hands outputs over through a run-scoped cache key", () => {
     "v2-x-${{ github.run_attempt }}-${{ github.sha }}",
   ]) {
     const bad = clone(jobs);
-    steps(bad, "collaboration-test-build").push({
+    steps(bad, "collaboration-build").push({
       uses: "actions/cache/save@fixture",
       with: { path: "target", key },
     });
     expect(verifyNoRunScopedCacheKeys(bad)).toEqual([
-      "web: collaboration-test-build must hand off run-scoped outputs by artifact, not by a cache key",
+      "web: collaboration-build must hand off run-scoped outputs by artifact, not by a cache key",
     ]);
   }
 });
@@ -839,99 +710,29 @@ test("the budget scalar comes from the context text, not the file on disk", () =
   expect(verifyWebBrowserBudget(contextFromTexts(ROOT, { "web.yml": source }))).toEqual([]);
 });
 
-test("collaboration normalizes source times only after an exact current-run artifact restore", () => {
+test("single collaboration producer keeps seed source times and rejects helper fallback caches", () => {
   const jobs = realJobs("web.yml");
-  const normalizerName = "Normalize tracked source mtimes for native cache reuse";
-  expect(
-    steps(jobs, "collaboration-main-build").some((step) => step["name"] === normalizerName),
-  ).toBe(false);
-  for (const name of ["collaboration-test-build", "collaboration-build"]) {
-    const list = steps(jobs, name);
-    const at = list.findIndex((step) => step["name"] === normalizerName);
-    expect(at, name).toBeGreaterThan(-1);
-    const restoreAt = list.findIndex(
-      (step) => step["name"] === "Restore current native preparation",
+  const changed = clone(jobs);
+  steps(changed, "collaboration-build").push({ run: "git ls-files -z | xargs -0 touch --\n" });
+  expect(verifyCollaborationPreparationJobs(changed).join("\n")).toContain(
+    "retain checkout source times",
+  );
+  for (const path of ["crates/collab-engine/target", "target\ncrates/collab-engine/target\n"]) {
+    const bad = clone(jobs);
+    steps(bad, "collaboration-build").push({
+      uses: "actions/cache/restore@fixture",
+      with: { path, key: "old-source" },
+    });
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "no helper fallback cache",
     );
-    expect(at, name).toBeGreaterThan(restoreAt);
-    expect(at, name).toBeLessThan(
-      list.findIndex(
-        (step) => step["name"] === "Compile native preparation" || step["id"] === "prepare",
-      ),
-    );
-    for (const edit of ["true\n", "git ls-files -z | xargs -0 touch --\n"]) {
-      const bad = clone(jobs);
-      const normalizer = steps(bad, name)[at];
-      if (!normalizer) throw new Error("missing source mtime normalizer");
-      normalizer["run"] = edit;
-      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-        "deterministic tracked source mtimes",
-      );
-    }
-    for (const before of [0, restoreAt]) {
-      const bad = clone(jobs);
-      const reordered = steps(bad, name);
-      const [normalizer] = reordered.splice(at, 1);
-      if (!normalizer) throw new Error("missing source mtime normalizer");
-      reordered.splice(before, 0, normalizer);
-      expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-        "after exact current-run artifact restore",
-      );
-    }
   }
-  const bad = clone(jobs);
-  const normalizer = stepWith(
-    jobs,
-    "collaboration-test-build",
-    (step) => step["name"] === normalizerName,
-  );
-  steps(bad, "collaboration-main-build").splice(1, 0, clone(normalizer));
-  expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-    "long-term seed must retain checkout source times",
-  );
-});
-
-test("normalized collaboration jobs reject long-term native and helper fallback caches", () => {
-  const jobs = realJobs("web.yml");
-  for (const name of ["collaboration-test-build", "collaboration-build"]) {
-    expect(
-      steps(jobs, name).some(
-        (step) => (step["with"] as Mapping | undefined)?.["path"] === "crates/collab-engine/target",
-      ),
-    ).toBe(false);
-    for (const path of [
-      "target",
-      "crates/collab-engine/target",
-      "target\ncrates/collab-engine/target\n",
-    ]) {
-      for (const fallback of [false, true]) {
-        for (const before of [true, false]) {
-          const bad = clone(jobs);
-          const restore: Mapping = {
-            name: "Restore old helper",
-            id: "old_helper",
-            uses: "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-            with: {
-              path,
-              key: "old-source",
-              ...(fallback ? { "restore-keys": "old-" } : {}),
-            },
-          };
-          const list = steps(bad, name);
-          list.splice(
-            before
-              ? 1
-              : list.findIndex(
-                  (step) =>
-                    step["id"] === "prepare" || step["name"] === "Compile native preparation",
-                ),
-            0,
-            restore,
-          );
-          expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-            "no long-term native cache in normalized jobs",
-          );
-        }
-      }
-    }
+  for (const field of ["key", "restore-keys"]) {
+    const bad = clone(jobs);
+    const seed = stepWith(bad, "collaboration-build", byId("cache_collaboration_main_seed"));
+    (seed["with"] as Mapping)[field] = "foreign";
+    expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
+      "only identity-bound root seed",
+    );
   }
 });

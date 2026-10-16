@@ -71,225 +71,55 @@ const RECEIPT_DOWNLOAD_WITH = {
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
 
-export const COLLABORATION_PREPARATION_JOBS = [
-  "collaboration-main-build",
-  "collaboration-test-build",
-] as const;
-// Each phase hands its compiled target to the next job as a run-scoped
-// artifact: a cache entry can be evicted between save and restore in one run.
-// The former cache key's arch/toolchain/SHA/attempt/SQLite identity travels as
-// a producer output that the consumer must reproduce; the run ID is the
-// artifact's own scope.
-type NativePhase = "main" | "tests";
-export const COLLABORATION_NATIVE_IDENTITY =
-  "${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-" +
-  "${{ steps.sqlite.outputs.cache_identity }}";
-export const COLLABORATION_NATIVE_OUTPUTS = {
-  artifact_id: "${{ steps.publish_native.outputs.artifact-id }}",
-  target_sha256: "${{ steps.native.outputs.target_sha256 }}",
-  native_identity: COLLABORATION_NATIVE_IDENTITY,
-};
-const nativeArchive = (phase: NativePhase) => `"$RUNNER_TEMP/fvoci-native-${phase}/target.tar.zst"`;
-// tar keeps the file modes and mtimes Cargo relies on; the artifact zip does not.
-export function collaborationPackRun(phase: NativePhase): string {
-  return (
-    "set -euo pipefail\n" +
-    `mkdir -m 0700 "$RUNNER_TEMP/fvoci-native-${phase}"\n` +
-    `tar --posix -cf - target | zstd -T0 --no-progress -o ${nativeArchive(phase)}\n` +
-    `sha256="$(sha256sum ${nativeArchive(phase)} | cut -d ' ' -f 1)"\n` +
-    `printf 'target_sha256=%s\\n' "$sha256" >> "$GITHUB_OUTPUT"\n`
-  );
-}
-export function collaborationUploadWith(phase: NativePhase): Mapping {
-  return {
-    name: `web-native-${phase}-\${{ github.run_attempt }}`,
-    path: `\${{ runner.temp }}/fvoci-native-${phase}/target.tar.zst`,
-    "compression-level": 0,
-    "if-no-files-found": "error",
-    "retention-days": 1,
-  };
-}
-export function collaborationRequireEnv(producer: string): Mapping {
-  return {
-    PRODUCER_RESULT: `\${{ needs.${producer}.result }}`,
-    PRODUCER_ARTIFACT: `\${{ needs.${producer}.outputs.artifact_id }}`,
-    PRODUCER_DIGEST: `\${{ needs.${producer}.outputs.target_sha256 }}`,
-    PRODUCER_IDENTITY: `\${{ needs.${producer}.outputs.native_identity }}`,
-    CURRENT_IDENTITY: COLLABORATION_NATIVE_IDENTITY,
-  };
-}
-export const COLLABORATION_REQUIRE_RUN =
-  "set -euo pipefail\n" +
-  '[[ "$PRODUCER_RESULT" == success && "$PRODUCER_ARTIFACT" =~ ^[0-9]+$ && "$PRODUCER_DIGEST" =~ ^[0-9a-f]{64}$ ]]\n' +
-  '[[ "$CURRENT_IDENTITY" =~ ^[A-Z0-9]+-1\\.99\\.0-[0-9a-f]{40}-[1-9][0-9]*-[0-9a-f]{64}$ && "$PRODUCER_IDENTITY" == "$CURRENT_IDENTITY" ]]\n';
-export function collaborationDownloadWith(producer: string, phase: NativePhase): Mapping {
-  return {
-    "artifact-ids": `\${{ needs.${producer}.outputs.artifact_id }}`,
-    "merge-multiple": true,
-    path: `\${{ runner.temp }}/fvoci-native-${phase}`,
-  };
-}
-export function collaborationRestoreRun(phase: NativePhase): string {
-  return (
-    "set -euo pipefail\n" +
-    `archive=${nativeArchive(phase)}\n` +
-    `printf '%s  %s\\n' "$PRODUCER_DIGEST" "$archive" | sha256sum --check --strict --quiet -\n` +
-    'zstd -dc --no-progress -- "$archive" | tar -xf -\n' +
-    'rm -- "$archive"\n'
-  );
-}
-export const COLLABORATION_PREPARATION_RUNS = {
-  "collaboration-main-build":
-    "cargo build --locked --offline --features db-tests,api-schema \\\n" +
-    "  --bin fvoci-server --bin fvoci-migrate --bin fvoci-e2e-fixture\n",
-  "collaboration-test-build":
-    "cargo test --locked --offline --features db-tests,api-schema --lib --no-run\n" +
-    "cargo test --locked --offline --features db-tests,api-schema --test selected_install_lifetime --no-run\n",
-};
-
-export const COLLABORATION_SOURCE_MTIME_RUN =
-  "set -euo pipefail\n" +
-  'source_epoch="$(git show -s --format=%ct HEAD)"\n' +
-  'git ls-files -z | xargs -0 touch -h -d "@$source_epoch" --\n';
-
-// Long-term seeds keep checkout mtimes so Cargo recompiles workspace sources.
-// Only exact current-run targets can use normalized mtimes; the original
-// producer still qualifies all outputs before publishing a selected packet.
+// The selected runner owns the existing main/lib/install/engine compiler stages
+// and qualifies their complete packet once in this job. No intermediate target
+// artifact or normalized checkout timestamp is needed inside one producer.
 export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
   const errors: string[] = [];
   const require = (ok: boolean, message: string) => {
     if (!ok) errors.push("web: collaboration preparation " + message);
   };
-  const list = (name: string): Mapping[] => {
-    const value = safeGet(safeGet(jobs, name), "steps");
-    return Array.isArray(value) ? value.flatMap((step) => (isMapping(step) ? [step] : [])) : [];
-  };
-  require(!list("collaboration-main-build").some((step) => {
+  for (const name of ["collaboration-main-build", "collaboration-test-build"])
+    require(!has(jobs, name), "obsolete preparation job must be absent: " + name);
+  const producer = safeGet(jobs, "collaboration-build");
+  require(isMapping(producer) &&
+    safeGet(producer, "needs") === "ci-plan", "single producer needs only ci-plan");
+  const value = safeGet(producer, "steps");
+  const steps = Array.isArray(value) ? value.filter(isMapping) : [];
+  require(!steps.some((step) => {
     const run = safeGet(step, "run");
-    return (
-      safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse" ||
-      (typeof run === "string" && /\btouch\b/.test(run))
-    );
+    return typeof run === "string" && /\btouch\b/.test(run);
   }), "long-term seed must retain checkout source times");
-  for (const [index, name] of COLLABORATION_PREPARATION_JOBS.entries()) {
-    const job = safeGet(jobs, name);
-    require(isMapping(job), `${name} must exist`);
-    require(pyEq(
-      safeGet(job, "needs"),
-      index === 0 ? "ci-plan" : ["ci-plan", "collaboration-main-build"],
-    ), "ordered preparation dependencies");
-    const steps = list(name);
-    const compiles = steps.filter((step) => safeGet(step, "name") === "Compile native preparation");
-    const compile = compiles[0];
-    require(compiles.length === 1 &&
-      compile !== undefined &&
-      unmasked(compile) &&
-      pyEq(Object.keys(compile).sort(), ["name", "run"]) &&
-      safeGet(compile, "run") ===
+  require(!steps.some((step) =>
+    usesPrefix(step, "actions/download-artifact@"),
+  ), "single producer cannot borrow an intermediate target");
+  const at = steps.findIndex((step) => safeGet(step, "id") === "prepare");
+  const prepare = steps[at];
+  require(prepare !== undefined &&
+    unmasked(prepare) &&
+    pyEq(Object.keys(prepare).sort(), ["env", "id", "name", "run"]) &&
+    pyEq(safeGet(prepare, "env"), { FVOCI_E2E_PENDING: "1" }) &&
+    safeGet(prepare, "run") ===
+      timingPreamble("collaboration-build", at + 1) +
         "set -euo pipefail\n" +
-          COLLABORATION_PREPARATION_RUNS[name], "complete unmasked compiler commands");
-    const phase = index === 0 ? "main" : "tests";
-    const packs = steps.filter(
-      (step) => safeGet(step, "name") === "Pack current native preparation",
-    );
-    const pack = packs[0];
-    require(packs.length === 1 &&
-      pack !== undefined &&
-      unmasked(pack) &&
-      pyEq(Object.keys(pack).sort(), ["id", "name", "run"]) &&
-      safeGet(pack, "id") === "native" &&
-      steps.indexOf(pack) > steps.indexOf(compile as Mapping) &&
-      safeGet(pack, "run") ===
-        collaborationPackRun(phase), "pack the compiled target with its modes, mtimes and digest");
-    const saves = steps.filter(
-      (step) => safeGet(step, "name") === "Save current native preparation",
-    );
-    const save = saves[0];
-    require(saves.length === 1 &&
-      save !== undefined &&
-      unmasked(save) &&
-      steps.indexOf(save) > steps.indexOf(pack as Mapping) &&
-      safeGet(save, "id") === "publish_native" &&
-      safeGet(save, "uses") === UPLOAD_PIN &&
-      pyEq(
-        safeGet(save, "with"),
-        collaborationUploadWith(phase),
-      ), "save only the packed current-run target as a run-scoped artifact");
-    require(pyEq(
-      safeGet(job, "outputs"),
-      COLLABORATION_NATIVE_OUTPUTS,
-    ), "outputs the artifact ID, digest and arch/SHA/attempt/SQLite identity");
-    require(steps.filter(
-      (step) => usesPrefix(step, "actions/upload-artifact@") && !isSQLiteHashUpload(step),
-    ).length === 1, "preparation cannot publish qualified packets");
-  }
-  for (const [name, producer, phase] of [
-    ["collaboration-test-build", "collaboration-main-build", "main"],
-    ["collaboration-build", "collaboration-test-build", "tests"],
-  ] as const) {
-    const steps = list(name);
-    const compileAt = steps.findIndex(
-      (step) =>
-        safeGet(step, "name") === "Compile native preparation" || safeGet(step, "id") === "prepare",
-    );
-    const sqliteAt = steps.findIndex((step) => safeGet(step, "id") === "sqlite");
-    const checks = steps.filter(
-      (step) => safeGet(step, "name") === "Require exact current native preparation",
-    );
-    const check = checks[0];
-    require(checks.length === 1 &&
-      check !== undefined &&
-      unmasked(check) &&
-      pyEq(Object.keys(check).sort(), ["env", "name", "run"]) &&
-      pyEq(safeGet(check, "env"), collaborationRequireEnv(producer)) &&
-      safeGet(check, "run") === COLLABORATION_REQUIRE_RUN &&
-      sqliteAt >= 0 &&
-      steps.indexOf(check) >
-        sqliteAt, "producer must match this run's arch/SHA/attempt/SQLite identity after SQLite preparation");
-    const downloads = steps.filter((step) => usesPrefix(step, "actions/download-artifact@"));
-    const download = downloads[0];
-    require(downloads.length === 1 &&
-      download !== undefined &&
-      unmasked(download) &&
-      safeGet(download, "uses") === DOWNLOAD_PIN &&
-      pyEq(safeGet(download, "with"), collaborationDownloadWith(producer, phase)) &&
-      steps.indexOf(download) >
-        steps.indexOf(
-          check as Mapping,
-        ), "exact current-run producer artifact ID after the identity check");
-    const restores = steps.filter(
-      (step) => safeGet(step, "name") === "Restore current native preparation",
-    );
-    const restore = restores[0];
-    require(restores.length === 1 &&
-      restore !== undefined &&
-      unmasked(restore) &&
-      pyEq(Object.keys(restore).sort(), ["env", "name", "run"]) &&
-      pyEq(safeGet(restore, "env"), {
-        PRODUCER_DIGEST: `\${{ needs.${producer}.outputs.target_sha256 }}`,
-      }) &&
-      safeGet(restore, "run") === collaborationRestoreRun(phase) &&
-      steps.indexOf(restore) > steps.indexOf(download as Mapping) &&
-      steps.indexOf(restore) <
-        compileAt, "digest-verified current-run artifact restore before compilation");
-    const normalizers = steps.filter(
-      (step) => safeGet(step, "name") === "Normalize tracked source mtimes for native cache reuse",
-    );
-    const normalize = normalizers[0];
-    require(normalizers.length === 1 &&
-      normalize !== undefined &&
-      unmasked(normalize) &&
-      pyEq(Object.keys(normalize).sort(), ["name", "run"]) &&
-      safeGet(normalize, "run") === COLLABORATION_SOURCE_MTIME_RUN &&
-      steps.indexOf(normalize) > steps.indexOf(restore as Mapping) &&
-      steps.indexOf(normalize) <
-        compileAt, "deterministic tracked source mtimes after exact current-run artifact restore before compilation");
-    require(steps
-      .filter((step) => usesPrefix(step, "actions/cache"))
-      .every((step) => {
-        const path = safeGet(safeGet(step, "with"), "path");
-        return typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git";
-      }), "no long-term native cache in normalized jobs");
+        'export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"\n' +
+        'export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"\n' +
+        'export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"\n' +
+        'mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"\n' +
+        "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected\n", "complete unmasked compiler and packet qualification in one owned producer");
+  for (const step of steps.filter((step) => usesPrefix(step, "actions/cache"))) {
+    const withs = safeGet(step, "with");
+    const path = safeGet(withs, "path");
+    if (typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git") continue;
+    require(isMapping(withs) &&
+      path === "target" &&
+      !has(withs, "restore-keys") &&
+      typeof safeGet(withs, "key") === "string" &&
+      String(safeGet(withs, "key")).includes("steps.sqlite.outputs.cache_identity") &&
+      steps.indexOf(step) >
+        steps.findIndex(
+          (item) => safeGet(item, "id") === "sqlite",
+        ), "only identity-bound root seed after SQLite preparation; no helper fallback cache");
   }
   return errors;
 }
@@ -378,10 +208,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
   };
 
   const producer = jobOf("collaboration-build");
-  require(pyEq(get(producer, "needs"), [
-    "ci-plan",
-    ...COLLABORATION_PREPARATION_JOBS,
-  ]), "producer needs ci-plan and successful preparation");
+  require(get(producer, "needs") === "ci-plan", "producer needs only ci-plan");
   const lanes = WEB_COLLAB_LANES.map((lane) => ({ lane, job: jobOf(lane.name) }));
   for (const { lane, job } of lanes) {
     require(pyEq(get(job, "needs"), lane.needs), "consumer needs successful registered producer");
@@ -389,7 +216,6 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
   const stepsByJob = new Map<string, Mapping[]>();
   for (const [name, job] of [
     ["collaboration-build", producer] as const,
-    ...COLLABORATION_PREPARATION_JOBS.map((name) => [name, jobOf(name)] as const),
     ...lanes.map(({ lane, job }) => [lane.name, job] as const),
   ]) {
     require(get(job, "runs-on") === "ubuntu-26.04" &&
@@ -537,11 +363,7 @@ export const RUSTUP_METADATA_RUN =
 const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
 const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
 const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
-const TIMED_RUSTUP_JOBS = [
-  ...COLLABORATION_PREPARATION_JOBS,
-  "collaboration-build",
-  ...WEB_COLLAB_LANES.map((lane) => lane.name),
-];
+const TIMED_RUSTUP_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
 
 export const WEB_SQLITE_JOBS = [
   "web-checks",

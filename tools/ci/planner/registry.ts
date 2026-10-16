@@ -14,8 +14,6 @@ export const WORKFLOW_JOBS = {
     "web-native-checks",
     "workspace-browser-build",
     "workspace-browser-shard",
-    "collaboration-main-build",
-    "collaboration-test-build",
     "collaboration-build",
     "collaboration-install-on",
     "collaboration-postgres-on",

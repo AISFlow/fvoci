@@ -53,8 +53,6 @@ const contracts = {
     "web-native-checks": "select_web_checks",
     "workspace-browser-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
-    "collaboration-main-build": "select_collaboration_main_build",
-    "collaboration-test-build": "select_collaboration_test_build",
     "collaboration-build": "select_collaboration_build",
     "collaboration-install-on": "select_collaboration_install_on",
     "collaboration-postgres-on": "select_collaboration_postgres_on",
@@ -869,10 +867,9 @@ for (const path of ["target", "crates/collab-engine/target"])
         (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
       );
     const ordinary = save("workspace-browser-build");
-    // The normalized producer has no long-term helper cache. Keep testing the
+    // The single producer has no long-term helper cache. Keep testing the
     // writer collision policy if another helper writer is introduced later.
-    const selected =
-      path === "target" ? save("collaboration-main-build") : structuredClone(ordinary);
+    const selected = path === "target" ? save("collaboration-build") : structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
     if (path !== "target") {
       assert.ok(
