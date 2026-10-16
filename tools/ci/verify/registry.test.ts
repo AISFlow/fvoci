@@ -131,7 +131,12 @@ describe("turso-test.yml literal text", () => {
   });
 
   test("restore cannot lose its source or observed dataset and target inputs", () => {
-    for (const key of ["ui_source_sha", "ui_baseline_sha256", "ui_target_sha256"]) {
+    for (const key of [
+      "ui_source_sha",
+      "ui_baseline_sha256",
+      "ui_target_sha256",
+      "reset_current12_data",
+    ]) {
       const parsed = parseWorkflow("turso-test.yml", text);
       if (parsed.error) throw new Error("Actual Turso workflow must parse");
       const data = parsed.data;
@@ -145,6 +150,22 @@ describe("turso-test.yml literal text", () => {
         "turso-test.yml: fixed phase inputs and non-destructive default",
       );
     }
+  });
+
+  test("current12 reset authority cannot become a default", () => {
+    const parsed = parseWorkflow("turso-test.yml", text);
+    const data = parsed.data;
+    if (!data) throw new Error("Actual Turso workflow mapping required");
+    const input = get(
+      get(get(triggersOf(data), "workflow_dispatch"), "inputs"),
+      "reset_current12_data",
+    );
+    if (!input || typeof input !== "object" || Array.isArray(input))
+      throw new Error("Actual current12 reset input mapping required");
+    input.default = true;
+    expect(verifyTursoWorkflow(data)).toContain(
+      "turso-test.yml: fixed phase inputs and non-destructive default",
+    );
   });
 
   test("the connection target is published before preparation, for later steps", () => {

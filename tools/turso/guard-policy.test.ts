@@ -297,6 +297,43 @@ describe("dispatch admission", () => {
     }
   });
 
+  test("current12 data reset keeps both manual refs and refuses every other phase", () => {
+    const reset = { phase: "reset", destructive: true, reset_current12_data: true };
+    for (const ref of [context.ref, REVIEWED_REF])
+      expect(validateDispatch({ ...context, ref }, reset, A)).toBe("reset");
+    expect(validateTarget(reset, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" }, secrets)).toBe(
+      "reset",
+    );
+    denied("DESTRUCTIVE_CONFIRMATION_REQUIRED", () =>
+      validateDispatch(context, { ...reset, destructive: false }, A),
+    );
+    denied("DESTRUCTIVE_NOT_ALLOWED", () => validateTarget(reset, settings, secrets));
+    for (const phase of PHASES.filter((phase) => phase !== "reset")) {
+      denied("RESET_CURRENT12_PHASE_REQUIRED", () =>
+        validateDispatch(context, { ...reset, phase }, A),
+      );
+      denied("RESET_CURRENT12_PHASE_REQUIRED", () =>
+        validateTarget(
+          { ...reset, phase },
+          { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" },
+          secrets,
+        ),
+      );
+    }
+    for (const value of ["true", 1, null])
+      denied("INVALID_BOOLEAN", () =>
+        validateDispatch(context, { ...reset, reset_current12_data: value }, A),
+      );
+    for (const changed of [
+      { ...context, event_name: "push", ref: REVIEWED_REF },
+      { ...context, ref: UI_REVIEWED_REF },
+      { ...context, ref: "refs/heads/topic" },
+      { ...context, repository: "attacker/fvoci" },
+      { ...context, sha: "b".repeat(40) },
+    ])
+      expect(() => validateDispatch(changed, reset, A)).toThrow(AdmissionError);
+  });
+
   test("unknown phase is not a shell command", () => {
     denied("UNKNOWN_PHASE", () => validateDispatch(context, { ...inputs, phase: "echo FAKE" }, A));
     denied("UNKNOWN_PHASE", () => {
@@ -616,6 +653,14 @@ describe("mode routing", () => {
   });
 
   test("event inputs: string booleans only, dict() semantics otherwise", () => {
+    for (const reset of ["true", "false"])
+      expect(eventInputs({ inputs: { phase: "reset", reset_current12_data: reset } })).toEqual({
+        phase: "reset",
+        destructive: false,
+        reset_current12_data: reset === "true",
+      });
+    for (const value of [true, "TRUE", "", null, 1])
+      denied("INVALID_BOOLEAN", () => eventInputs({ inputs: { reset_current12_data: value } }));
     expect(eventInputs({ inputs: { phase: "inventory", destructive: "true" } })).toEqual({
       phase: "inventory",
       destructive: true,

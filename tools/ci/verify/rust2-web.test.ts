@@ -51,7 +51,7 @@ const runOf = (step: Mapping): string => {
   return run;
 };
 
-test("every Web SQLite caller upgrades complete host inputs before capture without relaxing refusal", () => {
+test("every Web SQLite caller installs required packages before capture without unrelated upgrades", () => {
   const jobs = realJobs("web.yml");
   expect(verifyWebHostInputsJobs(jobs)).toEqual([]);
   for (const name of WEB_SQLITE_JOBS) {
@@ -59,7 +59,10 @@ test("every Web SQLite caller upgrades complete host inputs before capture witho
       ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
       ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
       ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
-      ["--with-new-pkgs", ""],
+      [
+        "apt-get install",
+        "apt-get upgrade -y --with-new-pkgs --no-remove\nsudo env DEBIAN_FRONTEND=noninteractive apt-get install",
+      ],
       ["--no-remove", ""],
       [" linux-libc-dev", ""],
       [" libcrypt-dev", ""],
@@ -86,8 +89,8 @@ test("every Web SQLite caller upgrades complete host inputs before capture witho
     prep["run"] = runOf(prep)
       .replace(capture, "")
       .replace(
-        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
-        capture + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get install",
+        capture + "sudo env DEBIAN_FRONTEND=noninteractive apt-get install",
       );
     expect(verifyWebHostInputsJobs(reordered).join("\n")).toContain(
       "complete unmasked host preparation",
@@ -103,7 +106,10 @@ test("Rust native handoff callers align host inputs before existing qualified SQ
       ["APT::Update::Error-Mode=any", "APT::Update::Error-Mode=persistent"],
       ["DEBIAN_FRONTEND=noninteractive", "DEBIAN_FRONTEND=dialog"],
       ['Always-Include-Phased-Updates "true"', 'Always-Include-Phased-Updates "false"'],
-      ["--with-new-pkgs", ""],
+      [
+        "apt-get install",
+        "apt-get upgrade -y --with-new-pkgs --no-remove\nsudo env DEBIAN_FRONTEND=noninteractive apt-get install",
+      ],
       ["--no-remove", ""],
       [" linux-libc-dev", ""],
       [" libcrypt-dev", ""],
@@ -122,8 +128,8 @@ test("Rust native handoff callers align host inputs before existing qualified SQ
     prep["run"] = runOf(prep)
       .replace(SQLITE_PACKAGES + "\n", "")
       .replace(
-        "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
-        SQLITE_PACKAGES + "\n" + "sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade",
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get install",
+        SQLITE_PACKAGES + "\n" + "sudo env DEBIAN_FRONTEND=noninteractive apt-get install",
       );
     expect(verifySqlitePrefixCache(reordered).join("\n")).toContain(
       "host packages must be aligned before SQLite capture",

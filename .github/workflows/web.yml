@@ -139,7 +139,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -278,7 +277,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -354,7 +352,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -480,7 +477,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -614,7 +610,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -724,7 +719,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -853,7 +847,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1015,7 +1008,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1177,7 +1169,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1338,7 +1329,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1499,7 +1489,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
@@ -1660,7 +1649,6 @@ jobs:
           esac
           printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
           sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs --no-remove
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
           mkdir "$RUNNER_TEMP/fvoci-sqlite"
           dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"

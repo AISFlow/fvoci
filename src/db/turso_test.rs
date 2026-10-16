@@ -1812,6 +1812,20 @@ mod inventory_policy_tests {
 // never invoke this route or reset a nonblank schema on their own behalf.
 const RESET_TEST_NAME: &str = "db::turso_test::turso_primary_disposable_prefix11_reset";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetMode {
+    FixtureOnly,
+    Current12Data,
+}
+
+fn reset_mode(lookup: impl Fn(&str) -> Option<String>) -> Result<ResetMode, &'static str> {
+    match lookup("FVOCI_TEST_TURSO_RESET_CURRENT12_DATA").as_deref() {
+        None | Some("false") => Ok(ResetMode::FixtureOnly),
+        Some("true") => Ok(ResetMode::Current12Data),
+        _ => Err("EXPLICIT_RESET_SELECTION_REQUIRED"),
+    }
+}
+
 fn reset_selection(
     lookup: impl Fn(&str) -> Option<String>,
     args: &[String],
@@ -2154,11 +2168,8 @@ async fn reset_current_fixture_admitted(
     family: &mut FamilyTx,
     snapshot: &super::migrate::TursoTestSchemaSnapshot,
 ) -> Result<(), &'static str> {
+    let sql = reset_current_catalog_sql(family).await?;
     let matches = async {
-        let tables = family.query(
-            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name", &[]
-        ).await?.iter().map(|row| row.cell(0)?.string()).collect::<Result<Vec<_>, sqlx::Error>>()?;
-        let Ok(sql) = reset_current_user_data_sql(&tables) else { return Ok(false); };
         // FamilyTx accepts static reviewed SQL. The catalog was verified against
         // the compiled registry, so this one process-lifetime query cannot vary
         // by target; no input table name can enter it without that full gate.
@@ -2221,6 +2232,23 @@ async fn reset_current_fixture_admitted(
     }
 }
 
+/// Called only after the full compiled ledger/catalog gate on this writer.
+/// Both reset modes require complete coverage by the single literal drop plan.
+async fn reset_current_catalog_sql(family: &mut FamilyTx) -> Result<String, &'static str> {
+    let tables = family
+        .query(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+            &[],
+        )
+        .await
+        .map_err(|_| "RESET_FIXTURE_REFUSED")?
+        .iter()
+        .map(|row| row.cell(0)?.string())
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map_err(|_| "RESET_FIXTURE_REFUSED")?;
+    reset_current_user_data_sql(&tables)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ResetOutcome {
     primary: &'static str,
@@ -2243,6 +2271,10 @@ impl ResetOutcome {
 }
 
 async fn reset_transaction(backend: &Backend) -> ResetOutcome {
+    reset_transaction_with_mode(backend, ResetMode::FixtureOnly).await
+}
+
+async fn reset_transaction_with_mode(backend: &Backend, mode: ResetMode) -> ResetOutcome {
     if !matches!(backend, Backend::LibsqlRemote(_)) {
         return ResetOutcome::refused("WRONG_PRODUCT_BACKEND");
     }
@@ -2275,7 +2307,12 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
         let snapshot = super::migrate::turso_test_schema_in_writer(family, schema_steps)
             .await
             .map_err(|_| "RESET_SCHEMA_REFUSED")?;
-        if schema_steps == 11 {
+        if mode == ResetMode::Current12Data {
+            if schema_steps != 12 {
+                return Err("RESET_SCHEMA_REFUSED");
+            }
+            reset_current_catalog_sql(family).await?;
+        } else if schema_steps == 11 {
             // Preserve the original PREFIX11 empty-user-data contract.
             let user_rows = reset_user_data_total(family).await?;
             reset_user_data_admitted(user_rows)?;
@@ -2346,13 +2383,14 @@ async fn reset_transaction(backend: &Backend) -> ResetOutcome {
 async fn turso_primary_disposable_prefix11_reset() -> Result<(), &'static str> {
     let args: Vec<String> = std::env::args().collect();
     reset_selection(|name| std::env::var(name).ok(), &args)?;
+    let mode = reset_mode(|name| std::env::var(name).ok())?;
     let (url, token) = reset_credentials(|name| std::env::var(name).ok())?;
     let backend = Backend::LibsqlRemote(
         RemoteDatabase::connect(url, token, 1)
             .await
             .map_err(|_| "CONNECT_FAILED")?,
     );
-    let outcome = reset_transaction(&backend).await;
+    let outcome = reset_transaction_with_mode(&backend, mode).await;
     // Backend close ALWAYS awaits original local cleanup/drain, including
     // failure/quarantined commit; local drain is not a server Close ACK.
     let close = close_migration_owner(&backend).await;
@@ -2381,6 +2419,49 @@ async fn turso_primary_disposable_prefix11_reset() -> Result<(), &'static str> {
 #[cfg(test)]
 mod reset_policy_tests {
     use super::*;
+
+    #[test]
+    fn reset_current12_data_mode_requires_an_exact_explicit_boolean() {
+        assert_eq!(reset_mode(|_| None), Ok(ResetMode::FixtureOnly));
+        for (value, expected) in [
+            ("false", ResetMode::FixtureOnly),
+            ("true", ResetMode::Current12Data),
+        ] {
+            assert_eq!(reset_mode(|_| Some(value.into())), Ok(expected));
+        }
+        for value in ["", "TRUE", "1", " true", "false\n"] {
+            assert_eq!(
+                reset_mode(|_| Some(value.into())),
+                Err("EXPLICIT_RESET_SELECTION_REQUIRED")
+            );
+        }
+    }
+
+    #[test]
+    fn reset_current12_drop_coverage_refuses_missing_extra_or_duplicate_tables() {
+        let tables: Vec<String> = RESET_DROP_STATEMENTS
+            .iter()
+            .filter_map(|statement| {
+                statement
+                    .strip_prefix("DROP TABLE IF EXISTS \"")?
+                    .strip_suffix("\";")
+                    .map(String::from)
+            })
+            .collect();
+        assert!(reset_current_user_data_sql(&tables).is_ok());
+        let mut missing = tables.clone();
+        missing.pop();
+        let mut extra = tables.clone();
+        extra.push("unexpected_table".into());
+        let mut duplicate = tables.clone();
+        duplicate.push(tables[0].clone());
+        for wrong in [missing, extra, duplicate] {
+            assert_eq!(
+                reset_current_user_data_sql(&wrong),
+                Err("RESET_FIXTURE_REFUSED")
+            );
+        }
+    }
 
     fn flags() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -2701,6 +2782,10 @@ mod reset_policy_tests {
             .unwrap();
         let workspace = uuid::Uuid::now_v7();
         migration_populate(&backend, workspace).await.unwrap();
+        let current12_only = reset_transaction_with_mode(&backend, ResetMode::Current12Data).await;
+        assert_eq!(current12_only.primary, "RESET_SCHEMA_REFUSED");
+        assert_eq!(current12_only.rollback, "RETURNED_OK");
+        assert_eq!(current12_only.steps, 0);
         let outcome = reset_transaction(&backend).await;
         assert_eq!(outcome.primary, "RESET_USER_DATA_PRESENT");
         assert_eq!(outcome.steps, 0);
@@ -2853,6 +2938,36 @@ mod reset_policy_tests {
         (driver, root, backend)
     }
 
+    async fn current_reset_data_fixture() -> (
+        crate::db::libsql_finish_fixture::LibsqlFinishFixture,
+        std::path::PathBuf,
+        Backend,
+    ) {
+        let (driver, root, backend) = current_reset_fixture().await;
+        let mut tx = backend.begin_write().await.unwrap();
+        let family = remote_family(&mut tx).unwrap();
+        // Connected real STRICT/FK rows, not the default migration fingerprint.
+        for sql in [
+            "INSERT INTO users(id,email,given_name,personal_workspace_id) SELECT X'00000000000070008000000000000001','reset-fixture@example.invalid','Reset',id FROM workspaces",
+            "INSERT INTO memberships(workspace_id,user_id,role) SELECT id,X'00000000000070008000000000000001','owner' FROM workspaces",
+            "INSERT INTO documents(id,workspace_id,title,path,sort_key,number,status,schema_version,created_by,content_json) SELECT X'00000000000070008000000000000002',id,'Reset document','00000000000070008000000000000002','V',1,'draft',2,X'00000000000070008000000000000001','{}' FROM workspaces",
+            "INSERT INTO document_states(workspace_id,document_id,state) SELECT id,X'00000000000070008000000000000002',X'01' FROM workspaces",
+            "INSERT INTO attachments(id,workspace_id,document_id,uploader_id,status,name,reserved_size_bytes,storage_key) SELECT X'00000000000070008000000000000003',id,X'00000000000070008000000000000002',X'00000000000070008000000000000001','uploading','Reset attachment',1,'reset-fixture-object' FROM workspaces",
+            "INSERT INTO instance_settings(key,value) VALUES('ResetExtra','true')",
+            "UPDATE instance_settings_meta SET revision=4",
+            "UPDATE maintenance_job_claims SET generation=99,owner_token=X'00000000000070008000000000000001',expires_at=1 WHERE job_key=8",
+        ] {
+            assert_eq!(family.execute(sql, &[]).await.unwrap(), 1);
+        }
+        assert!(family
+            .query("PRAGMA foreign_key_check", &[])
+            .await
+            .unwrap()
+            .is_empty());
+        tx.commit_with_cleanup().await.unwrap();
+        (driver, root, backend)
+    }
+
     // Raw catalog, ledger and all nonempty fixture/negative-control rows. This
     // observer uses a fresh stream and also preserves the generated ID/times.
     async fn current_reset_state(backend: &Backend) -> Vec<Vec<Vec<Cell>>> {
@@ -2875,8 +2990,113 @@ mod reset_policy_tests {
                 (0..columns).map(|column| row.cell(column).unwrap()).collect()
             }).collect());
         }
+        for sql in [
+            "SELECT * FROM users ORDER BY id",
+            "SELECT * FROM memberships ORDER BY workspace_id,user_id",
+            "SELECT * FROM documents ORDER BY id",
+            "SELECT * FROM document_states ORDER BY workspace_id,document_id",
+            "SELECT * FROM attachments ORDER BY id",
+        ] {
+            state.push(
+                family
+                    .query(sql, &[])
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|row| {
+                        (0..row.column_count().unwrap())
+                            .map(|column| row.cell(column).unwrap())
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
         tx.rollback().await.unwrap();
         state
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_current12_data_requires_confirmation_and_commits_connected_rows() {
+        let (driver, root, backend) = current_reset_data_fixture().await;
+        let before = current_reset_state(&backend).await;
+        let refused = reset_transaction(&backend).await;
+        assert_eq!(refused.primary, "RESET_FIXTURE_REFUSED");
+        assert_eq!(refused.rollback, "RETURNED_OK");
+        assert_eq!(refused.commit, "NOT_STARTED");
+        assert_eq!(refused.steps, 0);
+        assert_eq!(current_reset_state(&backend).await, before);
+        let outcome = reset_transaction_with_mode(&backend, ResetMode::Current12Data).await;
+        close_migration_owner(&backend).await.unwrap();
+        finish_fixture(driver, root).await;
+        assert_eq!(
+            outcome,
+            ResetOutcome {
+                primary: "OK",
+                rollback: "NOT_STARTED",
+                commit: "RETURNED_OK",
+                blank: "CONFIRMED",
+                steps: 126,
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_current12_data_schema_refusals_rollback_without_effect() {
+        for mutation in [
+            "CREATE TABLE reset_unexpected_object(id INTEGER PRIMARY KEY)",
+            "UPDATE schema_migrations SET sql_sha256='0000000000000000000000000000000000000000000000000000000000000000' WHERE version=1",
+        ] {
+            let (driver, root, backend) = current_reset_data_fixture().await;
+            let mut tx = backend.begin_write().await.unwrap();
+            remote_family(&mut tx).unwrap().execute(mutation, &[]).await.unwrap();
+            tx.commit_with_cleanup().await.unwrap();
+            let before = current_reset_state(&backend).await;
+            let outcome = reset_transaction_with_mode(&backend, ResetMode::Current12Data).await;
+            let after = current_reset_state(&backend).await;
+            close_migration_owner(&backend).await.unwrap();
+            finish_fixture(driver, root).await;
+            assert_eq!(outcome.primary, "RESET_SCHEMA_REFUSED");
+            assert_eq!(outcome.rollback, "RETURNED_OK");
+            assert_eq!(outcome.commit, "NOT_STARTED");
+            assert_eq!(outcome.steps, 0);
+            assert_eq!(after, before);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "ROOT allocated official sqld and explicit migration helper gates required"]
+    async fn reset_current12_data_lost_commit_reply_has_no_fresh_observer() {
+        let (driver, root, backend) = current_reset_data_fixture().await;
+        let gate = driver.arm_commit_response_loss();
+        let reset = reset_transaction_with_mode(&backend, ResetMode::Current12Data);
+        tokio::pin!(reset);
+        tokio::select! {
+            outcome = &mut reset => panic!("reset returned before actual commit response: {outcome:?}"),
+            response = gate.wait_upstream_response() => response.unwrap(),
+        }
+        gate.release_lost_reply();
+        let outcome = reset.await;
+        assert_eq!(outcome.primary, "COMMIT_UNCONFIRMED");
+        assert_eq!(outcome.commit, "UNCONFIRMED");
+        assert_eq!(outcome.blank, "NOT_RUN");
+        assert_eq!(outcome.rollback, "NOT_STARTED");
+        assert_eq!(outcome.steps, 126);
+        assert!(close_migration_owner(&backend).await.is_err());
+        assert_eq!(backend.connection_stats().unwrap().size, 0);
+        let exchanges = driver.exchanges();
+        let commit = exchanges
+            .iter()
+            .rposition(|exchange| exchange.has_commit)
+            .unwrap();
+        assert!(exchanges[commit].reply_lost);
+        assert_eq!(exchanges[commit].upstream_status, Some(200));
+        for exchange in &exchanges[commit + 1..] {
+            let request = serde_json::to_string(&exchange.request).unwrap();
+            assert!(!request.contains("SELECT") && !request.contains("ROLLBACK"));
+        }
+        finish_fixture(driver, root).await;
     }
 
     #[tokio::test]

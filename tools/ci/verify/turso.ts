@@ -88,6 +88,12 @@ const DISPATCH_INPUTS = {
     type: "boolean",
     default: false,
   },
+  reset_current12_data: {
+    description:
+      "Reset only; explicitly discard data in the designated test DB after exact current12 schema validation",
+    type: "boolean",
+    default: false,
+  },
   ui_source_sha: {
     description:
       "ROOT reviewed exact UI source SHA (ui-baseline, ui-ack, restore, ui-auth and ui-final only)",

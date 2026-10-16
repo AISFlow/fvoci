@@ -772,6 +772,43 @@ describe("primary consumers", () => {
     expect(verdict.lines).toContain("TURSO_RESET_PASS tests=1 ignored=0");
     expect(verdict.lines.join("\n")).not.toContain("FAKE_PRIVATE_TOKEN");
   });
+
+  test("only an explicitly confirmed reset passes current12 data authority to its child", async () => {
+    for (const confirmed of [false, true]) {
+      const { root } = frozen();
+      const env = primaryEnv(root, { FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: "true" });
+      env.FVOCI_TEST_TURSO_RESET_CURRENT12_DATA = "true";
+      const run = seams([ok(resetSuccess())]);
+      await runPrimary(
+        "reset",
+        A,
+        { ...resetInputs, reset_current12_data: confirmed },
+        env,
+        run.seams,
+      );
+      expect(run.calls[0]?.env.FVOCI_TEST_TURSO_RESET_CURRENT12_DATA).toBe(
+        confirmed ? "true" : undefined,
+      );
+    }
+    for (const phase of ["connection", "inventory", "migration"] as const) {
+      const { root } = frozen();
+      const env = primaryEnv(root, {
+        FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE: phase === "migration" ? "true" : "false",
+      });
+      env.FVOCI_TEST_TURSO_RESET_CURRENT12_DATA = "true";
+      const run = seams([
+        ok(
+          phase === "inventory"
+            ? inventorySuccess()
+            : phase === "migration"
+              ? migration
+              : connection,
+        ),
+      ]);
+      await runPrimary(phase, A, { phase, destructive: phase === "migration" }, env, run.seams);
+      expect(run.calls[0]?.env.FVOCI_TEST_TURSO_RESET_CURRENT12_DATA).toBeUndefined();
+    }
+  });
 });
 
 describe("UI consumer handoff", () => {
