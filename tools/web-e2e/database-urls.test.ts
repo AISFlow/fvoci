@@ -1,12 +1,42 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { DatabaseUrlError, databaseUrls, quoteComponent } from "./database-urls.ts";
+import {
+  DatabaseUrlError,
+  databaseUrls,
+  groupDatabaseStatement,
+  quoteComponent,
+} from "./database-urls.ts";
 
 const SCRIPT = path.join(import.meta.dirname, "database-urls.ts");
 const DB = "fvoci_e2e_0123456789abcdef";
 const ROLE = `fvoci_app_${DB}`;
 const PASSWORD = "00112233445566778899aabbccddeeff";
 const SECRET = "admin-secret";
+
+describe("owned group database operations", () => {
+  const env = { DB_NAME: DB, ROLE_NAME: ROLE, ROLE_PASSWORD: PASSWORD };
+  test("the app role is explicitly restricted and retirement is limited to the same generated pair", () => {
+    expect(groupDatabaseStatement("create-role", env)).toContain("NOSUPERUSER NOBYPASSRLS");
+    expect(groupDatabaseStatement("drop-role", env)).toBe(`DROP ROLE IF EXISTS "${ROLE}"`);
+    expect(groupDatabaseStatement("drop-database", env)).toBe(
+      `DROP DATABASE IF EXISTS "${DB}" WITH (FORCE)`,
+    );
+  });
+  for (const bad of [
+    { DB_NAME: "postgres" },
+    { DB_NAME: DB + '"; DROP DATABASE postgres;--' },
+    { ROLE_NAME: "postgres" },
+    { ROLE_PASSWORD: "' SUPERUSER --" },
+  ])
+    test("refuses foreign or injectable group inputs " + Object.keys(bad).join(), () => {
+      expect(() => groupDatabaseStatement("create-role", { ...env, ...bad })).toThrow(
+        DatabaseUrlError,
+      );
+    });
+  test("refuses arbitrary SQL commands", () => {
+    expect(() => groupDatabaseStatement("DROP DATABASE postgres", env)).toThrow(DatabaseUrlError);
+  });
+});
 
 describe("databaseUrls", () => {
   test("replaces the admin path and builds the app role URL", () => {

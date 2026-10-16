@@ -5,21 +5,294 @@
 // exits 1; a usage error exits 2.
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
   fchmodSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readlinkSync,
   realpathSync,
   statSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
 import { validateSpecRelpath } from "./groups.ts";
+
+export const CI_WEB_IMAGE =
+  "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
+
+// This first ordinary-browser slice retains the complete registered shard.
+// The other shards still have host Docker/psql fixture oracles to migrate;
+// they are never silently run with a socket or with those assertions skipped.
+export function containerShard(value: string | undefined): string {
+  if (value !== "6") fail("the shared-container slice currently supports the complete shard 6");
+  return value;
+}
+
+function checkedOutput(argv: string[], cwd: string): string {
+  const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
+  return result.stdout.toString().trim();
+}
+
+/** One pinned image, existing producer packet, then one real isolated shard. */
+async function containerBrowser(argv: string[], consumeOnly = false): Promise<number> {
+  if (consumeOnly ? argv.length !== 4 : argv.length !== 3 || argv[1] !== "--ci-shard")
+    throw new UsageError("container-browser ROOT --ci-shard 6");
+  const root = realpathSync(argv[0] ?? "");
+  if (!consumeOnly) containerShard(argv[2]);
+  if (
+    process.env.GITHUB_ACTIONS ||
+    Object.keys(process.env).some((key) => key.startsWith("GITHUB_"))
+  )
+    fail("local container execution cannot impersonate a GitHub job");
+  const uid = process.getuid?.(),
+    gid = process.getgid?.();
+  if (!uid || gid === undefined) fail("a non-root POSIX Docker client is required");
+  const image = CI_WEB_IMAGE;
+  if (
+    !/^linux (?:x86_64|amd64)$/.test(
+      checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    )
+  )
+    fail("the first browser slice requires a native Linux amd64 Docker daemon");
+  const metadata = checkedOutput(
+    [
+      "docker",
+      "image",
+      "inspect",
+      "--format",
+      "{{.Os}} {{.Architecture}} {{json .RepoDigests}}",
+      image,
+    ],
+    root,
+  );
+  if (!metadata.startsWith("linux amd64 ") || !metadata.includes(JSON.stringify(image)))
+    fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
+  const source = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  if (consumeOnly && source !== argv[3]) fail("consumer source differs from the producer");
+  checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
+  const common = realpathSync(
+    resolve(root, checkedOutput(["git", "rev-parse", "--git-common-dir"], root)),
+  );
+  const batch = consumeOnly
+    ? realpathSync(argv[1] ?? "")
+    : realpathSync(mkdtempSync(join(tmpdir(), "fvoci-container-browser-")));
+  if (statSync(batch).uid !== uid || (statSync(batch).mode & 0o777) !== 0o700)
+    fail("the owned private browser batch is required");
+  chmodSync(batch, 0o700);
+  const run = consumeOnly ? (argv[2] ?? "") : randomBytes(16).toString("hex");
+  if (!/^[a-f0-9]{32}$/.test(run)) fail("invalid browser batch identity");
+  const producer = join(batch, "producer"),
+    consumer = join(batch, "consumer");
+  if (!consumeOnly) {
+    for (const directory of [
+      producer,
+      consumer,
+      "cargo",
+      "home",
+      "tmp",
+      "sqlite",
+      "producer-output",
+      "consumer-output",
+    ].map((p) => (p.startsWith(batch) ? p : join(batch, p))))
+      mkdirSync(directory, { mode: directory.endsWith("/tmp") ? 0o711 : 0o700 });
+    // Only Git objects are mounted read-only, not account config or credentials. Both source
+    // copies occupy the same physical path inside the image, preserving the
+    // existing packet's no-relocation and full-current-input checks.
+    for (const directory of [producer, consumer]) {
+      checkedOutput(
+        ["git", "clone", "--shared", "--no-checkout", "--quiet", root, directory],
+        root,
+      );
+      checkedOutput(["git", "checkout", "--quiet", "--detach", source], directory);
+    }
+  }
+  const network = "fvoci-browser-" + run;
+  let networkCreated = false;
+  async function runContainer(
+    phase: "prepare" | "consume",
+    services: NodeJS.ProcessEnv = {},
+  ): Promise<number> {
+    const directory = phase === "prepare" ? producer : consumer;
+    const output = phase === "prepare" ? "producer-output" : "consumer-output";
+    const variables: Record<string, string> = {
+      HOME: "/fvoci-run/home",
+      CARGO_HOME: "/fvoci-run/cargo",
+      TMPDIR: "/fvoci-run/tmp",
+      CARGO_TARGET_DIR: root + "/target",
+      CARGO_BUILD_JOBS: "2",
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_DEV_DEBUG: "0",
+      CARGO_PROFILE_TEST_DEBUG: "0",
+      GIT_OPTIONAL_LOCKS: "0",
+      CI: "true",
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_IMAGE: image,
+      FVOCI_WEB_CONTAINER_RUN: run,
+      FVOCI_WEB_CONTAINER_SOURCE: source,
+      FVOCI_WEB_CONTAINER_JOB:
+        phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+      FVOCI_SELECTED_CI_OUTPUT: "/fvoci-run/output",
+      FVOCI_WEB_BUILD_HANDOFF: "/fvoci-run/handoff",
+    };
+    if (phase === "consume") {
+      const pg = new URL(services.TEST_DATABASE_URL ?? "");
+      pg.hostname = "fvoci-pg";
+      pg.port = "5432";
+      variables.TEST_DATABASE_URL = pg.toString();
+      variables.FVOCI_E2E_SHARED_SERVICES = "1";
+      for (const name of [
+        "FVOCI_TEST_PG_CONTAINER",
+        "FVOCI_MEILI_KEY",
+        "MEILI_MASTER_KEY",
+        "FVOCI_TEST_MEILI_CONTAINER",
+      ])
+        variables[name] = services[name] ?? "";
+      variables.FVOCI_MEILI_URL = "http://fvoci-meili:7700";
+      variables.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
+        .update(readFileSync(join(batch, "handoff/handoff.json")))
+        .digest("hex");
+    }
+    const envFile = join(batch, phase + ".env");
+    writeFileSync(
+      envFile,
+      Object.entries(variables)
+        .map(([k, v]) => `${k}=${v}\n`)
+        .join(""),
+      { mode: 0o600, flag: "wx" },
+    );
+    const name = "fvoci-browser-" + run + "-" + phase;
+    const args = [
+      "docker",
+      "run",
+      "--pull=never",
+      "--init",
+      "--name",
+      name,
+      "--user",
+      `${String(uid)}:${String(gid)}`,
+      "--cpus=2",
+      "--memory=16g",
+      "--pids-limit=1024",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--env-file",
+      envFile,
+      "--workdir",
+      root,
+    ];
+    for (const [from, to, readonly] of [
+      [directory, root, false],
+      [join(common, "objects"), join(common, "objects"), true],
+      [batch, "/fvoci-run", false],
+      [join(batch, output), "/fvoci-run/output", false],
+    ] as const) {
+      if (from.includes(",") || to.includes(",")) fail("Docker bind paths cannot contain commas");
+      args.push("--mount", `type=bind,source=${from},target=${to}${readonly ? ",readonly" : ""}`);
+    }
+    if (phase === "consume") {
+      args.push(
+        "--network",
+        network,
+        "--mount",
+        `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
+      );
+    }
+    const setup =
+      phase === "prepare"
+        ? "bash scripts/prepare-web-e2e.sh\ncargo build --locked --jobs 2 --manifest-path xtask/Cargo.toml --target-dir xtask/target\nxtask/target/debug/xtask sqlite-ci --parent /fvoci-run/sqlite --env-file /fvoci-run/sqlite.env\nsource /fvoci-run/sqlite.env\nexec bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-browser"
+        : "source /fvoci-run/sqlite.env\nexec bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-browser --ci-shard 6";
+    args.push(image, "bash", "-euo", "pipefail", "-c", setup);
+    const started = performance.now();
+    const child = Bun.spawn(args, {
+      stdin: "ignore",
+      stdout: "inherit",
+      stderr: "inherit",
+      timeout: 20 * 60_000,
+    });
+    const interrupt = () => {
+        child.kill("SIGINT");
+      },
+      terminate = () => {
+        child.kill("SIGTERM");
+      };
+    process.once("SIGINT", interrupt);
+    process.once("SIGTERM", terminate);
+    let result: number;
+    try {
+      result = await child.exited;
+    } finally {
+      process.removeListener("SIGINT", interrupt);
+      process.removeListener("SIGTERM", terminate);
+      rmSync(envFile);
+    }
+    const inspect = Bun.spawnSync(
+      ["docker", "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (inspect.exitCode === 0) {
+      if (!inspect.stdout.toString().startsWith("false ")) {
+        // A stopped/lost Docker client is not proof its container retired.
+        // Attempt bounded stop, keep the first failure, and never rm --force.
+        Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
+        if (result === 0) result = 1;
+      }
+      const removed = Bun.spawnSync(["docker", "rm", "-v", name], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (removed.exitCode !== 0 && result === 0) result = 1;
+    } else if (result === 0) result = 1;
+    process.stderr.write(
+      `container-browser phase=${phase} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(result)}\n`,
+    );
+    return result;
+  }
+  if (consumeOnly) return await runContainer("consume", process.env);
+  // Service wrappers invoke the same command for the consume half, carrying
+  // only their owned ephemeral connection exports in the environment.
+  const prepared = await runContainer("prepare");
+  if (prepared !== 0) return prepared;
+  try {
+    checkedOutput(["docker", "network", "create", "--internal", network], root);
+    networkCreated = true;
+    const child = Bun.spawn(
+      [
+        "bash",
+        join(root, "scripts/start-test-postgres.sh"),
+        "bash",
+        join(root, "scripts/start-test-meili.sh"),
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/web-e2e/run-web-e2e.ts"),
+        "container-consume",
+        root,
+        batch,
+        run,
+        source,
+      ],
+      {
+        cwd: root,
+        env: { ...process.env, FVOCI_TEST_NETWORK: network },
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+      },
+    );
+    return await child.exited;
+  } finally {
+    if (networkCreated) checkedOutput(["docker", "network", "rm", network], root);
+  }
+}
 
 /** A refusal: the CLI prints the message to stderr and exits 1. */
 export class CheckError extends Error {}
@@ -142,12 +415,23 @@ export function qualifyCommittedApi(
   env: Record<string, string | undefined>,
   git: Git = spawnGit(root),
 ): string {
-  if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
-  const allowed = committedApiJobs(request, env.GITHUB_JOB);
-  if (env.GITHUB_JOB === undefined || !allowed.has(env.GITHUB_JOB)) {
+  const local = env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  if (local) {
+    if (
+      request.selected ||
+      !/^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/.test(
+        env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+      ) ||
+      Object.keys(env).some((key) => key.startsWith("GITHUB_"))
+    )
+      fail("requires an ordinary local browser container");
+  } else if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
+  const job = local ? env.FVOCI_WEB_CONTAINER_JOB : env.GITHUB_JOB;
+  const allowed = committedApiJobs(request, job);
+  if (job === undefined || !allowed.has(job)) {
     fail("requires the allocated browser job");
   }
-  const sha = env.GITHUB_SHA ?? "";
+  const sha = (local ? env.FVOCI_WEB_CONTAINER_SOURCE : env.GITHUB_SHA) ?? "";
   if (!/^[0-9a-f]{40}$/.test(sha) || gitLine(git, ["rev-parse", "HEAD"]) !== sha) {
     fail("checkout HEAD differs from tested SHA");
   }
@@ -362,6 +646,7 @@ export function writeLauncherReceipt(prefix: string, values: readonly string[]):
 }
 
 const USAGE = [
+  "usage: run-web-e2e.ts container-browser ROOT --ci-shard 6",
   "usage: run-web-e2e.ts committed-api ROOT SHARD true|false ''|prepare|consume",
   "       run-web-e2e.ts plan-specs JSON_LINE",
   "       run-web-e2e.ts path-within CHILD PARENT",
@@ -424,7 +709,10 @@ function run(argv: string[]): string {
 
 if (import.meta.main) {
   try {
-    process.stdout.write(run(process.argv.slice(2)));
+    const argv = process.argv.slice(2);
+    if (argv[0] === "container-browser" || argv[0] === "container-consume")
+      process.exit(await containerBrowser(argv.slice(1), argv[0] === "container-consume"));
+    process.stdout.write(run(argv));
   } catch (error) {
     if (error instanceof UsageError) {
       process.stderr.write(`${USAGE}\nrun-web-e2e.ts: error: ${error.message}\n`);

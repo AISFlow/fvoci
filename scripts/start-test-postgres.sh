@@ -35,10 +35,21 @@ PASSWORD="$(openssl rand -hex 24)"
 printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
 
 cleanup() {
+  local status=$? retired=0
   # -v: the image declares a VOLUME; without it every run leaves an anonymous
   # volume behind (the --rm auto-removal does not run after an explicit rm).
-  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+    if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+      docker stop --time 10 "$CONTAINER" >/dev/null || retired=1
+      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$CONTAINER")" == 'false 0' ]] || retired=1
+      docker rm -v "$CONTAINER" >/dev/null || retired=1
+    fi
+  else
+    docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+  fi
   rm -f "$ENV_FILE"
+  if (( status == 0 && retired != 0 )); then status=1; fi
+  return "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -46,7 +57,13 @@ trap 'exit 143' TERM
 
 PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 
-cid="$(docker run -d --rm \
+network_args=()
+remove_args=(--rm)
+if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+  network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-pg --cpus=1 --memory=2g --pids-limit=256)
+  remove_args=()
+fi
+cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
   --name "$CONTAINER" \
   --label "fvoci.test-run=${RUN_ID}" \
   --env-file "$ENV_FILE" \

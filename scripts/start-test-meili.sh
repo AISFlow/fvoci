@@ -17,7 +17,17 @@ fvoci_test_meili_stop() {
   _fvoci_test_meili_owned=""
   # -v is defensive: the pinned image declares no VOLUME today (its data stays
   # in the container layer), but an image that did would leak one per run.
-  docker rm -f -v "$container" >/dev/null 2>&1 || true
+  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+    if docker inspect "$container" >/dev/null 2>&1; then
+      local retired=0
+      docker stop --time 10 "$container" >/dev/null || retired=1
+      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$container")" == 'false 0' ]] || retired=1
+      docker rm -v "$container" >/dev/null || retired=1
+      return "$retired"
+    fi
+  else
+    docker rm -f -v "$container" >/dev/null 2>&1 || true
+  fi
 }
 
 # Starts the container and exports FVOCI_MEILI_URL, FVOCI_MEILI_KEY,
@@ -37,7 +47,13 @@ fvoci_test_meili_start() {
   export FVOCI_TEST_MEILI_CONTAINER="fvoci-rust-test-meili-${run_id}"
   _fvoci_test_meili_owned="$FVOCI_TEST_MEILI_CONTAINER"
 
-  cid="$(docker run -d --rm \
+  local -a network_args=()
+  local -a remove_args=(--rm)
+  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
+    network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-meili --cpus=1 --memory=2g --pids-limit=256)
+    remove_args=()
+  fi
+  cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
     --name "$FVOCI_TEST_MEILI_CONTAINER" \
     --label "fvoci.test-run=${run_id}" \
     -e "MEILI_MASTER_KEY=${master_key}" \
@@ -72,7 +88,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     echo "usage: $0 <command> [args...]" >&2
     exit 1
   fi
-  trap fvoci_test_meili_stop EXIT
+  trap 'status=$?; fvoci_test_meili_stop || { (( status != 0 )) || status=1; }; exit "$status"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fvoci_test_meili_start

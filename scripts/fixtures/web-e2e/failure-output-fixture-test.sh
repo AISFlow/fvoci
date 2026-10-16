@@ -329,6 +329,20 @@ STUB
 # FVOCI_FIXTURE_PLAYWRIGHT_EXIT=<n> replaces the Playwright run by that exit.
 cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash
+# The runtime now talks to PostgreSQL through the existing Bun DB helper.
+# Retain this fixture's resource-event log and drop-failure injection, without
+# recording the generated app password or opening an actual DB connection.
+if [[ "${1:-}" == --no-env-file && "${2:-}" == */tools/web-e2e/database-urls.ts && $# == 3 ]]; then
+  case "$3" in
+    create-database) echo "CREATE DATABASE \"$DB_NAME\"" ;;
+    create-role) echo "CREATE ROLE \"$ROLE_NAME\" NOSUPERUSER NOBYPASSRLS" ;;
+    drop-database) echo "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)" ;;
+    drop-role) echo "DROP ROLE IF EXISTS \"$ROLE_NAME\"" ;;
+    *) exit 2 ;;
+  esac >>"$FVOCI_FIXTURE_NET_STATE.sql"
+  if [[ "$3" == drop-database && "${FVOCI_FIXTURE_DROP:-ok}" == fail ]]; then exit 3; fi
+  exit 0
+fi
 case "${1:-}" in
   */tools/web-e2e/smtp-sink.ts) echo "$$" >"$FVOCI_FIXTURE_NET_STATE.smtp-pid" ;;
   */tools/web-e2e/trace-summary.ts)

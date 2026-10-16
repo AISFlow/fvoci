@@ -1,34 +1,42 @@
 import { readJson, flowSchemas } from "./helpers";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { SQL } from "bun";
 import { expect, type Page } from "@playwright/test";
 
 // Fixture updates affect only the runner's isolated database. Requests and
 // token issuance/consumption still use the production Rust handlers.
-export function authSql(sql: string): string {
+export async function authSql(sql: string): Promise<string> {
   const url = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
   const container = process.env.FVOCI_TEST_PG_CONTAINER;
   if (!url || !container) {
     throw new Error("isolated PostgreSQL fixture is required");
   }
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      new URL(url).pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-At",
-      "-c",
-      sql,
-    ],
-    { encoding: "utf8", stdio: "pipe" },
-  ).trim();
+  if (!/^\/fvoci_e2e_[a-f0-9]{16}$/.test(new URL(url).pathname))
+    throw new Error("isolated PostgreSQL fixture database is required");
+  const connection = new SQL(url, { max: 1, connectionTimeout: 10 });
+  try {
+    // Simple protocol + raw fields retain PostgreSQL's full timestamp text
+    // and scalar spelling (including microseconds and t/f), as psql -At did.
+    const rows: unknown = await connection.unsafe(sql).simple().raw();
+    if (!Array.isArray(rows)) throw new Error("invalid PostgreSQL fixture rows");
+    return rows
+      .map((row: unknown) => {
+        if (!Array.isArray(row)) throw new Error("invalid PostgreSQL fixture row");
+        return row
+          .map((value: unknown) => {
+            if (value === null) return "";
+            if (!Buffer.isBuffer(value)) throw new Error("invalid PostgreSQL fixture field");
+            return value.toString();
+          })
+          .join("|");
+      })
+      .join("\n")
+      .trim();
+  } catch {
+    throw new Error("isolated PostgreSQL auth fixture query failed");
+  } finally {
+    await connection.close();
+  }
 }
 
 export function tokenHash(token: string): string {
@@ -65,27 +73,35 @@ export async function rejectMagicVariants(
   submit: () => Promise<void>,
 ): Promise<void> {
   const hash = tokenHash(token);
-  const expiry = authSql(`SELECT expires_at FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`);
+  const expiry = await authSql(
+    `SELECT expires_at FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`,
+  );
   expect(expiry).not.toBe("");
   // Opening the original URL never consumes the token.
   await page.goto(`${path}?token=${token}`);
   await expectVueAuth(page);
-  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`)).toBe("1");
+  expect(
+    await authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`),
+  ).toBe("1");
   await navigateAuthQuery(page, path);
   await expect(page.getByRole("alert")).toBeVisible();
   await navigateAuthQuery(page, `${path}?token=${token}`);
   await expect(page.getByRole("alert")).toHaveCount(0);
-  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`)).toBe("1");
+  expect(
+    await authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`),
+  ).toBe("1");
   const tampered = `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`;
   await navigateAuthQuery(page, `${path}?token=${tampered}`);
   await submit();
   await expect(page.getByRole("alert")).toContainText("링크가 만료되었거나 이미 사용되었습니다");
   await expect(page).toHaveURL(new RegExp(`${path}\\?token=`));
-  expect(authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`)).toBe("1");
+  expect(
+    await authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${hash}'`),
+  ).toBe("1");
   await navigateAuthQuery(page, `${path}?token=${token}`);
   // A rejected previous token must not hide a new token's action.
   await expect(page.getByRole("alert")).toHaveCount(0);
-  authSql(
+  await authSql(
     `UPDATE fvoci.magic_tokens SET expires_at = now() - interval '1 second' WHERE token_hash = '${hash}'`,
   );
   try {
@@ -93,7 +109,7 @@ export async function rejectMagicVariants(
     await submit();
     await expect(page.getByRole("alert")).toContainText("링크가 만료되었거나 이미 사용되었습니다");
   } finally {
-    authSql(
+    await authSql(
       `UPDATE fvoci.magic_tokens SET expires_at = '${expiry}'::timestamptz WHERE token_hash = '${hash}'`,
     );
   }
@@ -101,7 +117,9 @@ export async function rejectMagicVariants(
 
 export async function expectSpentMagic(page: Page, endpoint: string, token: string): Promise<void> {
   expect(
-    authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`),
+    await authSql(
+      `SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`,
+    ),
   ).toBe("0");
   const response = await page.request.post(endpoint, { data: { token } });
   expect(response.status()).toBe(400);

@@ -52,6 +52,11 @@ ROLE_NAME=""
 MEILI_INDEX=""
 MEILI_SERVER_KEY_FILE=""
 
+group_database() {
+  DB_NAME="$DB_NAME" ROLE_NAME="$ROLE_NAME" ROLE_PASSWORD="${ROLE_PASSWORD:-}" \
+    timeout 60 bun --no-env-file "$ROOT/tools/web-e2e/database-urls.ts" "$1"
+}
+
 # The leader is still running (a zombie is not: `wait` reaps it). Without a
 # readable /proc entry, a pid bash has not yet reaped counts as running, so
 # the bounded loop below never blocks in `wait` on a live leader.
@@ -195,10 +200,8 @@ cleanup() {
   fi
   if [[ -n "$DB_NAME" ]]; then
     # FORCE ends connections a spec-owned server may still hold.
-    timeout 60 docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -d postgres \
-      -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)" >/dev/null || failed+=(drop-database)
-    timeout 60 docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -d postgres \
-      -c "DROP ROLE IF EXISTS \"$ROLE_NAME\"" >/dev/null || failed+=(drop-role)
+    group_database drop-database || failed+=(drop-database)
+    group_database drop-role || failed+=(drop-role)
   fi
   if [[ -n "$MEILI_INDEX" ]]; then
     meili_delete_index || failed+=(delete-meili-index)
@@ -308,18 +311,13 @@ run_playwright() {
 
 net_mark "containers ready; preparing database"
 
-PG_CONTAINER="${FVOCI_TEST_PG_CONTAINER:?missing test postgres container}"
-psql_admin() {
-  docker exec -i "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 "$@"
-}
-
 STEP=create-database
 DB_SUFFIX="$(openssl rand -hex 8)"
 ROLE_PASSWORD="$(openssl rand -hex 16)"
 # Named before the attempt: cleanup drops them IF EXISTS.
 DB_NAME="fvoci_e2e_${DB_SUFFIX}"
 ROLE_NAME="fvoci_app_${DB_NAME}"
-psql_admin -d postgres -c "CREATE DATABASE \"$DB_NAME\"" >/dev/null
+group_database create-database >/dev/null
 
 STEP=database-url
 # The role password reaches the helper through its environment, never argv;
@@ -334,7 +332,7 @@ export DATABASE_URL DATABASE_APP_URL
 STEP=migrate
 "$MIGRATE_BIN" >/dev/null
 STEP=create-app-role
-psql_admin -d "$DB_NAME" -c "CREATE ROLE \"$ROLE_NAME\" LOGIN PASSWORD '$ROLE_PASSWORD' NOSUPERUSER NOBYPASSRLS" >/dev/null
+group_database create-role
 STEP=grant-app-role
 "$MIGRATE_BIN" --grant-app-role "$ROLE_NAME"
 

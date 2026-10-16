@@ -714,6 +714,24 @@ scripts/prepare-web-e2e.sh
 scripts/run-web-e2e.sh
 ```
 
+The first shared-container browser slice runs the complete ordinary shard 6:
+
+```sh
+bash scripts/run-web-e2e.sh --container --ci-shard 6
+```
+
+Prepare the digest named by `CI_WEB_IMAGE` in `tools/web-e2e/run-web-e2e.ts`
+locally once; the command refuses a missing image and never pulls `latest`.
+It uses the same browser producer, sealed packet and shard entrypoints in two
+fresh source copies, prepares the existing xtask SQLite SDK once, and compiles
+no consumer binaries. The host owns an isolated PostgreSQL/Meilisearch network;
+browser containers receive no Docker socket or privilege. Actor UID/GID come
+from the caller, writable paths and ports are run-owned, and CPU/memory/PID
+limits are explicit. This initial slice requires a native Linux amd64 Docker
+daemon; macOS Docker Desktop and ARM64 execution are not yet verified. Other
+shards retain their host Docker fixture oracles until those boundaries are
+migrated; the container command refuses them rather than omitting assertions.
+
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
 import/export, and deletion surfaces are shown as unavailable rather than faked.

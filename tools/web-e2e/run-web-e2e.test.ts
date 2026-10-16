@@ -18,6 +18,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CheckError,
+  CI_WEB_IMAGE,
+  containerShard,
   committedApiJobs,
   createSafeDiagnostics,
   launcherReceipt,
@@ -143,6 +145,26 @@ describe("qualifyCommittedApi", () => {
     expect(qualifyCommittedApi(root, request, ciEnv(sha))).toBe(sha);
   });
 
+  test("local ordinary browser identity is distinct from GitHub and still checks the exact source", () => {
+    const { root, sha } = committedCheckout();
+    const local = {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
+      FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+      FVOCI_WEB_CONTAINER_SOURCE: sha,
+    };
+    expect(qualifyCommittedApi(root, request, local)).toBe(sha);
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, GITHUB_ACTIONS: "true" }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_SOURCE: "0".repeat(40) }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_IMAGE: "latest" }),
+    ).toThrow();
+  });
+
   test("refuses outside CI, in another job, at another SHA or through a symlinked root", () => {
     const { root, sha } = committedCheckout();
     refused(
@@ -194,6 +216,12 @@ describe("qualifyCommittedApi", () => {
       "git rev-parse HEAD failed with exit 128",
     );
   });
+});
+
+test("the first container slice admits a complete shard, never an arbitrary subset or unsupported host oracle shard", () => {
+  expect(containerShard("6")).toBe("6");
+  for (const value of [undefined, "", "0", "-1", "6 --grep=skip", "8"])
+    expect(() => containerShard(value)).toThrow(CheckError);
 });
 
 describe("planSpecs", () => {

@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${1:-}" == --container ]]; then
+  shift
+  exec bun --no-env-file "$ROOT/tools/web-e2e/run-web-e2e.ts" container-browser "$ROOT" "$@"
+fi
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 # Freeze relative output paths before changing cwd for frontend/build commands.
 # realpath -m resolves symlinks and keeps missing components (a fresh target).
@@ -274,15 +278,15 @@ run_ci_shard() {
 
 if [[ -n "$BROWSER_PHASE" ]]; then
   [[ "$SELECTED_BACKENDS" == false && "$CI_COMMITTED_API" == true && ${#SPEC_ARGS[@]} -eq 0 ]] || { echo "browser handoff requires committed API and no selected/spec options" >&2; exit 1; }
-  [[ "${CI:-}" == true && "${GITHUB_ACTIONS:-}" == true ]] || { echo "browser handoff requires GitHub CI" >&2; exit 1; }
+  [[ "${CI:-}" == true && ( "${GITHUB_ACTIONS:-}" == true || "${FVOCI_WEB_CONTAINER_LOCAL:-}" == 1 ) ]] || { echo "browser handoff requires GitHub CI or the local browser container" >&2; exit 1; }
   : "${FVOCI_SELECTED_CI_OUTPUT:?required private browser build output}"
   : "${FVOCI_WEB_BUILD_HANDOFF:?missing browser producer packet path}"
   [[ "${FVOCI_E2E_PROFILE:-debug}" == debug ]] || { echo "browser packet requires debug profile" >&2; exit 1; }
   export FVOCI_WEB_BUILD_PHASE="$BROWSER_PHASE"
   if [[ "$BROWSER_PHASE" == prepare ]]; then
-    [[ "${GITHUB_JOB:-}" == workspace-browser-build && -z "$CI_SHARD" ]] || { echo "wrong browser producer job" >&2; exit 1; }
+    [[ "${FVOCI_WEB_CONTAINER_JOB:-${GITHUB_JOB:-}}" == workspace-browser-build && -z "$CI_SHARD" ]] || { echo "wrong browser producer job" >&2; exit 1; }
   else
-    [[ "${GITHUB_JOB:-}" == workspace-browser-shard && -n "$CI_SHARD" ]] || { echo "wrong browser consumer job" >&2; exit 1; }
+    [[ "${FVOCI_WEB_CONTAINER_JOB:-${GITHUB_JOB:-}}" == workspace-browser-shard && -n "$CI_SHARD" ]] || { echo "wrong browser consumer job" >&2; exit 1; }
     : "${FVOCI_WEB_BUILD_HANDOFF_SHA256:?missing browser producer digest}"
   fi
 fi
