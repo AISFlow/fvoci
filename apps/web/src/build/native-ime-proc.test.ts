@@ -116,7 +116,7 @@ describe.skipIf(process.platform !== "linux")("/proc process identification", ()
       // Actual cat output proves exec completed; keeping stdin open holds the
       // malformed single-element title alive for the real /proc scan.
       const ready = "native-ime-proc-ready\n";
-      bad.stdin.write(ready);
+      await bad.stdin.write(ready);
       await bad.stdin.flush();
       const reader = bad.stdout.getReader();
       let echoed = "";
@@ -130,7 +130,7 @@ describe.skipIf(process.platform !== "linux")("/proc process identification", ()
         reader.releaseLock();
       }
       expect(echoed).toBe(ready);
-      expect(readFileSync(`/proc/${bad.pid}/cmdline`, "utf8")).toBe(title + "\0");
+      expect(readFileSync(`/proc/${String(bad.pid)}/cmdline`, "utf8")).toBe(title + "\0");
       expect(() => browserProcesses(profile)).toThrow("No closing quotation");
     } finally {
       bad.kill("SIGKILL");
