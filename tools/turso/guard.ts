@@ -237,7 +237,7 @@ export async function runPrimary(
   // memory only, never written, uploaded or reflected. No retry.
   const result = await seams.runChild(
     [executable, primaryTestName(phase), "--ignored", "--exact", "--test-threads=1", "--nocapture"],
-    primaryChildEnv(phase, env, url, token),
+    primaryChildEnv(phase, env, url, token, inputs),
   );
   if (binding && frozenBinding(checkoutSha, env, seams).key !== binding.key) reject(BINDING_FAILED);
   if (phase === "reset") return resetResult(result.status, result.output);
