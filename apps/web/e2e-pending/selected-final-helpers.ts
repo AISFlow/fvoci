@@ -23,7 +23,7 @@ import {
   sentPersistRequests,
   type CollabWireLog,
 } from "./collab-helpers";
-import { UUID_RE } from "./collab-wire";
+import { COLLAB_PERSIST_DONE, COLLAB_PERSIST_REQUEST, UUID_RE } from "./collab-wire";
 import {
   nativeHistory,
   observeNativeWire,
@@ -214,22 +214,57 @@ export async function saveOff(actor: Actor, target: Target): Promise<string> {
 
 export async function freshReadback(
   actors: SelectedActors,
+  writer: Actor,
   who: "owner" | "member" | "outsider",
   target: Target,
   expected: Awaited<ReturnType<typeof editorShape>>,
   info: TestInfo,
   attachmentBytes?: Buffer,
 ): Promise<void> {
+  let writerNativeJson: ReturnType<typeof yDocToTiptapJson> | undefined;
+  if (actors.binding.flow === "on") {
+    const ack = writer.acks.at(-1);
+    if (
+      !ack ||
+      ack.flow !== "on" ||
+      ack.workspaceId !== target.workspaceId ||
+      ack.documentId !== target.id
+    )
+      throw new Error("SELECTED_FINAL_WRITER_ACK_TARGET_MISSING");
+    expect(ack.requestId).toMatch(UUID_RE);
+    const room = `${target.workspaceId}:document:${target.id}`;
+    for (const [frames, payload] of [
+      [writer.wire.sent, `${COLLAB_PERSIST_REQUEST}:${ack.requestId}`],
+      [writer.wire.received, `${COLLAB_PERSIST_DONE}:${ack.requestId}`],
+    ] as const)
+      expect(
+        frames.some(
+          (frame) =>
+            frame.kind === "stateless" && frame.routingKey === room && frame.payload === payload,
+        ),
+      ).toBe(true);
+    const native = nativeHistory(writer.native, room, false);
+    try {
+      writerNativeJson = yDocToTiptapJson(native);
+    } finally {
+      native.destroy();
+    }
+  }
   const reader = await actors.open(who);
   await mount(reader, target, actors.binding.flow);
   await expect.poll(() => editorShape(reader.page)).toEqual(expected);
   const current = await body(reader.page, target);
   if (!isTiptapDoc(expected.document)) throw new Error("SELECTED_FINAL_EXPECTED_DOCUMENT_INVALID");
-  const expectedNative = tiptapJsonToYDoc(expected.document);
-  try {
-    expect(current.contentJson).toEqual(yDocToTiptapJson(expectedNative));
-  } finally {
-    expectedNative.destroy();
+  if (actors.binding.flow === "on") {
+    expect(writerNativeJson).toBeDefined();
+    expect(current.contentJson).toEqual(writerNativeJson);
+  } else {
+    const expectedNative = tiptapJsonToYDoc(expected.document);
+    try {
+      expect(current.contentJson).toEqual(yDocToTiptapJson(expectedNative));
+    } finally {
+      expectedNative.destroy();
+    }
   }
   if (attachmentBytes) {
     const { storedAttachmentDownloadBytes } = await import("./collab-helpers");

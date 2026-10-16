@@ -251,7 +251,7 @@ fn serialize_xml_element<T: ReadTxn>(
         }
     }
     reject_truncated_xml_children(yielded, el.len(txn), &tag)?;
-    if !content.is_empty() {
+    if yielded > 0 {
         obj.insert("content".into(), Value::Array(content));
     }
     Ok(Value::Object(obj))
@@ -497,6 +497,33 @@ fn without_ychange(value: &Value) -> Value {
 mod tests {
     use super::yattr2markname;
     use serde_json::json;
+
+    #[test]
+    fn empty_xml_text_child_preserves_content_and_unknown_attributes() {
+        use yrs::{Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+
+        let doc = crate::engine::new_doc();
+        let root = doc.get_or_insert_xml_fragment(crate::FRAGMENT);
+        let mut txn = doc.transact_mut();
+        let with_text = root.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        with_text.insert_attribute(&mut txn, "id", "with-empty-text");
+        with_text.insert_attribute(&mut txn, "unknown", "한글😀9007199254740993");
+        with_text.push_back(&mut txn, XmlTextPrelim::new(""));
+        let without_text = root.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        without_text.insert_attribute(&mut txn, "id", "without-child");
+        drop(txn);
+
+        let projected =
+            super::project_prosemirror(&doc.transact(), &crate::limits::Limits::for_tests())
+                .expect("schema-free projection");
+        assert_eq!(
+            projected,
+            json!({"type":"doc","content":[
+                {"type":"paragraph","attrs":{"id":"with-empty-text","unknown":"한글😀9007199254740993"},"content":[]},
+                {"type":"paragraph","attrs":{"id":"without-child"}}
+            ]})
+        );
+    }
 
     #[test]
     fn hashed_mark_suffix_is_stripped() {

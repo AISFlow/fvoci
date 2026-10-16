@@ -129,7 +129,7 @@ if (binding.suite === "products") {
     uniqueBlockIds(expected);
     expect(expected.text).toContain("개인 기록 한글😀");
     expect((await other.page.request.get(`${target.path}/body`)).status()).toBe(404);
-    await freshReadback(actors, "owner", target, expected, info);
+    await freshReadback(actors, owner, "owner", target, expected, info);
   });
 
   test(PRODUCT_TITLES[1], async ({ browser }, info) => {
@@ -234,7 +234,15 @@ if (binding.suite === "products") {
         )
       ).status(),
     ).toBe(404);
-    await freshReadback(actors, "member", target, await editorShape(member.page), info, bytes);
+    await freshReadback(
+      actors,
+      member,
+      "member",
+      target,
+      await editorShape(member.page),
+      info,
+      bytes,
+    );
   });
 
   test(PRODUCT_TITLES[2], async ({ browser }, info) => {
@@ -293,7 +301,7 @@ if (binding.suite === "products") {
     await owner.page.keyboard.press("Control+End");
     await owner.page.keyboard.type(" healthy owner after refusal");
     await saveOn(owner);
-    await freshReadback(actors, "owner", target, await editorShape(owner.page), info);
+    await freshReadback(actors, owner, "owner", target, await editorShape(owner.page), info);
   });
 
   test(PRODUCT_TITLES[3], async ({ browser }, info) => {
@@ -373,7 +381,7 @@ if (binding.suite === "products") {
     expect(attachmentNodes(expected)).toHaveLength(1);
     expect(await storedAttachmentDownloadBytes(owner.page)).toEqual(bytes);
     await expectConverged(owner.page, peer.page);
-    await freshReadback(actors, "outsider", target, expected, info, bytes);
+    await freshReadback(actors, owner, "outsider", target, expected, info, bytes);
   });
 } else {
   test(boundaryTitle(binding.browser, binding.flow), async ({ browser }, info) => {
@@ -395,6 +403,6 @@ if (binding.suite === "products") {
     await expectBlocks(owner.page, ["첫 문단", "중간 문단", "끝 문단 boundary"]);
     if (binding.flow === "on") await saveOn(owner);
     else await saveOff(owner, target);
-    await freshReadback(actors, "owner", target, await editorShape(owner.page), info);
+    await freshReadback(actors, owner, "owner", target, await editorShape(owner.page), info);
   });
 }
