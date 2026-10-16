@@ -786,3 +786,31 @@ fn usage_errors_exit_two_before_any_work() {
     }
     assert_eq!(f.trace(), "");
 }
+
+#[test]
+fn image_adoption_refuses_unpinned_or_mutable_inputs_before_any_helper_or_export() {
+    let _serial = serial();
+    let fixture = Fixture::new();
+    for arguments in [
+        vec!["--image-sdk", "/opt/fvoci-sqlite"],
+        vec!["--expected-sdk-sha256", "invalid"],
+        vec![
+            "--image-sdk",
+            "/opt/fvoci-sqlite",
+            "--image-ref",
+            "latest",
+            "--expected-sdk-sha256",
+            "invalid",
+        ],
+        vec!["--image-sdk", "/opt/fvoci-sqlite", "--identity-only"],
+        vec!["--image-sdk", "/opt/fvoci-sqlite", "--cache-fallback"],
+        vec!["--seal-image-sdk"],
+    ] {
+        let result = fixture.invoke(&arguments);
+        fixture.rejected(&result);
+        assert!(
+            fixture.trace().is_empty(),
+            "image refusal must not download, inspect or build"
+        );
+    }
+}

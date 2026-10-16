@@ -1,6 +1,7 @@
 // CI-only policy around Bun's YAML/TOML/tar implementations and GNU tar.
 // No extraction to disk and no matched credential values are printed.
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 
 class PolicyError extends Error {}
@@ -170,7 +171,9 @@ export function verifyWorkflow(data: unknown) {
     check(
       paths?.includes("docker/ci-base/**") &&
         paths.includes(".github/workflows/ci-base-image.yml") &&
-        paths.includes("tools/ci/**"),
+        paths.includes("tools/ci/**") &&
+        paths.includes("xtask/**") &&
+        paths.includes("tests/support/official_sqld.rs"),
       "image edits must trigger builds",
     );
   }
@@ -241,15 +244,28 @@ export function verifyWorkflow(data: unknown) {
         "token must use github.token via env",
       );
       check(!/python3|type=gha|qemu/i.test(run), "no new Python, gha cache or QEMU");
-      if (run.includes("docker login"))
+      if (
+        run.includes("docker login") ||
+        run === "bun tools/ci/ci-base-image.ts login" ||
+        run === "bun tools/ci/ci-base-image.ts publish-manifest"
+      )
         check(
           at(step, "env", "GHCR_TOKEN") === "${{ github.token }}" &&
-            run.includes("--password-stdin"),
+            (run.includes("--password-stdin") || run.startsWith("bun tools/ci/ci-base-image.ts ")),
           "token env/password-stdin required",
         );
-      if (run.includes("docker buildx build"))
+      if (
+        run.includes("docker buildx build") ||
+        run === "bun tools/ci/ci-base-image.ts native-build"
+      )
         check(!("if" in step), "native build step may not be skipped");
     }
+    const expected = name === "push-manifest" ? "publish-manifest" : "native-build";
+    check(
+      steps.filter((step) => at(step, "run") === "bun tools/ci/ci-base-image.ts " + expected)
+        .length === 1,
+      "image execution must use the existing Bun command exactly once",
+    );
   }
 }
 
@@ -497,6 +513,18 @@ if (import.meta.main) {
         verifyWorkflow(Bun.YAML.parse(await text(".github/workflows/ci-base-image.yml")));
         break;
       }
+      case "login":
+        await imageLogin();
+        break;
+      case "native-build":
+        await nativeImageBuild();
+        break;
+      case "publish-manifest":
+        await publishImageManifest();
+        break;
+      case "smoke":
+        await smokeImage(operand(args, 0), operand(args, 1));
+        break;
       case "scan":
         await scanImage(operand(args, 0), operand(args, 1), operand(args, 2));
         break;
@@ -546,4 +574,399 @@ if (import.meta.main) {
     );
     process.exitCode = 1;
   }
+}
+
+function imageEnv(name: string): string {
+  const value = process.env[name];
+  check(value && !/[\r\n\0]/.test(value), "missing/invalid image execution input");
+  return value;
+}
+export function imageBuildPlan(env: Record<string, string | undefined>, architecture: string) {
+  const arch = env.ARCH,
+    target = env.TARGET;
+  check(
+    (arch === "amd64" && architecture === "x64") || (arch === "arm64" && architecture === "arm64"),
+    "native image architecture required",
+  );
+  check(target === "ci-base" || target === "ci-web", "unknown CI image target");
+  const source = env.GITHUB_SHA,
+    run = env.GITHUB_RUN_ID,
+    attempt = env.GITHUB_RUN_ATTEMPT;
+  check(
+    source &&
+      /^[0-9a-f]{40}$/.test(source) &&
+      run &&
+      /^[1-9][0-9]*$/.test(run) &&
+      attempt &&
+      /^[1-9][0-9]*$/.test(attempt),
+    "exact source/run/attempt required",
+  );
+  check(
+    env.PUBLISH === "true" || env.PUBLISH === "false",
+    "explicit image publication selection required",
+  );
+  check(
+    env.PUBLISH !== "true" || env.GITHUB_REF === "refs/heads/main",
+    "publication requires main",
+  );
+  const image = `ghcr.io/aisflow/fvoci-${target}`;
+  return {
+    arch,
+    target,
+    image,
+    builder: `${target}-${run}-${attempt}-${arch}`,
+    ref: `${image}:${source}-${run}-${attempt}-${arch}`,
+    args: [
+      "--platform",
+      `linux/${arch}`,
+      "--file",
+      "docker/ci-base/Dockerfile",
+      "--target",
+      target,
+      "--label",
+      "org.opencontainers.image.source=https://github.com/AISFlow/fvoci",
+      "--label",
+      `org.opencontainers.image.revision=${source}`,
+      "--provenance=false",
+      "--progress=plain",
+    ],
+  };
+}
+
+// Image-only argv execution. Signals terminate and await the owned CLI child;
+// nativeImageBuild then removes its owned BuildKit worker in finally.
+async function imageCommand(
+  argv: string[],
+  options: { log?: string; input?: string } = {},
+): Promise<string> {
+  const environment = { ...process.env };
+  delete environment.GHCR_TOKEN;
+  delete environment.GITHUB_TOKEN;
+  const child = Bun.spawn(argv, {
+    env: environment,
+    stdin: options.input === undefined ? "ignore" : "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const interrupt = () => child.kill("SIGTERM");
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  if (options.input !== undefined && child.stdin !== null && typeof child.stdin !== "number") {
+    child.stdin.write(options.input);
+    child.stdin.end();
+  }
+  let output = "",
+    bytes = 0;
+  async function drain(stream: ReadableStream<Uint8Array>, stdout: boolean) {
+    for await (const chunk of stream) {
+      bytes += chunk.length;
+      if (bytes > (options.log ? 128 * 1024 * 1024 : 16 * 1024 * 1024)) {
+        child.kill("SIGTERM");
+        throw new PolicyError("image command output bound exceeded");
+      }
+      if (options.log) {
+        appendFileSync(options.log, chunk);
+        process.stdout.write(chunk);
+      } else if (stdout) output += new TextDecoder().decode(chunk);
+    }
+  }
+  try {
+    const drained = await Promise.allSettled([
+      drain(child.stdout, true),
+      drain(child.stderr, false),
+    ]);
+    const code = await child.exited;
+    check(
+      drained.every((result) => result.status === "fulfilled") && code === 0 && !child.signalCode,
+      "image command failed; retained build diagnostics describe the stage",
+    );
+    return output.trim();
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await child.exited;
+  }
+}
+async function imageLogin() {
+  check(imageEnv("GITHUB_REF") === "refs/heads/main", "publication login requires main");
+  const path = imageEnv("DOCKER_CONFIG");
+  check(
+    path === join(imageEnv("RUNNER_TEMP"), "ci-base-docker") ||
+      path === join(imageEnv("RUNNER_TEMP"), "ci-base-manifest-docker"),
+    "owned image credential directory required",
+  );
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  await imageCommand(
+    ["docker", "login", "ghcr.io", "-u", imageEnv("GITHUB_ACTOR"), "--password-stdin"],
+    { input: imageEnv("GHCR_TOKEN") },
+  );
+}
+
+// Runs inside the final tool image under its non-root user and read-only root
+// filesystem. Only explicit temporary/cache mounts are writable.
+export function imageSmokeScript(): string {
+  return String.raw`
+const fs = require("node:fs"), path = require("node:path");
+const check = (value) => { if (!value) throw new Error("image tool/SDK smoke refused"); };
+const run = (args) => { const child = Bun.spawnSync(args, {stdout:"pipe",stderr:"pipe"}); check(child.exitCode === 0 && !child.signalCode); return child.stdout.toString().trim(); };
+check(process.getuid() === 1000 && process.getgid() === 1000);
+check(run(["rustc","--version"]).split(" ")[1] === "1.99.0");
+check(run(["bun","--version"]) === "1.4.3");
+function immutable(root) { const stat=fs.statSync(root); check(stat.uid===0 && (stat.mode & 0o022)===0); try {fs.accessSync(root,fs.constants.W_OK); throw new Error("writable tool");} catch(error) {check(error.code === "EROFS" || error.code === "EACCES");} if(stat.isDirectory()) for(const name of fs.readdirSync(root)) immutable(path.join(root,name)); }
+for(const root of ["/opt/rustup","/opt/cargo","/opt/fvoci-sqlite","/usr/local/bin/fvoci-ci-tools"]) immutable(root);
+for(const name of ["registry","git"]) { const directory=path.join(process.env.CARGO_HOME,name); fs.mkdirSync(directory,{recursive:true}); fs.accessSync(directory,fs.constants.W_OK); }
+for(const command of [["cargo","--version"],["cargo","fmt","--version"],["cargo","clippy","--version"],["git","--version"],["zstd","--version"],["dpkg-query","-s","ca-certificates"]]) run(command);
+check(!fs.existsSync("/tmp/bootstrap-ca.crt"));
+for(const line of fs.readFileSync("/var/lib/dpkg/info/ca-certificates.md5sums","utf8").trim().split("\n")) { const match=/^([a-f0-9]{32})\s+(.+)$/.exec(line); check(match); if(/^usr\/share\/(doc|man)\//.test(match[2])) continue; check(new Bun.CryptoHasher("md5").update(fs.readFileSync("/"+match[2])).digest("hex")===match[1]); }
+check(fs.readdirSync("/usr/local/share/ca-certificates").length===0);
+check(fs.statSync("/etc/ssl/certs/ca-certificates.crt").size>0 && fs.existsSync(path.join(process.env.LIBCLANG_PATH,"libclang.so")));
+const parent=fs.mkdtempSync("/tmp/fvoci-image-sdk-");
+try { const identity=new Bun.CryptoHasher("sha256").update(fs.readFileSync("/opt/fvoci-sqlite/consumer-inputs.json")).digest("hex");
+ run(["/usr/local/bin/fvoci-ci-tools","sqlite-ci","--image-sdk","/opt/fvoci-sqlite","--expected-sdk-sha256",identity,"--image-ref",process.env.FVOCI_SDK_IMAGE_REF,"--parent",parent]);
+ if(process.env.FVOCI_IMAGE_TARGET === "ci-web") { function browser(root) { for(const name of fs.readdirSync(root)){const p=path.join(root,name),s=fs.statSync(p);if(s.isDirectory()){const b=browser(p);if(b)return b;} else if(name==="chrome" && /chrome-linux/.test(p))return p;} } const executable=browser(process.env.PLAYWRIGHT_BROWSERS_PATH);check(executable);check(run([executable,"--headless","--no-sandbox","--disable-gpu","--user-data-dir="+path.join(parent,"chromium"),"--dump-dom","about:blank"]).includes("<html")); }
+} finally { fs.rmSync(parent,{recursive:true,force:true}); }
+`;
+}
+export async function smokeImage(ref: string, target: string) {
+  check(
+    sha256Digest.test(ref) && (target === "ci-base" || target === "ci-web"),
+    "smoke requires exact local image digest and target",
+  );
+  await imageCommand([
+    "docker",
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--read-only",
+    "--cpus",
+    "2",
+    "--memory",
+    "16g",
+    "--tmpfs",
+    "/tmp:rw,mode=1777",
+    "--tmpfs",
+    "/home/ci/.cargo:rw,uid=1000,gid=1000,mode=0755",
+    "--env",
+    `FVOCI_SDK_IMAGE_REF=${ref}`,
+    "--env",
+    `FVOCI_IMAGE_TARGET=${target}`,
+    ref,
+    "bun",
+    "-e",
+    imageSmokeScript(),
+  ]);
+}
+async function nativeImageBuild() {
+  const plan = imageBuildPlan(process.env, process.arch);
+  const work = mkdtempSync(join(imageEnv("RUNNER_TEMP"), "ci-base-"));
+  const log = join(work, "build.log"),
+    inspection = join(work, "image.json");
+  let builderOwned = false,
+    failure: unknown;
+  const cleanupErrors: unknown[] = [];
+  const summary = (line: string) => appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  try {
+    await imageCommand([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
+    await imageCommand([process.execPath, "test", "tools/ci/ci-base-image.test.ts"]);
+    await imageCommand(["docker", "buildx", "version"]);
+    await imageCommand([
+      "docker",
+      "buildx",
+      "create",
+      "--name",
+      plan.builder,
+      "--driver",
+      "docker-container",
+      "--use",
+      "--driver-opt",
+      "memory=16g",
+      "--driver-opt",
+      "cpu-period=100000",
+      "--driver-opt",
+      "cpu-quota=200000",
+    ]);
+    builderOwned = true;
+    await imageCommand(["docker", "buildx", "inspect", "--bootstrap"]);
+    const started = performance.now();
+    await imageCommand(
+      [
+        "docker",
+        "buildx",
+        "build",
+        ...plan.args,
+        "--tag",
+        plan.ref,
+        "--load",
+        "--cache-from",
+        `type=registry,ref=${plan.image}:cache-${plan.arch}`,
+        ".",
+      ],
+      { log },
+    );
+    summary(
+      `Native build ${plan.target}/${plan.arch}: ${String((performance.now() - started) / 1000)}s`,
+    );
+    const metadata: unknown = JSON.parse(
+      await imageCommand(["docker", "image", "inspect", plan.ref, "--format", "{{json .}}"]),
+    );
+    await Bun.write(inspection, JSON.stringify(metadata));
+    await imageCommand(["docker", "image", "save", plan.ref, "--output", join(work, "image.tar")]);
+    await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    const id = at(metadata, "Id");
+    check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
+    await smokeImage(id, plan.target);
+    if (process.env.PUBLISH === "true") {
+      const started = performance.now();
+      await imageCommand(["docker", "push", plan.ref]);
+      await imageCommand([
+        "docker",
+        "buildx",
+        "build",
+        ...plan.args,
+        "--output",
+        "type=cacheonly",
+        "--cache-to",
+        `type=registry,ref=${plan.image}:cache-${plan.arch},mode=max`,
+        ".",
+      ]);
+      summary(
+        `Image/cache publish ${plan.target}/${plan.arch}: ${String((performance.now() - started) / 1000)}s`,
+      );
+      summary(await imageCommand(["docker", "buildx", "imagetools", "inspect", plan.ref]));
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      if (existsSync(log))
+        summary(
+          buildSummary(
+            readFileSync(log, "utf8"),
+            existsSync(inspection) ? JSON.parse(readFileSync(inspection, "utf8")) : undefined,
+          ),
+        );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (builderOwned)
+      try {
+        await imageCommand(["docker", "buildx", "rm", plan.builder]);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    try {
+      await imageCommand(["docker", "logout", "ghcr.io"]);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    for (const path of [
+      work,
+      imageEnv("DOCKER_CONFIG"),
+      join(imageEnv("RUNNER_TEMP"), "ci-base-bun"),
+    ])
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+  }
+  if (failure || cleanupErrors.length)
+    throw new AggregateError(
+      [...(failure ? [failure] : []), ...cleanupErrors],
+      "image build or normal cleanup failed",
+    );
+}
+async function publishImageManifest() {
+  check(imageEnv("GITHUB_REF") === "refs/heads/main", "manifest publication requires main");
+  const plan = imageBuildPlan({ ...process.env, ARCH: "amd64", PUBLISH: "true" }, "x64");
+  const work = mkdtempSync(join(imageEnv("RUNNER_TEMP"), "ci-base-manifest-"));
+  let failure: unknown;
+  const cleanupErrors: unknown[] = [];
+  const summary = (line: string) => appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  try {
+    await imageLogin();
+    const sources: string[] = [];
+    for (const arch of ["amd64", "arm64"]) {
+      const ref = plan.ref.replace(/amd64$/, arch);
+      const config: unknown = JSON.parse(
+        await imageCommand([
+          "docker",
+          "buildx",
+          "imagetools",
+          "inspect",
+          ref,
+          "--format",
+          "{{json .Image}}",
+        ]),
+      );
+      const manifest: unknown = JSON.parse(
+        await imageCommand([
+          "docker",
+          "buildx",
+          "imagetools",
+          "inspect",
+          ref,
+          "--format",
+          "{{json .Manifest}}",
+        ]),
+      );
+      sources.push(`${plan.image}@${archDigest(config, manifest, arch)}`);
+      const raw: unknown = JSON.parse(
+        await imageCommand(["docker", "buildx", "imagetools", "inspect", ref, "--raw"]),
+      );
+      const layers = list(at(raw, "layers"));
+      check(layers, "invalid image layers");
+      let size = 0;
+      for (const layer of layers) {
+        const bytes = at(layer, "size");
+        check(
+          typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0,
+          "invalid layer size",
+        );
+        size += bytes;
+      }
+      summary(`Compressed layer size (${arch}): ${String(size)} bytes`);
+    }
+    const started = performance.now(),
+      ref = `${plan.image}:sha-${imageEnv("GITHUB_SHA")}`;
+    await imageCommand(["docker", "buildx", "imagetools", "create", "--tag", ref, ...sources]);
+    const index: unknown = JSON.parse(
+      await imageCommand([
+        "docker",
+        "buildx",
+        "imagetools",
+        "inspect",
+        ref,
+        "--format",
+        "{{json .Manifest}}",
+      ]),
+    );
+    summary(`Multi-arch reference: ${plan.image}@${String(verifyManifest(index, sources))}`);
+    summary(`Manifest publish: ${String((performance.now() - started) / 1000)}s`);
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      await imageCommand(["docker", "logout", "ghcr.io"]);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    for (const path of [
+      work,
+      imageEnv("DOCKER_CONFIG"),
+      join(imageEnv("RUNNER_TEMP"), "ci-base-bun"),
+    ])
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+  }
+  if (failure || cleanupErrors.length)
+    throw new AggregateError(
+      [...(failure ? [failure] : []), ...cleanupErrors],
+      "image manifest or normal cleanup failed",
+    );
 }

@@ -59,7 +59,7 @@ pub const FLAGS: [&str; 13] = [
     "-DHAVE_USLEEP=1",
     "-DHAVE_ISNAN=1",
 ];
-const LINK_FLAGS: [&str; 3] = ["-pthread", "-ldl", "-lm"];
+pub const LINK_FLAGS: [&str; 3] = ["-pthread", "-ldl", "-lm"];
 /// The only environment native tools receive.
 pub const ENV: [(&str, &str); 3] = [("PATH", "/usr/bin:/bin"), ("LC_ALL", "C"), ("LANG", "C")];
 /// Required consumer inputs cannot be removed by editing the cache manifest.
@@ -418,7 +418,11 @@ impl Runner {
     }
 
     fn smoke(&mut self, prefix: &Path) -> Result<String, Failure> {
-        let directory = host::mkdtemp("smoke-run-", prefix).map_err(|e| e.to_string())?;
+        self.smoke_at(prefix, prefix)
+    }
+
+    fn smoke_at(&mut self, prefix: &Path, scratch: &Path) -> Result<String, Failure> {
+        let directory = host::mkdtemp("smoke-run-", scratch).map_err(|e| e.to_string())?;
         let result = self.run(
             &[
                 text(&prefix.join("smoke")),
@@ -703,6 +707,74 @@ fn build(parsed: &args::Parsed, runner: &mut Runner) -> Result<(), Failure> {
     std::io::stdout().flush().map_err(io)
 }
 
+fn verified_outputs(prefix: &Path, inputs: &Value, env_text: &str) -> Result<Value, Failure> {
+    let required: BTreeSet<String> = REQUIRED_OUTPUTS.iter().map(|s| (*s).to_owned()).collect();
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(prefix.join("manifest.json")).map_err(io)?)
+            .map_err(|e| e.to_string())?;
+    if manifest.get("inputs") != Some(inputs) {
+        return Err("existing build input identity differs; use a new owned prefix".to_owned());
+    }
+    let outputs = manifest
+        .get("outputs")
+        .and_then(Value::as_object)
+        .filter(|o| o.keys().cloned().collect::<BTreeSet<_>>() == required)
+        .ok_or("existing prefix required output inventory differs")?;
+    let mut expected_files = required.clone();
+    expected_files.insert("manifest.json".to_owned());
+    if files_below(prefix)? != expected_files {
+        return Err("existing prefix output inventory differs".to_owned());
+    }
+    for output in &required {
+        let path = prefix.join(output);
+        no_symlinks(&path)?;
+        let matches = path.is_file()
+            && Some(sha256_hex(&fs::read(&path).map_err(io)?).as_str()) == outputs[output].as_str();
+        if !matches {
+            return Err(format!(
+                "existing build output hash/type mismatch: {output}"
+            ));
+        }
+    }
+    if fs::read_to_string(prefix.join("env.sh")).map_err(io)? != env_text {
+        return Err("existing build environment differs".to_owned());
+    }
+    Ok(manifest)
+}
+
+/// Image adoption reuses the existing complete output inventory and real smoke,
+/// but places the temporary database outside the immutable SDK.
+pub fn verify_image_outputs(prefix: &Path, scratch: &Path, inputs: &Value) -> Result<(), String> {
+    let env_text = image_exports(prefix);
+    let manifest = verified_outputs(prefix, inputs, &env_text)?;
+    if sha3_hex(&fs::read(prefix.join("sqlite3.c")).map_err(io)?) != C_HASH
+        || sha256_hex(&fs::read(prefix.join("include/sqlite3.h")).map_err(io)?) != HEADER_HASH
+        || fs::read_to_string(prefix.join("smoke.c")).map_err(io)? != smoke_source()
+    {
+        return Err("image SDK pinned source/header/smoke differs".into());
+    }
+    let mut runner = Runner {
+        timings: Map::new(),
+    };
+    let proof = runner.smoke_at(prefix, scratch)?;
+    if manifest.get("proof").and_then(Value::as_str) != Some(proof.as_str()) {
+        return Err("image SDK actual smoke proof differs".into());
+    }
+    Ok(())
+}
+
+pub fn image_exports(prefix: &Path) -> String {
+    [
+        ("SQLITE3_LIB_DIR", text(&prefix.join("lib"))),
+        ("SQLITE3_INCLUDE_DIR", text(&prefix.join("include"))),
+        ("SQLITE3_STATIC", "1".to_owned()),
+        ("SQLITE3_NO_PKG_CONFIG", "1".to_owned()),
+    ]
+    .iter()
+    .map(|(key, value)| format!("export {key}={}\n", shell::quote(value)))
+    .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_or_verify(
     runner: &mut Runner,
@@ -717,42 +789,11 @@ fn build_or_verify(
     ar: &str,
     stage_slot: &mut Option<PathBuf>,
 ) -> Result<(), Failure> {
-    let required: BTreeSet<String> = REQUIRED_OUTPUTS.iter().map(|s| (*s).to_owned()).collect();
     if prefix.exists() {
         if !prefix.is_dir() || host::owner(prefix).map_err(io)? != host::getuid() {
             return Err("existing prefix is not an owned build directory".to_owned());
         }
-        let manifest: Value =
-            serde_json::from_str(&fs::read_to_string(prefix.join("manifest.json")).map_err(io)?)
-                .map_err(|e| e.to_string())?;
-        if manifest.get("inputs") != Some(inputs) {
-            return Err("existing build input identity differs; use a new owned prefix".to_owned());
-        }
-        let outputs = manifest
-            .get("outputs")
-            .and_then(Value::as_object)
-            .filter(|o| o.keys().cloned().collect::<BTreeSet<_>>() == required)
-            .ok_or("existing prefix required output inventory differs")?;
-        let mut expected_files = required.clone();
-        expected_files.insert("manifest.json".to_owned());
-        if files_below(prefix)? != expected_files {
-            return Err("existing prefix output inventory differs".to_owned());
-        }
-        for output in &required {
-            let path = prefix.join(output);
-            no_symlinks(&path)?;
-            let matches = path.is_file()
-                && Some(sha256_hex(&fs::read(&path).map_err(io)?).as_str())
-                    == outputs[output].as_str();
-            if !matches {
-                return Err(format!(
-                    "existing build output hash/type mismatch: {output}"
-                ));
-            }
-        }
-        if fs::read_to_string(prefix.join("env.sh")).map_err(io)? != env_text {
-            return Err("existing build environment differs".to_owned());
-        }
+        let manifest = verified_outputs(prefix, inputs, env_text)?;
         let proof = runner.smoke(prefix)?;
         if manifest.get("proof").and_then(Value::as_str) != Some(proof.as_str()) {
             return Err("cached actual smoke proof differs".to_owned());

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   archDigest,
   buildSummary,
+  imageBuildPlan,
   scanImage,
   verifyManifest,
   verifyMetadata,
@@ -988,4 +989,43 @@ test("per-arch digest rejects wrong image architecture", () => {
       "arm64",
     ),
   ).toThrow("mismatch");
+});
+
+test("native image execution binds source, attempt, architecture and publication authority before Docker", () => {
+  const good = {
+    ARCH: "amd64",
+    TARGET: "ci-web",
+    GITHUB_SHA: "a".repeat(40),
+    GITHUB_RUN_ID: "123",
+    GITHUB_RUN_ATTEMPT: "2",
+    GITHUB_REF: "refs/pull/1/merge",
+    PUBLISH: "false",
+  };
+  const plan = imageBuildPlan(good, "x64");
+  expect(plan.args.at(-1)).toBe("--progress=plain");
+  expect(plan.ref).toEndWith("-123-2-amd64");
+  for (const change of [
+    { ARCH: "arm64" },
+    { TARGET: "foreign" },
+    { GITHUB_SHA: "main" },
+    { GITHUB_RUN_ID: "0" },
+    { GITHUB_RUN_ATTEMPT: "0" },
+    { PUBLISH: "true" },
+    { PUBLISH: "" },
+  ])
+    expect(() => imageBuildPlan({ ...good, ...change }, "x64")).toThrow();
+  expect(imageBuildPlan({ ...good, ARCH: "arm64" }, "arm64").arch).toBe("arm64");
+  expect(
+    imageBuildPlan({ ...good, PUBLISH: "true", GITHUB_REF: "refs/heads/main" }, "x64").ref,
+  ).toBe(plan.ref);
+});
+
+test.each([
+  "opt/fvoci-sqlite/consumer-inputs.json",
+  "opt/fvoci-sqlite/x86_64-unknown-linux-gnu/proof.txt",
+  "usr/local/bin/fvoci-ci-tools",
+])("new SDK/tool path cannot bypass the full saved-layer credential scan: %s", async (path) => {
+  expect((await rejection(saved([{ [path]: "ghp_" + "X".repeat(36) }]))).message).toContain(
+    "credential/DB URL pattern found",
+  );
 });
