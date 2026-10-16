@@ -441,6 +441,8 @@ jobs:
           bun-version-file: .bun-version
       - name: Build and qualify ordinary container browser outputs
         id: prepare
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: >-
           bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE"
           --prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"
@@ -474,13 +476,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - name: Prepare disk for ordinary browser containers
-        if: contains(fromJSON('[1,2,4,6,7]'), matrix.shard)
-        run: |
-          set -euo pipefail
-          df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1
-          sudo rm -rf -- /usr/local/lib/android
-          df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1
       - if: contains(fromJSON('[0,3,5]'), matrix.shard)
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
@@ -583,6 +578,7 @@ jobs:
         if: "!contains(fromJSON('[0,3,5]'), matrix.shard)"
         id: container_browser
         env:
+          TMPDIR: ${{ runner.temp }}
           FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}
         run: >-
           bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE"

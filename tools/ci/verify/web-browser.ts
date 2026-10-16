@@ -101,7 +101,8 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
       unmasked,
     ), "producer must run checkout/setup/prepare/publish without host preparation or bypass");
   const prepare = ps.find((step) => step.id === "prepare");
-  require(prepare?.run ===
+  require(pyEq(prepare?.env, { TMPDIR: "${{ runner.temp }}" }) &&
+    prepare?.run ===
     command(
       '--prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"',
     ), "shared explicit prepare command required");
@@ -163,6 +164,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
         '--consume ${{ matrix.shard }} --handoff "$RUNNER_TEMP/fvoci-browser-container-packet" --handoff-sha256 "$FVOCI_WEB_BUILD_HANDOFF_SHA256"',
       ) &&
     pyEq(runtime.env, {
+      TMPDIR: "${{ runner.temp }}",
       FVOCI_WEB_BUILD_HANDOFF_SHA256:
         "${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}",
     }) &&
