@@ -405,12 +405,7 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
                   "--offline",
                   "--features",
                   "db-tests,api-schema",
-                  "--bin",
-                  "fvoci-server",
-                  "--bin",
-                  "fvoci-migrate",
-                  "--bin",
-                  "fvoci-e2e-fixture",
+                  "--lib",
                 ]
               : name === "fixture"
                 ? [
