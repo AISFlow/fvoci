@@ -17,19 +17,7 @@ fvoci_test_meili_stop() {
   _fvoci_test_meili_owned=""
   # -v is defensive: the pinned image declares no VOLUME today (its data stays
   # in the container layer), but an image that did would leak one per run.
-  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-    if docker inspect "$container" >/dev/null 2>&1; then
-      local retired=0
-      docker stop --time 10 "$container" >/dev/null || retired=1
-      # This pinned Meili process uses SIGTERM's native 128+15 exit status;
-      # require that real stop, never a timeout's SIGKILL (137) or OOM.
-      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$container")" == 'false 143 false' ]] || retired=1
-      docker rm -v "$container" >/dev/null || retired=1
-      return "$retired"
-    fi
-  else
-    docker rm -f -v "$container" >/dev/null 2>&1 || true
-  fi
+  docker rm -f -v "$container" >/dev/null 2>&1 || true
 }
 
 # Starts the container and exports FVOCI_MEILI_URL, FVOCI_MEILI_KEY,
@@ -49,21 +37,13 @@ fvoci_test_meili_start() {
   export FVOCI_TEST_MEILI_CONTAINER="fvoci-rust-test-meili-${run_id}"
   _fvoci_test_meili_owned="$FVOCI_TEST_MEILI_CONTAINER"
 
-  local -a network_args=()
-  local -a remove_args=(--rm)
-  local -a publish_args=(-p 127.0.0.1:0:7700)
-  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-    network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-meili --cpus=1 --memory=2g --pids-limit=256)
-    remove_args=()
-    publish_args=()
-  fi
-  cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
+  cid="$(docker run -d --rm \
     --name "$FVOCI_TEST_MEILI_CONTAINER" \
     --label "fvoci.test-run=${run_id}" \
     -e "MEILI_MASTER_KEY=${master_key}" \
     -e MEILI_NO_ANALYTICS=true \
     -e MEILI_ENV=production \
-    "${publish_args[@]}" \
+    -p 127.0.0.1:0:7700 \
     "$FVOCI_TEST_MEILI_IMAGE")" || return 1
 
   deadline=$((SECONDS + 30))
@@ -76,16 +56,12 @@ fvoci_test_meili_start() {
     sleep 1
   done
 
-  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-    export FVOCI_MEILI_URL="http://fvoci-meili:7700"
-  else
-    port="$(docker port "$cid" 7700 | head -1 | awk -F: '{print $NF}')" || return 1
-    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-      echo "meilisearch published no host port for 7700" >&2
-      return 1
-    fi
-    export FVOCI_MEILI_URL="http://127.0.0.1:${port}"
+  port="$(docker port "$cid" 7700 | head -1 | awk -F: '{print $NF}')" || return 1
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "meilisearch published no host port for 7700" >&2
+    return 1
   fi
+  export FVOCI_MEILI_URL="http://127.0.0.1:${port}"
   export FVOCI_MEILI_KEY="$master_key"
   export MEILI_MASTER_KEY="$master_key"
 }
@@ -96,7 +72,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     echo "usage: $0 <command> [args...]" >&2
     exit 1
   fi
-  trap 'status=$?; fvoci_test_meili_stop || { (( status != 0 )) || status=1; }; exit "$status"' EXIT
+  trap fvoci_test_meili_stop EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fvoci_test_meili_start

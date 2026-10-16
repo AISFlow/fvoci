@@ -20,6 +20,7 @@ import {
   CheckError,
   CI_WEB_IMAGE,
   containerShard,
+  sqliteEnvironment,
   committedApiJobs,
   createSafeDiagnostics,
   launcherReceipt,
@@ -218,10 +219,23 @@ describe("qualifyCommittedApi", () => {
   });
 });
 
-test("the first container slice admits a complete shard, never an arbitrary subset or unsupported host oracle shard", () => {
-  expect(containerShard("6")).toBe("6");
-  for (const value of [undefined, "", "0", "-1", "6 --grep=skip", "8"])
+test("containers admit complete migrated shards, never partial or required host fixtures", () => {
+  for (const value of ["1", "2", "4", "6", "7"]) expect(containerShard(value)).toBe(value);
+  for (const value of [undefined, "", "0", "3", "5", "-1", "6 --grep=skip", "8"])
     expect(() => containerShard(value)).toThrow(CheckError);
+});
+
+test("SQLite exports are four data fields, never shell evaluation", () => {
+  const valid =
+    "export SQLITE3_LIB_DIR=/owned/lib\nexport SQLITE3_INCLUDE_DIR=/owned/include\nexport SQLITE3_STATIC=1\nexport SQLITE3_NO_PKG_CONFIG=1\n";
+  expect(sqliteEnvironment(valid).SQLITE3_LIB_DIR).toBe("/owned/lib");
+  for (const text of [
+    valid + "export PATH=/foreign\n",
+    valid.replace("/owned/lib", "$(foreign)"),
+    valid.replace("SQLITE3_NO_PKG_CONFIG", "SQLITE3_STATIC"),
+    valid.replace("export SQLITE3_STATIC=1\n", ""),
+  ])
+    expect(() => sqliteEnvironment(text)).toThrow(CheckError);
 });
 
 describe("planSpecs", () => {

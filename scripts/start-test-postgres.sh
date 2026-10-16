@@ -35,21 +35,10 @@ PASSWORD="$(openssl rand -hex 24)"
 printf 'POSTGRES_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
 
 cleanup() {
-  local status=$? retired=0
   # -v: the image declares a VOLUME; without it every run leaves an anonymous
   # volume behind (the --rm auto-removal does not run after an explicit rm).
-  if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-    if docker inspect "$CONTAINER" >/dev/null 2>&1; then
-      docker stop --time 10 "$CONTAINER" >/dev/null || retired=1
-      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$CONTAINER")" == 'false 0' ]] || retired=1
-      docker rm -v "$CONTAINER" >/dev/null || retired=1
-    fi
-  else
-    docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
-  fi
+  docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   rm -f "$ENV_FILE"
-  if (( status == 0 && retired != 0 )); then status=1; fi
-  return "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -57,19 +46,11 @@ trap 'exit 143' TERM
 
 PG_MAX_CONNECTIONS="${FVOCI_TEST_PG_MAX_CONNECTIONS:-150}"
 
-network_args=()
-remove_args=(--rm)
-publish_args=(-p 127.0.0.1:0:5432)
-if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-  network_args=(--network "$FVOCI_TEST_NETWORK" --network-alias fvoci-pg --cpus=1 --memory=2g --pids-limit=256)
-  remove_args=()
-  publish_args=()
-fi
-cid="$(docker run -d "${remove_args[@]}" "${network_args[@]}" \
+cid="$(docker run -d --rm \
   --name "$CONTAINER" \
   --label "fvoci.test-run=${RUN_ID}" \
   --env-file "$ENV_FILE" \
-  "${publish_args[@]}" \
+  -p 127.0.0.1:0:5432 \
   "$IMAGE" \
   postgres -c "max_connections=${PG_MAX_CONNECTIONS}")"
 
@@ -88,12 +69,8 @@ if [[ ! "$server_version_num" =~ ^${PG_MAJOR}[0-9]{4}$ ]]; then
   exit 1
 fi
 
-if [[ -n "${FVOCI_TEST_NETWORK:-}" ]]; then
-  export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@fvoci-pg:5432/postgres"
-else
-  port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
-  export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"
-fi
+port="$(docker port "$cid" 5432 | head -1 | awk -F: '{print $NF}')"
+export TEST_DATABASE_URL="postgres://postgres:${PASSWORD}@127.0.0.1:${port}/postgres"
 export FVOCI_TEST_PG_CONTAINER="$CONTAINER"
 
 # Keep this shell alive so EXIT cleans up after both successful and failed commands.

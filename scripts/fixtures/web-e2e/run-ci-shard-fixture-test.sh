@@ -14,7 +14,7 @@ trap cleanup EXIT
 REAL_BUN="$(command -v bun)"
 mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/apps/web" "$FIXTURE_ROOT/tools/web-e2e"
 cp "$ROOT/scripts/run-web-e2e.sh" "$FIXTURE_ROOT/scripts/"
-cp "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/compat.ts" "$ROOT/tools/web-e2e/run-web-e2e.ts" \
+cp "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/compat.ts" "$ROOT/tools/web-e2e/run-web-e2e.ts" "$ROOT/tools/web-e2e/database-urls.ts" \
   "$ROOT/tools/web-e2e/shard-fixture.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 chmod +x "$FIXTURE_ROOT/scripts/run-web-e2e.sh"
 

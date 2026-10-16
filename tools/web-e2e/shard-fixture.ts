@@ -2,10 +2,57 @@
 // `bun tools/web-e2e/shard-fixture.ts <command> ...`. Each command runs real
 // shell fragments of the web e2e scripts with their runtime stubbed and exits
 // 1 with one stderr line on the first broken expectation.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 import { TIMER_FILTERS } from "./groups.ts";
+import { groupDatabaseStatement } from "./database-urls.ts";
+
+async function fakeBun(args: string[]): Promise<void> {
+  const state = process.env.FVOCI_FIXTURE_NET_STATE;
+  if (!state) throw new FixtureError("fixture state required");
+  if (
+    args.length === 3 &&
+    args[0] === "--no-env-file" &&
+    args[1]?.endsWith("/tools/web-e2e/database-urls.ts")
+  ) {
+    const sql = groupDatabaseStatement(args[2] ?? "", process.env)
+      .replace(/ PASSWORD '[^']*'/, " ")
+      .replace(/\s+/g, " ");
+    appendFileSync(state + ".sql", sql + "\n");
+    process.exit(args[2] === "drop-database" && process.env.FVOCI_FIXTURE_DROP === "fail" ? 3 : 0);
+  }
+  if (
+    args[0]?.endsWith("/tools/web-e2e/trace-summary.ts") &&
+    process.env.FVOCI_FIXTURE_TRACE_SUMMARY === "fail"
+  ) {
+    process.stderr.write(
+      "fixture summarizer error postgres://u:fixture-secret@h/db MEILI_MASTER_KEY=fixture-meili-master-secret\n",
+    );
+    process.exit(3);
+  }
+  if (args.slice(0, 5).join(" ") === "--bun x --no-install playwright test") {
+    if (process.env.FVOCI_FIXTURE_RECORD_PLAYWRIGHT === "1") {
+      appendFileSync(state + ".playwright-launches", "launch\n");
+      if (args[5] === "--config=e2e/perf/perf.config.ts") process.exit(0);
+    }
+    if (process.env.FVOCI_FIXTURE_PLAYWRIGHT_EXIT)
+      process.exit(Number(process.env.FVOCI_FIXTURE_PLAYWRIGHT_EXIT));
+  }
+  const child = Bun.spawn([process.execPath, ...args], {
+    env: process.env,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if (args[0]?.endsWith("/tools/web-e2e/smtp-sink.ts"))
+    writeFileSync(state + ".smtp-pid", String(child.pid));
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
+    process.once(signal, () => {
+      child.kill(signal);
+    });
+  process.exit(await child.exited);
+}
 
 class FixtureError extends Error {}
 
@@ -224,7 +271,8 @@ function retention(fn: string, root: string): void {
   }
 }
 
-const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => void }> = {
+const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => unknown }> = {
+  "fake-bun": { arity: -1, run: (...args) => fakeBun(args) },
   "record-args": { arity: -1, run: (...args) => process.stdout.write(`${JSON.stringify(args)}\n`) },
   "timer-rows": {
     arity: 2,
@@ -260,7 +308,7 @@ if (import.meta.main) {
     process.exit(2);
   }
   try {
-    command.run(...args);
+    await command.run(...args);
   } catch (error) {
     process.stderr.write(
       `shard-fixture ${name}: ${error instanceof Error ? error.message : String(error)}\n`,

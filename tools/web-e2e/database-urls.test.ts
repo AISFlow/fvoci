@@ -4,6 +4,8 @@ import {
   DatabaseUrlError,
   databaseUrls,
   groupDatabaseStatement,
+  fixtureDatabaseUrl,
+  fixtureRows,
   quoteComponent,
 } from "./database-urls.ts";
 
@@ -12,6 +14,30 @@ const DB = "fvoci_e2e_0123456789abcdef";
 const ROLE = `fvoci_app_${DB}`;
 const PASSWORD = "00112233445566778899aabbccddeeff";
 const SECRET = "admin-secret";
+
+test("fixture rows preserve text microseconds, null columns, duplicates and multiple statement results", () => {
+  const row = [Buffer.from("2026-10-16 01:02:03.123456+00"), null, Buffer.from("t")];
+  expect(fixtureRows([[], [row, row], []])).toBe(
+    "2026-10-16 01:02:03.123456+00||t\n2026-10-16 01:02:03.123456+00||t",
+  );
+  expect(fixtureRows([[null], [Buffer.from("x")], [null]])).toBe("\nx\n");
+  expect(() => fixtureRows([[new Date()]])).toThrow(DatabaseUrlError);
+});
+
+test("fixture app URL is bound to the generated admin database and same service", () => {
+  const env = {
+    FVOCI_TEST_PG_CONTAINER: "fvoci-rust-test-pg-" + "a".repeat(32),
+    FVOCI_E2E_ADMIN_DATABASE_URL: `postgres://postgres:${SECRET}@fvoci-pg:5432/${DB}`,
+    DATABASE_APP_URL: `postgres://${ROLE}:${PASSWORD}@fvoci-pg:5432/${DB}`,
+  };
+  expect(fixtureDatabaseUrl("app", env)).toBe(env.DATABASE_APP_URL);
+  for (const change of [
+    { DATABASE_APP_URL: env.DATABASE_APP_URL.replace(ROLE, "postgres") },
+    { DATABASE_APP_URL: env.DATABASE_APP_URL.replace("fvoci-pg", "foreign") },
+    { FVOCI_E2E_ADMIN_DATABASE_URL: env.FVOCI_E2E_ADMIN_DATABASE_URL.replace(DB, "postgres") },
+  ])
+    expect(() => fixtureDatabaseUrl("app", { ...env, ...change })).toThrow(DatabaseUrlError);
+});
 
 describe("owned group database operations", () => {
   const env = { DB_NAME: DB, ROLE_NAME: ROLE, ROLE_PASSWORD: PASSWORD };

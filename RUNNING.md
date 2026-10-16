@@ -714,10 +714,11 @@ scripts/prepare-web-e2e.sh
 scripts/run-web-e2e.sh
 ```
 
-The first shared-container browser slice runs the complete ordinary shard 6:
+Shared-container browser tests prepare one producer and reuse it across the
+complete ordinary shards whose SQL fixtures use the native Bun helper:
 
 ```sh
-bash scripts/run-web-e2e.sh --container --ci-shard 6
+bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser . --ci-shards 1,2,4,6,7
 ```
 
 Prepare the digest named by `CI_WEB_IMAGE` in `tools/web-e2e/run-web-e2e.ts`
@@ -731,6 +732,10 @@ limits are explicit. This initial slice requires a native Linux amd64 Docker
 daemon; macOS Docker Desktop and ARM64 execution are not yet verified. Other
 shards retain their host Docker fixture oracles until those boundaries are
 migrated; the container command refuses them rather than omitting assertions.
+Shard 0 retains the timer's host SQL fixture, shard 3 its archive-owned databases
+and native restart lifecycle, and shard 5 its actual Docker service-ledger witness.
+These complete shards still require the existing host command. An individual
+supported shard can be selected with `--ci-shard N`.
 
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,

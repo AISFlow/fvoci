@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 // Wiki documents (/w/:slug/WIKI-<n>) are a page of the Vue app, with the
 // collaborative editor bound to the real /collab room of the Rust server.
 // Runs against the production build the Rust server serves, with the real
@@ -654,27 +655,10 @@ test("a peer's change to an embed or math block being edited keeps the typed dra
     )
       throw new Error("Invalid app role fixture");
     const stored = JSON.parse(
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          "-i",
-          container,
-          "psql",
-          "-X",
-          "-qAt",
-          "-U",
-          app.username,
-          "-d",
-          app.pathname.slice(1),
-          "-v",
-          "ON_ERROR_STOP=1",
-        ],
-        {
-          input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${wsId}'; SELECT content_json FROM fvoci.documents WHERE workspace_id='${wsId}' AND id='${doc.id}'; ROLLBACK;`,
-          encoding: "utf8",
-        },
-      ),
+      execFileSync(process.execPath, fixtureQueryArgs("app"), {
+        input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${wsId}'; SELECT content_json FROM fvoci.documents WHERE workspace_id='${wsId}' AND id='${doc.id}'; ROLLBACK;`,
+        encoding: "utf8",
+      }),
     ) as unknown;
     expect(stored).toEqual(saved);
     await testInfo.attach("w3-original-math-app-role-body.json", {

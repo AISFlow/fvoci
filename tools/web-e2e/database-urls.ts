@@ -73,6 +73,87 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
+/** Native Bun child argv; SQL stays on stdin and credentials stay in env. */
+export function fixtureQueryArgs(role: "admin" | "app", commandTag = false): string[] {
+  return [
+    "--no-env-file",
+    import.meta.path,
+    "fixture-query",
+    role,
+    ...(commandTag ? ["command-tag"] : []),
+  ];
+}
+
+export function fixtureDatabaseUrl(role: string, env: NodeJS.ProcessEnv): string {
+  try {
+    const admin = new URL(required(env, "FVOCI_E2E_ADMIN_DATABASE_URL"));
+    const container = required(env, "FVOCI_TEST_PG_CONTAINER");
+    if (
+      !/^fvoci-rust-test-pg-[a-f0-9]{32}$/.test(container) ||
+      !["postgres:", "postgresql:"].includes(admin.protocol) ||
+      admin.username !== "postgres" ||
+      !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(admin.pathname)
+    )
+      throw new Error();
+    if (role === "admin") return admin.toString();
+    const app = new URL(required(env, "DATABASE_APP_URL"));
+    if (
+      role !== "app" ||
+      app.username !== "fvoci_app_" + admin.pathname.slice(1) ||
+      app.pathname !== admin.pathname ||
+      app.hostname !== admin.hostname ||
+      app.port !== admin.port
+    )
+      throw new Error();
+    return app.toString();
+  } catch {
+    throw new DatabaseUrlError("owned PostgreSQL fixture role and database required");
+  }
+}
+
+export function fixtureRows(value: unknown): string {
+  if (!Array.isArray(value)) throw new DatabaseUrlError("invalid PostgreSQL fixture result");
+  const lines: string[] = [];
+  for (const row of value as unknown[]) {
+    if (!Array.isArray(row)) throw new DatabaseUrlError("invalid PostgreSQL fixture row");
+    if (row.length === 0) continue;
+    if (row.every((field: unknown) => field === null || Buffer.isBuffer(field)))
+      lines.push(
+        row.map((field: unknown) => (field === null ? "" : (field as Buffer).toString())).join("|"),
+      );
+    else lines.push(fixtureRows(row));
+  }
+  return lines.join("\n");
+}
+
+async function fixtureQuery(role: string, commandTag: boolean): Promise<void> {
+  const connection = new SQL(fixtureDatabaseUrl(role, process.env), {
+    max: 1,
+    connectionTimeout: 10,
+  });
+  try {
+    const sql = await Bun.stdin.text();
+    const rows: unknown = await connection.unsafe(sql).simple().raw();
+    if (commandTag) {
+      if (
+        !Array.isArray(rows) ||
+        !("command" in rows) ||
+        rows.command !== "UPDATE" ||
+        !("count" in rows) ||
+        typeof rows.count !== "number" ||
+        !Number.isSafeInteger(rows.count)
+      )
+        throw new DatabaseUrlError("invalid PostgreSQL command result");
+      process.stdout.write(`UPDATE ${String(rows.count)}\n`);
+    } else process.stdout.write(fixtureRows(rows));
+  } catch (error) {
+    if (error instanceof DatabaseUrlError) throw error;
+    throw new DatabaseUrlError("isolated PostgreSQL fixture query failed");
+  } finally {
+    await connection.close();
+  }
+}
+
 // The four operations formerly performed with docker exec psql by the group
 // runtime. Keeping them here lets the same runtime use the owned PostgreSQL
 // service directly, without a Docker socket or CLI inside the browser image.
@@ -164,6 +245,21 @@ async function groupDatabase(action: string): Promise<void> {
 }
 
 if (import.meta.main) {
+  if (process.argv[2] === "fixture-query") {
+    try {
+      if (
+        !["admin", "app"].includes(process.argv[3] ?? "") ||
+        process.argv.length > 5 ||
+        (process.argv[4] !== undefined && process.argv[4] !== "command-tag")
+      )
+        throw new DatabaseUrlError("invalid fixture query arguments");
+      await fixtureQuery(process.argv[3] ?? "", process.argv[4] === "command-tag");
+      process.exit(0);
+    } catch {
+      process.stderr.write("database-urls: isolated PostgreSQL fixture query failed\n");
+      process.exit(1);
+    }
+  }
   if (
     process.argv.length > 3 ||
     (process.argv[2] !== undefined &&

@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser, login } from "./helpers";
@@ -400,25 +401,10 @@ test("late notification open and read-all preserve the other workspace's unread 
   if (required2 === undefined) {
     throw new Error("Missing fixture value: process.env.FVOCI_E2E_ADMIN_DATABASE_URL");
   }
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      required1,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      new URL(required2).pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-    ],
-    {
-      input: `INSERT INTO fvoci.notifications (workspace_id,user_id,event_id,verb,actor_user_id,target_type,target_id,payload) SELECT e.workspace_id,'${userId}'::uuid,e.id,e.verb,e.actor_user_id,e.target_type,e.target_id,jsonb_build_object('commentId',c.id,'documentId',c.document_id,'parentId',NULL) FROM fvoci.events e JOIN fvoci.comments c ON c.id=e.target_id WHERE e.target_id IN (${commentIds.map((id) => `'${id}'::uuid`).join(",")}) AND e.verb='comment.created' ON CONFLICT (workspace_id,user_id,event_id) DO NOTHING;`,
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  );
+  execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+    input: `INSERT INTO fvoci.notifications (workspace_id,user_id,event_id,verb,actor_user_id,target_type,target_id,payload) SELECT e.workspace_id,'${userId}'::uuid,e.id,e.verb,e.actor_user_id,e.target_type,e.target_id,jsonb_build_object('commentId',c.id,'documentId',c.document_id,'parentId',NULL) FROM fvoci.events e JOIN fvoci.comments c ON c.id=e.target_id WHERE e.target_id IN (${commentIds.map((id) => `'${id}'::uuid`).join(",")}) AND e.verb='comment.created' ON CONFLICT (workspace_id,user_id,event_id) DO NOTHING;`,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   for (const operation of ["open", "read-all"] as const) {
     const notification = (
       await readJson(

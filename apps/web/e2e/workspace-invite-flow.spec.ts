@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser, login, logout, watchCspViolations } from "./helpers";
@@ -98,24 +99,12 @@ test("owner invites a second user who signs up, accepts, and appears in members"
   if (!adminUrl || !container) {
     throw new Error("isolated PostgreSQL fixture is required");
   }
-  const database = new URL(adminUrl).pathname.slice(1);
-  const updated = execFileSync(
-    "docker",
-    [
-      "exec",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      database,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-c",
+  const updated = execFileSync(process.execPath, fixtureQueryArgs("admin", true), {
+    encoding: "utf8",
+    stdio: "pipe",
+    input:
       "UPDATE fvoci.invitations SET expires_at = now() - interval '1 second' WHERE email = 'expired-invite@example.com' AND accepted_at IS NULL",
-    ],
-    { encoding: "utf8", stdio: "pipe" },
-  );
+  });
   expect(updated.trim()).toBe("UPDATE 1");
 
   await logout(page);
