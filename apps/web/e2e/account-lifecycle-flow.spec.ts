@@ -162,7 +162,7 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page).toHaveURL(/\/login/);
 
-  const deletedAt = authSql(
+  const deletedAt = await authSql(
     "SELECT deleted_at FROM fvoci.users WHERE email = 'leaver@example.com'",
   );
   expect(deletedAt).not.toBe("");
@@ -171,7 +171,7 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await expectVueAuth(page);
   await page.getByRole("button", { name: "탈퇴 취소" }).click();
   await expect(page.getByRole("alert")).toContainText("이 링크로는 취소할 수 없습니다.");
-  authSql(
+  await authSql(
     "UPDATE fvoci.users SET deleted_at = now() - interval '15 days' WHERE email = 'leaver@example.com'",
   );
   try {
@@ -179,7 +179,7 @@ test("account settings: password, email change, magic link, withdraw and cancel"
     await page.getByRole("button", { name: "탈퇴 취소" }).click();
     await expect(page.getByRole("alert")).toContainText("이 링크로는 취소할 수 없습니다.");
   } finally {
-    authSql(
+    await authSql(
       `UPDATE fvoci.users SET deleted_at = '${deletedAt}'::timestamptz WHERE email = 'leaver@example.com'`,
     );
   }
@@ -190,7 +190,9 @@ test("account settings: password, email change, magic link, withdraw and cancel"
   await expectVueAuth(page);
   await expect(page.getByText("탈퇴 예약이 취소되었습니다.")).toHaveCount(0);
   expect(
-    authSql("SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE email = 'leaver@example.com'"),
+    await authSql(
+      "SELECT deleted_at IS NOT NULL FROM fvoci.users WHERE email = 'leaver@example.com'",
+    ),
   ).toBe("t");
   await page.getByRole("button", { name: "탈퇴 취소" }).click();
   await expect(
@@ -199,7 +201,7 @@ test("account settings: password, email change, magic link, withdraw and cancel"
 
   await expect(page).toHaveURL(/\/cancel-withdraw$/);
   expect(
-    authSql(
+    await authSql(
       "SELECT deleted_at IS NULL AND withdraw_cancel_token_hash IS NULL FROM fvoci.users WHERE email = 'leaver@example.com'",
     ),
   ).toBe("t");

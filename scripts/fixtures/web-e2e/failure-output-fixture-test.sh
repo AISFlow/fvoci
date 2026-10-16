@@ -62,7 +62,7 @@ cp "$ROOT/tools/web-e2e/trace-summary.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXT
 cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
 cp "$ROOT/tools/perf/perf-inner.ts" "$FIXTURE_ROOT/tools/perf/"
 cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$ROOT/tools/web-e2e/network-settle.ts" \
-  "$ROOT/tools/web-e2e/database-urls.ts" "$FIXTURE_ROOT/tools/web-e2e/"
+  "$ROOT/tools/web-e2e/database-urls.ts" "$ROOT/tools/web-e2e/run-web-e2e.ts" "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/shard-fixture.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
@@ -329,29 +329,11 @@ STUB
 # FVOCI_FIXTURE_PLAYWRIGHT_EXIT=<n> replaces the Playwright run by that exit.
 cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash
-case "${1:-}" in
-  */tools/web-e2e/smtp-sink.ts) echo "$$" >"$FVOCI_FIXTURE_NET_STATE.smtp-pid" ;;
-  */tools/web-e2e/trace-summary.ts)
-    if [[ "${FVOCI_FIXTURE_TRACE_SUMMARY:-ok}" == fail ]]; then
-      echo "fixture summarizer error postgres://u:fixture-secret@h/db MEILI_MASTER_KEY=fixture-meili-master-secret" >&2
-      exit 3
-    fi
-    ;;
-esac
-if [[ "${1:-}" == "--bun" && "${2:-}" == "x" && "${3:-}" == "--no-install" && "${4:-}" == "playwright" && "${5:-}" == "test" ]]; then
-  if [[ "${FVOCI_FIXTURE_RECORD_PLAYWRIGHT:-0}" == "1" ]]; then
-    echo "launch" >>"$FVOCI_FIXTURE_NET_STATE.playwright-launches"
-    if [[ "${6:-}" == "--config=e2e/perf/perf.config.ts" ]]; then
-      exit 0
-    fi
-  fi
-  if [[ -n "${FVOCI_FIXTURE_PLAYWRIGHT_EXIT:-}" ]]; then
-    exit "$FVOCI_FIXTURE_PLAYWRIGHT_EXIT"
-  fi
-fi
-exec "$FVOCI_FIXTURE_REAL_BUN" "$@"
+exec "$FVOCI_FIXTURE_REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fake-bun "$@"
 STUB
 chmod +x "$FIXTURE_ROOT"/scripts/*.sh "$FIXTURE_ROOT/target/debug/"* "$FAKE_BIN/"*
+"$REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fixture-runtime \
+  "$ROOT/tools/web-e2e/run-web-e2e.ts" "$FIXTURE_ROOT/tools/web-e2e/run-web-e2e.ts" "$FAKE_BIN/bun"
 
 # run_group <pending:0|1> <outcome:pass|fail> <net-mode> <log> <github-output>
 run_group() {

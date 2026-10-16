@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser, login, logout, watchCspViolations } from "./helpers";
@@ -282,22 +283,10 @@ test("notification pagination reaches a third page, bell cache stays valid, and 
     ON CONFLICT (workspace_id, user_id, event_id) DO NOTHING;
     COMMIT;
   `;
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      new URL(adminUrl).pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-    ],
-    { input: sql, stdio: ["pipe", "pipe", "pipe"] },
-  );
+  execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+    input: sql,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   await logout(page);
   await login(page, "navigation-inbox@example.com", "inboxpass123");
   expect(

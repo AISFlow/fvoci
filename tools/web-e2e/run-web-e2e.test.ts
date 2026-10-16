@@ -18,6 +18,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CheckError,
+  CI_WEB_IMAGE,
+  containerShard,
+  qualifyCohortHostProgram,
+  sqliteEnvironment,
   committedApiJobs,
   createSafeDiagnostics,
   launcherReceipt,
@@ -143,6 +147,26 @@ describe("qualifyCommittedApi", () => {
     expect(qualifyCommittedApi(root, request, ciEnv(sha))).toBe(sha);
   });
 
+  test("local ordinary browser identity is distinct from GitHub and still checks the exact source", () => {
+    const { root, sha } = committedCheckout();
+    const local = {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
+      FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+      FVOCI_WEB_CONTAINER_SOURCE: sha,
+    };
+    expect(qualifyCommittedApi(root, request, local)).toBe(sha);
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, GITHUB_ACTIONS: "true" }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_SOURCE: "0".repeat(40) }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_IMAGE: "latest" }),
+    ).toThrow();
+  });
+
   test("refuses outside CI, in another job, at another SHA or through a symlinked root", () => {
     const { root, sha } = committedCheckout();
     refused(
@@ -194,6 +218,55 @@ describe("qualifyCommittedApi", () => {
       "git rev-parse HEAD failed with exit 128",
     );
   });
+});
+
+test("containers admit complete migrated shards, never partial or required host fixtures", () => {
+  for (const value of ["1", "2", "4", "6", "7"]) expect(containerShard(value)).toBe(value);
+  for (const value of [undefined, "", "0", "3", "5", "-1", "6 --grep=skip", "8"])
+    expect(() => containerShard(value)).toThrow(CheckError);
+});
+
+test("SQLite exports are four data fields, never shell evaluation", () => {
+  const valid =
+    "export SQLITE3_LIB_DIR=/owned/lib\nexport SQLITE3_INCLUDE_DIR=/owned/include\nexport SQLITE3_STATIC=1\nexport SQLITE3_NO_PKG_CONFIG=1\n";
+  expect(sqliteEnvironment(valid).SQLITE3_LIB_DIR).toBe("/owned/lib");
+  for (const text of [
+    valid + "export PATH=/foreign\n",
+    valid.replace("/owned/lib", "$(foreign)"),
+    valid.replace("SQLITE3_NO_PKG_CONFIG", "SQLITE3_STATIC"),
+    valid.replace("export SQLITE3_STATIC=1\n", ""),
+  ])
+    expect(() => sqliteEnvironment(text)).toThrow(CheckError);
+});
+
+test("cohort reuse retains the complete in-container program and rejects product source changes", async () => {
+  const before =
+    "const IMAGE='fixed'; async function browserPhase(){return 7;} async function containerBrowser(){return 0;}";
+  const hostChange = before.replace(
+    "containerBrowser(){return 0;}",
+    "containerBrowser(){return 1;}",
+  );
+  await qualifyCohortHostProgram(before, hostChange, ["tools/web-e2e/run-web-e2e.ts"]);
+  const rejected = async (promise: Promise<void>) => {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CheckError);
+  };
+  await rejected(qualifyCohortHostProgram(before, hostChange, ["src/main.rs"]));
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("return 7", "return 8"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("'fixed'", "'foreign'"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
 });
 
 describe("planSpecs", () => {

@@ -5,21 +5,1196 @@
 // exits 1; a usage error exits 2.
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
   fchmodSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readlinkSync,
   realpathSync,
   statSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
-import { validateSpecRelpath } from "./groups.ts";
+import {
+  validateSpecRelpath,
+  discoverGroups,
+  assignShards,
+  verifyPlan,
+  DEFAULT_SHARD_COUNT,
+} from "./groups.ts";
+
+export const CI_WEB_IMAGE =
+  "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
+
+// This first ordinary-browser slice retains the complete registered shard.
+// The other shards still have host Docker/psql fixture oracles to migrate;
+// they are never silently run with a socket or with those assertions skipped.
+export function containerShard(value: string | undefined): string {
+  if (!value || !["1", "2", "4", "6", "7"].includes(value))
+    fail(
+      "shared containers support complete shards 1,2,4,6,7; timer/archive/service-ledger fixtures retain their host boundary",
+    );
+  return value;
+}
+
+async function command(argv: string[], cwd: string, env = process.env): Promise<number> {
+  const child = Bun.spawn(["setsid", ...argv], {
+    cwd,
+    env,
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const signal = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, name);
+    } catch {
+      /* already retired */
+    }
+  };
+  const interrupt = () => {
+      signal("SIGINT");
+    },
+    terminate = () => {
+      signal("SIGTERM");
+    };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  try {
+    return await child.exited;
+  } finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
+  }
+}
+
+async function stage(name: string, argv: string[], root: string, env = process.env): Promise<void> {
+  const started = performance.now();
+  process.stderr.write(`web-e2e stage=${name} started\n`);
+  const status = await command(argv, root, env);
+  process.stderr.write(
+    `web-e2e stage=${name} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(status)}\n`,
+  );
+  if (status !== 0) throw new RuntimeExit(status);
+}
+
+class RuntimeExit extends Error {
+  constructor(readonly status: number) {
+    super("web e2e command failed");
+  }
+}
+
+async function browserServices(
+  root: string,
+  batch: string,
+  network: string,
+  body: (env: NodeJS.ProcessEnv) => Promise<number>,
+): Promise<number> {
+  const id = randomBytes(16).toString("hex"),
+    pg = "fvoci-rust-test-pg-" + id,
+    meili = "fvoci-rust-test-meili-" + id,
+    password = randomBytes(24).toString("hex"),
+    key = randomBytes(16).toString("hex"),
+    envFile = join(batch, "services-" + id);
+  const owned: string[] = [];
+  let status = 1,
+    created = false;
+  let interrupted = 0;
+  const interrupt = () => {
+      interrupted = 130;
+    },
+    terminate = () => {
+      interrupted = 143;
+    };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
+  const inspect = (name: string) =>
+    checkedOutput(
+      [
+        "docker",
+        "inspect",
+        "--format",
+        "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+        name,
+      ],
+      root,
+    );
+  try {
+    writeFileSync(envFile + "-pg.env", `POSTGRES_PASSWORD=${password}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    writeFileSync(
+      envFile + "-meili.env",
+      `MEILI_MASTER_KEY=${key}\nMEILI_NO_ANALYTICS=true\nMEILI_ENV=production\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    checkedOutput(["docker", "network", "create", "--internal", network], root);
+    created = true;
+    for (const [name, alias, image, ready] of [
+      [
+        pg,
+        "fvoci-pg",
+        "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
+        ["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+      ],
+      [
+        meili,
+        "fvoci-meili",
+        "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
+        ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"],
+      ],
+    ] as const) {
+      owned.push(name);
+      checkedOutput(
+        [
+          "docker",
+          "run",
+          "--pull=never",
+          "-d",
+          "--name",
+          name,
+          "--network",
+          network,
+          "--network-alias",
+          alias,
+          "--cpus=1",
+          "--memory=2g",
+          "--pids-limit=256",
+          "--label",
+          "fvoci.test-run=" + id,
+          "--env-file",
+          envFile + (name === pg ? "-pg.env" : "-meili.env"),
+          image,
+          ...(name === pg ? ["postgres", "-c", "max_connections=150"] : []),
+        ],
+        root,
+      );
+      const deadline = performance.now() + 30_000;
+      for (;;) {
+        if (interrupted) throw new RuntimeExit(interrupted);
+        const probe = Bun.spawnSync(["docker", "exec", name, ...ready], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        if (probe.exitCode === 0) break;
+        if (performance.now() >= deadline)
+          fail("owned browser service readiness failed within 30s");
+        await Bun.sleep(1000);
+      }
+    }
+    if (
+      !/^18[0-9]{4}$/.test(
+        checkedOutput(
+          ["docker", "exec", pg, "psql", "-U", "postgres", "-tAc", "SHOW server_version_num"],
+          root,
+        ),
+      )
+    )
+      fail("owned PostgreSQL version mismatch");
+    status = await body({
+      TEST_DATABASE_URL: `postgres://postgres:${password}@fvoci-pg:5432/postgres`,
+      FVOCI_TEST_PG_CONTAINER: pg,
+      FVOCI_TEST_MEILI_CONTAINER: meili,
+      FVOCI_MEILI_KEY: key,
+      MEILI_MASTER_KEY: key,
+    });
+    if (interrupted && status === 0) status = interrupted;
+  } finally {
+    for (const name of owned.reverse()) {
+      let retired = true;
+      const present = Bun.spawnSync(["docker", "inspect", "--format", "{{.Id}}", name], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      if (present.exitCode === 0) {
+        if (
+          Bun.spawnSync(["docker", "stop", "--time", "10", name], {
+            stdout: "ignore",
+            stderr: "ignore",
+          }).exitCode !== 0
+        )
+          retired = false;
+        try {
+          if (inspect(name) !== `false ${name === pg ? "0" : "143"} false`) retired = false;
+        } catch {
+          retired = false;
+        }
+        if (
+          Bun.spawnSync(["docker", "rm", "-v", name], { stdout: "ignore", stderr: "ignore" })
+            .exitCode !== 0
+        )
+          retired = false;
+      } else retired = false;
+      if (!retired) {
+        process.stderr.write("container-browser owned service normal cleanup failed\n");
+        if (status === 0) status = 1;
+      } else
+        process.stderr.write(
+          `container-browser service=${name === pg ? "postgres" : "meili"} normal_cleanup=PASS\n`,
+        );
+    }
+    for (const path of [envFile + "-pg.env", envFile + "-meili.env"])
+      if (existsSync(path)) rmSync(path);
+    if (
+      created &&
+      Bun.spawnSync(["docker", "network", "rm", network], { stdout: "ignore", stderr: "ignore" })
+        .exitCode !== 0
+    ) {
+      process.stderr.write("container-browser owned network cleanup failed\n");
+      if (status === 0) status = 1;
+    }
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
+  }
+  return status;
+}
+
+// The image owns compiler/browser packages; xtask remains the only SQLite recipe.
+// Its four verified exports are data, never evaluated as shell input.
+export function sqliteEnvironment(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of text.trim().split("\n")) {
+    const match =
+      /^export (SQLITE3_INCLUDE_DIR|SQLITE3_LIB_DIR|SQLITE3_STATIC|SQLITE3_NO_PKG_CONFIG)=(?:'([^'\r\n]*)'|([A-Za-z0-9_./-]+))$/.exec(
+        line,
+      );
+    if (!match || !match[1] || Object.hasOwn(result, match[1]))
+      fail("invalid verified SQLite environment");
+    result[match[1]] = match[2] ?? match[3] ?? "";
+  }
+  if (Object.keys(result).length !== 4) fail("incomplete verified SQLite environment");
+  if (result.SQLITE3_STATIC !== "1" || result.SQLITE3_NO_PKG_CONFIG !== "1")
+    fail("invalid static SQLite policy");
+  return result;
+}
+
+async function browserPhase(root: string, phase: string, shards: string[]): Promise<number> {
+  if (process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1" || !["prepare", "consume"].includes(phase))
+    fail("ordinary container phase required");
+  process.env.ROOT = root;
+  process.env.FVOCI_COLLAB_ENGINE = join(root, "crates/collab-engine/target/debug/collab-engine");
+  process.env.FVOCI_WEB_BUILD_PHASE = phase;
+  try {
+    if (phase === "prepare") {
+      if (shards.length || existsSync(join(root, "apps/web/dist")))
+        fail("producer requires absent dist and no shard");
+      await stage("cargo-fetch", ["cargo", "fetch", "--locked"], root);
+      await stage(
+        "engine-fetch",
+        [
+          "cargo",
+          "fetch",
+          "--locked",
+          "--manifest-path",
+          join(root, "crates/collab-engine/Cargo.toml"),
+        ],
+        root,
+      );
+      // Bun owns lifecycle scripts' node executable without a shell harness.
+      await stage(
+        "dependencies",
+        [process.execPath, "--bun", "install", "--frozen-lockfile"],
+        root,
+      );
+      await stage(
+        "browser-version",
+        [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
+        join(root, "apps/web"),
+      );
+      await stage(
+        "xtask-build",
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "--jobs",
+          "2",
+          "--manifest-path",
+          "xtask/Cargo.toml",
+          "--target-dir",
+          "xtask/target",
+        ],
+        root,
+      );
+      await stage(
+        "sqlite-prepare",
+        [
+          join(root, "xtask/target/debug/xtask"),
+          "sqlite-ci",
+          "--parent",
+          "/fvoci-run/sqlite",
+          "--env-file",
+          "/fvoci-run/sqlite.env",
+        ],
+        root,
+      );
+    }
+    Object.assign(process.env, sqliteEnvironment(readFileSync("/fvoci-run/sqlite.env", "utf8")));
+    qualifyCommittedApi(
+      root,
+      {
+        shard: phase === "consume" ? (shards[0] ?? "") : "",
+        selected: false,
+        browserPhase: phase as "prepare" | "consume",
+      },
+      process.env,
+    );
+    const handoff = (args: string[]) => [
+      process.execPath,
+      "--no-env-file",
+      join(root, "tools/selected-backend-ci/handoff.ts"),
+      ...args,
+    ];
+    if (phase === "prepare") {
+      await stage("browser-input-before", handoff(["browser-before"]), root);
+      await stage("web-build", [process.execPath, "--bun", "run", "build"], join(root, "apps/web"));
+      qualifyCommittedApi(
+        root,
+        { shard: "", selected: false, browserPhase: "prepare" },
+        process.env,
+      );
+      await stage("fixture-build", handoff(["browser-stage", "fixture"]), root);
+      await stage("default-server-build", handoff(["browser-stage", "default"]), root);
+      await stage("worker-build", handoff(["browser-stage", "engine"]), root, {
+        ...process.env,
+        CARGO_TARGET_DIR: join(root, "crates/collab-engine/target"),
+      });
+      await stage("browser-input-after", handoff(["browser-after"]), root);
+      await stage("browser-handoff-export", handoff(["export"]), root);
+    } else {
+      if (shards.length !== 1) fail("consumer requires exactly one complete shard");
+      const shard = containerShard(shards[0]);
+      const groups = discoverGroups(),
+        plan = assignShards(groups, DEFAULT_SHARD_COUNT);
+      verifyPlan(undefined, DEFAULT_SHARD_COUNT);
+      await stage("browser-handoff-consume", handoff(["consume"]), root);
+      for (const specs of plan[Number(shard)] ?? [])
+        await stage(
+          "browser-group",
+          ["bash", join(root, "scripts/web-e2e-run-group.sh"), ...specs],
+          root,
+        );
+      process.stderr.write(`=== web e2e shard ${shard}: all groups passed ===\n`);
+    }
+    return 0;
+  } catch (error) {
+    if (error instanceof RuntimeExit) return error.status;
+    throw error;
+  }
+}
+
+/** The existing group runtime, shared by ordinary host and image consumers. */
+async function groupRuntime(argv: string[]): Promise<number> {
+  const { databaseUrls } = await import("./database-urls.ts");
+  const root = process.env.ROOT,
+    run = process.env.RUN_DIR,
+    log = process.env.SERVER_LOG,
+    pepper = process.env.PEPPER;
+  if (!root || !run || !log || !pepper) fail("ROOT, RUN_DIR, SERVER_LOG and PEPPER are required");
+  const profile = process.env.FVOCI_E2E_PROFILE ?? "debug";
+  if (!["debug", "release"].includes(profile)) fail("FVOCI_E2E_PROFILE must be debug or release");
+  const target = process.env.CARGO_TARGET_DIR ?? join(root, "target"),
+    server = join(target, profile, "fvoci-server"),
+    migrate = join(target, profile, "fvoci-migrate");
+  const env = { ...process.env };
+  let step = "prepare",
+    status = 0,
+    interrupted = 0;
+  let db = "",
+    role = "",
+    index = "",
+    keyFile = "";
+  type Child = ReturnType<typeof Bun.spawn>;
+  let serverChild: Child | undefined, smtp: Child | undefined, playwright: Child | undefined;
+  const mark = (message: string) => {
+    if (env.NET_MARKS_LOG)
+      appendFileSync(
+        env.NET_MARKS_LOG,
+        `[${new Date().toISOString().replace("Z", "")}] # fvoci: ${message}\n`,
+      );
+  };
+  const send = (child: Child | undefined, signal: NodeJS.Signals) => {
+    if (child) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        /* already retired */
+      }
+    }
+  };
+  const signals: [NodeJS.Signals, number][] = [
+    ["SIGHUP", 129],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["SIGPIPE", 141],
+  ];
+  const handlers = signals.map(([signal, code]) => {
+    const handler = () => {
+      if (!interrupted) interrupted = code;
+      send(playwright, signal);
+    };
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
+  const checkInterrupt = () => {
+    if (interrupted) throw new RuntimeExit(interrupted);
+  };
+  const call = async (args: string[], variables = env) => {
+    checkInterrupt();
+    const exit = await command(args, root, variables);
+    checkInterrupt();
+    if (exit !== 0) throw new RuntimeExit(exit);
+  };
+  const pause = async (seconds: string) => {
+    await call(["sleep", seconds]);
+  };
+  const database = async (action: string) => {
+    const child = Bun.spawn(
+      [
+        "timeout",
+        "60",
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/web-e2e/database-urls.ts"),
+        action,
+      ],
+      {
+        cwd: root,
+        env: { ...env, DB_NAME: db, ROLE_NAME: role },
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+      },
+    );
+    const exit = await child.exited;
+    if (exit !== 0) throw new RuntimeExit(exit);
+  };
+  const alive = (child: Child) => child.exitCode === null && child.signalCode === null;
+  const spawnGroup = (
+    args: string[],
+    variables: NodeJS.ProcessEnv,
+    stdout: "inherit" | number = "inherit",
+  ) =>
+    Bun.spawn(["setsid", ...args], {
+      cwd: root,
+      env: variables,
+      stdin: "ignore",
+      stdout,
+      stderr: stdout,
+    });
+  const runningGroup = (child: Child) => {
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const stop = async (name: string, child: Child | undefined) => {
+    if (!child) return;
+    send(child, "SIGTERM");
+    let deadline = performance.now() + 10_000;
+    while (runningGroup(child) && performance.now() < deadline) await Bun.sleep(100);
+    if (runningGroup(child)) {
+      process.stderr.write(
+        `web-e2e cleanup: ${name} process group ${String(child.pid)} still running 10 s after SIGTERM; sending SIGKILL\n`,
+      );
+      send(child, "SIGKILL");
+      deadline = performance.now() + 5_000;
+      while (runningGroup(child) && performance.now() < deadline) await Bun.sleep(100);
+    }
+    if (runningGroup(child)) throw new CheckError("process group survived SIGKILL");
+    await child.exited;
+  };
+  const meili = async (method: string, path: string) => {
+    const child = Bun.spawn(
+      ["curl", "-sS", "--max-time", "30", "-X", method, "-w", "\\n%{http_code}", "-K", "-"],
+      {
+        env,
+        stdin: new Blob([
+          `url = "${(env.FVOCI_MEILI_URL ?? "").replace(/\/$/, "")}${path}"\nheader = "Authorization: Bearer ${env.MEILI_MASTER_KEY ?? ""}"\n`,
+        ]),
+        stdout: "pipe",
+        stderr: "ignore",
+      },
+    );
+    const text = await new Response(child.stdout).text();
+    if ((await child.exited) !== 0) throw new CheckError("Meilisearch retirement request failed");
+    const split = text.lastIndexOf("\n");
+    return { body: text.slice(0, split), code: text.slice(split + 1) };
+  };
+  const deleteIndex = async () => {
+    const initial = await meili("DELETE", "/indexes/" + index);
+    const task: unknown = JSON.parse(initial.body);
+    if (
+      initial.code !== "202" ||
+      !task ||
+      typeof task !== "object" ||
+      !("taskUid" in task) ||
+      !Number.isSafeInteger(task.taskUid)
+    )
+      throw new CheckError("index delete did not enqueue a task");
+    const deadline = performance.now() + 60_000;
+    let done = false,
+      lastStatus = "unknown";
+    for (let i = 0; i < 300 && performance.now() < deadline; i++) {
+      const response = await meili("GET", "/tasks/" + String(task.taskUid));
+      const facts: unknown = JSON.parse(response.body);
+      if (response.code !== "200" || !facts || typeof facts !== "object" || !("status" in facts))
+        throw new CheckError("invalid index retirement task");
+      lastStatus = String(facts.status);
+      if (facts.status === "succeeded") {
+        done = true;
+        break;
+      }
+      if (
+        facts.status === "failed" &&
+        "error" in facts &&
+        facts.error &&
+        typeof facts.error === "object" &&
+        "code" in facts.error &&
+        facts.error.code === "index_not_found"
+      ) {
+        done = true;
+        break;
+      }
+      if (["failed", "canceled"].includes(String(facts.status))) break;
+      const wait = Bun.spawn(["sleep", "0.2"], { env, stdout: "ignore", stderr: "ignore" });
+      if ((await wait.exited) !== 0) throw new CheckError("index retirement wait failed");
+    }
+    if (!done)
+      throw new CheckError(
+        `Meilisearch index deletion task ${String(task.taskUid)} did not succeed (status ${lastStatus})`,
+      );
+    if ((await meili("GET", "/indexes/" + index)).code !== "404")
+      throw new CheckError("index still present");
+  };
+  try {
+    mark("containers ready; preparing database");
+    step = "create-database";
+    const suffix = randomBytes(8).toString("hex");
+    db = "fvoci_e2e_" + suffix;
+    role = "fvoci_app_" + db;
+    env.ROLE_PASSWORD = randomBytes(16).toString("hex");
+    await database("create-database");
+    step = "database-url";
+    const urls = databaseUrls(env.TEST_DATABASE_URL ?? "", db, role, env.ROLE_PASSWORD);
+    env.DATABASE_URL = urls.admin;
+    env.DATABASE_APP_URL = urls.app;
+    step = "migrate";
+    await call([migrate]);
+    step = "create-app-role";
+    await database("create-role");
+    step = "grant-app-role";
+    await call([migrate, "--grant-app-role", role]);
+    delete env.ROLE_PASSWORD;
+    Object.assign(env, {
+      PASSWORD_PEPPER_KEYS: pepper,
+      PASSWORD_PEPPER_ACTIVE_KEY_ID: "test",
+      ENCRYPTION_KEYS: JSON.stringify({ e2e: randomBytes(32).toString("hex") }),
+      ENCRYPTION_ACTIVE_KEY_ID: "e2e",
+      FVOCI_WEBHOOK_ALLOW_TARGETS: "127.0.0.1",
+      FVOCI_BIND: "127.0.0.1:0",
+      RUST_LOG: env.RUST_LOG ?? "warn,tower_http=debug",
+      FVOCI_EXTRACT_POLL_SECS: "2",
+      FVOCI_PUBLIC_ORIGIN: "http://127.0.0.1:0",
+      FVOCI_STORAGE_DIR: join(run, "storage"),
+      FVOCI_E2E_ADMIN_DATABASE_URL: urls.admin,
+      FVOCI_E2E_SERVER_BIN: server,
+      FVOCI_E2E_RESULT_DIR: run,
+    });
+    if (!env.FVOCI_STATIC_DIR) fail("isolated static assets required");
+    mkdirSync(join(run, "storage"), { recursive: true });
+    delete env.DATABASE_URL;
+    delete env.FVOCI_MIGRATION_URL;
+    const capture = join(run, "smtp.jsonl"),
+      portFile = join(run, "smtp.port");
+    writeFileSync(capture, "");
+    step = "smtp-sink";
+    smtp = spawnGroup(
+      [
+        process.execPath,
+        join(root, "tools/web-e2e/smtp-sink.ts"),
+        "--capture",
+        capture,
+        "--port-file",
+        portFile,
+      ],
+      env,
+    );
+    const deadline = performance.now() + 10_000;
+    while (!existsSync(portFile) || statSync(portFile).size === 0) {
+      if (!alive(smtp) || performance.now() >= deadline) fail("smtp sink did not write port file");
+      await pause("0.05");
+    }
+    Object.assign(env, {
+      SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: readFileSync(portFile, "utf8").trim(),
+      SMTP_FROM: "noreply@example.com",
+      FVOCI_E2E_SMTP_CAPTURE: capture,
+    });
+    if (env.FVOCI_E2E_PENDING !== "1") {
+      const setupKeys = new Set([
+        "FVOCI_E2E_ADMIN_DATABASE_URL",
+        "TEST_DATABASE_URL",
+        "FVOCI_TEST_DATABASE_URL",
+        "MEILI_MASTER_KEY",
+        "FVOCI_MEILI_MASTER_KEY",
+        "FVOCI_MEILI_KEY",
+      ]);
+      const serverEnv = Object.fromEntries(
+        Object.entries(env).filter(([key]) => !setupKeys.has(key)),
+      );
+      if (env.FVOCI_MEILI_URL && env.MEILI_MASTER_KEY) {
+        step = "meili-key";
+        keyFile = join(run, "meili-search.key");
+        index = "fvoci_e2e_" + suffix;
+        env.FVOCI_MEILI_INDEX = index;
+        serverEnv.FVOCI_MEILI_INDEX = index;
+        await call([migrate, "--ensure-meili-key", keyFile]);
+        serverEnv.FVOCI_MEILI_KEY_FILE = keyFile;
+      }
+      step = "server-start";
+      const names = join(run, "server-env-names.txt");
+      writeFileSync(names, Object.keys(serverEnv).sort().join("\n") + "\n", { mode: 0o600 });
+      env.FVOCI_E2E_SERVER_ENV_NAMES = names;
+      const fd = openSync(log, "w", 0o600);
+      try {
+        serverChild = spawnGroup([server], serverEnv, fd);
+      } finally {
+        closeSync(fd);
+      }
+      // The fixture controls seq/sleep; real invocations retain 120 polls and 30s.
+      if (
+        Bun.spawnSync(["seq", "1", "120"], { env, stdout: "ignore", stderr: "inherit" })
+          .exitCode !== 0
+      )
+        fail("startup poll sequence failed");
+      let base = "",
+        ready = false;
+      for (let i = 0; i < 120; i++) {
+        checkInterrupt();
+        const text = readFileSync(log, "utf8");
+        base = /fvoci-server listening on ([^\r\n]+)/.exec(text)?.[1] ?? "";
+        if (!alive(serverChild)) fail("server exited during startup");
+        if (
+          base &&
+          Bun.spawnSync(["curl", "-fsS", base + "/api/v1/setup"], {
+            env,
+            stdout: "ignore",
+            stderr: "ignore",
+          }).exitCode === 0
+        ) {
+          ready = true;
+          break;
+        }
+        await pause("0.25");
+      }
+      if (!ready)
+        fail("server did not become ready within 30s (GET /api/v1/setup never succeeded)");
+      env.PLAYWRIGHT_BASE_URL = base;
+      mark("server ready");
+    }
+    step = "network-settle";
+    const settled = Bun.spawn(
+      [process.execPath, "--no-env-file", join(root, "tools/web-e2e/network-settle.ts")],
+      { env, stdout: "inherit", stderr: "pipe" },
+    );
+    const warning = await new Response(settled.stderr).text();
+    process.stderr.write(warning);
+    const settleStatus = await settled.exited;
+    if (settleStatus !== 0) throw new RuntimeExit(settleStatus);
+    const events = () =>
+      env.NET_MONITOR_LOG && existsSync(env.NET_MONITOR_LOG)
+        ? readFileSync(env.NET_MONITOR_LOG, "utf8").split("\n").length - 1
+        : 0;
+    const before = events();
+    checkInterrupt();
+    step = "playwright";
+    mark("playwright start");
+    const pwEnv = { ...env };
+    delete pwEnv.JEST_WORKER_ID;
+    playwright = Bun.spawn(
+      [
+        "setsid",
+        process.execPath,
+        "--bun",
+        "x",
+        "--no-install",
+        "playwright",
+        "test",
+        ...(env.FVOCI_E2E_PENDING === "1"
+          ? ["--config=e2e-pending/collab-playwright.config.ts"]
+          : []),
+        "--output=" + join(run, "playwright-output"),
+        ...argv,
+      ],
+      {
+        cwd: join(root, "apps/web"),
+        env: pwEnv,
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+      },
+    );
+    status = await playwright.exited;
+    mark(`playwright exited with status ${String(status)}`);
+    if (env.NET_MONITOR_PID) {
+      try {
+        process.kill(Number(env.NET_MONITOR_PID), 0);
+        process.stderr.write(
+          `network: netlink address/link events while Playwright ran: ${String(events() - before)}\n`,
+        );
+      } catch {
+        /* monitor already exited */
+      }
+    }
+    if (status !== 0 && warning.includes("network settle: warning: "))
+      process.stderr.write(
+        "web-e2e: Playwright started before the host network settled (" + warning.trim() + ")\n",
+      );
+    if (interrupted) status = interrupted;
+    if (status !== 0) throw new RuntimeExit(status);
+  } catch (error) {
+    status = error instanceof RuntimeExit ? error.status : 1;
+    process.stderr.write(`web-e2e step ${step} failed (exit ${String(status)})\n`);
+    if (error instanceof CheckError) process.stderr.write(error.message + "\n");
+    if (step === "server-start" && existsSync(log))
+      process.stderr.write(
+        readFileSync(log, "utf8")
+          .replace(/postgres(?:ql)?:\/\/\S+/g, "postgres://redacted")
+          .replace(/libsql:\/\/\S+/g, "libsql://redacted")
+          .replace(/https:\/\/\S*\.turso\.io\S*/g, "https://redacted")
+          .replace(
+            /\b(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=\S+/g,
+            "$1=redacted",
+          ),
+      );
+  } finally {
+    // A second interrupt cannot cut bounded retirement short.
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    const ignore = () => {};
+    for (const [signal] of signals) process.on(signal, ignore);
+    const failed: string[] = [];
+    const retire = async (name: string, body: () => Promise<void>) => {
+      try {
+        await body();
+      } catch (error) {
+        failed.push(name);
+        if (error instanceof CheckError) process.stderr.write(error.message + "\n");
+      }
+    };
+    if (playwright && alive(playwright)) await Promise.race([playwright.exited, Bun.sleep(30_000)]);
+    await retire("stop-playwright", () => stop("playwright", playwright));
+    await retire("stop-server", () => stop("server", serverChild));
+    await retire("stop-smtp-sink", () => stop("smtp-sink", smtp));
+    if (db) {
+      await retire("drop-database", () => database("drop-database"));
+      await retire("drop-role", () => database("drop-role"));
+    }
+    if (index) {
+      await retire("delete-meili-index", deleteIndex);
+      if (keyFile && existsSync(keyFile) && statSync(keyFile).size)
+        await retire("delete-meili-key", async () => {
+          if (
+            (await meili("DELETE", "/keys/" + readFileSync(keyFile, "utf8").trim())).code !== "204"
+          )
+            fail("Meilisearch key delete failed");
+        });
+    }
+    if (failed.length) {
+      process.stderr.write(`web-e2e cleanup failed: ${failed.join(" ")}\n`);
+      if (status === 0) status = 1;
+      else
+        process.stderr.write(
+          `web-e2e: the group verdict stays exit ${String(status)} (step ${step})\n`,
+        );
+    }
+    for (const [signal] of signals) process.removeListener(signal, ignore);
+  }
+  return status;
+}
+
+function checkedOutput(argv: string[], cwd: string): string {
+  const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
+  return result.stdout.toString().trim();
+}
+
+// Reuse never relabels a packet: the image still runs the original exact
+// checkout and native qualifier. Only these host Docker functions may differ.
+export async function qualifyCohortHostProgram(
+  before: string,
+  current: string,
+  changed: string[],
+): Promise<void> {
+  if (
+    changed.some(
+      (path) =>
+        ![
+          "tools/web-e2e/run-web-e2e.ts",
+          "tools/web-e2e/run-web-e2e.test.ts",
+          "RUNNING.md",
+        ].includes(path),
+    )
+  )
+    fail("cohort reuse requires unchanged product and in-container sources");
+  const ts = await import("typescript");
+  const host = new Set(["containerBrowser", "browserServices", "qualifyCohortHostProgram"]);
+  const program = (text: string) =>
+    ts
+      .createSourceFile("run-web-e2e.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+      .statements.filter(
+        (node) => !ts.isFunctionDeclaration(node) || !host.has(node.name?.text ?? ""),
+      )
+      .map((node) => node.getText())
+      .join("\n");
+  if (program(before) !== program(current))
+    fail("cohort reuse cannot replace any in-container program");
+}
+
+/** One pinned image, existing producer packet, then one real isolated shard. */
+async function containerBrowser(argv: string[]): Promise<number> {
+  if (
+    (argv.length !== 3 && !(argv.length === 5 && argv[3] === "--reuse-cohort")) ||
+    !["--ci-shard", "--ci-shards"].includes(argv[1] ?? "")
+  )
+    throw new UsageError("container-browser ROOT {--ci-shard N|--ci-shards N,N,...}");
+  const root = realpathSync(argv[0] ?? "");
+  if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
+  const shards = (argv[2] ?? "").split(",").map(containerShard);
+  if (new Set(shards).size !== shards.length || (argv[1] === "--ci-shard" && shards.length !== 1))
+    fail("duplicate or invalid shard selection");
+  if (
+    process.env.GITHUB_ACTIONS ||
+    Object.keys(process.env).some((key) => key.startsWith("GITHUB_"))
+  )
+    fail("local container execution cannot impersonate a GitHub job");
+  const uid = process.getuid?.(),
+    gid = process.getgid?.();
+  if (!uid || gid === undefined) fail("a non-root POSIX Docker client is required");
+  const image = CI_WEB_IMAGE;
+  if (
+    !/^linux (?:x86_64|amd64)$/.test(
+      checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    )
+  )
+    fail("the first browser slice requires a native Linux amd64 Docker daemon");
+  const metadata = checkedOutput(
+    [
+      "docker",
+      "image",
+      "inspect",
+      "--format",
+      "{{.Os}} {{.Architecture}} {{json .RepoDigests}}",
+      image,
+    ],
+    root,
+  );
+  if (!metadata.startsWith("linux amd64 ") || !metadata.includes(JSON.stringify(image)))
+    fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
+  const orchestratorSource = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  let source = orchestratorSource;
+  checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
+  const common = realpathSync(
+    resolve(root, checkedOutput(["git", "rev-parse", "--git-common-dir"], root)),
+  );
+  const batch = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-container-browser-")));
+  if (statSync(batch).uid !== uid || (statSync(batch).mode & 0o777) !== 0o700)
+    fail("the owned private browser batch is required");
+  chmodSync(batch, 0o700);
+  const cohort = argv[4] === undefined ? batch : realpathSync(argv[4]);
+  let run = randomBytes(16).toString("hex");
+  const resources = randomBytes(16).toString("hex");
+  if (cohort !== batch) {
+    if (statSync(cohort).uid !== uid || (statSync(cohort).mode & 0o777) !== 0o700)
+      fail("owned private producer cohort required");
+    const value: unknown = JSON.parse(readFileSync(join(cohort, "handoff/handoff.json"), "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      fail("invalid producer cohort");
+    const manifest = value as Record<string, unknown>;
+    if (
+      typeof manifest.source !== "string" ||
+      !/^[a-f0-9]{40}$/.test(manifest.source) ||
+      typeof manifest.run !== "string" ||
+      manifest.container_image !== image ||
+      manifest.root !== root ||
+      manifest.repository !== "local-container"
+    )
+      fail("producer cohort source/image/path mismatch");
+    source = manifest.source;
+    run = manifest.run;
+    checkedOutput(["git", "merge-base", "--is-ancestor", source, orchestratorSource], root);
+    const changed = checkedOutput(
+      ["git", "diff", "--name-only", source, orchestratorSource, "--"],
+      root,
+    )
+      .split("\n")
+      .filter(Boolean);
+    await qualifyCohortHostProgram(
+      checkedOutput(["git", "show", source + ":tools/web-e2e/run-web-e2e.ts"], root),
+      readFileSync(join(root, "tools/web-e2e/run-web-e2e.ts"), "utf8"),
+      changed,
+    );
+  }
+  process.stderr.write(
+    `container-browser orchestrator_source=${orchestratorSource} build_source=${source} consumer_source=${source} reuse=${String(cohort !== batch)}\n`,
+  );
+  if (!/^[a-f0-9]{32}$/.test(run)) fail("invalid browser batch identity");
+  const producer = join(cohort, "producer");
+  {
+    for (const directory of [
+      ...(cohort === batch ? [producer, "cargo", "home", "tmp", "sqlite", "producer-output"] : []),
+      ...shards.map((shard) => join(batch, "consumer-" + shard)),
+      ...shards.map((shard) => "consumer-output-" + shard),
+    ].map((p) => (p.startsWith(batch) ? p : join(batch, p))))
+      mkdirSync(directory, { mode: directory.endsWith("/tmp") ? 0o711 : 0o700 });
+    // Only Git objects are mounted read-only, not account config or credentials. Both source
+    // copies occupy the same physical path inside the image, preserving the
+    // existing packet's no-relocation and full-current-input checks.
+    for (const directory of [
+      ...(cohort === batch ? [producer] : []),
+      ...shards.map((shard) => join(batch, "consumer-" + shard)),
+    ]) {
+      checkedOutput(
+        ["git", "clone", "--shared", "--no-checkout", "--quiet", root, directory],
+        root,
+      );
+      checkedOutput(["git", "checkout", "--quiet", "--detach", source], directory);
+    }
+  }
+  for (const shard of shards) {
+    const runDirectory = join(batch, "run-" + shard);
+    mkdirSync(runDirectory, { mode: 0o700 });
+    for (const name of ["home", "tmp", "cargo", "sqlite", "handoff", "output", "vite-temp"])
+      mkdirSync(join(runDirectory, name), { mode: name === "tmp" ? 0o711 : 0o700 });
+  }
+  async function runContainer(
+    phase: "prepare" | "consume",
+    services: NodeJS.ProcessEnv = {},
+    shard = "",
+  ): Promise<number> {
+    const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
+    const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
+    const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
+    const variables: Record<string, string> = {
+      HOME: "/fvoci-run/home",
+      CARGO_HOME: "/fvoci-run/cargo",
+      TMPDIR: "/fvoci-run/tmp",
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8",
+      CARGO_TARGET_DIR: root + "/target",
+      CARGO_BUILD_JOBS: "2",
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_DEV_DEBUG: "0",
+      CARGO_PROFILE_TEST_DEBUG: "0",
+      GIT_OPTIONAL_LOCKS: "0",
+      CI: "true",
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_IMAGE: image,
+      FVOCI_WEB_CONTAINER_RUN: run,
+      FVOCI_WEB_CONTAINER_SOURCE: source,
+      FVOCI_WEB_CONTAINER_JOB:
+        phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+      FVOCI_SELECTED_CI_OUTPUT: "/fvoci-run/output",
+      FVOCI_WEB_BUILD_HANDOFF: "/fvoci-run/handoff",
+    };
+    if (phase === "consume") {
+      const pg = new URL(services.TEST_DATABASE_URL ?? "");
+      pg.hostname = "fvoci-pg";
+      pg.port = "5432";
+      variables.TEST_DATABASE_URL = pg.toString();
+      variables.FVOCI_E2E_SHARED_SERVICES = "1";
+      for (const name of [
+        "FVOCI_TEST_PG_CONTAINER",
+        "FVOCI_MEILI_KEY",
+        "MEILI_MASTER_KEY",
+        "FVOCI_TEST_MEILI_CONTAINER",
+      ])
+        variables[name] = services[name] ?? "";
+      variables.FVOCI_MEILI_URL = "http://fvoci-meili:7700";
+      variables.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
+        .update(readFileSync(join(cohort, "handoff/handoff.json")))
+        .digest("hex");
+    }
+    const envFile = join(batch, phase + shard + ".env");
+    writeFileSync(
+      envFile,
+      Object.entries(variables)
+        .map(([k, v]) => `${k}=${v}\n`)
+        .join(""),
+      { mode: 0o600, flag: "wx" },
+    );
+    const name = "fvoci-browser-" + resources + "-" + phase + shard;
+    const args = [
+      "docker",
+      "run",
+      "--pull=never",
+      "--init",
+      "--name",
+      name,
+      "--user",
+      `${String(uid)}:${String(gid)}`,
+      "--cpus=2",
+      "--memory=16g",
+      "--pids-limit=1024",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--env-file",
+      envFile,
+      "--workdir",
+      root,
+    ];
+    for (const [from, to, readonly] of [
+      [directory, root, false],
+      [join(common, "objects"), join(common, "objects"), true],
+      [runDirectory, "/fvoci-run", false],
+      // Bun's node shim uses /tmp, independently of TMPDIR. Hide the image
+      // build's root-owned shim with the same owned ordinary-disk temp dir.
+      [join(runDirectory, "tmp"), "/tmp", false],
+      [join(batch, output), "/fvoci-run/output", false],
+    ] as const) {
+      if (from.includes(",") || to.includes(",")) fail("Docker bind paths cannot contain commas");
+      args.push("--mount", `type=bind,source=${from},target=${to}${readonly ? ",readonly" : ""}`);
+    }
+    if (phase === "consume") {
+      args.push(
+        "--network",
+        "fvoci-browser-" + resources + "-" + shard,
+        "--mount",
+        `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
+      );
+      for (const [from, to] of [
+        [join(cohort, "sqlite"), "/fvoci-run/sqlite"],
+        [join(cohort, "sqlite.env"), "/fvoci-run/sqlite.env"],
+        [join(cohort, "handoff"), "/fvoci-run/handoff"],
+        ...["registry", "git", "config", "config.toml"]
+          .filter((name) => existsSync(join(cohort, "cargo", name)))
+          .map((name) => [join(cohort, "cargo", name), "/fvoci-run/cargo/" + name]),
+      ]) {
+        if (!from || !to || from.includes(",")) fail("invalid shared native input mount");
+        args.push("--mount", `type=bind,source=${from},target=${to},readonly`);
+      }
+      args.push(
+        "--mount",
+        `type=bind,source=${runDirectory}/vite-temp,target=${root}/node_modules/.vite-temp`,
+      );
+    }
+    args.push(
+      image,
+      "bun",
+      "--no-env-file",
+      join(root, "tools/web-e2e/run-web-e2e.ts"),
+      "browser-phase",
+      root,
+      phase,
+      ...(phase === "consume" ? [shard] : []),
+    );
+    const started = performance.now();
+    const logFd =
+      phase === "consume" ? openSync(join(runDirectory, "console.log"), "wx", 0o600) : undefined;
+    let child;
+    try {
+      child = Bun.spawn(args, {
+        stdin: "ignore",
+        stdout: logFd ?? "inherit",
+        stderr: logFd ?? "inherit",
+        timeout: 20 * 60_000,
+      });
+    } catch (error) {
+      rmSync(envFile);
+      throw error;
+    } finally {
+      if (logFd !== undefined) closeSync(logFd);
+    }
+    const interrupt = () => {
+        child.kill("SIGINT");
+      },
+      terminate = () => {
+        child.kill("SIGTERM");
+      };
+    process.once("SIGINT", interrupt);
+    process.once("SIGTERM", terminate);
+    let result: number;
+    try {
+      result = await child.exited;
+    } finally {
+      process.removeListener("SIGINT", interrupt);
+      process.removeListener("SIGTERM", terminate);
+      rmSync(envFile);
+    }
+    const inspect = Bun.spawnSync(
+      [
+        "docker",
+        "inspect",
+        "--format",
+        "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+        name,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    if (inspect.exitCode === 0) {
+      if (result === 0 && inspect.stdout.toString().trim() !== "false 0 false") result = 1;
+      if (!inspect.stdout.toString().startsWith("false ")) {
+        // A stopped/lost Docker client is not proof its container retired.
+        // Attempt bounded stop, keep the first failure, and never rm --force.
+        Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
+        if (result === 0) result = 1;
+      }
+      const removed = Bun.spawnSync(["docker", "rm", "-v", name], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (removed.exitCode !== 0 && result === 0) result = 1;
+    } else if (result === 0) result = 1;
+    process.stderr.write(
+      `container-browser phase=${phase} shard=${shard || "producer"} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(result)}${phase === "consume" ? " log=" + join(runDirectory, "console.log") : ""}\n`,
+    );
+    return result;
+  }
+  if (cohort === batch) {
+    const prepared = await runContainer("prepare");
+    if (prepared !== 0) return prepared;
+  }
+  // Only an empty mountpoint is added: no dependency file/input hash changes.
+  mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
+  let firstFailure = 0;
+  for (let at = 0; at < shards.length; at += 2) {
+    const settled = await Promise.allSettled(
+      shards.slice(at, at + 2).map(async (shard) => {
+        const status = await browserServices(
+          root,
+          batch,
+          "fvoci-browser-" + resources + "-" + shard,
+          async (services) => {
+            const result = await runContainer("consume", services, shard);
+            if (result !== 0 && firstFailure === 0) firstFailure = result;
+            return result;
+          },
+        );
+        if (status !== 0 && firstFailure === 0) firstFailure = status;
+      }),
+    );
+    for (const result of settled)
+      if (result.status === "rejected") {
+        if (firstFailure === 0)
+          firstFailure = result.reason instanceof RuntimeExit ? result.reason.status : 1;
+        process.stderr.write("container-browser consumer setup failed\n");
+      }
+    if (firstFailure) return firstFailure;
+  }
+  return 0;
+}
 
 /** A refusal: the CLI prints the message to stderr and exits 1. */
 export class CheckError extends Error {}
@@ -142,12 +1317,23 @@ export function qualifyCommittedApi(
   env: Record<string, string | undefined>,
   git: Git = spawnGit(root),
 ): string {
-  if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
-  const allowed = committedApiJobs(request, env.GITHUB_JOB);
-  if (env.GITHUB_JOB === undefined || !allowed.has(env.GITHUB_JOB)) {
+  const local = env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  if (local) {
+    if (
+      request.selected ||
+      !/^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/.test(
+        env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+      ) ||
+      Object.keys(env).some((key) => key.startsWith("GITHUB_"))
+    )
+      fail("requires an ordinary local browser container");
+  } else if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
+  const job = local ? env.FVOCI_WEB_CONTAINER_JOB : env.GITHUB_JOB;
+  const allowed = committedApiJobs(request, job);
+  if (job === undefined || !allowed.has(job)) {
     fail("requires the allocated browser job");
   }
-  const sha = env.GITHUB_SHA ?? "";
+  const sha = (local ? env.FVOCI_WEB_CONTAINER_SOURCE : env.GITHUB_SHA) ?? "";
   if (!/^[0-9a-f]{40}$/.test(sha) || gitLine(git, ["rev-parse", "HEAD"]) !== sha) {
     fail("checkout HEAD differs from tested SHA");
   }
@@ -362,6 +1548,7 @@ export function writeLauncherReceipt(prefix: string, values: readonly string[]):
 }
 
 const USAGE = [
+  "usage: run-web-e2e.ts container-browser ROOT {--ci-shard N|--ci-shards N,N,...}",
   "usage: run-web-e2e.ts committed-api ROOT SHARD true|false ''|prepare|consume",
   "       run-web-e2e.ts plan-specs JSON_LINE",
   "       run-web-e2e.ts path-within CHILD PARENT",
@@ -424,8 +1611,14 @@ function run(argv: string[]): string {
 
 if (import.meta.main) {
   try {
-    process.stdout.write(run(process.argv.slice(2)));
+    const argv = process.argv.slice(2);
+    if (argv[0] === "container-browser") process.exit(await containerBrowser(argv.slice(1)));
+    if (argv[0] === "browser-phase")
+      process.exit(await browserPhase(argv[1] ?? "", argv[2] ?? "", argv.slice(3)));
+    if (argv[0] === "group-runtime") process.exit(await groupRuntime(argv.slice(1)));
+    process.stdout.write(run(argv));
   } catch (error) {
+    if (error instanceof RuntimeExit) process.exit(error.status);
     if (error instanceof UsageError) {
       process.stderr.write(`${USAGE}\nrun-web-e2e.ts: error: ${error.message}\n`);
       process.exit(2);

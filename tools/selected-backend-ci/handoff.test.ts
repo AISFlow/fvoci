@@ -34,6 +34,7 @@ import {
   browserStage,
   buildInputs,
   consume,
+  context,
   distFiles,
   exportPacket,
   inputDiagnostics,
@@ -834,6 +835,44 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
+
+  test("a local job name cannot reassign the actual GitHub browser job", () => {
+    process.env.FVOCI_WEB_CONTAINER_JOB = "workspace-browser-shard";
+    expect(context("workspace-browser-build", f.host).source).toBe(SHA);
+    expect(() => context("workspace-browser-shard", f.host)).toThrow(/wrong handoff job/);
+  });
+
+  test("local container packet retains full admission and rejects another image or GitHub identity", async () => {
+    for (const key of Object.keys(process.env))
+      if (key.startsWith("GITHUB_")) Reflect.deleteProperty(process.env, key);
+    Object.assign(process.env, {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_RUN: "a".repeat(32),
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-build",
+      FVOCI_WEB_CONTAINER_SOURCE: SHA,
+      FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    });
+    exportPacket(f.host);
+    const manifest = JSON.parse(readFileSync(join(f.packet, "handoff.json"), "utf8")) as Manifest;
+    expect(manifest.repository).toBe("local-container");
+    for (const entry of Object.values(manifest.entries)) unlinkSync(entry.path);
+    Object.assign(process.env, {
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
+      FVOCI_WEB_BUILD_PHASE: "consume",
+      FVOCI_WEB_BUILD_HANDOFF_SHA256: sha(join(f.packet, "handoff.json")),
+    });
+    const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "b".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    process.env.GITHUB_JOB = "workspace-browser-shard";
+    await assert.rejects(consume(f.host));
+    Reflect.deleteProperty(process.env, "GITHUB_JOB");
+    await consume(f.host);
+    expect((get("handoff-consumed.json") as Consumed).full_current_physical_inputs_equal).toBe(
+      true,
+    );
+  });
 
   test("a fresh shard without target or dist directories installs the packet", async () => {
     const assets = distFiles(f.host);

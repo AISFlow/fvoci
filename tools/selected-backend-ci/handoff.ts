@@ -97,8 +97,12 @@ function ldd(path: string): { exitCode: number; stdout: string; stderr: string }
 }
 const distOf = (h: HostFacts) => join(h.checkout, "apps/web/dist");
 
+const browserJob = () =>
+  (process.env.FVOCI_WEB_CONTAINER_LOCAL === "1"
+    ? process.env.FVOCI_WEB_CONTAINER_JOB
+    : process.env.GITHUB_JOB) ?? "";
 export const browser = () =>
-  ["workspace-browser-build", "workspace-browser-shard"].includes(process.env.GITHUB_JOB ?? "");
+  ["workspace-browser-build", "workspace-browser-shard"].includes(browserJob());
 const stages = (): readonly string[] => (browser() ? browserStages : collaborationStages);
 const jobs = (): readonly [string, string] =>
   browser()
@@ -183,6 +187,7 @@ export function distFiles(h: HostFacts = host): Record<string, string> {
 }
 
 export interface Context {
+  container_image?: string;
   platform?: { system: string; machine: string; os_release_sha256: string };
   repository: string;
   run: string;
@@ -191,14 +196,19 @@ export interface Context {
   tree: string;
 }
 export function context(job: string, h: HostFacts = host): Context {
-  assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
-  const actual = process.env.GITHUB_JOB ?? "";
+  const local = process.env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  const actual = browserJob();
+  if (local) {
+    assert.ok(browser() && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
+    assert.ok(process.getuid?.() !== 0, "browser container must be non-root");
+    assert.match(env("FVOCI_WEB_CONTAINER_RUN"), /^[a-f0-9]{32}$/);
+  } else assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
   if (job === "collaboration-flow" && collaborationConsumers.includes(actual)) job = actual;
   assert.equal(actual, job, "wrong handoff job");
   if (browser()) {
     assert.equal(
       call(["git", "rev-parse", "HEAD"], h.checkout),
-      env("GITHUB_SHA"),
+      env(local ? "FVOCI_WEB_CONTAINER_SOURCE" : "GITHUB_SHA"),
       "checkout differs from tested SHA",
     );
     assert.equal(
@@ -208,7 +218,10 @@ export function context(job: string, h: HostFacts = host): Context {
       0,
       "checkout has tracked changes",
     );
-    assert.ok(/^[0-9]+$/.test(env("GITHUB_RUN_ID")) && /^[0-9]+$/.test(env("GITHUB_RUN_ATTEMPT")));
+    if (!local)
+      assert.ok(
+        /^[0-9]+$/.test(env("GITHUB_RUN_ID")) && /^[0-9]+$/.test(env("GITHUB_RUN_ATTEMPT")),
+      );
   } else identity("handoff", undefined, h.checkout);
   assert.equal(
     process.env.FVOCI_WEB_BUILD_PHASE,
@@ -216,12 +229,17 @@ export function context(job: string, h: HostFacts = host): Context {
     "wrong web build phase",
   );
   const result: Context = {
-    repository: env("GITHUB_REPOSITORY"),
-    run: env("GITHUB_RUN_ID"),
-    attempt: env("GITHUB_RUN_ATTEMPT"),
+    repository: local ? "local-container" : env("GITHUB_REPOSITORY"),
+    run: env(local ? "FVOCI_WEB_CONTAINER_RUN" : "GITHUB_RUN_ID"),
+    attempt: local ? "1" : env("GITHUB_RUN_ATTEMPT"),
     source: call(["git", "rev-parse", "HEAD"], h.checkout),
     tree: call(["git", "rev-parse", "HEAD^{tree}"], h.checkout),
   };
+  if (local || process.env.FVOCI_WEB_CONTAINER_IMAGE) {
+    const image = env("FVOCI_WEB_CONTAINER_IMAGE");
+    assert.match(image, /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/);
+    result.container_image = image;
+  }
   if (browser()) {
     assert.ok(
       process.platform === "linux" && process.arch === "x64",
@@ -626,10 +644,11 @@ export function exportPacket(h: HostFacts = host): void {
     entries,
   };
   write(join(packet, "handoff.json"), manifest);
-  appendFileSync(
-    env("GITHUB_OUTPUT"),
-    "handoff_sha256=" + sha(join(packet, "handoff.json")) + "\n",
-  );
+  if (process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1")
+    appendFileSync(
+      env("GITHUB_OUTPUT"),
+      "handoff_sha256=" + sha(join(packet, "handoff.json")) + "\n",
+    );
 }
 
 export function admit(h: HostFacts = host) {
@@ -895,6 +914,7 @@ export async function browserStage(name: string | undefined, h: HostFacts = host
     ],
   };
   const command = [...(commands[name] ?? []), "--message-format=json-render-diagnostics"];
+  if (process.env.FVOCI_WEB_CONTAINER_IMAGE) command.push("--jobs", "2");
   return await compilerStage(output, name, command, read(output, "before.json") as Inputs);
 }
 export function browserAfter(h: HostFacts = host): void {

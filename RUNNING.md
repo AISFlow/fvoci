@@ -714,6 +714,37 @@ scripts/prepare-web-e2e.sh
 scripts/run-web-e2e.sh
 ```
 
+Shared-container browser tests prepare one producer and reuse it across the
+complete ordinary shards whose SQL fixtures use the native Bun helper:
+
+```sh
+bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser . --ci-shards 1,2,4,6,7
+```
+
+Prepare the digest named by `CI_WEB_IMAGE` in `tools/web-e2e/run-web-e2e.ts`
+locally once; the command refuses a missing image and never pulls `latest`.
+It uses the same browser producer, sealed packet and shard entrypoints in two
+fresh source copies, prepares the existing xtask SQLite SDK once, and compiles
+no consumer binaries. The host owns an isolated PostgreSQL/Meilisearch network;
+browser containers receive no Docker socket or privilege. Actor UID/GID come
+from the caller, writable paths and ports are run-owned, and CPU/memory/PID
+limits are explicit. This initial slice requires a native Linux amd64 Docker
+daemon; macOS Docker Desktop and ARM64 execution are not yet verified. Other
+shards retain their host Docker fixture oracles until those boundaries are
+migrated; the container command refuses them rather than omitting assertions.
+Shard 0 retains the timer's host SQL fixture, shard 3 its archive-owned databases
+and native restart lifecycle, and shard 5 its actual Docker service-ledger witness.
+These complete shards still require the existing host command. An individual
+supported shard can be selected with `--ci-shard N`.
+
+At most two complete consumers run together, with separate databases, networks,
+home/temp/Cargo lock directories, output and Vite config caches. SDK and dependency
+bytes are shared read-only at the producer's original physical paths. A retained
+owned cohort can be selected with `--reuse-cohort /path/to/cohort`; this retains its
+exact build and in-container source and native qualification. Reuse refuses any
+product or in-container program change; the host orchestrator source is reported
+separately. It does not qualify a new image or a different product source.
+
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
 import/export, and deletion surfaces are shown as unavailable rather than faked.

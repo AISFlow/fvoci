@@ -330,7 +330,7 @@ test("workspace consents show real empty, populated, timezone, retry and role de
   ).userId;
   // Fixture timestamp straddles a UTC day; the production read must use the
   // user's persisted timezone, rather than the browser's or server's zone.
-  authSql(`UPDATE fvoci.users SET timezone = 'America/Los_Angeles' WHERE id = '${currentUserId}';
+  await authSql(`UPDATE fvoci.users SET timezone = 'America/Los_Angeles' WHERE id = '${currentUserId}';
     UPDATE fvoci.user_consents SET consented_at = '2026-01-01T00:30:00Z' WHERE user_id = '${currentUserId}' AND kind = 'terms' AND version = ${String(version)}`);
   const consentUrl = `**/api/v1/workspaces/${workspaceId}/consents`;
   await page.route(consentUrl, (route) => route.abort("failed"));
@@ -368,7 +368,7 @@ test("workspace consents show real empty, populated, timezone, retry and role de
   await section.locator("summary").click();
   await expect(row.getByRole("cell").nth(0)).toHaveText(currentUserId);
   await page.unroute(`**/api/v1/workspaces/${workspaceId}/members`);
-  authSql(`UPDATE fvoci.users SET timezone = 'Asia/Seoul' WHERE id = '${currentUserId}'`);
+  await authSql(`UPDATE fvoci.users SET timezone = 'Asia/Seoul' WHERE id = '${currentUserId}'`);
 
   for (const role of ["admin", "member"]) {
     const email = `settings-consent-${role}@example.com`;
