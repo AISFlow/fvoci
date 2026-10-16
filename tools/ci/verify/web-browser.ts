@@ -111,12 +111,13 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
   for (const step of steps.filter((step) => usesPrefix(step, "actions/cache"))) {
     const withs = safeGet(step, "with");
     const path = safeGet(withs, "path");
+    const key = safeGet(withs, "key");
     if (typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git") continue;
     require(isMapping(withs) &&
       path === "target" &&
       !has(withs, "restore-keys") &&
-      typeof safeGet(withs, "key") === "string" &&
-      String(safeGet(withs, "key")).includes("steps.sqlite.outputs.cache_identity") &&
+      typeof key === "string" &&
+      key.includes("steps.sqlite.outputs.cache_identity") &&
       steps.indexOf(step) >
         steps.findIndex(
           (item) => safeGet(item, "id") === "sqlite",
