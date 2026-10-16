@@ -24,6 +24,10 @@ import {
   containerFailureArtifacts,
   webRequest,
   containerShard,
+  containerArchitecture,
+  containerImageSource,
+  qualifyContainerDaemon,
+  commandProcess,
   qualifyCohortHostProgram,
   qualifyImageSource,
   sqliteEnvironment,
@@ -38,6 +42,7 @@ import {
   writeLauncherReceipt,
   type CommittedApiRequest,
 } from "./run-web-e2e.ts";
+import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
@@ -465,7 +470,88 @@ test("dependency phase refuses service credentials before any command or output"
   expect(stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
 });
 
-for (const mode of ["normal", "inputs-fail"])
+test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure", () => {
+  const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
+  for (const aliases of [
+    ["x64", "x86_64", "amd64"],
+    ["arm64", "aarch64"],
+  ]) {
+    const machine = nativeArchitecture(aliases[0] as string);
+    for (const alias of aliases) {
+      expect(containerArchitecture("linux", alias, machine)).toBe(machine);
+      expect(
+        containerArchitecture("darwin", alias, machine, machine === "aarch64" ? "1" : "0"),
+      ).toBe(machine);
+      qualifyContainerDaemon("unix:///owned/docker.sock", "linux " + alias, machine);
+      expect(
+        containerImageSource(
+          "sha256:" +
+            "b".repeat(64) +
+            " linux " +
+            alias +
+            " " +
+            "c".repeat(40) +
+            " " +
+            JSON.stringify([pin]),
+          { image: pin, local: false },
+          machine,
+        ),
+      ).toBe("c".repeat(40));
+      const native = nativeLinux("linux", alias, machine, machine + "-unknown-linux-gnu");
+      expect(native.target).toBe(machine + "-unknown-linux-gnu");
+      expect(native.abi).toEqual([
+        machine === "x86_64" ? "/lib64/ld-linux-x86-64.so.2" : "/lib/ld-linux-aarch64.so.1",
+        ...["libc.so.6", "libm.so.6", "libgcc_s.so.1"].map(
+          (name) => "/lib/" + machine + "-linux-gnu/" + name,
+        ),
+      ]);
+    }
+  }
+  for (const args of [
+    ["linux", "x64", "aarch64"],
+    ["darwin", "x64", "x86_64", "1"],
+    ["darwin", "arm64", "aarch64", "0"],
+    ["darwin", "arm64", "aarch64"],
+    ["win32", "x64", "x86_64"],
+    ["linux", "riscv64", "riscv64"],
+  ])
+    expect(() =>
+      containerArchitecture(args[0] as string, args[1] as string, args[2] as string, args[3]),
+    ).toThrow();
+  for (const args of [
+    ["linux", "arm64", "x86_64"],
+    ["darwin", "x64", "x86_64"],
+    ["linux", "x64", "x86_64", "aarch64-unknown-linux-gnu"],
+    ["linux", "arm64", "aarch64", "x86_64-unknown-linux-gnu"],
+    ["linux", "x64", "x86_64", ""],
+  ])
+    expect(() =>
+      nativeLinux(args[0] as string, args[1] as string, args[2] as string, args[3]),
+    ).toThrow();
+  for (const endpoint of [
+    "tcp://PRIVATE_ENDPOINT_CANARY",
+    "ssh://PRIVATE_ENDPOINT_CANARY",
+    "unix://foreign/socket",
+    "unix:///socket\n",
+  ])
+    expect(() => qualifyContainerDaemon(endpoint, "linux amd64", "x86_64")).toThrow();
+  expect(commandProcess(["docker", "pull", pin], "darwin")).toEqual({
+    argv: ["docker", "pull", pin],
+    group: false,
+  });
+  expect(commandProcess(["docker", "pull", pin], "linux").group).toBe(true);
+  expect(() => commandProcess(["bash", "host-only"], "darwin")).toThrow(/host-only/);
+});
+
+for (const mode of [
+  "normal",
+  ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
+  "inputs-fail",
+  "daemon-mismatch",
+  "image-mismatch",
+  "foreign-digest",
+  "remote-endpoint",
+])
   test("isolated CI Docker topology: " + mode, async () => {
     const { root, sha } = committedCheckout(),
       bin = tempDir(),
@@ -485,10 +571,12 @@ const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
 if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");}
+if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
 if(a[0]==="pull"){}
-else if(a[0]==="info")console.log("linux x86_64");
-else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux amd64 "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_PIN]));
+else if(a[0]==="context"&&a[1]==="inspect")console.log(JSON.stringify(process.env.FIXTURE_MODE==="remote-endpoint"?"tcp://PRIVATE_ENDPOINT_CANARY":"unix:///fixture/docker.sock"));
+else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-mismatch"?process.env.FIXTURE_OTHER_ARCH:["amd64","x64","arm64"].includes(process.env.FIXTURE_MODE)?process.env.FIXTURE_MODE:process.env.FIXTURE_ARCH));
+else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
 else if(a[0]==="network"){}
 else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
@@ -534,6 +622,12 @@ else process.exit(42);
           FIXTURE_SHA: sha,
           FIXTURE_PIN: pin,
           FIXTURE_MODE: mode,
+          FIXTURE_ARCH: nativeArchitecture(process.arch),
+          FIXTURE_OTHER_ARCH: nativeArchitecture(process.arch) === "x86_64" ? "aarch64" : "x86_64",
+          DOCKER_CONTEXT: "fixture",
+          DOCKER_HOST: "",
+          DOCKER_DEFAULT_PLATFORM:
+            "linux/" + (nativeArchitecture(process.arch) === "x86_64" ? "amd64" : "arm64"),
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -544,8 +638,15 @@ else process.exit(42);
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ]);
-    expect(code, stderr).toBe(mode === "normal" ? 0 : 17);
+    const refused = [
+      "daemon-mismatch",
+      "image-mismatch",
+      "foreign-digest",
+      "remote-endpoint",
+    ].includes(mode);
+    expect(code, stderr).toBe(refused ? 1 : mode === "inputs-fail" ? 17 : 0);
     expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
     const rows = readFileSync(calls, "utf8")
       .trim()
       .split("\n")
@@ -557,9 +658,21 @@ else process.exit(42);
             network?: string | null;
             hasDatabase?: boolean;
             hasMeili?: boolean;
+            platform?: string;
           },
       );
-    expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(3);
+    expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(
+      refused ? (["daemon-mismatch", "remote-endpoint"].includes(mode) ? 0 : 1) : 3,
+    );
+    if (refused) {
+      expect(rows.some((row) => row.op[0] === "run" || row.op[0] === "network")).toBe(false);
+      expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+      return;
+    }
+    for (const row of rows.filter((row) => ["pull", "run"].includes(row.op[0] ?? "")))
+      expect(row.platform).toBe(
+        "linux/" + (nativeArchitecture(process.arch) === "x86_64" ? "amd64" : "arm64"),
+      );
     const inputs = rows.findIndex((row) => row.phase === "inputs"),
       consume = rows.findIndex((row) => row.phase === "consume"),
       network = rows.findIndex((row) => row.op[0] === "network" && row.op[1] === "create");
@@ -567,7 +680,7 @@ else process.exit(42);
     expect(rows[inputs]?.network).toBeNull();
     expect(rows[inputs]?.hasDatabase).toBe(false);
     expect(rows[inputs]?.hasMeili).toBe(false);
-    if (mode === "normal") {
+    if (mode !== "inputs-fail") {
       expect(network).toBeGreaterThan(inputs);
       expect(consume).toBeGreaterThan(network);
       expect(rows[consume]?.network).toMatch(/^fvoci-browser-/);

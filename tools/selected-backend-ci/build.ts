@@ -32,6 +32,7 @@ import {
   resolved,
 } from "./io.ts";
 import type { Artifact, Binary, Bundle, Inputs, Stage } from "./types.ts";
+import { nativeLinux } from "./types.ts";
 
 export function elfDependencies(code: number, stdout: string, stderr: string): string[] {
   const text = stdout + "\n" + stderr;
@@ -46,13 +47,14 @@ export function elfDependencies(code: number, stdout: string, stderr: string): s
     return [];
   throw new Error("ldd prerequisite failed");
 }
-export const abiFiles = () =>
-  [
-    "/lib64/ld-linux-x86-64.so.2",
-    "/lib/x86_64-linux-gnu/libc.so.6",
-    "/lib/x86_64-linux-gnu/libm.so.6",
-    "/lib/x86_64-linux-gnu/libgcc_s.so.1",
-  ].map((p) => realpathSync(p));
+export const nativeHost = () =>
+  nativeLinux(
+    process.platform,
+    process.arch,
+    call(["uname", "-m"]),
+    process.env.CARGO_BUILD_TARGET,
+  );
+export const abiFiles = () => nativeHost().abi.map((p) => realpathSync(p));
 export const reference = (path: string) => ({ path: realpathSync(path), sha256: sha(path) });
 export function buildEnv(): Record<string, string> {
   const names = Object.keys(process.env)

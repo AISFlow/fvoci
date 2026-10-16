@@ -25,6 +25,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
+import { nativeArchitecture, type NativeArchitecture } from "../selected-backend-ci/types.ts";
 import {
   validateSpecRelpath,
   discoverGroups,
@@ -70,6 +71,12 @@ export function containerShard(value: string | undefined): string {
 
 let entryCancellation = 0;
 
+export function commandProcess(argv: string[], system: string) {
+  if (system === "linux") return { argv: ["setsid", ...argv], group: true };
+  if (system === "darwin" && argv[0] === "docker") return { argv, group: false };
+  fail("host-only commands require Linux; Darwin supports the ordinary Docker client only");
+}
+
 export async function command(
   argv: string[],
   cwd: string,
@@ -81,7 +88,8 @@ export async function command(
   cleanup = false,
 ): Promise<number> {
   if (entryCancellation && !cleanup) return entryCancellation;
-  const child = Bun.spawn(["setsid", ...argv], {
+  const invocation = commandProcess(argv, process.platform);
+  const child = Bun.spawn(invocation.argv, {
     cwd,
     env,
     stdin: "ignore",
@@ -89,7 +97,7 @@ export async function command(
   });
   const signal = (name: NodeJS.Signals) => {
     try {
-      process.kill(-child.pid, name);
+      process.kill(invocation.group ? -child.pid : child.pid, name);
     } catch {
       /* already retired */
     }
@@ -263,6 +271,10 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
   if (entryCancellation) return entryCancellation;
   root = realpathSync(root);
   const request = webRequest(argv, process.env);
+  if (request.route !== "docker" && (process.platform !== "linux" || process.arch !== "x64"))
+    fail(
+      "the full requested selection includes Linux x64 host-only assertions; select an explicit supported Docker shard on this client",
+    );
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
   if (request.route !== "host") {
     const dockerShards = request.route === "hybrid" ? "1,2,4,6,7" : shard;
@@ -712,6 +724,7 @@ async function browserServices(
   root: string,
   batch: string,
   network: string,
+  platform: string,
   body: (env: NodeJS.ProcessEnv) => Promise<number>,
 ): Promise<number> {
   const id = randomBytes(16).toString("hex"),
@@ -775,6 +788,8 @@ async function browserServices(
           "docker",
           "run",
           "--pull=never",
+          "--platform",
+          platform,
           "-d",
           "--name",
           name,
@@ -1480,6 +1495,54 @@ function checkedOutput(argv: string[], cwd: string): string {
   return result.stdout.toString().trim();
 }
 
+export function containerArchitecture(
+  system: string,
+  runtime: string,
+  kernel: string,
+  darwinArm?: string,
+): NativeArchitecture {
+  if (system !== "linux" && system !== "darwin")
+    fail("a Linux or Darwin Docker client is required");
+  if (system === "darwin" && darwinArm !== "0" && darwinArm !== "1")
+    fail("physical Darwin architecture is required");
+  const physical = nativeArchitecture(
+    system === "darwin" ? (darwinArm === "1" ? "arm64" : "x64") : kernel,
+  );
+  if (nativeArchitecture(runtime) !== physical || nativeArchitecture(kernel) !== physical)
+    fail("translated Docker clients are unsupported");
+  return physical;
+}
+
+export function qualifyContainerDaemon(
+  endpoint: string,
+  info: string,
+  arch: NativeArchitecture,
+): void {
+  if (!/^unix:\/\/\/[^\s?#\0]+$/.test(endpoint)) fail("a local Unix Docker endpoint is required");
+  const match = /^linux (\S+)$/.exec(info);
+  if (!match || nativeArchitecture(match[1] as string) !== arch)
+    fail("Docker requires a native Linux daemon matching the physical client architecture");
+}
+
+export function containerImageSource(
+  metadata: string,
+  sdk: { image: string; local: boolean },
+  arch: NativeArchitecture,
+): string {
+  const match = /^(sha256:[a-f0-9]{64}) linux (\S+) ([a-f0-9]{40}) (.+)$/.exec(metadata);
+  if (!match || nativeArchitecture(match[2] as string) !== arch)
+    fail("the pinned native ci-web image must match the client and daemon");
+  let digests: unknown;
+  try {
+    digests = JSON.parse(match[4] as string);
+  } catch {
+    fail("invalid image digest metadata");
+  }
+  if (sdk.local ? match[1] !== sdk.image : !Array.isArray(digests) || !digests.includes(sdk.image))
+    fail("the actual immutable image identity is required");
+  return match[3] as string;
+}
+
 export function qualifyImageSource(root: string, imageSource: string, current: string): void {
   if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
     fail("exact image and consumer source revisions required");
@@ -1621,7 +1684,14 @@ export function containerRequest(argv: string[], env: NodeJS.ProcessEnv) {
 async function containerBrowser(argv: string[]): Promise<number> {
   const { sdk, phase: requestedPhase, shards, ci, options } = containerRequest(argv, process.env);
   const root = realpathSync(argv[0] ?? fail("container root required"));
-  if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
+  const architecture = containerArchitecture(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+    process.platform === "darwin"
+      ? checkedOutput(["sysctl", "-n", "hw.optional.arm64"], root)
+      : undefined,
+  );
   const uid = process.getuid?.(),
     gid = process.getgid?.();
   if (!uid || gid === undefined) fail("a non-root POSIX Docker client is required");
@@ -1629,14 +1699,39 @@ async function containerBrowser(argv: string[]): Promise<number> {
   if (ci && orchestratorSource !== process.env.GITHUB_SHA)
     fail("container checkout differs from tested SHA");
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
-  const image = sdk.image;
-  if (ci) await stage("image-fetch", ["docker", "pull", image], root);
+  let endpoint: unknown = process.env.DOCKER_HOST;
+  if (process.env.DOCKER_CONTEXT || !endpoint) {
+    const json = checkedOutput(
+      [
+        "docker",
+        "context",
+        "inspect",
+        "--format",
+        "{{json .Endpoints.docker.Host}}",
+        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
+      ],
+      root,
+    );
+    try {
+      endpoint = JSON.parse(json);
+    } catch {
+      fail("invalid Docker endpoint metadata");
+    }
+  }
+  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
+  qualifyContainerDaemon(
+    endpoint,
+    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    architecture,
+  );
+  const platform = "linux/" + (architecture === "x86_64" ? "amd64" : "arm64");
   if (
-    !/^linux (?:x86_64|amd64)$/.test(
-      checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
-    )
+    process.env.DOCKER_DEFAULT_PLATFORM !== undefined &&
+    process.env.DOCKER_DEFAULT_PLATFORM !== platform
   )
-    fail("the first browser slice requires a native Linux amd64 Docker daemon");
+    fail("Docker platform override must match the native architecture");
+  const image = sdk.image;
+  if (ci) await stage("image-fetch", ["docker", "pull", "--platform", platform, image], root);
   const metadata = checkedOutput(
     [
       "docker",
@@ -1648,16 +1743,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     ],
     root,
   );
-  if (
-    !(sdk.local
-      ? metadata.startsWith(image + " linux amd64 ")
-      : /^sha256:[a-f0-9]{64} linux amd64 /.test(metadata) &&
-        metadata.includes(JSON.stringify(image)))
-  )
-    fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
-  const imageSource =
-    /^sha256:[a-f0-9]{64} linux amd64 ([a-f0-9]{40}) /.exec(metadata)?.[1] ??
-    fail("the pinned image requires its actual source revision");
+  const imageSource = containerImageSource(metadata, sdk, architecture);
   qualifyImageSource(root, imageSource, orchestratorSource);
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
@@ -1878,6 +1964,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
       "docker",
       "run",
       "--pull=never",
+      "--platform",
+      platform,
       "--init",
       "--name",
       name,
@@ -2055,7 +2143,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
   if (ci && requestedPhase === "consume")
     for (const image of BROWSER_SERVICE_IMAGES)
-      await stage("service-image-fetch", ["docker", "pull", image], root);
+      await stage("service-image-fetch", ["docker", "pull", "--platform", platform, image], root);
   let firstFailure = 0;
   for (let at = 0; at < shards.length; at += 2) {
     if (entryCancellation) return firstFailure || entryCancellation;
@@ -2072,6 +2160,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
           root,
           batch,
           "fvoci-browser-" + resources + "-" + shard,
+          platform,
           async (services) => {
             const result = await runContainer("consume", services, shard);
             if (result !== 0 && firstFailure === 0) firstFailure = result;

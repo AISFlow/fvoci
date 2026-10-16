@@ -1038,6 +1038,16 @@ describe.serial("browser build packet", () => {
       exportPacket(f.host);
     }).toThrow();
   });
+  test("cross Rust host and explicit cross target refuse the native browser packet", () => {
+    const environment = get("build-environment.json") as { rustc: string };
+    environment.rustc = "release: 1.99.0\nhost: aarch64-unknown-linux-gnu";
+    put("build-environment.json", environment);
+    f.host.toolchain = () => ({ ...toolchain(), rustc: environment.rustc });
+    expect(() => exportPacket(f.host)).toThrow();
+    process.env.CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
+    expect(() => context("workspace-browser-build", f.host)).toThrow(/native Linux/);
+    expect(existsSync(f.packet)).toBe(false);
+  });
   test("existing dist destination and symlink asset refused", async () => {
     browserTransfer();
     writeFileSync(join(f.dist, "index.html"), "stale");

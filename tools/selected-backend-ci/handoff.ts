@@ -26,7 +26,15 @@ import process from "node:process";
 import { Header, Parser } from "tar";
 import type { ReadEntry } from "tar";
 import { browserStages, collaborationStages, expectedFiles, identity } from "./admission.ts";
-import { abiFiles, buildEnv, compilerStage, elfDependencies, inputs, reference } from "./build.ts";
+import {
+  abiFiles,
+  buildEnv,
+  compilerStage,
+  elfDependencies,
+  inputs,
+  nativeHost,
+  reference,
+} from "./build.ts";
 import {
   below,
   call,
@@ -107,6 +115,7 @@ export const browser = () =>
     "workspace-browser-container-build",
     "workspace-browser-shard",
   ].includes(browserJob());
+const nativeTarget = () => (browser() ? nativeHost().target : "x86_64-unknown-linux-gnu");
 const stages = (): readonly string[] => (browser() ? browserStages : collaborationStages);
 const jobs = (): readonly [string, string] =>
   browser()
@@ -262,13 +271,14 @@ export function context(job: string, h: HostFacts = host): Context {
     result.container_image_source = imageSource;
   }
   if (browser()) {
+    const native = nativeHost();
     assert.ok(
-      process.platform === "linux" && process.arch === "x64",
-      "unsupported browser platform",
+      result.container_image || native.machine === "x86_64",
+      "ARM browser packets require the qualified container boundary",
     );
     result.platform = {
       system: "Linux",
-      machine: "x86_64",
+      machine: native.machine,
       os_release_sha256: digest(readFileSync("/etc/os-release")),
     };
   }
@@ -467,7 +477,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
     const name = record.target.name;
     names.add(name);
     assert.equal(record.compiledSource, before.head);
-    assert.equal(record.targetTriple, "x86_64-unknown-linux-gnu");
+    assert.equal(record.targetTriple, nativeTarget());
     assert.ok(
       deepEquals(
         [...record.features].sort(),
@@ -497,7 +507,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
   assert.equal(environment.os_release, readFileSync("/etc/os-release", "utf8"));
   assert.ok(
     environment.rustc.includes("release: 1.99.0") &&
-      environment.rustc.includes("host: x86_64-unknown-linux-gnu"),
+      environment.rustc.split("\n").includes("host: " + nativeTarget()),
   );
   assert.ok(
     deepEquals(environment.features, browser() ? [] : ["api-schema", "db-tests"]) &&
@@ -875,9 +885,13 @@ export function browserBefore(h: HostFacts = host): void {
   assert.ok(browser() && !existsSync(distOf(h)), "producer must start without dist");
   const release = osRelease();
   assert.ok(release.ID === "ubuntu" && release.VERSION_ID === "26.04");
-  assert.equal(
-    process.env.CARGO_BUILD_TARGET ?? "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-gnu",
+  const target = nativeTarget();
+  assert.ok(
+    h
+      .toolchain()
+      .rustc.split("\n")
+      .includes("host: " + target),
+    "Rust host must be native",
   );
   assert.equal(process.env.FVOCI_E2E_PROFILE ?? "debug", "debug", "browser packet is debug only");
   write(join(output, "build-env-inputs.json"), buildEnv());
@@ -972,7 +986,7 @@ export function browserAfter(h: HostFacts = host): void {
       sha256: sha(path),
       bytes: statSync(path).size,
       compiledSource: before.head,
-      targetTriple: "x86_64-unknown-linux-gnu",
+      targetTriple: nativeTarget(),
       target: artifact.target,
       features: artifact.features,
       profile: artifact.profile,

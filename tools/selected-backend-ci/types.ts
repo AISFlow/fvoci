@@ -1,3 +1,32 @@
+export type NativeArchitecture = "x86_64" | "aarch64";
+
+export function nativeArchitecture(value: string): NativeArchitecture {
+  if (["x64", "x86_64", "amd64"].includes(value)) return "x86_64";
+  if (["arm64", "aarch64"].includes(value)) return "aarch64";
+  throw new Error("unsupported native architecture");
+}
+
+/** Linux native bytes only; a translated runtime or cross target is never a packet producer. */
+export function nativeLinux(system: string, runtime: string, kernel: string, target?: string) {
+  const machine = nativeArchitecture(kernel);
+  const triple = machine + "-unknown-linux-gnu";
+  if (
+    system !== "linux" ||
+    nativeArchitecture(runtime) !== machine ||
+    (target !== undefined && target !== triple)
+  )
+    throw new Error("native Linux runtime, kernel and Rust target must match");
+  const directory = "/lib/" + machine + "-linux-gnu";
+  return {
+    machine,
+    target: triple,
+    abi: [
+      machine === "x86_64" ? "/lib64/ld-linux-x86-64.so.2" : "/lib/ld-linux-aarch64.so.1",
+      ...["libc.so.6", "libm.so.6", "libgcc_s.so.1"].map((name) => directory + "/" + name),
+    ],
+  };
+}
+
 export interface Inputs {
   head: string;
   tree: string;
