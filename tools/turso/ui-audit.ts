@@ -771,8 +771,10 @@ function sqliteExtractedEvent(
     list(after, "operations", "events").filter((row) => same(row, operation)).length !== 1 ||
     Object.values(record(after, "allocations", "events")).filter(
       (row) =>
-        get(row, "eventWitness", "class") === "sqlite-attachment-extracted" &&
-        get(row, "eventWitness", "target") === target,
+        isRecord(row) &&
+        isRecord(row.eventWitness) &&
+        row.eventWitness.class === "sqlite-attachment-extracted" &&
+        row.eventWitness.target === target,
     ).length !== 1
   )
     return null;

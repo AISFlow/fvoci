@@ -1617,6 +1617,13 @@ test("SQLite extraction events bind one new closed document attachment and its e
   };
   expect(() => {
     const f = fixture();
+    // The complete allocation includes the ordinary workspace-created event
+    // with a NULL witness, independently accounted for by its actual actor.
+    expect(
+      Object.values(record(f.after, "allocations", "events")).some(
+        (row) => get(row, "eventWitness") === null,
+      ),
+    ).toBe(true);
     allocatedRows(f.before, f.after, f.audit);
   }).not.toThrow();
   const mutations: ((f: ReturnType<typeof fixture>) => void)[] = [
@@ -1640,7 +1647,7 @@ test("SQLite extraction events bind one new closed document attachment and its e
     },
     (f) => {
       f.fields[4] = ["blob", f.reader];
-      f.attachment.actors = [f.reader];
+      record(f.attachment).actors = [f.reader];
     },
     (f) => {
       f.fields[5] = ["text", "uploading"];
