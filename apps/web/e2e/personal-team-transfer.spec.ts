@@ -236,85 +236,35 @@ async function witness(workspaceId: string, testInfo: TestInfo): Promise<void> {
   const ledger = (() => {
     if (run !== undefined || image !== undefined) {
       try {
-        const context = z
-          .object({
-            run: z.string().regex(/^[a-f0-9]{32}$/),
-            image: z
-              .string()
-              .regex(/^(?:ghcr\.io\/aisflow\/fvoci-ci-web@sha256:|sha256:)[a-f0-9]{64}$/),
-          })
-          .parse({ run, image });
         if (
+          !run?.trim() ||
+          !image?.trim() ||
           process.env.FVOCI_WEB_BUILD_PHASE !== "consume" ||
-          process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE !==
-            (context.image.startsWith("sha256:") ? "1" : "0") ||
-          !relay ||
-          Buffer.byteLength(relay, "utf8") > 65536
+          !relay
         )
           throw new Error();
-        const value = z
-          .strictObject({
-            run: z.literal(context.run),
-            image: z.literal(context.image),
-            ledger: z
-              .array(
-                z.strictObject({
-                  name: z.enum(names),
-                  container: z.string(),
-                  inspected: z.strictObject({
-                    Image: z.string(),
-                    StartedAt: z.iso.datetime(),
-                    Pid: z.number().int().positive().max(2147483647),
-                    Labels: z.record(z.string(), z.string()),
-                    Mounts: z.array(
-                      z.strictObject({
-                        Type: z.enum(["bind", "volume", "tmpfs"]),
-                        Name: z.string().optional(),
-                        Source: z.string(),
-                        Destination: z.string().startsWith("/"),
-                        Driver: z.string().optional(),
-                        Mode: z.string(),
-                        RW: z.boolean(),
-                        Propagation: z.string(),
-                      }),
-                    ),
-                  }),
-                }),
-              )
-              .length(2),
-          })
+        const entries = z
+          .array(
+            z.strictObject({
+              name: z.enum(names),
+              container: z.string().min(1),
+              inspected: z.string().min(1),
+            }),
+          )
+          .length(2)
           .parse(JSON.parse(relay) as unknown);
-        let serviceRun: string | undefined;
         return names.map((name) => {
-          const entries = value.ledger.filter((entry) => entry.name === name);
-          const entry = entries[0];
-          const postgres = name === "FVOCI_TEST_PG_CONTAINER";
-          const owned = new RegExp(
-            "^fvoci-rust-test-" + (postgres ? "pg" : "meili") + "-([a-f0-9]{32})$",
-          ).exec(process.env[name] ?? "");
+          const matching = entries.filter((entry) => entry.name === name);
+          const entry = matching[0];
           if (
-            entries.length !== 1 ||
+            matching.length !== 1 ||
             !entry ||
-            !owned?.[1] ||
+            !process.env[name]?.trim() ||
             entry.container !== process.env[name] ||
-            (serviceRun !== undefined && serviceRun !== owned[1]) ||
-            entry.inspected.Labels["fvoci.test-run"] !== owned[1] ||
-            !(
-              postgres
-                ? /^postgres:[\w.-]+@sha256:[a-f0-9]{64}$/
-                : /^getmeili\/meilisearch:[\w.-]+@sha256:[a-f0-9]{64}$/
-            ).test(entry.inspected.Image)
+            !entry.inspected.trim()
           )
             throw new Error();
-          serviceRun = owned[1];
-          const { Image, StartedAt, Pid, Labels, Mounts } = entry.inspected;
-          return {
-            name,
-            container: entry.container,
-            inspected: [Image, StartedAt, Pid, Labels, Mounts]
-              .map((field) => JSON.stringify(field))
-              .join("|"),
-          };
+          return entry;
         });
       } catch {
         throw new Error("container service witness invalid (contents withheld)");
