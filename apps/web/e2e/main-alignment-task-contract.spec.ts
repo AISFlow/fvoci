@@ -1718,7 +1718,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
               taskFreshAdmission?: { provider: HocuspocusProvider };
             };
             if (!owner.taskFreshAdmission) throw new Error("Missing actual task admission");
-            owner.taskFreshAdmission.provider.startSync();
+            owner.taskFreshAdmission.provider.forceSync();
           });
           await expect
             .poll(() => closes)
