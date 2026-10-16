@@ -35,6 +35,17 @@ test("frozen metadata rejects changed actor hash or a different valid browser be
     titles: [...PRODUCT_TITLES],
   };
   assertFinalMetadata(metadata, digest, binding);
+  assertFinalMetadata({ ...metadata, unrelated: true }, digest, binding);
+  for (const key of Object.keys(metadata)) {
+    for (const fault of ["missing", "wrong-value", "wrong-type"]) {
+      const changed = structuredClone(metadata) as Record<string, unknown>;
+      if (fault === "missing") Reflect.deleteProperty(changed, key);
+      else changed[key] = fault === "wrong-type" ? 1 : key === "titles" ? ["wrong"] : "wrong";
+      expect(() => {
+        assertFinalMetadata(changed, digest, binding);
+      }).toThrow();
+    }
+  }
   for (const wrong of [
     { actorBindingSha256: "b".repeat(64) },
     { browser: "webkit" },

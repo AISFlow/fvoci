@@ -1147,7 +1147,7 @@ async fn capture_primary_read(
                     let mut columns = Vec::new();
                     for (i, column) in column_names(row)?.into_iter().enumerate() {
                         if matches!(column, "id" | "email" | "workspace_id" | "user_id" | "role") {
-                            columns.push((column.to_string(), row.cell(i as usize)?));
+                            columns.push((column.to_string(), row.cell(i)?));
                         }
                     }
                     match *name {
@@ -1211,14 +1211,13 @@ async fn capture_primary_read(
         };
         Ok(PrimaryCapture { dataset, checks })
     }.await;
-    let result = result.map_err(|original| {
+    result.map_err(|original| {
         sqlx::Error::AnyDriverError(Box::new(BaselineFailure {
             phase,
             original,
             table_comparison,
         }))
-    });
-    result
+    })
 }
 
 // Cover the entire existing job limit forwards from the native clock. This is

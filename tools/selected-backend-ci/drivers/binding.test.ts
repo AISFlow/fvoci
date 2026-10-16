@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { parseJson, root } from "../io.ts";
+import { PRODUCT_TITLES } from "../../turso/ui-selected-native-policy.ts";
 import {
   engineFeaturesMatch,
   loadCurrent,
@@ -216,9 +217,7 @@ describe("SQLite ON PRODUCT4 report", () => {
       password: "fixture-outsider",
     },
   };
-  test("exact current metadata and four unchanged cases are required", async () => {
-    const { PRODUCT_TITLES, assertFinalMetadata } =
-      await import("../../../apps/web/e2e-pending/selected-final-contract.ts");
+  test("exact current metadata and four unchanged cases are required", () => {
     const report = () => ({
       config: {
         workers: 1,
@@ -251,8 +250,8 @@ describe("SQLite ON PRODUCT4 report", () => {
     expect(
       validateProductReport(parseJson(JSON.stringify(report())), binding, "d".repeat(64)),
     ).toEqual([...PRODUCT_TITLES]);
-    // The parent matches public policy values without initializing the browser
-    // SDK. Every metadata field must retain the maintained Zod adapter's guard.
+    // The parent validates the public policy without loading the browser SDK.
+    // The web contract tests cover the Zod adapter with the same metadata faults.
     const checkMetadata = (metadata: unknown) => {
       const value = report();
       return validateProductReport(
@@ -262,16 +261,12 @@ describe("SQLite ON PRODUCT4 report", () => {
       );
     };
     const extended = { ...report().config.metadata, unrelated: true };
-    assertFinalMetadata(extended, "d".repeat(64), binding);
     expect(checkMetadata(extended)).toEqual([...PRODUCT_TITLES]);
     for (const key of Object.keys(report().config.metadata)) {
       for (const fault of ["missing", "wrong-value", "wrong-type"]) {
         const metadata = structuredClone(report().config.metadata) as Record<string, unknown>;
         if (fault === "missing") Reflect.deleteProperty(metadata, key);
         else metadata[key] = fault === "wrong-type" ? 1 : key === "titles" ? ["wrong"] : "wrong";
-        expect(() => {
-          assertFinalMetadata(metadata, "d".repeat(64), binding);
-        }).toThrow();
         expect(() => checkMetadata(metadata)).toThrow();
       }
     }
