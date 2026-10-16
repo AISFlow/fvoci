@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -231,11 +232,124 @@ describe("qualifyCommittedApi", () => {
   });
 });
 
-test("containers admit complete migrated shards, never partial or required host fixtures", () => {
-  for (const value of ["0", "1", "2", "3", "4", "6", "7"])
+test("containers admit every complete ordinary shard, never a partial selection", () => {
+  for (const value of ["0", "1", "2", "3", "4", "5", "6", "7"])
     expect(containerShard(value)).toBe(value);
-  for (const value of [undefined, "", "5", "-1", "6 --grep=skip", "8"])
+  for (const value of [undefined, "", "-1", "6 --grep=skip", "8"])
     expect(() => containerShard(value)).toThrow(CheckError);
+});
+
+test("modeled service inspection binds owned identities and revalidates all fields before cleanup, even on body failure", async () => {
+  const root = tempDir(),
+    bin = join(root, "bin"),
+    state = join(root, "state"),
+    calls = join(root, "calls");
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "docker"),
+    `#!${process.execPath}
+import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+const args = process.argv.slice(2), path = process.env.FIXTURE_STATE;
+const state = JSON.parse(readFileSync(path, "utf8"));
+appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify(args) + "\\n");
+const save = () => writeFileSync(path, JSON.stringify(state));
+if (args[0] === "run") {
+  const name = args[args.indexOf("--name") + 1];
+  const id = (name.includes("-pg-") ? "a" : "b").repeat(64);
+  state.services[id] = { id, name, image: args[args.indexOf("--env-file") + 2], label: args[args.indexOf("--label") + 1].split("=")[1] };
+  save(); console.log(id);
+} else if (args[0] === "exec") {
+  if (args.includes("psql")) console.log("180006");
+} else if (args[0] === "inspect") {
+  const format = args[args.indexOf("--format") + 1], key = args.at(-1);
+  const service = state.services[key] ?? Object.values(state.services).find(s => s.name === key);
+  if (!service) process.exit(3);
+  if (format.includes(".Config.Env")) process.exit(90);
+  if (format === "{{.Id}}") console.log(service.id);
+  else if (format.includes(".State.Running")) console.log("false " + (service.name.includes("-pg-") ? "0" : "143") + " false");
+  else {
+    const fields = [service.id, "/" + service.name, service.image, "2026-10-17T00:00:00Z", 123, {"fvoci.test-run": service.label}, []];
+    if (!state.body && state.mode === "missing") process.exit(3);
+    if (!state.body && state.mode === "foreign") fields[5] = {"fvoci.test-run": "WITHHELD_SERVICE_CANARY"};
+    if (state.body && state.mode.startsWith("change-")) {
+      const at = Number(state.mode.slice(7));
+      fields[at] = at === 4 ? 456 : at === 5 ? {"fvoci.test-run": service.label, extra: true} : at === 6 ? [{Source: "changed"}] : fields[at] + "changed";
+    }
+    console.log(JSON.stringify(fields) + "\\n" + fields.slice(2).map(v => JSON.stringify(v)).join("|"));
+  }
+} else if (args[0] === "stop" && state.mode === "cleanup") process.exit(3);
+else if (args[0] === "rm") { delete state.services[args.at(-1)]; save(); }
+`,
+    { mode: 0o755 },
+  );
+  const driver = `
+import { browserServices } from ${JSON.stringify(CLI)};
+import {readFileSync,writeFileSync} from "node:fs";
+const path = process.env.FIXTURE_STATE;
+try {
+ const result = await browserServices(${JSON.stringify(root)}, ${JSON.stringify(root)}, "owned-fixture-network", "linux/amd64", async env => {
+  const ledger = JSON.parse(env.FVOCI_E2E_SERVICE_WITNESS);
+  if (ledger.length !== 2 || ledger.some((e,i) => e.name !== ["FVOCI_TEST_PG_CONTAINER","FVOCI_TEST_MEILI_CONTAINER"][i] || e.container !== env[e.name] || e.inspected.split("|").length !== 5)) throw Error("invalid relay");
+  const state = JSON.parse(readFileSync(path,"utf8")); state.body = true; writeFileSync(path,JSON.stringify(state));
+  if (state.throwBody) throw Error("WITHHELD_SERVICE_CANARY");
+  return state.bodyStatus;
+ });
+ console.log("RESULT=" + result);
+} catch { console.log("RESULT=11"); }
+`;
+  for (const [mode, bodyStatus, throwBody, expected, bodyRan] of [
+    ["valid", 0, false, 0, true],
+    ["missing", 0, false, 11, false],
+    ["foreign", 0, false, 11, false],
+    ...Array.from({ length: 7 }, (_, at) => ["change-" + at, 0, false, 1, true]),
+    ["valid", 17, false, 17, true],
+    ["change-3", 17, false, 17, true],
+    ["valid", 0, true, 11, true],
+    ["cleanup", 0, false, 1, true],
+  ] as [string, number, boolean, number, boolean][]) {
+    writeFileSync(
+      state,
+      JSON.stringify({ mode, bodyStatus, throwBody, body: false, services: {} }),
+    );
+    writeFileSync(calls, "");
+    const child = Bun.spawn([process.execPath, "--no-env-file", "-e", driver], {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: bin + ":" + process.env.PATH,
+        FIXTURE_STATE: state,
+        FIXTURE_CALLS: calls,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, out, err] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exit, mode).toBe(0);
+    expect(out, mode).toBe("RESULT=" + expected + "\n");
+    expect(out + err).not.toContain("WITHHELD_SERVICE_CANARY");
+    const final = JSON.parse(readFileSync(state, "utf8")) as {
+      body: boolean;
+      services: Record<string, unknown>;
+    };
+    expect(final.body, mode).toBe(bodyRan);
+    expect(final.services, mode).toEqual({});
+    const commands = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    expect(commands.filter((args) => args[0] === "stop").length, mode).toBe(2);
+    expect(commands.at(-1), mode).toEqual(["network", "rm", "owned-fixture-network"]);
+    expect(
+      readdirSync(root).some((name) => name.endsWith(".env")),
+      mode,
+    ).toBe(false);
+    if (mode === "valid" && bodyRan) expect(err).toContain("service_witness_unchanged=PASS");
+    if (mode.startsWith("change-")) expect(err).toContain("service witness revalidation failed");
+  }
 });
 
 test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
@@ -334,11 +448,10 @@ console.log(JSON.stringify({first,next,clean}));process.exit(first);`;
     }
   });
 
-test("maintained default preserves the full hybrid suite and exact host selections", () => {
-  expect(webRequest([], {}).route).toBe("hybrid");
-  for (const shard of ["0", "1", "2", "3", "4", "6", "7"])
+test("maintained default runs all ordinary shards in Docker and preserves explicit host selections", () => {
+  expect(webRequest([], {}).route).toBe("docker");
+  for (const shard of ["0", "1", "2", "3", "4", "5", "6", "7"])
     expect(webRequest(["--ci-shard", shard], {}).route).toBe("docker");
-  for (const shard of ["5"]) expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
   const args = ["e2e/v050-task-timer.spec.ts", "--grep", "exact original filter", "--workers=1"];
   expect(webRequest(args, {}).specs).toEqual(args);
   expect(webRequest(args, {}).route).toBe("host");
@@ -353,7 +466,6 @@ test("maintained default preserves the full hybrid suite and exact host selectio
     ["--ci-shard", "8"],
     ["--ci-shard", "2", "x.spec.ts"],
     ["--host", "--local-image-sdk"],
-    ["--ci-shard", "5", "--image-pin", "local"],
     ["--ci-shard-count", "16"],
   ])
     expect(() => webRequest(args, {})).toThrow(CheckError);

@@ -250,7 +250,7 @@ describe("buildPlan", () => {
       expect(plans.rust.jobs["postgres-build"]).toEqual(
         plans.rust.jobs.postgres as { selected: boolean },
       );
-      expect(plans.web.jobs["workspace-browser-build"]).toEqual(
+      expect(plans.web.jobs["workspace-browser-container-build"]).toEqual(
         plans.web.jobs["workspace-browser-shard"] as { selected: boolean },
       );
     }

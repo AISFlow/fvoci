@@ -51,7 +51,6 @@ const contracts = {
     "web-static": "select_web_static",
     "web-checks": "select_web_checks",
     "web-native-checks": "select_web_checks",
-    "workspace-browser-build": "select_workspace_browser_shard",
     "workspace-browser-container-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
     "collaboration-build": "select_collaboration_build",
@@ -248,7 +247,6 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
           ["postgres-build", "collaboration"],
         ]
       : [
-          ["workspace-browser-build", "workspace-browser-shard"],
           ["workspace-browser-container-build", "workspace-browser-shard"],
           ["collaboration-build", "collaboration-install-on"],
           ["collaboration-build", "collaboration-postgres-on"],
@@ -275,13 +273,7 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
       assert.equal(producerDownloads.length, 1, "required step must occur exactly once");
     }
     required(download);
-    assert.equal(
-      download.if,
-      name === "web" && producerId.startsWith("workspace-browser-")
-        ? (producerId === "workspace-browser-container-build" ? "!" : "") +
-            "contains(fromJSON('[5]'), matrix.shard)"
-        : undefined,
-    );
+    assert.equal(download.if, undefined);
     assert.equal(download.with?.["run-id"], undefined, "handoff must stay in the current run");
     assert.equal(download.with?.repository, undefined);
     const uploads = actionSteps(producer, "actions/upload-artifact");
@@ -638,12 +630,12 @@ const artifactMutations: Mutation[] = [
       assert.ok(s);
       s.with = { "artifact-ids": "${{ needs.collaboration-build.outputs.artifact_id }}" };
     },
-    error: "workspace-browser-build",
+    error: "workspace-browser-container-build",
   },
   {
     name: "missing producer packet tolerated",
     mutate: (w) => {
-      const s = oneStep(job(w, "workspace-browser-build"), (s) => s.id === "publish");
+      const s = oneStep(job(w, "workspace-browser-container-build"), (s) => s.id === "publish");
       s.with = { "if-no-files-found": "warn" };
     },
     error: "missing packet",
@@ -869,24 +861,27 @@ test("Web build-cache writers keep unique keys", () => {
 for (const path of ["target", "crates/collab-engine/target"])
   test(`negative: Web build writers collide on the ${path} cache key`, () => {
     const workflow = load("web");
-    const save = (name: string) =>
-      oneStep(
-        job(workflow, name),
-        (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === path,
-      );
-    const ordinary = save("workspace-browser-build");
-    // The single producer has no long-term helper cache. Keep testing the
-    // writer collision policy if another helper writer is introduced later.
-    const selected = path === "target" ? save("collaboration-build") : structuredClone(ordinary);
+    const rootSave = oneStep(
+      job(workflow, "collaboration-build"),
+      (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === "target",
+    );
+    const ordinary = path === "target" ? rootSave : structuredClone(rootSave);
+    const selected = structuredClone(ordinary);
     assert.ok(ordinary.with && selected.with);
     if (path !== "target") {
       assert.ok(
-        !job(workflow, "collaboration-build").steps.some((step) => step.with?.path === path),
+        !Object.values(workflow.jobs).some((job) =>
+          job.steps.some((step) => step.with?.path === path),
+        ),
       );
-      selected.with.key = "independent-helper-writer";
-      job(workflow, "collaboration-build").steps.push(selected);
-      uniqueBuildCacheWriters(workflow);
+      ordinary.with.path = path;
+      ordinary.with.key = "independent-helper-writer";
+      selected.with.path = path;
+      job(workflow, "collaboration-build").steps.push(ordinary);
     }
+    selected.with.key = "independent-build-writer";
+    job(workflow, "collaboration-build").steps.push(selected);
+    uniqueBuildCacheWriters(workflow);
     ordinary.with.key = selected.with.key;
     expect(() => {
       uniqueBuildCacheWriters(workflow);

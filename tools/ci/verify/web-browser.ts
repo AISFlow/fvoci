@@ -70,13 +70,6 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
-export const HOST_BROWSER_IF = "contains(fromJSON('[5]'), matrix.shard)";
-export const IMAGE_BROWSER_IF = "!" + HOST_BROWSER_IF;
-const hostBrowserStep = (step: Mapping, job: string): Mapping =>
-  job === "workspace-browser-shard" && step.if === HOST_BROWSER_IF
-    ? Object.fromEntries(Object.entries(step).filter(([key]) => key !== "if"))
-    : step;
-
 export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const errors: string[] = [];
   const require = (value: boolean, message: string) => {
@@ -122,9 +115,8 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   require(isMapping(consumer) &&
     pyEq(consumer.needs, [
       "ci-plan",
-      "workspace-browser-build",
       "workspace-browser-container-build",
-    ]), "both independent host/image producers must be required");
+    ]), "one image producer must be required");
   for (const list of [ps, cs]) {
     const checkout = list.find((step) => usesPrefix(step, "actions/checkout@"));
     require(pyEq(checkout?.with, {
@@ -141,7 +133,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   require(download.length === 1 &&
     download[0] !== undefined &&
     download[0].uses === DOWNLOAD_PIN &&
-    download[0].if === IMAGE_BROWSER_IF &&
+    !has(download[0], "if") &&
     pyEq(download[0].with, {
       "artifact-ids": "${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
       "merge-multiple": true,
@@ -150,7 +142,8 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const admit = cs.find(
     (step) => step.name === "Require a successful exact container browser producer artifact",
   );
-  require(admit?.if === IMAGE_BROWSER_IF &&
+  require(admit !== undefined &&
+    !has(admit, "if") &&
     admit.run === "bun --no-env-file tools/web-e2e/run-web-e2e.ts require-browser-producer" &&
     pyEq(admit.env, {
       PRODUCER_RESULT: "${{ needs.workspace-browser-container-build.result }}",
@@ -158,7 +151,8 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
       PRODUCER_DIGEST: "${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}",
     }), "producer success and artifact digest admission required");
   const runtime = cs.find((step) => step.id === "container_browser");
-  require(runtime?.if === IMAGE_BROWSER_IF &&
+  require(runtime !== undefined &&
+    !has(runtime, "if") &&
     runtime.run ===
       command(
         '--consume ${{ matrix.shard }} --handoff "$RUNNER_TEMP/fvoci-browser-container-packet" --handoff-sha256 "$FVOCI_WEB_BUILD_HANDOFF_SHA256"',
@@ -169,13 +163,22 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
         "${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}",
     }) &&
     !has(runtime, "continue-on-error"), "one complete image shard after packet admission required");
-  const first = cs.findIndex((step) => stepRun(step).startsWith("rustup toolchain install")),
-    last = cs.findIndex((step) => step.id === "browser");
-  require(first >= 0 && last > first, "host-only complete runtime must remain");
-  for (const step of cs.slice(first, last + 1))
-    if (step.id !== "sqlite_diagnostics")
-      require(step.if ===
-        HOST_BROWSER_IF, "host preparation and assertions restricted exactly to shard5");
+  require(!has(jobs, "workspace-browser-build"), "obsolete host producer must be absent");
+  require(isMapping(consumer) &&
+    pyEq(consumer.strategy, { "fail-fast": false, matrix: { shard: [0, 1, 2, 3, 4, 5, 6, 7] } }) &&
+    consumer["runs-on"] === "ubuntu-26.04" &&
+    consumer["timeout-minutes"] === 20 &&
+    !has(consumer, "continue-on-error"), "all eight complete image shards and budget required");
+  require(cs.every(
+    (step) =>
+      !stepRun(step).includes("cargo ") &&
+      !stepRun(step).includes("rustup ") &&
+      !stepRun(step).includes("apt-get ") &&
+      !stepRun(step).includes("playwright install") &&
+      !stepRun(step).includes("--ci-consume-browser") &&
+      step.id !== "sqlite" &&
+      (!has(step, "if") || String(step.if).includes("failure()")),
+  ), "no host preparation, host runtime or conditional image subset");
   require(cs.indexOf(admit as Mapping) < cs.indexOf(download[0] as Mapping) &&
     cs.indexOf(download[0] as Mapping) <
       cs.indexOf(runtime as Mapping), "admission/download/runtime ordering required");
@@ -477,12 +480,7 @@ export const RUSTUP_METADATA_RUN =
   'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
 const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
 const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
-const WEB_NATIVE_JOBS = [
-  "workspace-browser-build",
-  "workspace-browser-shard",
-  "collaboration-build",
-  ...WEB_COLLAB_LANES.map((lane) => lane.name),
-];
+const WEB_NATIVE_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
 
 export const WEB_SQLITE_JOBS = ["web-checks", "web-native-checks", ...WEB_NATIVE_JOBS];
 // The same complete host preparation precedes every Web SQLite/cache identity.
@@ -537,7 +535,7 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
     if (
       sqlites.length !== 1 ||
       !sqlite ||
-      !pyEq(hostBrowserStep(sqlite, name), {
+      !pyEq(sqlite, {
         name: "Prepare pinned SQLite root build inputs",
         id: "sqlite",
         env: { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" },
@@ -603,7 +601,7 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
       continue;
     }
     const original = list[index] as Mapping;
-    const step = hostBrowserStep(original, name);
+    const step = original;
     pinned.add(original);
     if (!pyEq(Object.keys(step).sort(), ["name", "run"]) || stepRun(step) !== RUSTUP_METADATA_RUN) {
       errors.push(

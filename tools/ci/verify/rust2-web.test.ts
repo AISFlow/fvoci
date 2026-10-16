@@ -430,7 +430,7 @@ test("normal browser job budget is measured and fail closed", () => {
   ]);
 });
 
-test("ordinary image route preserves every host shard and qualified current-run artifact", () => {
+test("ordinary image route requires all eight shards and qualified current-run artifact", () => {
   const jobs = realJobs("web.yml");
   expect(verifyWebContainerHandoffJobs(jobs)).toEqual([]);
   const mutations: ((bad: Mapping) => void)[] = [
@@ -464,10 +464,12 @@ test("ordinary image route preserves every host shard and qualified current-run 
       },
     ),
     (bad) => {
-      stepWith(bad, "workspace-browser-shard", byId("browser"))["if"] = "false";
+      stepWith(bad, "workspace-browser-shard", byId("container_browser"))["if"] = "false";
     },
     (bad) => {
-      stepWith(bad, "workspace-browser-shard", byId("sqlite"))["if"] = "true";
+      (bad["workspace-browser-shard"] as Mapping).strategy = {
+        matrix: { shard: [0, 1, 2, 3, 4, 6, 7] },
+      };
     },
     (bad) => {
       const dl = stepWith(

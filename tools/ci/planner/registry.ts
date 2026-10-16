@@ -12,7 +12,6 @@ export const WORKFLOW_JOBS = {
     "web-static",
     "web-checks",
     "web-native-checks",
-    "workspace-browser-build",
     "workspace-browser-container-build",
     "workspace-browser-shard",
     "collaboration-build",

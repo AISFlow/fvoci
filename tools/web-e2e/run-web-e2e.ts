@@ -71,13 +71,10 @@ export function containerImage(
 }
 
 // Each admitted ordinary-browser shard retains every registered group.
-// Service-ledger fixtures retain their host boundary;
-// they are never silently run with a socket or with those assertions skipped.
+// Host-owned service inspection is relayed and revalidated without a socket.
 export function containerShard(value: string | undefined): string {
-  if (!value || !["0", "1", "2", "3", "4", "6", "7"].includes(value))
-    fail(
-      "shared containers support complete shards 0,1,2,3,4,6,7; service-ledger fixtures retain their host boundary",
-    );
+  if (!value || !["0", "1", "2", "3", "4", "5", "6", "7"].includes(value))
+    fail("shared containers require one complete shard 0..7");
   return value;
 }
 
@@ -244,8 +241,7 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
     selected ||
     !!browserPhase ||
     env.FVOCI_E2E_PENDING === "1" ||
-    specs.length > 0 ||
-    ["5"].includes(shard);
+    specs.length > 0;
   if (hostRequired && imageOptions.length)
     fail("container image options cannot alter a required host/CI selection");
   return {
@@ -256,7 +252,7 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
     browserPhase,
     specs,
     imageOptions,
-    route: hostRequired ? ("host" as const) : shard ? ("docker" as const) : ("hybrid" as const),
+    route: hostRequired ? ("host" as const) : ("docker" as const),
   };
 }
 
@@ -289,18 +285,10 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     );
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
   if (request.route !== "host") {
-    const dockerShards = request.route === "hybrid" ? "0,1,2,3,4,6,7" : shard;
-    process.stderr.write(
-      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=5" : ""}\n`,
-    );
-    const status = await containerBrowser([
-      root,
-      "--ci-shards",
-      dockerShards,
-      ...request.imageOptions,
-    ]);
-    if (status !== 0 || entryCancellation || request.route === "docker")
-      return status || entryCancellation;
+    const dockerShards =
+      shard || Array.from({ length: DEFAULT_SHARD_COUNT }, (_, at) => at).join(",");
+    process.stderr.write(`web-e2e route=docker shards=${dockerShards}\n`);
+    return containerBrowser([root, "--ci-shards", dockerShards, ...request.imageOptions]);
   } else process.stderr.write("web-e2e route=host requested selection retained\n");
   process.env.ROOT = root;
   process.env.CARGO_TARGET_DIR = resolvePath(
@@ -533,13 +521,13 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
   }
   const group = (args: string[]) =>
     command([process.execPath, "--no-env-file", import.meta.path, "group-wrapper", ...args], root);
-  if (shard || request.route === "hybrid") {
+  if (shard) {
     verifyPlan(undefined, DEFAULT_SHARD_COUNT);
     const plan = assignShards(discoverGroups(), DEFAULT_SHARD_COUNT);
     if (browserPhase === "consume")
       await stage("browser-handoff-consume", handoff("consume"), root);
     else await build();
-    for (const index of request.route === "hybrid" ? ["5"] : [shard]) {
+    for (const index of [shard]) {
       process.stderr.write(`web-e2e host_complete_shard=${index}\n`);
       for (const specs of plan[Number(index)] ?? []) {
         const status = await group(specs);
@@ -732,7 +720,7 @@ export async function selectedHost(
   return pending || selected;
 }
 
-async function browserServices(
+export async function browserServices(
   root: string,
   batch: string,
   network: string,
@@ -745,7 +733,8 @@ async function browserServices(
     password = randomBytes(24).toString("hex"),
     key = randomBytes(16).toString("hex"),
     envFile = join(batch, "services-" + id);
-  const owned: string[] = [];
+  const identities: { name: string; container: string; image: string }[] = [];
+  let ledger: { name: string; container: string; inspected: string }[] | undefined;
   let status = 1,
     created = false;
   let interrupted = 0;
@@ -768,6 +757,50 @@ async function browserServices(
       ],
       root,
     );
+  const witness = () =>
+    identities.map(({ name, container, image }, at) => {
+      const inspected = checkedOutput(
+        [
+          "docker",
+          "inspect",
+          "--format",
+          "[{{json .Id}},{{json .Name}},{{json .Config.Image}},{{json .State.StartedAt}},{{json .State.Pid}},{{json .Config.Labels}},{{json .Mounts}}]\n{{json .Config.Image}}|{{json .State.StartedAt}}|{{json .State.Pid}}|{{json .Config.Labels}}|{{json .Mounts}}",
+          container,
+        ],
+        root,
+      );
+      const split = inspected.indexOf("\n");
+      let fields: unknown;
+      try {
+        fields = JSON.parse(inspected.slice(0, split));
+      } catch {
+        fail("owned service witness identity invalid (contents withheld)");
+      }
+      if (
+        split < 0 ||
+        !Array.isArray(fields) ||
+        fields.length !== 7 ||
+        fields[0] !== container ||
+        fields[1] !== "/" + name ||
+        fields[2] !== image ||
+        typeof fields[3] !== "string" ||
+        !fields[3] ||
+        !Number.isSafeInteger(fields[4]) ||
+        Number(fields[4]) <= 0 ||
+        !fields[5] ||
+        typeof fields[5] !== "object" ||
+        Array.isArray(fields[5]) ||
+        (fields[5] as Record<string, unknown>)["fvoci.test-run"] !== id ||
+        !Array.isArray(fields[6]) ||
+        !inspected.slice(split + 1).trim()
+      )
+        fail("owned service witness identity invalid (contents withheld)");
+      return {
+        name: at === 0 ? "FVOCI_TEST_PG_CONTAINER" : "FVOCI_TEST_MEILI_CONTAINER",
+        container: name,
+        inspected: inspected.slice(split + 1),
+      };
+    });
   try {
     writeFileSync(envFile + "-pg.env", `POSTGRES_PASSWORD=${password}\n`, {
       flag: "wx",
@@ -794,8 +827,7 @@ async function browserServices(
         ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"],
       ],
     ] as const) {
-      owned.push(name);
-      checkedOutput(
+      const container = checkedOutput(
         [
           "docker",
           "run",
@@ -821,6 +853,8 @@ async function browserServices(
         ],
         root,
       );
+      if (!/^[0-9a-f]{64}$/.test(container)) fail("owned service container ID invalid");
+      identities.push({ name, container, image });
       const deadline = performance.now() + 30_000;
       for (;;) {
         if (interrupted) throw new RuntimeExit(interrupted);
@@ -844,36 +878,48 @@ async function browserServices(
     )
       fail("owned PostgreSQL version mismatch");
     if (interrupted || entryCancellation) throw new RuntimeExit(interrupted || entryCancellation);
+    ledger = witness();
     status = await body({
       TEST_DATABASE_URL: `postgres://postgres:${password}@fvoci-pg:5432/postgres`,
       FVOCI_TEST_PG_CONTAINER: pg,
       FVOCI_TEST_MEILI_CONTAINER: meili,
+      FVOCI_E2E_SERVICE_WITNESS: JSON.stringify(ledger),
       FVOCI_MEILI_KEY: key,
       MEILI_MASTER_KEY: key,
     });
     if (interrupted && status === 0) status = interrupted;
   } finally {
-    for (const name of owned.reverse()) {
+    if (ledger) {
+      try {
+        if (JSON.stringify(witness()) !== JSON.stringify(ledger))
+          fail("owned service witness changed (contents withheld)");
+        process.stderr.write("container-browser service_witness_unchanged=PASS\n");
+      } catch {
+        process.stderr.write("container-browser service witness revalidation failed\n");
+        if (status === 0) status = 1;
+      }
+    }
+    for (const { name, container } of [...identities].reverse()) {
       let retired = true;
-      const present = Bun.spawnSync(["docker", "inspect", "--format", "{{.Id}}", name], {
+      const present = Bun.spawnSync(["docker", "inspect", "--format", "{{.Id}}", container], {
         stdout: "ignore",
         stderr: "ignore",
       });
       if (present.exitCode === 0) {
         if (
-          Bun.spawnSync(["docker", "stop", "--time", "10", name], {
+          Bun.spawnSync(["docker", "stop", "--time", "10", container], {
             stdout: "ignore",
             stderr: "ignore",
           }).exitCode !== 0
         )
           retired = false;
         try {
-          if (inspect(name) !== `false ${name === pg ? "0" : "143"} false`) retired = false;
+          if (inspect(container) !== `false ${name === pg ? "0" : "143"} false`) retired = false;
         } catch {
           retired = false;
         }
         if (
-          Bun.spawnSync(["docker", "rm", "-v", name], { stdout: "ignore", stderr: "ignore" })
+          Bun.spawnSync(["docker", "rm", "-v", container], { stdout: "ignore", stderr: "ignore" })
             .exitCode !== 0
         )
           retired = false;
@@ -887,7 +933,12 @@ async function browserServices(
         );
     }
     for (const path of [envFile + "-pg.env", envFile + "-meili.env"])
-      if (existsSync(path)) rmSync(path);
+      try {
+        if (existsSync(path)) rmSync(path);
+      } catch {
+        process.stderr.write("container-browser owned service environment cleanup failed\n");
+        if (status === 0) status = 1;
+      }
     if (
       created &&
       Bun.spawnSync(["docker", "network", "rm", network], { stdout: "ignore", stderr: "ignore" })
@@ -2388,6 +2439,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
         "FVOCI_MEILI_KEY",
         "MEILI_MASTER_KEY",
         "FVOCI_TEST_MEILI_CONTAINER",
+        "FVOCI_E2E_SERVICE_WITNESS",
       ])
         variables[name] = services[name] ?? "";
       variables.FVOCI_MEILI_URL = "http://fvoci-meili:7700";

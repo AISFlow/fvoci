@@ -388,8 +388,6 @@ fn contract(root: &Path) -> Check {
             &[
                 "web-checks",
                 "web-native-checks",
-                "workspace-browser-build",
-                "workspace-browser-shard",
                 "collaboration-build",
                 "collaboration-install-on",
                 "collaboration-postgres-on",
@@ -410,10 +408,75 @@ fn contract(root: &Path) -> Check {
             .map(|(n, _)| n.as_str())
             .collect();
         if workflow == "web" {
-            for obsolete in ["collaboration-main-build", "collaboration-test-build"] {
+            for obsolete in [
+                "collaboration-main-build",
+                "collaboration-test-build",
+                "workspace-browser-build",
+            ] {
                 ensure(!all.iter().any(|(name, _)| name == obsolete), || {
                     format!("obsolete preparation job {obsolete}")
                 })?;
+            }
+        }
+        if workflow == "web" {
+            let producer = job(&text, "workspace-browser-container-build")
+                .ok_or("missing container producer")?;
+            let consumer =
+                job(&text, "workspace-browser-shard").ok_or("missing container consumer")?;
+            contains(
+                producer,
+                "--prepare --handoff \"$RUNNER_TEMP/fvoci-browser-container-packet\"",
+                "container producer",
+            )?;
+            contains(
+                producer,
+                "name: web-browser-container-build-${{ github.run_attempt }}",
+                "container producer",
+            )?;
+            contains(
+                consumer,
+                "needs: [ci-plan, workspace-browser-container-build]",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "shard: [0, 1, 2, 3, 4, 5, 6, 7]",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "artifact-ids: ${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "--consume ${{ matrix.shard }} --handoff \"$RUNNER_TEMP/fvoci-browser-container-packet\"",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "--handoff-sha256 \"$FVOCI_WEB_BUILD_HANDOFF_SHA256\"",
+                "container consumer",
+            )?;
+            for (body, required) in [
+                (producer, "id: prepare"),
+                (producer, "id: publish"),
+                (consumer, "id: container_browser"),
+            ] {
+                let matching: Vec<_> = blocks(body)
+                    .into_iter()
+                    .filter(|(s, e)| body[*s..*e].contains(required))
+                    .collect();
+                ensure(
+                    matching.len() == 1 && !masked(&body[matching[0].0..matching[0].1]),
+                    || "container preparation/consumption must be unmasked".into(),
+                )?;
+            }
+            for body in [producer, consumer] {
+                excludes(body, "id: sqlite", "container handoff")?;
+                excludes(body, "cargo ", "container handoff")?;
+                excludes(body, "playwright install", "container handoff")?;
+                excludes(body, "--ci-consume-browser", "container handoff")?;
             }
         }
         actual.sort_unstable();
@@ -449,24 +512,6 @@ fn contract(root: &Path) -> Check {
                 )?;
                 less(find(body, "Verify cached SQLite prefix")?, download, what)?;
                 less(download, unpack, what)?;
-            } else if workflow == "web" && *name == "workspace-browser-shard" {
-                excludes(body, "path: target", what)?;
-                contains(
-                    body,
-                    "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
-                    what,
-                )?;
-                contains(
-                    body,
-                    "artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}",
-                    what,
-                )?;
-                contains(body, "--ci-consume-browser", what)?;
-                less(
-                    find(body, "id: sqlite")?,
-                    find(body, "Download this run")?,
-                    what,
-                )?;
             } else if workflow == "web" && COLLAB_LANES.contains(name) {
                 // Each lane prepares its own SDK before admitting the producer's exact artifact.
                 excludes(body, "path: target", what)?;
@@ -554,13 +599,7 @@ fn contract(root: &Path) -> Check {
             }
             for preparation in [prepare, ready] {
                 let preparation = text_of(preparation);
-                let unguarded = if workflow == "web" && *name == "workspace-browser-shard" {
-                    let host = "        if: contains(fromJSON('[5]'), matrix.shard)\n";
-                    contains(preparation, host, what)?;
-                    preparation.replacen(host, "", 1)
-                } else {
-                    preparation.to_owned()
-                };
+                let unguarded = preparation;
                 ensure(!masked(&unguarded), || {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
@@ -804,10 +843,7 @@ fn assert_mutations_fail(
 fn new_producer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
-    for (workflow, name) in [
-        ("rust", "postgres-build"),
-        ("web", "workspace-browser-build"),
-    ] {
+    for (workflow, name) in [("rust", "postgres-build"), ("web", "collaboration-build")] {
         let path = root.join(format!(".github/workflows/{workflow}.yml"));
         let original = fs::read_to_string(&path).unwrap();
         let span = job_span(&original, name);
@@ -822,10 +858,10 @@ fn new_producer_mutations_fail_same_wiring_contract() {
             .iter()
             .find(|b| text_of(**b).lines().any(is_target_path_line))
             .unwrap();
-        let helper = *steps
+        let helper = steps
             .iter()
             .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
-            .unwrap();
+            .copied();
         let cache_text = text_of(cache);
         let move_cache_before = |anchor: (usize, usize)| {
             format!(
@@ -898,7 +934,9 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 ),
                 None,
             ),
-            (
+        ];
+        if let Some(helper) = helper {
+            changes.push((
                 "helper borrows SQLite inputs".into(),
                 replace_once(
                     body,
@@ -909,8 +947,8 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                     ),
                 ),
                 None,
-            ),
-        ];
+            ));
+        }
         if workflow == "rust" {
             let verify = *steps
                 .iter()
@@ -939,11 +977,7 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 replace_once(
                     body,
                     text_of(save),
-                    &text_of(save).replacen(
-                        "v1-web-browser-default-fixture-",
-                        "v1-web-browser-drifted-",
-                        1,
-                    ),
+                    &text_of(save).replacen("v2-web-", "v2-drifted-", 1),
                 ),
                 None,
             ));
@@ -1036,28 +1070,43 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     for (name, old, new) in [
         (
             "workspace-browser-shard",
-            "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
-            "needs: [ci-plan, workspace-browser-build]",
-        ),
-        (
-            "workspace-browser-shard",
-            "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
             "needs: [ci-plan, workspace-browser-container-build]",
+            "needs: [ci-plan]",
         ),
         (
             "workspace-browser-shard",
-            "id: sqlite\n",
-            "id: sqlite\n        if: false\n",
+            "artifact-ids: ${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+            "artifact-ids: foreign",
         ),
         (
             "workspace-browser-shard",
-            "id: sqlite\n",
-            "id: sqlite\n        continue-on-error: true\n",
+            "id: container_browser\n",
+            "id: container_browser\n        if: false\n",
         ),
         (
             "workspace-browser-shard",
-            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[5]'), matrix.shard)",
-            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0]'), matrix.shard)",
+            "id: container_browser\n",
+            "id: container_browser\n        continue-on-error: true\n",
+        ),
+        (
+            "workspace-browser-shard",
+            "--consume ${{ matrix.shard }}",
+            "--consume 2",
+        ),
+        (
+            "workspace-browser-container-build",
+            "--prepare --handoff",
+            "--consume 2 --handoff",
+        ),
+        (
+            "workspace-browser-container-build",
+            "        id: prepare\n",
+            "        id: prepare\n        if: false\n",
+        ),
+        (
+            "workspace-browser-container-build",
+            "name: web-browser-container-build-${{ github.run_attempt }}",
+            "name: foreign-packet",
         ),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         (

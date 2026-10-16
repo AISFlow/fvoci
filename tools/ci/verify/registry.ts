@@ -26,7 +26,6 @@ export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> =
     "web-static",
     "web-checks",
     "web-native-checks",
-    "workspace-browser-build",
     "workspace-browser-container-build",
     "workspace-browser-shard",
     "collaboration-build",
@@ -173,7 +172,6 @@ export function selectOutputKey(job: string): string {
   // their consumers.
   const shared: Record<string, string> = {
     "web-native-checks": "web-checks",
-    "workspace-browser-build": "workspace-browser-shard",
     "workspace-browser-container-build": "workspace-browser-shard",
     "postgres-build": "postgres",
     "install-image": "install-smoke",
