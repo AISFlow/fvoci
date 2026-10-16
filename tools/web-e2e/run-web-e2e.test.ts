@@ -855,7 +855,7 @@ const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STA
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}}
+if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
 if(a[0]==="pull"){}
@@ -863,11 +863,11 @@ else if(a[0]==="context"&&a[1]==="inspect")console.log(JSON.stringify(process.en
 else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-mismatch"?process.env.FIXTURE_OTHER_ARCH:["amd64","x64","arm64"].includes(process.env.FIXTURE_MODE)?process.env.FIXTURE_MODE:process.env.FIXTURE_ARCH));
 else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
 else if(a[0]==="network"){}
-else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
+else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
-else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" "+(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"?"19":!s[a.at(-1)]&&a.at(-1).includes("meili")?"143":"0")+" false");
-else if(a[0]==="stop"){s[a.at(-1)]=false;save();}
-else if(a[0]==="rm"){if(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}delete s[a.at(-1)];save();}
+else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
+else if(a[0]==="stop"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);if(typeof s[key]==="object")s[key].running=false;else s[key]=false;save();}
+else if(a[0]==="rm"){if(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
 else process.exit(42);
 `;
     writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
@@ -965,6 +965,7 @@ else process.exit(42);
             platform?: string;
             sdk?: string;
             imagePinned?: boolean;
+            serviceWitness?: boolean;
           },
       );
     expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(
@@ -1000,6 +1001,7 @@ else process.exit(42);
       expect(consume).toBeGreaterThan(network);
       expect(rows[consume]?.network).toMatch(/^fvoci-browser-/);
       expect(rows[consume]?.hasDatabase).toBe(true);
+      expect(rows[consume]?.serviceWitness).toBe(true);
     } else {
       expect(network).toBe(-1);
       expect(consume).toBe(-1);
