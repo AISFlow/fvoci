@@ -795,7 +795,7 @@ export function imageSmokeScript(): string {
   return String.raw`
 const fs = require("node:fs"), path = require("node:path");
 const check = (value) => { if (!value) throw new Error("image tool/SDK smoke refused"); };
-const run = (args) => { const child = Bun.spawnSync(args, {stdout:"pipe",stderr:"pipe"}); check(child.exitCode === 0 && !child.signalCode); return child.stdout.toString().trim(); };
+const run = (args, env=process.env) => { const child = Bun.spawnSync(args, {env:{...env},stdout:"pipe",stderr:"pipe"}); check(child.exitCode === 0 && !child.signalCode); return child.stdout.toString().trim(); };
 check(process.getuid() === 1000 && process.getgid() === 1000);
 check(run(["rustc","--version"]).split(" ")[1] === "1.99.0");
 check(run(["bun","--version"]) === "1.4.3");
@@ -810,7 +810,10 @@ check(fs.statSync("/etc/ssl/certs/ca-certificates.crt").size>0 && fs.existsSync(
 const parent=fs.mkdtempSync("/tmp/fvoci-image-sdk-");
 try { const identity=new Bun.CryptoHasher("sha256").update(fs.readFileSync("/opt/fvoci-sqlite/consumer-inputs.json")).digest("hex");
  run(["/usr/local/bin/fvoci-ci-tools","sqlite-ci","--local-image-sdk","--image-sdk","/opt/fvoci-sqlite","--expected-sdk-sha256",identity,"--image-ref",process.env.FVOCI_SDK_IMAGE_REF,"--parent",parent]);
- if(process.env.FVOCI_IMAGE_TARGET === "ci-web") { function browser(root) { for(const name of fs.readdirSync(root)){const p=path.join(root,name),s=fs.statSync(p);if(s.isDirectory()){const b=browser(p);if(b)return b;} else if(name==="chrome" && /chrome-linux/.test(p))return p;} } const executable=browser(process.env.PLAYWRIGHT_BROWSERS_PATH);check(executable);check(run([executable,"--headless","--no-sandbox","--disable-gpu","--user-data-dir="+path.join(parent,"chromium"),"--dump-dom","about:blank"]).includes("<html")); }
+ if(process.env.FVOCI_IMAGE_TARGET === "ci-web") { function browser(root) { for(const name of fs.readdirSync(root)){const p=path.join(root,name),s=fs.statSync(p);if(s.isDirectory()){const b=browser(p);if(b)return b;} else if(name==="chrome" && /chrome-linux/.test(p))return p;} } const executable=browser(process.env.PLAYWRIGHT_BROWSERS_PATH);check(executable);
+ const home=path.join(parent,"browser-home");fs.mkdirSync(home,{mode:0o700});
+ const browserEnv={...process.env,HOME:home,XDG_CONFIG_HOME:path.join(home,"config"),XDG_CACHE_HOME:path.join(home,"cache")};
+ check(run([executable,"--headless","--no-sandbox","--disable-gpu","--user-data-dir="+path.join(parent,"chromium"),"--dump-dom","about:blank"],browserEnv).includes("<html")); }
 } finally { fs.rmSync(parent,{recursive:true,force:true}); }
 `;
 }
