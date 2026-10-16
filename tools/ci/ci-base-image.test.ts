@@ -1377,9 +1377,9 @@ for (const mode of [
         } else {
           const local =
             "image=" +
-              (mode === "published-classic" ? identity.configDigest : identity.manifestDigest) +
-              " sdk_sha256=" +
-              "e".repeat(64);
+            (mode === "published-classic" ? identity.configDigest : identity.manifestDigest) +
+            " sdk_sha256=" +
+            "e".repeat(64);
           expect(summary).toContain(local);
           expect(stdout).toContain(local);
           const published =
