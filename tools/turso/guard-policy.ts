@@ -67,6 +67,14 @@ function destructiveOf(inputs: Inputs): boolean {
   return boolean(Object.hasOwn(inputs, "destructive") ? inputs.destructive : false);
 }
 
+function resetCurrent12DataOf(inputs: Inputs): boolean {
+  const confirmed = boolean(
+    Object.hasOwn(inputs, "reset_current12_data") ? inputs.reset_current12_data : false,
+  );
+  if (confirmed && phaseOf(inputs) !== "reset") reject("RESET_CURRENT12_PHASE_REQUIRED");
+  return confirmed;
+}
+
 const READ_ONLY: readonly Phase[] = ["connection", "inventory", "ui-baseline"];
 
 export function validateDispatch(
@@ -88,6 +96,7 @@ export function validateDispatch(
   if (!isPhase(phase)) reject("UNKNOWN_PHASE");
   if (uiManual && phase !== "ui-baseline" && phase !== "ui-ack") reject("UI_REF_PHASE_REQUIRED");
   const destructive = destructiveOf(inputs);
+  resetCurrent12DataOf(inputs);
   if (bootstrap && phase !== "connection") reject("SECRET_MODE_REQUIRES_MANUAL");
   if (phase === "connection" && destructive) reject("CONNECTION_MUST_BE_READ_ONLY");
   if ((phase === "inventory" || phase === "ui-baseline") && destructive)
@@ -152,6 +161,7 @@ export function validateTarget(
   const phase = phaseOf(inputs);
   if (!isPhase(phase)) reject("UNKNOWN_PHASE");
   const destructive = destructiveOf(inputs);
+  resetCurrent12DataOf(inputs);
   const allow = settings.FVOCI_TEST_TURSO_ALLOW_DESTRUCTIVE;
   if (phase === "connection" && destructive) reject("CONNECTION_MUST_BE_READ_ONLY");
   if ((phase === "inventory" || phase === "ui-baseline") && (destructive || allow !== "false")) {
@@ -211,6 +221,11 @@ export function eventInputs(event: unknown): Inputs {
   const flag = Object.hasOwn(inputs, "destructive") ? inputs.destructive : "false";
   if (flag !== "true" && flag !== "false") reject("INVALID_BOOLEAN");
   inputs.destructive = flag === "true";
+  if (Object.hasOwn(inputs, "reset_current12_data")) {
+    const reset = inputs.reset_current12_data;
+    if (reset !== "true" && reset !== "false") reject("INVALID_BOOLEAN");
+    inputs.reset_current12_data = reset === "true";
+  }
   return inputs;
 }
 
@@ -287,12 +302,14 @@ export function primaryChildEnv(
   env: Env,
   url: string,
   token: string,
+  inputs: Inputs = {},
 ): Record<string, string> {
   const child = pick(env, ["PATH", "LD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TZ"]);
   child.FVOCI_DATABASE_BACKEND = "libsql-remote";
   if (phase === "reset") {
     child.FVOCI_TEST_TURSO_DATABASE_URL = url;
     child.FVOCI_TEST_TURSO_AUTH_TOKEN = token;
+    if (resetCurrent12DataOf(inputs)) child.FVOCI_TEST_TURSO_RESET_CURRENT12_DATA = "true";
   } else {
     child.FVOCI_LIBSQL_URL = url;
     child.FVOCI_LIBSQL_AUTH_TOKEN = token;

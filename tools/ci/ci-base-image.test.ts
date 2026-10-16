@@ -10,6 +10,8 @@ import {
   allocateImageBuilder,
   retireImageBuilder,
   imageCommand,
+  imageSdkSeal,
+  imageSdkSummary,
   smokeImage,
   scanImage,
   verifyManifest,
@@ -1025,6 +1027,42 @@ test("native image execution binds source, attempt, architecture and publication
   ).toBe(plan.ref);
 });
 
+test("SDK summaries bind each native architecture and image to a verified seal", () => {
+  const seal = "e".repeat(64);
+  expect(imageSdkSeal("FVOCI_CI_SQLITE_SDK_SHA256=" + seal)).toBe(seal);
+  for (const output of [
+    "",
+    "PRIVATE_CANARY",
+    "FVOCI_CI_SQLITE_SDK_SHA256=" + "E".repeat(64),
+    "FVOCI_CI_SQLITE_SDK_SHA256=" + seal + "\nPRIVATE_CANARY",
+    ("FVOCI_CI_SQLITE_SDK_SHA256=" + seal + "\n").repeat(2),
+  ]) {
+    expect(() => imageSdkSeal(output)).toThrow("content withheld");
+  }
+  for (const target of ["ci-base", "ci-web"])
+    for (const arch of ["amd64", "arm64"]) {
+      const plan = imageBuildPlan(
+        {
+          ARCH: arch,
+          TARGET: target,
+          GITHUB_SHA: "b".repeat(40),
+          GITHUB_RUN_ID: "11",
+          GITHUB_RUN_ATTEMPT: "1",
+          GITHUB_REF: "refs/heads/main",
+          PUBLISH: "true",
+        },
+        arch === "amd64" ? "x64" : "arm64",
+      );
+      const ref = plan.image + "@sha256:" + "c".repeat(64);
+      expect(imageSdkSummary(plan, ref, seal)).toBe(
+        `SQLite SDK (${target}/${arch}): source=${"b".repeat(40)} image=${ref} sdk_sha256=${seal}`,
+      );
+      for (const bad of ["latest", plan.ref, "ghcr.io/foreign/image@sha256:" + "c".repeat(64)])
+        expect(() => imageSdkSummary(plan, bad, seal)).toThrow("content withheld");
+      expect(() => imageSdkSummary(plan, ref, "PRIVATE_CANARY")).toThrow("content withheld");
+    }
+});
+
 test.each([
   "opt/fvoci-sqlite/consumer-inputs.json",
   "opt/fvoci-sqlite/x86_64-unknown-linux-gnu/proof.txt",
@@ -1037,10 +1075,14 @@ test.each([
 
 // Real Bun children simulate only the Docker CLI allocation boundary. No
 // daemon, image, credential or application runtime is touched by these cases.
-async function dockerChildFixture(mode: string) {
+async function dockerChildFixture(
+  mode: string,
+  identity?: { configDigest: string; manifestDigest: string },
+) {
   const bin = join(root, "bin");
   await mkdir(bin);
   const state = join(root, "state.json");
+  const metadata = info(process.arch === "arm64" ? "arm64" : "amd64");
   await writeFile(
     state,
     JSON.stringify({
@@ -1048,9 +1090,33 @@ async function dockerChildFixture(mode: string) {
       builder: mode === "collision",
       worker: mode === "collision",
       smoke: null,
+      configDigest:
+        identity?.configDigest ??
+        "sha256:" + new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
       metadata: {
-        ...info(process.arch === "arm64" ? "arm64" : "amd64"),
-        Id: "sha256:" + "a".repeat(64),
+        ...metadata,
+        Config: {
+          ...metadata.Config,
+          Labels: {
+            ...metadata.Config.Labels,
+            "org.opencontainers.image.revision": "b".repeat(40),
+          },
+        },
+        Id: identity
+          ? mode === "published-classic"
+            ? identity.configDigest
+            : identity.manifestDigest
+          : "sha256:" + "a".repeat(64),
+        Descriptor:
+          identity && mode !== "published-classic"
+            ? {
+                mediaType: "application/vnd.oci.image.manifest.v1+json",
+                digest:
+                  mode === "inspected-mismatch"
+                    ? "sha256:" + "f".repeat(64)
+                    : identity.manifestDigest,
+              }
+            : undefined,
       },
     }),
   );
@@ -1063,13 +1129,15 @@ if(a[0]==="buildx" && a[1]==="ls") console.log(state.builder?state.name:"");
 else if(a[0]==="buildx" && a[1]==="create") {state.name=a[a.indexOf("--name")+1];state.builder=true;state.worker=true;save();if(mode==="create-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(17);}}
 else if(a[0]==="buildx" && a[1]==="rm") {state.builder=false;state.worker=false;save();}
 else if(a[0]==="buildx" && ["version","inspect","build"].includes(a[1])) {}
+else if(a[0]==="buildx" && a[1]==="imagetools" && a[2]==="inspect") {if(a.includes("--raw"))console.log(JSON.stringify({config:{digest:mode==="published-mismatch"?"sha256:"+"f".repeat(64):state.configDigest}}));else if(a.at(-1)==="{{json .Image}}")console.log(JSON.stringify({architecture:state.metadata.Architecture,os:"linux",config:state.metadata.Config}));else console.log(JSON.stringify({digest:"sha256:"+"c".repeat(64)}));}
+else if(a[0]==="push") {}
 else if(a[0]==="image" && a[1]==="inspect") console.log(JSON.stringify(state.metadata));
 else if(a[0]==="image" && a[1]==="save") fs.copyFileSync(path.join(dir,"image.tar"),a[a.indexOf("--output")+1]);
 else if(a[0]==="logout") {}
 else if(a[0]==="container" && a[1]==="ls") {const filter=a[a.indexOf("--filter")+1];if(filter.includes("buildx_buildkit_")?state.worker:state.smoke!==null)console.log("abcdefabcdef");}
 else if(a[0]==="container" && a[1]==="inspect") {const worker=a[2].startsWith("buildx_buildkit_");console.log(JSON.stringify(worker?{Name:"/buildx_buildkit_"+state.name+"0",Config:{Env:["FVOCI_CI_BUILDER_OWNER="+state.name]}}:{Name:"/"+state.smoke.name,Image:state.smoke.ref,Config:{Labels:{"org.fvoci.ci.smoke-owner":state.smoke.name}}}));}
 else if(a[0]==="container" && a[1]==="rm") {if(a.at(-1).startsWith("buildx_buildkit_"))state.worker=false;else state.smoke=null;save();}
-else if(a[0]==="run") {state.smoke={name:a[a.indexOf("--name")+1],ref:a.find(v=>/^sha256:/.test(v))};save();if(mode==="smoke-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(9);}if(mode==="interrupt"){process.on("SIGTERM",()=>process.exit(0));fs.writeFileSync(path.join(dir,"ready"),"ready");setInterval(()=>{},1000);}else if(mode!=="smoke-lie"){state.smoke=null;save();}}
+else if(a[0]==="run") {state.smoke={name:a[a.indexOf("--name")+1],ref:a.find(v=>/^sha256:/.test(v))};save();if(mode==="smoke-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(9);}if(mode==="interrupt"){process.on("SIGTERM",()=>process.exit(0));fs.writeFileSync(path.join(dir,"ready"),"ready");setInterval(()=>{},1000);}else {if(mode!=="smoke-lie"){state.smoke=null;save();}if(mode==="smoke-invalid")console.log("PRIVATE_STDOUT_CANARY");else if(mode!=="smoke-missing")console.log("FVOCI_CI_SQLITE_SDK_SHA256="+"e".repeat(64));}}
 else process.exit(42);
 `;
   await writeFile(join(bin, "docker"), "#!" + process.execPath + "\n" + code);
@@ -1165,18 +1233,23 @@ test("successful builder allocation has positive normal retirement", async () =>
     fixture.restore();
   }
 });
-for (const mode of ["smoke-normal", "smoke-fail", "smoke-lie"])
+for (const mode of ["smoke-normal", "smoke-fail", "smoke-lie", "smoke-invalid", "smoke-missing"])
   test("named image smoke confirms closure after " + mode, async () => {
     const fixture = await dockerChildFixture(mode);
     try {
       const run = smokeImage("sha256:" + "a".repeat(64), "ci-web", "fixture-smoke");
-      if (mode === "smoke-normal") await run;
+      if (mode === "smoke-normal") expect(await run).toBe("e".repeat(64));
       else {
         const error = await rejection(run);
         expect(error.message).toContain(
-          mode === "smoke-fail" ? "docker-run exit=9" : "outlived successful CLI",
+          mode === "smoke-fail"
+            ? "docker-run exit=9"
+            : mode === "smoke-lie"
+              ? "outlived successful CLI"
+              : "missing/invalid verified image SDK seal",
         );
         expect(error.message).not.toContain("PRIVATE_STDERR_CANARY");
+        expect(error.message).not.toContain("PRIVATE_STDOUT_CANARY");
       }
       expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({ smoke: null });
     } finally {
@@ -1233,6 +1306,106 @@ test("image command waits for normal real-child stdin/stdout completion", async 
     ),
   ).toBe("fixture-input");
 });
+
+for (const mode of [
+  "published-ok",
+  "published-classic",
+  "published-mismatch",
+  "inspected-mismatch",
+])
+  test(
+    "native publisher binds its smoke seal to the actual published config: " + mode,
+    async () => {
+      const identity = await saved([{ "safe.txt": "safe" }]);
+      expect(identity.configDigest).not.toBe(identity.manifestDigest);
+      const fixture = await dockerChildFixture(mode, identity);
+      const checkout = join(root, "checkout"),
+        runnerTemp = join(root, "runner");
+      try {
+        await mkdir(join(checkout, "tools/ci"), { recursive: true });
+        await mkdir(join(checkout, ".github/workflows"), { recursive: true });
+        await mkdir(join(checkout, "apps/web"), { recursive: true });
+        await mkdir(runnerTemp);
+        for (const path of [
+          "tools/ci/ci-base-image.ts",
+          ".github/workflows/ci-base-image.yml",
+          "rust-toolchain.toml",
+          ".bun-version",
+          "apps/web/package.json",
+        ])
+          await writeFile(
+            join(checkout, path),
+            await readFile(join(import.meta.dir, "../..", path)),
+          );
+        await writeFile(
+          join(checkout, "tools/ci/ci-base-image.test.ts"),
+          'import {test,expect} from "bun:test";test("fixture prerequisite",()=>expect(true).toBe(true));',
+        );
+        const child = Bun.spawn([process.execPath, "tools/ci/ci-base-image.ts", "native-build"], {
+          cwd: checkout,
+          env: {
+            ...process.env,
+            ARCH: process.arch === "arm64" ? "arm64" : "amd64",
+            TARGET: "ci-base",
+            PUBLISH: "true",
+            GITHUB_REF: "refs/heads/main",
+            GITHUB_SHA: "b".repeat(40),
+            GITHUB_RUN_ID: "11",
+            GITHUB_RUN_ATTEMPT: "1",
+            RUNNER_TEMP: runnerTemp,
+            DOCKER_CONFIG: join(runnerTemp, "ci-base-docker"),
+            GITHUB_STEP_SUMMARY: join(root, "summary"),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect(code).toBe(mode.endsWith("mismatch") ? 1 : 0);
+        const summary = await readFile(join(root, "summary"), "utf8");
+        const calls = await readFile(join(root, "calls"), "utf8");
+        if (mode === "inspected-mismatch") {
+          expect(summary).not.toContain("sdk_sha256=");
+          expect(stderr).toContain("saved image differs from inspected image identity");
+          expect(calls).not.toContain('"run"');
+          expect(calls).not.toContain('"push"');
+        } else {
+          expect(summary).toContain(
+            "image=" +
+              (mode === "published-classic" ? identity.configDigest : identity.manifestDigest) +
+              " sdk_sha256=" +
+              "e".repeat(64),
+          );
+          const published =
+            "image=ghcr.io/aisflow/fvoci-ci-base@sha256:" +
+            "c".repeat(64) +
+            " sdk_sha256=" +
+            "e".repeat(64);
+          if (mode !== "published-mismatch") expect(summary).toContain(published);
+          else {
+            expect(summary).not.toContain(published);
+            expect(stderr).toContain("published image differs from verified SDK smoke");
+          }
+          expect(stdout + stderr + summary).not.toContain("PRIVATE_");
+          expect(calls).toContain(
+            '"imagetools","inspect","ghcr.io/aisflow/fvoci-ci-base@sha256:' +
+              "c".repeat(64) +
+              '","--raw"',
+          );
+        }
+        expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
+          builder: false,
+          worker: false,
+          smoke: null,
+        });
+      } finally {
+        fixture.restore();
+      }
+    },
+  );
 
 test("native image CLI interrupt during direct scan settles tar then retires its owned builder", async () => {
   const arch = process.arch === "arm64" ? "arm64" : "amd64";

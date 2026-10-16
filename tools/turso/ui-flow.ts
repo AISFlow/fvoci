@@ -1130,6 +1130,7 @@ export async function consumeIn(
   const baselineSha = valueDigest(baseline);
   const targetSha = digest(environment.FVOCI_LIBSQL_URL as string);
   if (phase === "ui-baseline") {
+    const blockers = startupBlockers(baseline);
     steps.output.out(
       "TURSO_UI_BASELINE_PASS source=" +
         manifest.sourceInputs.source +
@@ -1142,7 +1143,9 @@ export async function consumeIn(
         " setup_needed=" +
         String(get(baseline, "setupNeeded")).toLowerCase() +
         " startup_admissible=" +
-        String(startupBlockers(baseline).length === 0),
+        String(blockers.length === 0) +
+        " startup_blockers=" +
+        (blockers.join(",") || "none"),
     );
     return;
   }

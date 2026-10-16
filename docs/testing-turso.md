@@ -75,7 +75,7 @@ folding and no trailing-dot, port, or userinfo stripping:
 Case variants, a trailing dot, a port, userinfo, a subdomain,
 `fvoci-prod…turso.io`, and any other region are refused before connect. The
 allowlist is that literal, not an Environment variable or dispatch input.
-For PREFIX11, before any DROP, reset sums `count(*)` over the user-data tables:
+By default, reset is fixture-only. For PREFIX11, before any DROP, reset sums `count(*)` over the user-data tables:
 every reset `DROP TABLE` target except the ledger `schema_migrations`, the
 infrastructure singletons `instance_settings_meta`, `event_sequence`,
 `collab_fence_counter`, and `instance_config`, and step-12
@@ -107,6 +107,25 @@ or altered schemas still return `RESET_SCHEMA_REFUSED`. All admission and DDL
 share the original transaction. Only a confirmed commit permits the fresh
 connection's complete blank-catalog check; an uncertain commit stops without
 an alternate observer or retry.
+
+For an explicitly authorized initialization of this designated test database,
+manual phase `reset` also accepts `reset_current12_data=true` (default false).
+It keeps both existing trusted manual refs, both destructive gates, the exact
+target allowlist and test-only credentials. The extra confirmation is refused
+for every other phase. Its Rust child accepts only exact current12: the complete
+compiled ledger/catalog and coverage by the same literal drop plan are still
+required on the original writer. It then discards existing test data without
+requiring the migration fixture's row values. Prefix11 and unknown or altered
+schemas are refused in this mode. Omitting the confirmation preserves every
+fixture-only refusal above; product startup and ordinary consumers never reset.
+
+After a confirmed reset and fresh blank check, run the existing manual migration
+phase with `reset_current12_data=false`. Restore the Environment destructive flag
+to false and verify it, then capture a fresh read-only `ui-baseline` at the exact
+reviewed source. Only a startup-admissible baseline supplies the current dataset
+and target bindings for main-only `ui-final`. A refusal or uncertain commit stops
+the sequence without retry; restore and verify the destructive flag on failure
+as well. Initialization does not delete the Turso service or change secrets.
 
 Manual phase `reset` keeps both destructive gates and the exact selected test
 `db::turso_test::turso_primary_disposable_prefix11_reset`; its historical name
@@ -220,7 +239,8 @@ cargo test --locked --offline --features db-tests --lib \
 
 These controls need no Turso credentials and do not select the remote reset
 consumer. They cover PREFIX11 preservation/reset, current12 fixture reset,
-fixture counterexamples with unchanged persisted rows/catalog, and a lost
+explicit current12 connected-data reset, unchanged default refusals,
+schema counterexamples with unchanged persisted rows/catalog, and a lost
 commit reply without a fresh blank observer. Loopback sqld is separate from
 the pinned local SQLite engine and actual Turso acceptance.
 

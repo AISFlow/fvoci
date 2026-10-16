@@ -320,8 +320,9 @@ export function verifyMetadata(info: unknown, architecture: string) {
 export async function scanImage(path: string, inspection: string, arch: string) {
   const operation = imageInterrupts();
   try {
-    await scanSavedImage(path, inspection, arch, operation);
+    const descriptors = await scanSavedImage(path, inspection, arch, operation);
     operation.check();
+    return descriptors;
   } finally {
     operation.close();
   }
@@ -485,6 +486,10 @@ async function scanSavedImage(
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
+  return {
+    manifestDigest: "sha256:" + descriptorName(manifestDescriptor).slice("blobs/sha256/".length),
+    configDigest: "sha256:" + descriptorName(at(manifest, "config")).slice("blobs/sha256/".length),
+  };
 }
 
 export function buildSummary(log: string, info?: unknown) {
@@ -669,6 +674,7 @@ export function imageBuildPlan(env: Record<string, string | undefined>, architec
   return {
     arch,
     target,
+    source,
     image,
     builder: `${target}-${run}-${attempt}-${arch}`,
     ref: `${image}:${source}-${run}-${attempt}-${arch}`,
@@ -687,6 +693,26 @@ export function imageBuildPlan(env: Record<string, string | undefined>, architec
       "--progress=plain",
     ],
   };
+}
+
+export function imageSdkSeal(output: string): string {
+  const seal = /^FVOCI_CI_SQLITE_SDK_SHA256=([a-f0-9]{64})$/.exec(output)?.[1];
+  check(seal, "missing/invalid verified image SDK seal; content withheld");
+  return seal;
+}
+
+export function imageSdkSummary(
+  plan: ReturnType<typeof imageBuildPlan>,
+  ref: string,
+  seal: string,
+): string {
+  check(
+    /^[a-f0-9]{64}$/.test(seal) &&
+      (sha256Digest.test(ref) ||
+        (ref.startsWith(plan.image + "@") && sha256Digest.test(ref.slice(plan.image.length + 1)))),
+    "invalid image/SDK summary binding; content withheld",
+  );
+  return `SQLite SDK (${plan.target}/${plan.arch}): source=${plan.source} image=${ref} sdk_sha256=${seal}`;
 }
 
 // Image-only argv execution. Signals terminate and await the owned CLI child;
@@ -807,14 +833,16 @@ check(!fs.existsSync("/tmp/bootstrap-ca.crt"));
 for(const line of fs.readFileSync("/var/lib/dpkg/info/ca-certificates.md5sums","utf8").trim().split("\n")) { const match=/^([a-f0-9]{32})\s+(.+)$/.exec(line); check(match); if(/^usr\/share\/(doc|man)\//.test(match[2])) continue; check(new Bun.CryptoHasher("md5").update(fs.readFileSync("/"+match[2])).digest("hex")===match[1]); }
 check(fs.readdirSync("/usr/local/share/ca-certificates").length===0);
 check(fs.statSync("/etc/ssl/certs/ca-certificates.crt").size>0 && fs.existsSync(path.join(process.env.LIBCLANG_PATH,"libclang.so")));
-const parent=fs.mkdtempSync("/tmp/fvoci-image-sdk-");
+const parent=fs.mkdtempSync("/tmp/fvoci-image-sdk-");let sdkSha256;
 try { const identity=new Bun.CryptoHasher("sha256").update(fs.readFileSync("/opt/fvoci-sqlite/consumer-inputs.json")).digest("hex");
  run(["/usr/local/bin/fvoci-ci-tools","sqlite-ci","--local-image-sdk","--image-sdk","/opt/fvoci-sqlite","--expected-sdk-sha256",identity,"--image-ref",process.env.FVOCI_SDK_IMAGE_REF,"--parent",parent]);
  if(process.env.FVOCI_IMAGE_TARGET === "ci-web") { function browser(root) { for(const name of fs.readdirSync(root)){const p=path.join(root,name),s=fs.statSync(p);if(s.isDirectory()){const b=browser(p);if(b)return b;} else if(name==="chrome" && /chrome-linux/.test(p))return p;} } const executable=browser(process.env.PLAYWRIGHT_BROWSERS_PATH);check(executable);
  const home=path.join(parent,"browser-home");fs.mkdirSync(home,{mode:0o700});
  const browserEnv={...process.env,HOME:home,XDG_CONFIG_HOME:path.join(home,"config"),XDG_CACHE_HOME:path.join(home,"cache")};
  check(run([executable,"--headless","--no-sandbox","--disable-gpu","--user-data-dir="+path.join(parent,"chromium"),"--dump-dom","about:blank"],browserEnv).includes("<html")); }
+ sdkSha256=identity;
 } finally { fs.rmSync(parent,{recursive:true,force:true}); }
+check(/^[a-f0-9]{64}$/.test(sdkSha256));console.log("FVOCI_CI_SQLITE_SDK_SHA256="+sdkSha256);
 `;
 }
 export async function smokeImage(ref: string, target: string, name: string) {
@@ -827,9 +855,9 @@ export async function smokeImage(ref: string, target: string, name: string) {
     (await namedContainer(name)) === null,
     "image smoke name already exists; refusing adoption",
   );
-  let failure: unknown;
+  let failure: unknown, seal: string | undefined;
   try {
-    await imageCommand([
+    const output = await imageCommand([
       "docker",
       "run",
       "--rm",
@@ -857,6 +885,7 @@ export async function smokeImage(ref: string, target: string, name: string) {
       "-e",
       imageSmokeScript(),
     ]);
+    seal = imageSdkSeal(output);
   } catch (error) {
     failure = error;
   }
@@ -879,6 +908,8 @@ export async function smokeImage(ref: string, target: string, name: string) {
     cleanupErrors.push(error);
   }
   imageOutcome("smoke", failure, cleanupErrors);
+  check(seal !== undefined, "verified image SDK seal missing");
+  return seal;
 }
 async function nativeImageBuild() {
   const plan = imageBuildPlan(process.env, process.arch);
@@ -929,13 +960,23 @@ async function nativeImageBuild() {
       await run(["docker", "image", "inspect", plan.ref, "--format", "{{json .}}"]),
     );
     await Bun.write(inspection, JSON.stringify(metadata));
-    await run(["docker", "image", "save", plan.ref, "--output", join(work, "image.tar")]);
-    await scanImage(join(work, "image.tar"), inspection, plan.arch);
-    operation.check();
     const id = at(metadata, "Id");
     check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
-    await smokeImage(id, plan.target, plan.builder + "-smoke");
+    await run(["docker", "image", "save", id, "--output", join(work, "image.tar")]);
+    const saved = await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    const descriptor = at(metadata, "Descriptor");
+    check(
+      descriptor === undefined
+        ? id === saved.configDigest
+        : manifestMediaTypes.includes(at(descriptor, "mediaType")) &&
+            at(descriptor, "digest") === id &&
+            id === saved.manifestDigest,
+      "saved image differs from inspected image identity",
+    );
     operation.check();
+    const sdkSeal = await smokeImage(id, plan.target, plan.builder + "-smoke");
+    operation.check();
+    summary(imageSdkSummary(plan, id, sdkSeal));
     if (process.env.PUBLISH === "true") {
       const started = performance.now();
       await run(["docker", "push", plan.ref]);
@@ -953,7 +994,41 @@ async function nativeImageBuild() {
       summary(
         `Image/cache publish ${plan.target}/${plan.arch}: ${String((performance.now() - started) / 1000)}s`,
       );
-      summary(await run(["docker", "buildx", "imagetools", "inspect", plan.ref]));
+      const manifest: unknown = JSON.parse(
+        await run([
+          "docker",
+          "buildx",
+          "imagetools",
+          "inspect",
+          plan.ref,
+          "--format",
+          "{{json .Manifest}}",
+        ]),
+      );
+      const digest = at(manifest, "digest");
+      check(typeof digest === "string" && sha256Digest.test(digest), "invalid architecture digest");
+      const published = `${plan.image}@${digest}`;
+      const config: unknown = JSON.parse(
+        await run([
+          "docker",
+          "buildx",
+          "imagetools",
+          "inspect",
+          published,
+          "--format",
+          "{{json .Image}}",
+        ]),
+      );
+      const raw: unknown = JSON.parse(
+        await run(["docker", "buildx", "imagetools", "inspect", published, "--raw"]),
+      );
+      archDigest(config, manifest, plan.arch);
+      check(
+        at(config, "config", "Labels", "org.opencontainers.image.revision") === plan.source &&
+          at(raw, "config", "digest") === saved.configDigest,
+        "published image differs from verified SDK smoke",
+      );
+      summary(imageSdkSummary(plan, published, sdkSeal));
     }
   } catch (error) {
     failure = error;
