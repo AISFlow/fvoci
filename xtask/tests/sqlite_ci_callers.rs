@@ -555,7 +555,7 @@ fn contract(root: &Path) -> Check {
             for preparation in [prepare, ready] {
                 let preparation = text_of(preparation);
                 let unguarded = if workflow == "web" && *name == "workspace-browser-shard" {
-                    let host = "        if: contains(fromJSON('[0,3,5]'), matrix.shard)\n";
+                    let host = "        if: contains(fromJSON('[0,5]'), matrix.shard)\n";
                     contains(preparation, host, what)?;
                     preparation.replacen(host, "", 1)
                 } else {
@@ -1056,8 +1056,8 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
         ),
         (
             "workspace-browser-shard",
-            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0,3,5]'), matrix.shard)",
-            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0,3]'), matrix.shard)",
+            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0,5]'), matrix.shard)",
+            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0]'), matrix.shard)",
         ),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         (
