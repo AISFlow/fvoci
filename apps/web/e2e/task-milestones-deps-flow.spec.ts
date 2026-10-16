@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIResponse, type Page, type Route } from "@playwright/test";
 import { login } from "./helpers";
 
 // Validate the response fields used by this flow; retain the complete payload.
@@ -134,12 +134,6 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
   const blockedPath = new URL(page.url()).pathname;
   const blockedDisplay = blockedPath.split("/").pop() ?? "";
 
-  await page.goto(`/w/${admin.workspaceSlug}/TMD/tasks`);
-  await expect(page.getByTestId("project-milestones")).toBeVisible();
-  await page.getByTestId("project-milestone-name").fill("출시");
-  await page.getByTestId("project-milestone-add").click();
-  await expect(page.locator('[data-testid^="project-milestone-name-"]')).toHaveValue("출시");
-
   const wsId = await workspaceId(page, admin.workspaceSlug);
   const projectsRes = await page.request.get(`/api/v1/workspaces/${wsId}/projects`);
   const project = projectListSchema
@@ -147,6 +141,51 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
     .items.find((item: { key: string }) => item.key === "TMD");
   expect(project).toBeTruthy();
   assert(project);
+  const milestonesPath = `/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`;
+  const initialList = Promise.withResolvers<APIResponse>();
+  const releaseInitialList = Promise.withResolvers<void>();
+  const initialListFinished = Promise.withResolvers<void>();
+  let claimed = false;
+  const holdInitialList = async (route: Route) => {
+    if (route.request().method() !== "GET" || claimed) return route.fallback();
+    claimed = true;
+    try {
+      // Capture the real empty list before creation, but deliver it after POST.
+      const response = await route.fetch();
+      initialList.resolve(response);
+      await releaseInitialList.promise;
+      await route.fulfill({ response });
+    } catch (error) {
+      initialList.reject(error);
+      throw error;
+    } finally {
+      initialListFinished.resolve();
+    }
+  };
+  await page.route(`**${milestonesPath}`, holdInitialList);
+  try {
+    await page.goto(`/w/${admin.workspaceSlug}/TMD/tasks`);
+    const beforeCreate = await initialList.promise;
+    expect(beforeCreate.status()).toBe(200);
+    expect(milestoneListSchema.parse(await beforeCreate.json()).items).toEqual([]);
+    await expect(page.getByTestId("project-milestones")).toBeVisible();
+    await page.getByTestId("project-milestone-name").fill("출시");
+    const created = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === milestonesPath,
+    );
+    await page.getByTestId("project-milestone-add").click();
+    expect((await created).status()).toBe(201);
+    await expect(page.getByTestId("project-milestone-name")).toHaveValue("");
+    releaseInitialList.resolve();
+    await initialListFinished.promise;
+    await expect(page.locator('[data-testid^="project-milestone-name-"]')).toHaveValue("출시");
+  } finally {
+    releaseInitialList.resolve();
+    if (claimed) await initialListFinished.promise;
+    await page.unroute(`**${milestonesPath}`, holdInitialList);
+  }
   const milestonesRes = await page.request.get(
     `/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`,
   );
