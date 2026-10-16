@@ -85,7 +85,9 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
   require(isMapping(producer) &&
     safeGet(producer, "needs") === "ci-plan", "single producer needs only ci-plan");
   const value = safeGet(producer, "steps");
-  const steps = Array.isArray(value) ? value.filter(isMapping) : [];
+  const steps = Array.isArray(value)
+    ? value.flatMap((step) => (isMapping(step) ? [step] : []))
+    : [];
   require(!steps.some((step) => {
     const run = safeGet(step, "run");
     return typeof run === "string" && /\btouch\b/.test(run);
