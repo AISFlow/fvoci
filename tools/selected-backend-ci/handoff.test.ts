@@ -839,6 +839,7 @@ describe.serial("browser build packet", () => {
   test("CLI refusal identifies only its numeric own-source check", async () => {
     const cli = join(import.meta.dir, "handoff.ts");
     const child = Bun.spawn([process.execPath, "--no-env-file", cli, "consume"], {
+      env: { ...process.env },
       stdout: "pipe",
       stderr: "pipe",
     });
