@@ -551,7 +551,11 @@ test("dependency phases refuse credentials and cross targets and preserve fetch 
         ],
         {
           env: {
-            ...process.env,
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([key]) => key !== "CI" && !key.startsWith("GITHUB_"),
+              ),
+            ),
             PATH: bin + ":" + (process.env.PATH ?? ""),
             FIXTURE_CALLS: calls,
             FVOCI_WEB_CONTAINER_LOCAL: "1",
