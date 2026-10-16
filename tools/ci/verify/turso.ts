@@ -248,6 +248,10 @@ export function verifyTursoWorkflow(data: Mapping, name = TURSO_MANUAL_WORKFLOW_
   require(deepEqual(get(admission, "steps"), [
     CHECKOUT,
     SETUP_BUN,
+    {
+      name: "Locked admission dependencies (no lifecycle scripts)",
+      run: "bun install --frozen-lockfile --ignore-scripts",
+    },
     { name: "Pure admission fixtures (no credentials or network)", run: TURSO_COMMANDS.fixtures },
     {
       name: "Verify preexisting Environment (no configuration writes)",

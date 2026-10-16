@@ -1509,7 +1509,7 @@ test("SQLite invitation login is bound to one exact prepared new-actor row in bo
   }
 });
 
-test("SQLite extraction events bind one new closed document attachment and its exact producer row", async () => {
+test.each(["sqlite", "libsql-remote"] as const)("%s owned extraction", async (backend) => {
   const { allocatedRows } = await import("./ui-audit.ts");
   const fixture = () => {
     const f = sqlitePreparedRecords(),
@@ -1521,7 +1521,7 @@ test("SQLite extraction events bind one new closed document attachment and its e
       attachmentHash = f.h("complete-private-attachment-row"),
       cells: unknown[][] = [
         ["blob", eventId],
-        number(4),
+        number(backend === "sqlite" ? 4 : 1),
         ["blob", f.workspace],
         ["null"],
         ["text", "attachment.extracted"],
@@ -1569,8 +1569,8 @@ test("SQLite extraction events bind one new closed document attachment and its e
       event = {
         ...f.refs([f.workspace], [], eventId),
         eventWitness: {
-          class: "sqlite-attachment-extracted",
-          sequence: number(4),
+          class: "attachment-extracted",
+          sequence: cells[1],
           target,
           columns: [
             "id",
@@ -1587,21 +1587,45 @@ test("SQLite extraction events bind one new closed document attachment and its e
           cells,
         },
       };
+    if (backend === "libsql-remote") {
+      // Remote final phases have no local preparation actors or readback effects.
+      for (const table of [
+        "sessions",
+        "events",
+        "document_states",
+        "collab_room_fences",
+        "maintenance_job_claims",
+      ]) {
+        record(after, "fingerprints")[table] = structuredClone(
+          get(f.before, "fingerprints", table),
+        );
+        record(after, "allocations")[table] = structuredClone(get(f.before, "allocations", table));
+        if (Object.hasOwn(record(f.before, "operations"), table))
+          record(after, "operations")[table] = structuredClone(get(f.before, "operations", table));
+      }
+      record(after, "operations").collab_fence_counter = structuredClone(
+        get(f.before, "operations", "collab_fence_counter"),
+      );
+      f.before.backend = backend;
+      after.backend = backend;
+      f.audit.sqlitePreparation = undefined;
+      must(f.audit.serial).expectedBackend = undefined;
+    }
     record(after, "fingerprints").attachments = { [attachmentHash]: 1 };
     record(after, "allocations").attachments = { [attachmentHash]: attachment };
     record(after, "fingerprints", "events")[sha] = 1;
     record(after, "allocations", "events")[sha] = event;
     (get(after, "operations", "events") as unknown[]).push([
-      number(4),
+      cells[1],
       ["blob", f.workspace],
       ["null"],
     ]);
-    record(after, "operations").event_sequence = [[number(1), number(4)]];
+    record(after, "operations").event_sequence = [[number(1), cells[1]]];
     f.audit.documents = { [document]: f.workspace };
     must(f.audit.serial).after = {
-      ...must(f.audit.sqlitePreparation).prepared,
+      ...must(f.audit.serial).after,
       dataset: after,
-      checks: { ...must(f.audit.sqlitePreparation).prepared.checks, clockMicros: "60" },
+      checks: { ...must(f.audit.serial).after.checks, clockMicros: "60" },
     };
     return {
       ...f,
@@ -1624,7 +1648,7 @@ test("SQLite extraction events bind one new closed document attachment and its e
       Object.values(record(f.after, "allocations", "events")).some(
         (row) => get(row, "eventWitness") === null,
       ),
-    ).toBe(true);
+    ).toBe(backend === "sqlite");
     allocatedRows(f.before, f.after, f.audit);
   }).not.toThrow();
   const mutations: ((f: ReturnType<typeof fixture>) => void)[] = [
@@ -1688,16 +1712,30 @@ test("SQLite extraction events bind one new closed document attachment and its e
     },
     (f) => {
       (get(f.after, "operations", "events") as unknown[]).push([
-        number(4),
+        f.cells[1],
         ["blob", f.workspace],
         ["null"],
       ]);
     },
     (f) => {
-      f.after.backend = "libsql-remote";
+      f.after.backend = backend === "sqlite" ? "libsql-remote" : "sqlite";
     },
     (f) => {
-      f.audit.sqlitePreparation = undefined;
+      if (backend === "sqlite") f.audit.sqlitePreparation = undefined;
+      else f.audit.serial = undefined;
+    },
+    (f) => {
+      f.fields[10] = number(19);
+    },
+    (f) => {
+      f.cells[9] = number(1061);
+    },
+    (f) => {
+      record(f.event).eventWitness = null;
+    },
+    (f) => {
+      f.fields[4] = ["blob", "f".repeat(32)];
+      record(f.attachment).actors = ["f".repeat(32)];
     },
   ];
   for (const mutate of mutations) {

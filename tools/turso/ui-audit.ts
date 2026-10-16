@@ -651,7 +651,7 @@ type ProjectionTargets = {
   removedIdentityLinks: Set<string>;
 };
 
-function sqliteExtractedEvent(
+function ownedExtractedEvent(
   refs: Record_,
   audit: Audit,
   targets: ProjectionTargets,
@@ -661,14 +661,16 @@ function sqliteExtractedEvent(
   after: unknown,
 ): unknown[] | null {
   const selected = audit.sqlitePreparation,
+    backend = audit.serial?.expectedBackend ?? "libsql-remote",
+    started = backend === "sqlite" ? selected?.prepared : audit.serial?.before,
     witness = record(refs, "eventWitness"),
     cells = list(witness, "cells"),
     target = witness.target;
   if (
-    !selected ||
-    audit.serial?.expectedBackend !== "sqlite" ||
-    get(before, "backend") !== "sqlite" ||
-    get(after, "backend") !== "sqlite" ||
+    !audit.serial ||
+    !started ||
+    get(before, "backend") !== backend ||
+    get(after, "backend") !== backend ||
     count !== 1 ||
     !same(Object.keys(witness).sort(), ["cells", "class", "columns", "sequence", "target"]) ||
     !same(witness.columns, [
@@ -746,8 +748,8 @@ function sqliteExtractedEvent(
     !same(fields[3], ["null"]) ||
     !same(fields[4], ["blob", uploader]) ||
     !Object.hasOwn(audit.actors, uploader) ||
-    uploader === selected.preparationActor.id ||
-    uploader === selected.readbackActor.id ||
+    uploader === selected?.preparationActor.id ||
+    uploader === selected?.readbackActor.id ||
     !Object.hasOwn(audit.workspaces, workspace) ||
     targets.documents.get(document) !== workspace ||
     !same(get(attachment, "workspaces"), [workspace]) ||
@@ -765,7 +767,7 @@ function sqliteExtractedEvent(
     created = integer(cells[9]),
     operation = [cells[1], cells[2], cells[3]];
   if (
-    completed < decimal(selected.prepared.checks.clockMicros) ||
+    completed < decimal(started.checks.clockMicros) ||
     created < completed ||
     created > decimal(audit.serial.after.checks.clockMicros) + 999n ||
     list(after, "operations", "events").filter((row) => same(row, operation)).length !== 1 ||
@@ -773,7 +775,7 @@ function sqliteExtractedEvent(
       (row) =>
         isRecord(row) &&
         isRecord(row.eventWitness) &&
-        row.eventWitness.class === "sqlite-attachment-extracted" &&
+        row.eventWitness.class === "attachment-extracted" &&
         row.eventWitness.target === target,
     ).length !== 1
   )
@@ -826,8 +828,8 @@ function witnessedEventOperation(
   if (typeof target !== "string" || !/^[a-f0-9]{32}$/.test(target)) return null;
   const sequence = witness.sequence;
   if (integer(sequence) <= 0n) return null;
-  if (witness.class === "sqlite-attachment-extracted")
-    return sqliteExtractedEvent(refs, audit, targets, sha, count, before, after);
+  if (witness.class === "attachment-extracted")
+    return ownedExtractedEvent(refs, audit, targets, sha, count, before, after);
   if (witness.class === "actor-invitation-login") {
     const selected = audit.sqlitePreparation;
     return count === 1 &&
