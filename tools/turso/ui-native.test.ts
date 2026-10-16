@@ -408,6 +408,67 @@ const rewrite = (inputs: BrowserInputs, change: (external: Record<string, string
 };
 
 describe("browser", () => {
+  test("canonical reporter error locations survive without a stack and remain source qualified", () => {
+    const source = 'test("registered", async () => {\n  expect(response.status()).toBe(200);\n});';
+    const diagnostic = (location: unknown, errorLocation?: unknown) =>
+      browserFailureDiagnostic(
+        {
+          suites: [
+            {
+              specs: [
+                {
+                  title: "registered",
+                  tests: [
+                    {
+                      results: [
+                        {
+                          status: "failed",
+                          error: {
+                            message:
+                              "Error: expect(received).toBe(expected)\nReceived: 503\nPRIVATE_BODY",
+                            location,
+                            snippet: "PRIVATE_SNIPPET",
+                            cause: { message: "PRIVATE_CAUSE" },
+                          },
+                          errorLocation,
+                          stdout: [{ text: "PRIVATE_STDOUT" }],
+                          attachments: [{ body: "PRIVATE_ATTACHMENT" }],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        ON,
+        "on",
+        source,
+      );
+    const location = { file: ON, line: 2, column: 3 };
+    for (const errorLocation of [undefined, { file: ON, line: 1 }]) {
+      expect(diagnostic(location, errorLocation).browserFailure).toMatchObject({
+        failures: [{ title: "registered", step: "http-status", httpStatus: 503, line: 2 }],
+      });
+    }
+    for (const refused of [
+      { file: "PRIVATE_HELPER.ts", line: 2 },
+      { file: "PRIVATE_URL", line: 2 },
+      ...[0, -1, 1.5, 4, Number.NaN, Number.POSITIVE_INFINITY, "2"].map((line) => ({
+        file: ON,
+        line,
+      })),
+    ]) {
+      const result = diagnostic(refused, location);
+      expect(result.browserFailure).toMatchObject({
+        failures: [{ step: "expect", httpStatus: null, line: null }],
+      });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    }
+    expect(JSON.stringify(diagnostic(location))).not.toContain("PRIVATE_");
+  });
+
   test("diagnostics bound hostile reports and never treat body numbers as HTTP status", () => {
     const source = 'test("registered", async () => {\n  expect(body.secret).toBe(200);\n});';
     const result = {
