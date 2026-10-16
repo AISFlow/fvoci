@@ -714,36 +714,48 @@ scripts/prepare-web-e2e.sh
 scripts/run-web-e2e.sh
 ```
 
-Shared-container browser tests prepare one producer and reuse it across the
-complete ordinary shards whose SQL fixtures use the native Bun helper:
+The maintained ordinary browser entry selects shared Docker execution by default.
+Select an immutable SDK-bearing image and its sealed SQLite identity explicitly:
 
 ```sh
-bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser . --ci-shards 1,2,4,6,7
+scripts/run-web-e2e.sh --image-pin "$CI_WEB_IMAGE_PIN" --sdk-sha256 "$CI_WEB_SDK_SHA256" --ci-shard 2
 ```
 
-Prepare the digest named by `CI_WEB_IMAGE` in `tools/web-e2e/run-web-e2e.ts`
-locally once; the command refuses a missing image and never pulls `latest`.
-It uses the same browser producer, sealed packet and shard entrypoints in two
-fresh source copies, prepares the existing xtask SQLite SDK once, and compiles
-no consumer binaries. The host owns an isolated PostgreSQL/Meilisearch network;
-browser containers receive no Docker socket or privilege. Actor UID/GID come
-from the caller, writable paths and ports are run-owned, and CPU/memory/PID
-limits are explicit. This initial slice requires a native Linux amd64 Docker
-daemon; macOS Docker Desktop and ARM64 execution are not yet verified. Other
-shards retain their host Docker fixture oracles until those boundaries are
-migrated; the container command refuses them rather than omitting assertions.
-Shard 0 retains the timer's host SQL fixture, shard 3 its archive-owned databases
-and native restart lifecycle, and shard 5 its actual Docker service-ledger witness.
-These complete shards still require the existing host command. An individual
-supported shard can be selected with `--ci-shard N`.
+The image must already exist locally; the command never pulls or builds an image.
+A registry selection must use an exact `ghcr.io/aisflow/fvoci-ci-web@sha256:…`
+reference. Before registry publication, a locally verified Docker engine ID can
+be selected with `--image-pin sha256:… --sdk-sha256 … --local-image-sdk`.
+Local engine IDs are refused in CI and are never treated as registry digests.
+The historical tool-only default image does not contain the sealed SDK; an
+absent SDK pin or mismatched seal fails rather than compiling/downloading SQLite.
 
-At most two complete consumers run together, with separate databases, networks,
-home/temp/Cargo lock directories, output and Vite config caches. SDK and dependency
-bytes are shared read-only at the producer's original physical paths. A retained
-owned cohort can be selected with `--reuse-cohort /path/to/cohort`; this retains its
-exact build and in-container source and native qualification. Reuse refuses any
-product or in-container program change; the host orchestrator source is reported
-separately. It does not qualify a new image or a different product source.
+With no shard or spec selection, the entry retains the entire normal suite:
+complete Docker shards 1,2,4,6,7, followed by complete host shards 0,3,5. The
+Docker shards share one source-qualified producer, while the host cohort builds
+its own native artifacts once; host and container inputs are never mixed.
+Shard 0 needs the timer host SQL/lifecycle fixture, shard 3 owns archive databases
+and native restart, and shard 5 asserts the actual Docker service ledger. Prepare
+the host dependencies with `scripts/prepare-web-e2e.sh` before this full route.
+A host-required shard, explicit Playwright specs/filters, pending/selected suite,
+or current GitHub workflow keeps its original host boundary and exact selection.
+`--host` explicitly retains the host entry. Container image options cannot
+change a host-required selection. No groups are silently omitted.
+
+The producer and every consumer adopt `/opt/fvoci-sqlite` through the image's
+existing native verifier. Full recipe, compiler/header/library/Rust/ABI bytes,
+source/tree, image revision, SDK seal, run/attempt, features/profile and artifact
+checks remain required. The container's immutable SDK source can precede the
+test source only when the Dockerfile, SDK implementation and toolchain inputs
+match. Each consumer owns its SDK input report, home/temp/Cargo locks, output
+and Vite configuration cache; shared dependency/native bytes are read-only.
+
+At most two complete Docker consumers run together, each with its own database,
+restricted app role, private PostgreSQL/Meilisearch network and explicit CPU,
+memory and PID limits. Browser containers receive no Docker socket or privilege;
+UID/GID come from the caller. A retained cohort can be selected with
+`--reuse-cohort /path/to/cohort` only for its exact image/SDK/source-qualified
+packet; product or in-container changes are refused. Linux amd64 is the actual
+local acceptance target; macOS Docker Desktop and ARM64 remain unverified.
 
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,

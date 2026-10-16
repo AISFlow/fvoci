@@ -153,15 +153,38 @@ fn local_root_callers_require_preflight_and_forward_cargo_arguments() {
 fn web_build_stops_on_preflight_failure() {
     let _serial = serial();
     let r = CallerRoot::new(&["run-web-e2e.sh"]);
+    let bun = Command::new("bun")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(bun.status.success());
+    let bun = String::from_utf8(bun.stdout).unwrap().trim().to_owned();
+    let tools = r.root.join("tools/web-e2e");
+    fs::create_dir_all(&tools).unwrap();
+    for name in ["run-web-e2e.ts", "groups.ts", "compat.ts"] {
+        let source = fs::read_to_string(repo().join("tools/web-e2e").join(name)).unwrap();
+        let source = if name == "run-web-e2e.ts" {
+            source.replace(
+                "process.execPath",
+                &serde_json::to_string(&r.bin.join("bun")).unwrap(),
+            )
+        } else {
+            source
+        };
+        fs::write(tools.join(name), source).unwrap();
+    }
     write_exec(
         &r.bin.join("bun"),
-        "#!/usr/bin/env bash\necho \"bun $*\" >>\"$TRACE\"\n[ \"$*\" = '--bun x --no-install playwright --version' ]\n",
+        &format!(
+            "#!{bun}\nconst args=process.argv.slice(2);require('node:fs').appendFileSync(process.env.TRACE,'bun '+args.join(' ')+'\\n');if(args.join(' ')==='--bun x --no-install playwright --version')process.exit(0);const child=Bun.spawnSync([{},...args],{{stdin:'ignore',stdout:'inherit',stderr:'inherit'}});process.exit(child.exitCode);\n",
+            serde_json::to_string(&bun).unwrap()
+        ),
     );
     write_exec(
         &r.root.join("scripts/prepare-sqlite-ci.sh"),
         "#!/usr/bin/env bash\nprintf '%s\\n' \"preflight $*\" >>\"$TRACE\"\nexit 19\n",
     );
-    let out = r.command("run-web-e2e.sh").output().unwrap();
+    let out = r.command("run-web-e2e.sh").arg("--host").output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),

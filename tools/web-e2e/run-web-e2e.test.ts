@@ -19,6 +19,8 @@ import { join } from "node:path";
 import {
   CheckError,
   CI_WEB_IMAGE,
+  containerImage,
+  webRequest,
   containerShard,
   qualifyCohortHostProgram,
   sqliteEnvironment,
@@ -153,6 +155,7 @@ describe("qualifyCommittedApi", () => {
       FVOCI_WEB_CONTAINER_LOCAL: "1",
       FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
       FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
       FVOCI_WEB_CONTAINER_SOURCE: sha,
     };
     expect(qualifyCommittedApi(root, request, local)).toBe(sha);
@@ -224,6 +227,44 @@ test("containers admit complete migrated shards, never partial or required host 
   for (const value of ["1", "2", "4", "6", "7"]) expect(containerShard(value)).toBe(value);
   for (const value of [undefined, "", "0", "3", "5", "-1", "6 --grep=skip", "8"])
     expect(() => containerShard(value)).toThrow(CheckError);
+});
+
+test("maintained default preserves the full hybrid suite and exact host selections", () => {
+  expect(webRequest([], {}).route).toBe("hybrid");
+  for (const shard of ["1", "2", "4", "6", "7"])
+    expect(webRequest(["--ci-shard", shard], {}).route).toBe("docker");
+  for (const shard of ["0", "3", "5"])
+    expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
+  const args = ["e2e/v050-task-timer.spec.ts", "--grep", "exact original filter", "--workers=1"];
+  expect(webRequest(args, {}).specs).toEqual(args);
+  expect(webRequest(args, {}).route).toBe("host");
+  expect(webRequest([], { FVOCI_E2E_PENDING: "1" }).route).toBe("host");
+  expect(webRequest(["--host"], {}).route).toBe("host");
+  expect(webRequest(["--ci-shard", "2"], { GITHUB_ACTIONS: "true" }).route).toBe("host");
+  for (const args of [
+    ["--ci-shard", "8"],
+    ["--ci-shard", "2", "x.spec.ts"],
+    ["--host", "--local-image-sdk"],
+    ["--ci-shard", "0", "--image-pin", "local"],
+    ["--ci-shard-count", "16"],
+  ])
+    expect(() => webRequest(args, {})).toThrow(CheckError);
+});
+
+test("sealed SDK selection distinguishes local engine IDs from registry and CI authority", () => {
+  const seal = "b".repeat(64),
+    image = "sha256:" + "a".repeat(64);
+  expect(containerImage(image, seal, true, {})).toEqual({ image, sdk: seal, local: true });
+  expect(containerImage(CI_WEB_IMAGE, seal, false, { CI: "true" }).image).toBe(CI_WEB_IMAGE);
+  for (const [pin, sdk, local, env] of [
+    [image, seal, false, {}],
+    [CI_WEB_IMAGE, seal, true, {}],
+    [image, seal, true, { CI: "true" }],
+    [image, seal, true, { GITHUB_ACTIONS: "true" }],
+    [CI_WEB_IMAGE, "", false, {}],
+    ["latest", seal, false, {}],
+  ] as const)
+    expect(() => containerImage(pin, sdk, local, env)).toThrow(CheckError);
 });
 
 test("SQLite exports are four data fields, never shell evaluation", () => {

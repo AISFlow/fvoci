@@ -6,14 +6,25 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
+  chmodSync,
+  rmSync,
+  symlinkSync,
   readFileSync,
   realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import process from "node:process";
-import { TIMER_FILTERS } from "./groups.ts";
+import {
+  TIMER_FILTERS,
+  PAIR_FIRST,
+  PAIR_SECOND,
+  DEFAULT_SHARD_COUNT,
+  shardPlanLines,
+} from "./groups.ts";
 import { groupDatabaseStatement } from "./database-urls.ts";
 
 // Substitute only the Bun child executable in this fixture's private copied
@@ -91,6 +102,352 @@ async function fakeBun(args: string[]): Promise<void> {
 }
 
 class FixtureError extends Error {}
+
+// Executables live only in the owned copied fixture. The production entry and
+// all of its argument/qualification logic execute, with downstream tools stubbed.
+export async function entryTool(tool: string, args: string[]): Promise<void> {
+  if (tool === "cargo") {
+    console.error("fvoci-web-e2e-fake-cargo " + args.join(" "));
+    process.exit(Number(process.env.FVOCI_TEST_CARGO_EXIT ?? "0"));
+  }
+  if (tool === "bash") {
+    const name = args[0] ?? "";
+    if (name.endsWith("/prepare-sqlite-ci.sh")) {
+      check(args[1] === "--env-file" && !!args[2], "SQLite prerequisite argv");
+      console.error("fvoci-web-e2e-fake-sqlite-prep");
+      writeFileSync(
+        args[2],
+        "export SQLITE3_LIB_DIR=/fixture/sqlite/lib\nexport SQLITE3_INCLUDE_DIR=/fixture/sqlite/include\nexport SQLITE3_STATIC=1\nexport SQLITE3_NO_PKG_CONFIG=1\n",
+      );
+      return;
+    }
+    if (name.endsWith("/generate-api.sh")) {
+      console.error("fvoci-web-e2e-fake-generate-api");
+      return;
+    }
+    if (name.endsWith("/web-e2e-run-group.sh")) {
+      await new Response(Bun.stdin.stream()).text();
+      if (process.env.FVOCI_FIXTURE_TIMER === "1") {
+        console.log(JSON.stringify(args.slice(1)));
+        process.exit(args.includes(process.env.FVOCI_TEST_TIMER_FAIL_FILTER ?? "unset") ? 7 : 0);
+      }
+      console.log("fvoci-web-e2e-run-group " + args.slice(1).join(" "));
+      process.exit(Number(process.env.FVOCI_TEST_RUN_GROUP_EXIT ?? "0"));
+    }
+    const child = Bun.spawn(["/bin/bash", ...args], {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    process.exit(await child.exited);
+  }
+  if (args.join(" ") === "--bun x --no-install playwright --version") return;
+  if (args.join(" ") === "--bun run build") {
+    console.error("fvoci-web-e2e-fake-bun-build");
+    if (process.env.FVOCI_TEST_DIRTY_API_DURING_BUILD === "1")
+      appendFileSync("src/generated/api.ts", "// dirty during build\n");
+    process.exit(Number(process.env.FVOCI_TEST_BUN_BUILD_EXIT ?? "0"));
+  }
+  if (args[0]?.endsWith("/handoff.ts") && ["admit", "consume"].includes(args[1] ?? "")) {
+    check(process.env.FVOCI_WEB_BUILD_PHASE === "consume", "handoff consume phase");
+    console.log("fvoci-web-e2e-fake-handoff-" + String(args[1]));
+    process.exit(args[1] === "consume" ? Number(process.env.FVOCI_TEST_HANDOFF_EXIT ?? "0") : 0);
+  }
+  const child = Bun.spawn([process.execPath, ...args], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  process.exit(await child.exited);
+}
+
+function ciShardFixture(source: string): void {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-web-e2e-fixture.")));
+  const checkout = join(directory, "checkout"),
+    bin = join(directory, "bin");
+  const previousPath = process.env.PATH;
+  try {
+    for (const path of ["scripts", "apps/web/src/generated", "tools/web-e2e", "bin"])
+      mkdirSync(path === "bin" ? bin : join(checkout, path), { recursive: true });
+    for (const file of [
+      "scripts/run-web-e2e.sh",
+      ...["groups.ts", "compat.ts", "run-web-e2e.ts"].map((name) => "tools/web-e2e/" + name),
+    ]) {
+      const text = readFileSync(join(source, file), "utf8");
+      writeFileSync(
+        join(checkout, file),
+        file.endsWith("run-web-e2e.ts")
+          ? text.replaceAll("process.execPath", JSON.stringify(join(bin, "bun")))
+          : text,
+      );
+    }
+    for (const tool of ["bun", "bash", "cargo"]) {
+      const file = join(bin, tool);
+      writeFileSync(
+        file,
+        "#!" +
+          process.execPath +
+          "\nimport {entryTool} from " +
+          JSON.stringify(join(import.meta.dir, "shard-fixture.ts")) +
+          ";await entryTool(" +
+          JSON.stringify(tool) +
+          ",process.argv.slice(2));\n",
+      );
+      chmodSync(file, 0o755);
+    }
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: bin + ":" + (previousPath ?? ""),
+      CARGO_TARGET_DIR: join(checkout, "target"),
+    };
+    for (const key of Object.keys(env))
+      if (key.startsWith("GITHUB_") || key.startsWith("SQLITE3_") || key === "FVOCI_E2E_PENDING")
+        Reflect.deleteProperty(env, key);
+    const git = (...args: string[]) => {
+      const out = Bun.spawnSync(["git", "-C", checkout, ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      check(out.exitCode === 0, "fixture git command failed");
+      return out.stdout.toString().trim();
+    };
+    const populate = () => {
+      const e2e = join(checkout, "apps/web/e2e");
+      mkdirSync(e2e, { recursive: true });
+      for (const name of [
+        PAIR_FIRST,
+        PAIR_SECOND,
+        ...Array.from({ length: 26 }, (_, index) => `extra-${String(index + 1)}-flow.spec.ts`),
+      ])
+        writeFileSync(join(e2e, name), "// fixture\n");
+    };
+    const invoke = (args: string[], extra: NodeJS.ProcessEnv = {}) => {
+      const out = Bun.spawnSync(["/bin/bash", join(checkout, "scripts/run-web-e2e.sh"), ...args], {
+        cwd: checkout,
+        env: { ...env, ...extra },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return { status: out.exitCode, text: out.stdout.toString() + out.stderr.toString() };
+    };
+    populate();
+    const planned = shardPlanLines(join(checkout, "apps/web/e2e"), 0, DEFAULT_SHARD_COUNT).map(
+      (line) => line.specs.join(" "),
+    );
+    const rows = (text: string) =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("fvoci-web-e2e-run-group "))
+        .map((line) => line.slice("fvoci-web-e2e-run-group ".length));
+    const count = (text: string, marker: string) => text.split(marker).length - 1;
+    let result = invoke(["--host", "--ci-shard", "0"]);
+    check(
+      result.status === 0 &&
+        count(result.text, "fvoci-web-e2e-fake-generate-api") === 1 &&
+        same(rows(result.text), planned),
+      "complete shard requires one build and exact ordered groups: " + result.text,
+    );
+    rmSync(join(checkout, "apps/web/e2e"), { recursive: true });
+    mkdirSync(join(checkout, "apps/web/e2e"));
+    result = invoke(["--host", "--ci-shard", "0"]);
+    check(
+      result.status !== 0 && !result.text.includes("fvoci-web-e2e-fake-generate-api"),
+      "empty plan reached build",
+    );
+    populate();
+    check(
+      invoke(["--host", "--ci-shard", "0"], { FVOCI_TEST_RUN_GROUP_EXIT: "1" }).status === 1,
+      "group failure must propagate",
+    );
+    check(
+      invoke(["--host", "--ci-shard", "0"], { FVOCI_WEB_E2E_SHARD_COUNT: "16" }).status !== 0,
+      "shard override accepted",
+    );
+    writeFileSync(join(checkout, "apps/web/openapi.json"), '{"openapi":"3.1.0"}\n');
+    writeFileSync(join(checkout, "apps/web/src/generated/api.ts"), "// committed fixture types\n");
+    git("init", "-q");
+    git("add", "scripts", "apps");
+    const commit = () =>
+      git(
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "API fixture",
+      );
+    commit();
+    const ci = (): NodeJS.ProcessEnv => ({
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      GITHUB_JOB: "workspace-browser-shard",
+      GITHUB_SHA: git("rev-parse", "HEAD"),
+      FVOCI_SELECTED_CI_OUTPUT: join(checkout, "browser-output"),
+      FVOCI_WEB_BUILD_HANDOFF: join(checkout, "browser-packet"),
+      FVOCI_WEB_BUILD_HANDOFF_SHA256: "0".repeat(64),
+    });
+    const consumeArgs = ["--ci-use-committed-api", "--ci-consume-browser", "--ci-shard", "0"];
+    const noBuild = (text: string) =>
+      !/fvoci-web-e2e-fake-(generate-api|bun-build|cargo)/.test(text);
+    result = invoke(consumeArgs, ci());
+    check(
+      result.status === 0 &&
+        noBuild(result.text) &&
+        count(result.text, "fvoci-web-e2e-fake-handoff-consume") === 1 &&
+        same(rows(result.text), planned),
+      "committed consumer must consume exact groups without build: " + result.text,
+    );
+    check(
+      /web-e2e stage=browser-handoff-consume elapsed_seconds=[0-9.]+ exit=0/.test(result.text),
+      "consumer timing missing",
+    );
+    const reject = (label: string, extra: NodeJS.ProcessEnv = {}, args: string[] = []) => {
+      const out = invoke([...consumeArgs, ...args], { ...ci(), ...extra });
+      check(
+        out.status !== 0 && noBuild(out.text) && rows(out.text).length === 0,
+        "invalid committed fixture reached preparation: " + label,
+      );
+    };
+    reject("missing digest", { FVOCI_WEB_BUILD_HANDOFF_SHA256: "" });
+    result = invoke(consumeArgs, { ...ci(), FVOCI_TEST_HANDOFF_EXIT: "7" });
+    check(
+      result.status === 7 && noBuild(result.text) && rows(result.text).length === 0,
+      "artifact refusal did not propagate without fallback",
+    );
+    for (const extra of [
+      { CI: "false" },
+      { GITHUB_ACTIONS: "false" },
+      { GITHUB_JOB: "web-checks" },
+      { GITHUB_SHA: "0".repeat(40) },
+    ])
+      reject("authority", extra);
+    reject("duplicate flag", {}, ["--ci-use-committed-api"]);
+    const api = "apps/web/src/generated/api.ts",
+      openapi = "apps/web/openapi.json";
+    appendFileSync(join(checkout, api), "// dirty\n");
+    reject("dirty");
+    git("add", api);
+    reject("staged dirty");
+    git("restore", "--staged", "--worktree", api);
+    git("update-index", "--assume-unchanged", api);
+    appendFileSync(join(checkout, api), "// hidden dirty\n");
+    reject("hidden dirty");
+    git("update-index", "--no-assume-unchanged", api);
+    git("restore", api);
+    rmSync(join(checkout, openapi));
+    reject("missing");
+    git("restore", openapi);
+    writeFileSync(join(checkout, openapi), "");
+    reject("empty");
+    git("restore", openapi);
+    writeFileSync(join(checkout, "copied-openapi.json"), readFileSync(join(checkout, openapi)));
+    rmSync(join(checkout, openapi));
+    symlinkSync("../../copied-openapi.json", join(checkout, openapi));
+    reject("symlink");
+    rmSync(join(checkout, openapi));
+    git("restore", openapi);
+    git("rm", "--cached", "-q", api);
+    reject("missing index");
+    commit();
+    reject("absent HEAD");
+    git("add", api);
+    commit();
+    appendFileSync(join(checkout, "apps/web/e2e", PAIR_FIRST), "// dirty source\n");
+    reject("dirty source");
+    git("restore", "apps/web/e2e/" + PAIR_FIRST);
+    const sqlite = {
+      SQLITE3_LIB_DIR: "/fixture/sqlite/lib",
+      SQLITE3_INCLUDE_DIR: "/fixture/sqlite/include",
+      SQLITE3_STATIC: "1",
+      SQLITE3_NO_PKG_CONFIG: "1",
+    };
+    const selected = {
+      ...ci(),
+      ...sqlite,
+      GITHUB_JOB: "collaboration-flow",
+      FVOCI_E2E_PENDING: "1",
+      FVOCI_TEST_HANDOFF_EXIT: "7",
+    };
+    const selectedArgs = ["--ci-use-committed-api", "--ci-consume-selected"];
+    result = invoke(selectedArgs, selected);
+    check(
+      result.status === 7 &&
+        !/fvoci-web-e2e-fake-(sqlite-prep|generate-api|cargo)/.test(result.text) &&
+        count(result.text, "fvoci-web-e2e-fake-bun-build") === 1 &&
+        count(result.text, "committed API outputs match") === 2 &&
+        count(result.text, "fvoci-web-e2e-fake-handoff-admit") === 1 &&
+        count(result.text, "fvoci-web-e2e-fake-handoff-consume") === 1 &&
+        rows(result.text).length === 0,
+      "selected consumer rebuild or authority changed: " + result.text,
+    );
+    for (const key of ["SQLITE3_LIB_DIR", "SQLITE3_STATIC"]) {
+      const extra: NodeJS.ProcessEnv = { ...selected };
+      Reflect.deleteProperty(extra, key);
+      result = invoke(selectedArgs, extra);
+      check(
+        result.status !== 0 &&
+          result.text.includes(
+            "selected consumer requires the workflow-prepared SQLite environment",
+          ) &&
+          !/fvoci-web-e2e-fake-(sqlite-prep|bun-build|cargo|handoff-consume)/.test(result.text),
+        "missing selected SQLite export reached build",
+      );
+    }
+    // Execute the unchanged production timer dispatch/export/retention source,
+    // keeping the existing exact title/filter and retained-evidence checks.
+    process.env.PATH = env.PATH;
+    process.env.FVOCI_FIXTURE_TIMER = "1";
+    const groupSource = readFileSync(join(source, "scripts/web-e2e-run-group.sh"), "utf8");
+    const timer = join(checkout, "scripts/timer-dispatch-fixture.sh");
+    writeFileSync(
+      timer,
+      groupSource.slice(0, groupSource.indexOf("RUN_DIR=")) +
+        '\nbash "$ROOT/scripts/web-e2e-run-group.sh" "$@"\n',
+    );
+    const timerRun = Bun.spawnSync(
+      [
+        "/bin/bash",
+        timer,
+        "--workers=1",
+        "e2e/v050-task-timer.spec.ts",
+        "--retries=0",
+        "--trace=on",
+      ],
+      {
+        env: { ...process.env, ROOT: checkout, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    check(timerRun.exitCode === 0, "timer dispatch failed");
+    const timerLog = join(directory, "timer.jsonl");
+    writeFileSync(timerLog, timerRun.stdout);
+    timerRows(timerLog, join(source, "apps/web/e2e/v050-task-timer.spec.ts"));
+    dispatchCases(timer, checkout);
+    const exported = join(directory, "evidence-export.sh"),
+      statement = groupSource
+        .split("\n")
+        .filter((line) => line.startsWith("export FVOCI_W5_EVIDENCE_DIR="));
+    check(statement.length === 1, "evidence export statement count");
+    writeFileSync(exported, statement.join("\n"));
+    evidenceExport(exported, checkout);
+    const retained = join(directory, "evidence-retention.sh"),
+      start = groupSource.indexOf("retain_failure_artifacts() {");
+    check(start >= 0, "retention source missing");
+    writeFileSync(retained, groupSource.slice(start, groupSource.indexOf("\n}", start) + 2));
+    retention(retained, checkout);
+    console.log("run-ci-shard-fixture-test: ok");
+  } finally {
+    if (previousPath === undefined) Reflect.deleteProperty(process.env, "PATH");
+    else process.env.PATH = previousPath;
+    Reflect.deleteProperty(process.env, "FVOCI_FIXTURE_TIMER");
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 function check(condition: boolean, message: string): asserts condition {
   if (!condition) throw new FixtureError(message);
@@ -308,6 +665,12 @@ function retention(fn: string, root: string): void {
 }
 
 const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => unknown }> = {
+  "ci-shard": {
+    arity: 1,
+    run: (root = "") => {
+      ciShardFixture(root);
+    },
+  },
   "fixture-runtime": {
     arity: 3,
     run: (source = "", destination = "", executable = "") => {

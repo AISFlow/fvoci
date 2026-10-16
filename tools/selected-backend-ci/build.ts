@@ -120,6 +120,10 @@ export function inputs(systemInclude = "/usr/include"): Inputs {
     "build-env-inputs.json",
   );
   if (existsSync(compilerInputs)) add(compilerInputs);
+  if (process.env.FVOCI_WEB_CONTAINER_SDK_SHA256) {
+    add("/opt/fvoci-sqlite/consumer-inputs.json");
+    add("/fvoci-run/sqlite/consumer-inputs.json");
+  }
   for (const directory of [
     join(root, "node_modules"),
     call(["rustc", "--print", "sysroot"]),

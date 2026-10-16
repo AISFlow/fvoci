@@ -35,6 +35,23 @@ import {
 export const CI_WEB_IMAGE =
   "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
 
+export function containerImage(
+  image: string,
+  sdk: string,
+  local: boolean,
+  env: NodeJS.ProcessEnv,
+): { image: string; sdk: string; local: boolean } {
+  if (!/^[a-f0-9]{64}$/.test(sdk)) fail("an explicit sealed SQLite SDK SHA-256 is required");
+  if (
+    !(
+      local ? /^sha256:[a-f0-9]{64}$/ : /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/
+    ).test(image) ||
+    (local && (env.CI !== undefined || Object.keys(env).some((key) => key.startsWith("GITHUB_"))))
+  )
+    fail("registry image digest required; local engine IDs require explicit non-CI local SDK mode");
+  return { image, sdk, local };
+}
+
 // This first ordinary-browser slice retains the complete registered shard.
 // The other shards still have host Docker/psql fixture oracles to migrate;
 // they are never silently run with a socket or with those assertions skipped.
@@ -46,13 +63,20 @@ export function containerShard(value: string | undefined): string {
   return value;
 }
 
-async function command(argv: string[], cwd: string, env = process.env): Promise<number> {
+async function command(
+  argv: string[],
+  cwd: string,
+  env = process.env,
+  stdio: { stdout: "inherit" | number; stderr: "inherit" | number } = {
+    stdout: "inherit",
+    stderr: "inherit",
+  },
+): Promise<number> {
   const child = Bun.spawn(["setsid", ...argv], {
     cwd,
     env,
     stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
+    ...stdio,
   });
   const signal = (name: NodeJS.Signals) => {
     try {
@@ -79,10 +103,12 @@ async function command(argv: string[], cwd: string, env = process.env): Promise<
 
 async function stage(name: string, argv: string[], root: string, env = process.env): Promise<void> {
   const started = performance.now();
-  process.stderr.write(`web-e2e stage=${name} started\n`);
+  const dated = ["collaboration-build", "collaboration-flow"].includes(env.GITHUB_JOB ?? "");
+  const timestamp = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  process.stderr.write(`web-e2e stage=${name} started${dated ? " at=" + timestamp() : ""}\n`);
   const status = await command(argv, root, env);
   process.stderr.write(
-    `web-e2e stage=${name} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(status)}\n`,
+    `web-e2e stage=${name}${dated ? " finished at=" + timestamp() : ""} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(status)}\n`,
   );
   if (status !== 0) throw new RuntimeExit(status);
 }
@@ -91,6 +117,539 @@ class RuntimeExit extends Error {
   constructor(readonly status: number) {
     super("web e2e command failed");
   }
+}
+
+export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
+  let shard = "",
+    selected = false,
+    committed = false,
+    host = false;
+  let selectedPhase: "whole" | "prepare" | "consume" = "whole";
+  let browserPhase: "" | "prepare" | "consume" = "";
+  const specs: string[] = [],
+    imageOptions: string[] = [];
+  for (let at = 0; at < argv.length; at++) {
+    const arg = argv[at];
+    switch (arg) {
+      case "--host":
+        host = true;
+        break;
+      case "--ci-use-committed-api":
+        if (committed) fail("--ci-use-committed-api may be supplied only once");
+        committed = true;
+        break;
+      case "--ci-prepare-browser":
+      case "--ci-consume-browser":
+        if (browserPhase) fail("duplicate browser phase");
+        browserPhase = arg === "--ci-prepare-browser" ? "prepare" : "consume";
+        break;
+      case "--ci-prepare-selected":
+      case "--ci-consume-selected":
+        if (selected) fail("duplicate/mixed selected phase");
+        selected = true;
+        selectedPhase = arg === "--ci-prepare-selected" ? "prepare" : "consume";
+        break;
+      case "--with-selected-backends":
+        if (selected) fail("--with-selected-backends may be supplied only once");
+        selected = true;
+        break;
+      case "--ci-shard": {
+        const value = argv[++at];
+        if (shard || !value || !/^[0-9]+$/.test(value) || Number(value) >= DEFAULT_SHARD_COUNT)
+          fail("--ci-shard requires one index within the fixed shard count");
+        shard = String(Number(value));
+        break;
+      }
+      case "--ci-shard-count":
+        throw new CheckError(
+          "--ci-shard-count is not supported; CI uses the fixed shard count from tools/web-e2e/groups.ts",
+        );
+      case "--image-pin":
+      case "--sdk-sha256":
+      case "--reuse-cohort": {
+        const value = argv[++at];
+        if (!value || imageOptions.includes(arg)) fail("duplicate or incomplete container option");
+        imageOptions.push(arg, value);
+        break;
+      }
+      case "--local-image-sdk":
+        if (imageOptions.includes(arg)) fail("duplicate container option");
+        imageOptions.push(arg);
+        break;
+      case "--":
+        specs.push(...argv.slice(at + 1));
+        at = argv.length;
+        break;
+      default:
+        if (arg !== undefined) specs.push(arg);
+    }
+  }
+  if (env.FVOCI_WEB_E2E_DRY_RUN) fail("FVOCI_WEB_E2E_DRY_RUN is not supported");
+  if (env.FVOCI_WEB_E2E_SHARD_COUNT)
+    fail(
+      "FVOCI_WEB_E2E_SHARD_COUNT must not override the fixed CI shard count from tools/web-e2e/groups.ts",
+    );
+  if (shard && specs.length) fail("--ci-shard cannot be combined with explicit spec arguments");
+  const github = Object.keys(env).some((key) => key.startsWith("GITHUB_"));
+  if (
+    browserPhase &&
+    (selected || !committed || specs.length || env.CI !== "true" || env.GITHUB_ACTIONS !== "true")
+  )
+    fail("browser handoff requires GitHub committed API and no selected/spec options");
+  if (
+    env.GITHUB_ACTIONS === "true" &&
+    env.GITHUB_JOB === "workspace-browser-shard" &&
+    browserPhase !== "consume"
+  )
+    fail("hosted browser shard requires --ci-consume-browser");
+  if (selected && (shard || specs.length || env.FVOCI_E2E_PENDING !== "1"))
+    fail(
+      "--with-selected-backends requires the whole pending suite and cannot combine shard/spec/grep options",
+    );
+  const hostRequired =
+    host ||
+    github ||
+    selected ||
+    !!browserPhase ||
+    env.FVOCI_E2E_PENDING === "1" ||
+    specs.length > 0 ||
+    ["0", "3", "5"].includes(shard);
+  if (hostRequired && imageOptions.length)
+    fail("container image options cannot alter a required host/CI selection");
+  return {
+    shard,
+    selected,
+    committed,
+    selectedPhase,
+    browserPhase,
+    specs,
+    imageOptions,
+    route: hostRequired ? ("host" as const) : shard ? ("docker" as const) : ("hybrid" as const),
+  };
+}
+
+async function webEntry(root: string, argv: string[]): Promise<number> {
+  root = realpathSync(root);
+  const request = webRequest(argv, process.env);
+  const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
+  if (request.route !== "host") {
+    const dockerShards = request.route === "hybrid" ? "1,2,4,6,7" : shard;
+    process.stderr.write(
+      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=0,3,5" : ""}\n`,
+    );
+    const status = await containerBrowser([
+      root,
+      "--ci-shards",
+      dockerShards,
+      ...request.imageOptions,
+    ]);
+    if (status !== 0 || request.route === "docker") return status;
+  } else process.stderr.write("web-e2e route=host requested selection retained\n");
+  process.env.ROOT = root;
+  process.env.CARGO_TARGET_DIR = resolvePath(
+    process.env.CARGO_TARGET_DIR ?? join(root, "target"),
+    process.cwd(),
+  );
+  const engineTarget = join(root, "crates/collab-engine/target");
+  process.env.FVOCI_COLLAB_ENGINE = join(engineTarget, "debug/collab-engine");
+  const bun = (...args: string[]) => [process.execPath, ...args];
+  const handoff = (...args: string[]) =>
+    bun(join(root, "tools/selected-backend-ci/handoff.ts"), ...args);
+  const selectedCli = (...args: string[]) =>
+    bun(join(root, "scripts/run-selected-backend-e2e.ts"), ...args);
+  const required = (key: string) => {
+    const value = process.env[key];
+    if (!value) fail(`required ${key}`);
+    return value;
+  };
+  const api = () => {
+    const sha = qualifyCommittedApi(root, { shard, selected, browserPhase }, process.env);
+    process.stdout.write(`committed API outputs match tested checkout ${sha}\n`);
+  };
+  if (browserPhase) {
+    required("FVOCI_SELECTED_CI_OUTPUT");
+    required("FVOCI_WEB_BUILD_HANDOFF");
+    if ((process.env.FVOCI_E2E_PROFILE ?? "debug") !== "debug")
+      fail("browser packet requires debug profile");
+    process.env.FVOCI_WEB_BUILD_PHASE = browserPhase;
+    if (browserPhase === "prepare") {
+      if (process.env.GITHUB_JOB !== "workspace-browser-build" || shard)
+        fail("wrong browser producer job");
+    } else {
+      if (process.env.GITHUB_JOB !== "workspace-browser-shard" || !shard)
+        fail("wrong browser consumer job");
+      required("FVOCI_WEB_BUILD_HANDOFF_SHA256");
+    }
+  }
+  if (selected) {
+    required("FVOCI_SELECTED_CI_OUTPUT");
+    required("GITHUB_ACTIONS");
+    if (selectedPhase === "whole") {
+      if (
+        !["collaboration-flow", ...LANE_JOBS].includes(process.env.GITHUB_JOB ?? "") ||
+        process.env.FVOCI_WEB_BUILD_PHASE
+      )
+        fail("wrong same-job selected authority");
+    } else {
+      process.env.FVOCI_WEB_BUILD_PHASE = selectedPhase;
+      if (!committed || process.env.CI !== "true" || process.env.GITHUB_ACTIONS !== "true")
+        fail("handoff requires explicit GitHub committed API mode");
+      if (selectedPhase === "prepare") {
+        if (process.env.GITHUB_JOB !== "collaboration-build") fail("wrong producer job");
+      } else {
+        if (!["collaboration-flow", ...LANE_JOBS].includes(process.env.GITHUB_JOB ?? ""))
+          fail("wrong consumer job");
+        required("FVOCI_WEB_BUILD_HANDOFF");
+        required("FVOCI_WEB_BUILD_HANDOFF_SHA256");
+      }
+    }
+  }
+  if (committed) api();
+  if (selectedPhase === "consume") await stage("selected-handoff-admit", handoff("admit"), root);
+  if (
+    Bun.spawnSync(bun("--bun", "x", "--no-install", "playwright", "--version"), {
+      cwd: join(root, "apps/web"),
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exitCode !== 0
+  )
+    fail("missing web dependencies or Playwright; run scripts/prepare-web-e2e.sh");
+  const native = async (name: string, profile: "default" | "selected") => {
+    const args =
+      name === "engine"
+        ? [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--manifest-path",
+            join(root, "crates/collab-engine/Cargo.toml"),
+            "--features",
+            "worker",
+            "--bin",
+            "collab-engine",
+          ]
+        : name === "lib"
+          ? [
+              "cargo",
+              "test",
+              "--locked",
+              "--offline",
+              "--features",
+              "db-tests,api-schema",
+              "--lib",
+              "--no-run",
+            ]
+          : name === "install"
+            ? [
+                "cargo",
+                "test",
+                "--locked",
+                "--offline",
+                "--features",
+                "db-tests,api-schema",
+                "--test",
+                "selected_install_lifetime",
+                "--no-run",
+              ]
+            : name === "main"
+              ? [
+                  "cargo",
+                  "build",
+                  "--locked",
+                  "--offline",
+                  "--features",
+                  "db-tests,api-schema",
+                  "--bin",
+                  "fvoci-server",
+                  "--bin",
+                  "fvoci-migrate",
+                  "--bin",
+                  "fvoci-e2e-fixture",
+                ]
+              : name === "fixture"
+                ? [
+                    "cargo",
+                    "build",
+                    "--locked",
+                    "--offline",
+                    "--bin",
+                    "fvoci-e2e-fixture",
+                    "--features",
+                    "db-tests",
+                  ]
+                : [
+                    "cargo",
+                    "build",
+                    "--locked",
+                    "--offline",
+                    "--bin",
+                    "fvoci-server",
+                    "--bin",
+                    "fvoci-migrate",
+                  ];
+    const output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? "";
+    const target = name === "engine" ? engineTarget : required("CARGO_TARGET_DIR");
+    if (profile === "selected") args.push("--message-format=json-render-diagnostics");
+    await stage(
+      profile === "selected"
+        ? "selected-" + name
+        : name === "engine"
+          ? "worker-build"
+          : name === "fixture"
+            ? "fixture-build"
+            : "default-server-build",
+      profile === "selected"
+        ? [...selectedCli("stage", "--output", output, "--stage-name", name, "--"), ...args]
+        : args,
+      root,
+      { ...process.env, CARGO_TARGET_DIR: target },
+    );
+  };
+  const build = async () => {
+    if (selectedPhase === "consume") {
+      if (
+        !process.env.SQLITE3_LIB_DIR ||
+        !process.env.SQLITE3_INCLUDE_DIR ||
+        process.env.SQLITE3_STATIC !== "1" ||
+        process.env.SQLITE3_NO_PKG_CONFIG !== "1"
+      )
+        fail("selected consumer requires the workflow-prepared SQLite environment");
+    } else {
+      const temporary = mkdtempSync(join(tmpdir(), "fvoci-sqlite-env.")),
+        file = join(temporary, "env");
+      try {
+        try {
+          await stage(
+            "sqlite-prepare",
+            ["bash", join(root, "scripts/prepare-sqlite-ci.sh"), "--env-file", file],
+            root,
+          );
+        } catch (error) {
+          if (error instanceof RuntimeExit) throw new RuntimeExit(1);
+          throw error;
+        }
+        Object.assign(process.env, sqliteEnvironment(readFileSync(file, "utf8")));
+      } finally {
+        rmSync(temporary, { recursive: true, force: true });
+      }
+    }
+    if (!committed)
+      await stage("api-generation", ["bash", join(root, "scripts/generate-api.sh")], root);
+    await stage("web-build", bun("--bun", "run", "build"), join(root, "apps/web"));
+    if (committed) api();
+    if (selectedPhase === "consume")
+      await stage("selected-handoff-consume", handoff("consume"), root);
+    else if (selected) {
+      await stage(
+        "selected-input-before",
+        selectedCli("record-before", "--output", required("FVOCI_SELECTED_CI_OUTPUT")),
+        root,
+      );
+      for (const name of ["main", "lib", "install", "engine"]) await native(name, "selected");
+      await stage(
+        "selected-input-after",
+        selectedCli("record-after", "--output", required("FVOCI_SELECTED_CI_OUTPUT")),
+        root,
+      );
+    } else for (const name of ["fixture", "server", "engine"]) await native(name, "default");
+  };
+  if (browserPhase === "prepare") {
+    if (existsSync(join(root, "apps/web/dist"))) fail("browser producer requires absent dist");
+    await stage("browser-input-before", handoff("browser-before"), root);
+    await stage("web-build", bun("--bun", "run", "build"), join(root, "apps/web"));
+    api();
+    for (const [label, name] of [
+      ["fixture-build", "fixture"],
+      ["default-server-build", "default"],
+      ["worker-build", "engine"],
+    ])
+      await stage(
+        label ?? "",
+        handoff("browser-stage", name ?? ""),
+        root,
+        name === "engine" ? { ...process.env, CARGO_TARGET_DIR: engineTarget } : process.env,
+      );
+    await stage("browser-input-after", handoff("browser-after"), root);
+    await stage("browser-handoff-export", handoff("export"), root);
+    return 0;
+  }
+  const group = (args: string[]) =>
+    command(["bash", join(root, "scripts/web-e2e-run-group.sh"), ...args], root);
+  if (shard || request.route === "hybrid") {
+    verifyPlan(undefined, DEFAULT_SHARD_COUNT);
+    const plan = assignShards(discoverGroups(), DEFAULT_SHARD_COUNT);
+    if (browserPhase === "consume")
+      await stage("browser-handoff-consume", handoff("consume"), root);
+    else await build();
+    for (const index of request.route === "hybrid" ? ["0", "3", "5"] : [shard]) {
+      process.stderr.write(`web-e2e host_complete_shard=${index}\n`);
+      for (const specs of plan[Number(index)] ?? []) {
+        const status = await group(specs);
+        if (status !== 0) return status;
+      }
+    }
+    return 0;
+  }
+  await build();
+  if (selectedPhase === "prepare") {
+    await stage("selected-handoff-export", handoff("export"), root);
+    return 0;
+  }
+  const pending = await group(specs);
+  if (!selected) return pending;
+  return selectedHost(root, pending, selectedPhase === "consume");
+}
+
+async function selectedHost(root: string, pending: number, consume: boolean): Promise<number> {
+  const required = (key: string) => {
+    const value = process.env[key];
+    if (!value) fail(`required ${key}`);
+    return value;
+  };
+  const output = required("FVOCI_SELECTED_CI_OUTPUT"),
+    sqlite = required("FVOCI_SELECTED_CI_SQLITE_PARENT");
+  requirePathWithin(required("SQLITE3_LIB_DIR"), sqlite);
+  const diagnostics = join(required("RUNNER_TEMP"), "fvoci-selected-diagnostics");
+  createSafeDiagnostics(diagnostics, process.env);
+  const uid = String(process.getuid?.()),
+    gid = String(process.getgid?.());
+  const dockerGid = checkedOutput(["stat", "-c", "%g", "/var/run/docker.sock"], root);
+  const cli = join(root, "scripts/run-selected-backend-e2e.ts");
+  const groups = checkedOutput(
+    [
+      process.execPath,
+      cli,
+      "permissions",
+      "--output",
+      output,
+      "--sqlite-parent",
+      sqlite,
+      "--docker-gid",
+      dockerGid,
+    ],
+    root,
+  );
+  process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
+  const lane = process.env.FVOCI_COLLAB_LANE,
+    laneArgs: string[] = [];
+  if (lane) {
+    if (!["install/on", "postgres/on", "sqlite/on", "postgres/off", "sqlite/off"].includes(lane))
+      fail("unknown collaboration lane");
+    laneArgs.push("--lane", lane);
+    if (lane !== "install/on") {
+      const receipt = required("FVOCI_CLOSED_INSTALL_RECEIPT");
+      if (!existsSync(receipt) || lstatSync(receipt).isSymbolicLink())
+        fail("closed install receipt missing");
+      const destination = join(output, "closed-install-receipt.json");
+      await stage("closed-install-receipt", ["install", "-m", "0400", receipt, destination], root);
+      process.env.FVOCI_CLOSED_INSTALL_RECEIPT = destination;
+    }
+  }
+  await stage("runtime-owner", ["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
+  await stage(
+    "runtime-temp",
+    ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
+    root,
+  );
+  const preserved =
+    "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB";
+  const runtime = (mode: string, browser = false) => [
+    "sudo",
+    "--preserve-env=" +
+      preserved +
+      (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
+      (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
+    "setpriv",
+    "--reuid=1000",
+    "--regid=1000",
+    "--groups=" + groups,
+    ...(mode === "owner-return" ? [] : ["env", "TMPDIR=" + join(output, "tmp")]),
+    process.execPath,
+    cli,
+    mode,
+    "--output",
+    output,
+    ...(mode === "config-list" ? [] : laneArgs),
+  ];
+  const capture = async (args: string[], stdout: string, stderr?: string) => {
+    let out: number | undefined, err: number | undefined;
+    try {
+      out = openSync(join(diagnostics, stdout), "wx", 0o600);
+      if (stderr) err = openSync(join(diagnostics, stderr), "wx", 0o600);
+      return await command(args, root, process.env, { stdout: out, stderr: err ?? "inherit" });
+    } catch {
+      process.stderr.write("selected private capture failed\n");
+      return 1;
+    } finally {
+      if (out !== undefined) closeSync(out);
+      if (err !== undefined) closeSync(err);
+    }
+  };
+  let config = "not-run",
+    launcher = "not-run",
+    selected = 0;
+  if (consume) {
+    selected = await capture(
+      runtime("config-list", true),
+      "config-list.stdout.log",
+      "config-list.stderr.log",
+    );
+    config = String(selected);
+  }
+  if (config === "not-run" || selected === 0) {
+    selected = await command(runtime("run", true), root);
+    launcher = String(selected);
+  }
+  const ownership = await capture(runtime("owner-return"), "ownership-stage.json");
+  if (ownership === 0) {
+    if (
+      (await command(["sudo", "chown", "-h", "-R", uid + ":" + gid, output, sqlite], root)) !== 0
+    ) {
+      process.stderr.write("selected runtime ownership restoration failed\n");
+      if (!selected) selected = 1;
+    } else if (process.env.GITHUB_OUTPUT) {
+      try {
+        appendFileSync(
+          process.env.GITHUB_OUTPUT,
+          "selected-private-diagnostics<<FVOCI_CLOSED_DIAGNOSTICS\n" +
+            [
+              "*-stderr.log",
+              "*-stage.json",
+              "*-driver.log",
+              "selected-ci-receipt.json",
+              "handoff-input-before-safe.json",
+              "handoff-input-after-safe.json",
+              "handoff-input-current-safe.json",
+              "handoff-input-delta-safe.json",
+            ]
+              .map((name) => join(output, name) + "\n")
+              .join("") +
+            "FVOCI_CLOSED_DIAGNOSTICS\n",
+        );
+      } catch {
+        process.stderr.write("selected diagnostic publication failed\n");
+        if (!selected) selected = 1;
+      }
+    }
+  } else {
+    process.stderr.write(
+      "selected runtime ownership retained: resource retirement proof incomplete\n",
+    );
+    if (!selected) selected = 1;
+  }
+  try {
+    writeLauncherReceipt(diagnostics, [
+      launcher,
+      String(ownership),
+      String(selected),
+      String(pending),
+      config,
+    ]);
+  } catch {
+    if (!selected) selected = 1;
+  }
+  return pending || selected;
 }
 
 async function browserServices(
@@ -311,34 +870,32 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
         [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
         join(root, "apps/web"),
       );
-      await stage(
-        "xtask-build",
-        [
-          "cargo",
-          "build",
-          "--locked",
-          "--jobs",
-          "2",
-          "--manifest-path",
-          "xtask/Cargo.toml",
-          "--target-dir",
-          "xtask/target",
-        ],
-        root,
-      );
-      await stage(
-        "sqlite-prepare",
-        [
-          join(root, "xtask/target/debug/xtask"),
-          "sqlite-ci",
-          "--parent",
-          "/fvoci-run/sqlite",
-          "--env-file",
-          "/fvoci-run/sqlite.env",
-        ],
-        root,
-      );
     }
+    const sdk = containerImage(
+      process.env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+      process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
+      process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1",
+      process.env,
+    );
+    await stage(
+      "sqlite-sdk-admit",
+      [
+        "/usr/local/bin/fvoci-ci-tools",
+        "sqlite-ci",
+        "--image-sdk",
+        "/opt/fvoci-sqlite",
+        "--expected-sdk-sha256",
+        sdk.sdk,
+        "--image-ref",
+        sdk.image,
+        ...(sdk.local ? ["--local-image-sdk"] : []),
+        "--parent",
+        "/fvoci-run/sqlite",
+        "--env-file",
+        "/fvoci-run/sqlite.env",
+      ],
+      root,
+    );
     Object.assign(process.env, sqliteEnvironment(readFileSync("/fvoci-run/sqlite.env", "utf8")));
     qualifyCommittedApi(
       root,
@@ -357,7 +914,15 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
     ];
     if (phase === "prepare") {
       await stage("browser-input-before", handoff(["browser-before"]), root);
-      await stage("web-build", [process.execPath, "--bun", "run", "build"], join(root, "apps/web"));
+      await stage(
+        "web-build",
+        [process.execPath, "--bun", "run", "build"],
+        join(root, "apps/web"),
+        {
+          ...process.env,
+          CI: "true",
+        },
+      );
       qualifyCommittedApi(
         root,
         { shard: "", selected: false, browserPhase: "prepare" },
@@ -383,6 +948,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
           "browser-group",
           ["bash", join(root, "scripts/web-e2e-run-group.sh"), ...specs],
           root,
+          { ...process.env, CI: "true" },
         );
       process.stderr.write(`=== web e2e shard ${shard}: all groups passed ===\n`);
     }
@@ -865,12 +1431,26 @@ export async function qualifyCohortHostProgram(
 
 /** One pinned image, existing producer packet, then one real isolated shard. */
 async function containerBrowser(argv: string[]): Promise<number> {
-  if (
-    (argv.length !== 3 && !(argv.length === 5 && argv[3] === "--reuse-cohort")) ||
-    !["--ci-shard", "--ci-shards"].includes(argv[1] ?? "")
-  )
+  if (!argv[0] || !["--ci-shard", "--ci-shards"].includes(argv[1] ?? ""))
     throw new UsageError("container-browser ROOT {--ci-shard N|--ci-shards N,N,...}");
-  const root = realpathSync(argv[0] ?? "");
+  const options = new Map<string, string>();
+  for (let at = 3; at < argv.length; at++) {
+    const name = argv[at] ?? "";
+    const value = argv[at + 1];
+    if (options.has(name)) throw new UsageError("duplicate container option");
+    if (name === "--local-image-sdk") options.set(name, "1");
+    else if (["--image-pin", "--sdk-sha256", "--reuse-cohort"].includes(name) && value) {
+      options.set(name, value);
+      at++;
+    } else throw new UsageError("unknown or incomplete container option");
+  }
+  const sdk = containerImage(
+    options.get("--image-pin") ?? CI_WEB_IMAGE,
+    options.get("--sdk-sha256") ?? "",
+    options.has("--local-image-sdk"),
+    process.env,
+  );
+  const root = realpathSync(argv[0]);
   if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
   const shards = (argv[2] ?? "").split(",").map(containerShard);
   if (new Set(shards).size !== shards.length || (argv[1] === "--ci-shard" && shards.length !== 1))
@@ -883,7 +1463,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
   const uid = process.getuid?.(),
     gid = process.getgid?.();
   if (!uid || gid === undefined) fail("a non-root POSIX Docker client is required");
-  const image = CI_WEB_IMAGE;
+  const image = sdk.image;
   if (
     !/^linux (?:x86_64|amd64)$/.test(
       checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
@@ -896,14 +1476,39 @@ async function containerBrowser(argv: string[]): Promise<number> {
       "image",
       "inspect",
       "--format",
-      "{{.Os}} {{.Architecture}} {{json .RepoDigests}}",
+      '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
       image,
     ],
     root,
   );
-  if (!metadata.startsWith("linux amd64 ") || !metadata.includes(JSON.stringify(image)))
+  if (
+    !(sdk.local
+      ? metadata.startsWith(image + " linux amd64 ")
+      : /^sha256:[a-f0-9]{64} linux amd64 /.test(metadata) &&
+        metadata.includes(JSON.stringify(image)))
+  )
     fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
   const orchestratorSource = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  const imageSource =
+    /^sha256:[a-f0-9]{64} linux amd64 ([a-f0-9]{40}) /.exec(metadata)?.[1] ??
+    fail("the pinned image requires its actual source revision");
+  checkedOutput(
+    [
+      "git",
+      "diff",
+      "--quiet",
+      imageSource,
+      orchestratorSource,
+      "--",
+      "docker/ci-base/Dockerfile",
+      "xtask/src",
+      "xtask/Cargo.toml",
+      "xtask/Cargo.lock",
+      "rust-toolchain.toml",
+      ".bun-version",
+    ],
+    root,
+  );
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(
@@ -913,7 +1518,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
   if (statSync(batch).uid !== uid || (statSync(batch).mode & 0o777) !== 0o700)
     fail("the owned private browser batch is required");
   chmodSync(batch, 0o700);
-  const cohort = argv[4] === undefined ? batch : realpathSync(argv[4]);
+  const reuse = options.get("--reuse-cohort");
+  const cohort = reuse === undefined ? batch : realpathSync(reuse);
   let run = randomBytes(16).toString("hex");
   const resources = randomBytes(16).toString("hex");
   if (cohort !== batch) {
@@ -928,6 +1534,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
       !/^[a-f0-9]{40}$/.test(manifest.source) ||
       typeof manifest.run !== "string" ||
       manifest.container_image !== image ||
+      manifest.container_sdk_sha256 !== sdk.sdk ||
+      manifest.container_image_source !== imageSource ||
       manifest.root !== root ||
       manifest.repository !== "local-container"
     )
@@ -948,7 +1556,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     );
   }
   process.stderr.write(
-    `container-browser orchestrator_source=${orchestratorSource} build_source=${source} consumer_source=${source} reuse=${String(cohort !== batch)}\n`,
+    `container-browser orchestrator_source=${orchestratorSource} build_source=${source} consumer_source=${source} image_source=${imageSource} sdk_sha256=${sdk.sdk} reuse=${String(cohort !== batch)}\n`,
   );
   if (!/^[a-f0-9]{32}$/.test(run)) fail("invalid browser batch identity");
   const producer = join(cohort, "producer");
@@ -999,9 +1607,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
       CARGO_PROFILE_DEV_DEBUG: "0",
       CARGO_PROFILE_TEST_DEBUG: "0",
       GIT_OPTIONAL_LOCKS: "0",
-      CI: "true",
       FVOCI_WEB_CONTAINER_LOCAL: "1",
       FVOCI_WEB_CONTAINER_IMAGE: image,
+      FVOCI_WEB_CONTAINER_LOCAL_IMAGE: sdk.local ? "1" : "0",
+      FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
+      FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
       FVOCI_WEB_CONTAINER_RUN: run,
       FVOCI_WEB_CONTAINER_SOURCE: source,
       FVOCI_WEB_CONTAINER_JOB:
@@ -1075,8 +1685,6 @@ async function containerBrowser(argv: string[]): Promise<number> {
         `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
       );
       for (const [from, to] of [
-        [join(cohort, "sqlite"), "/fvoci-run/sqlite"],
-        [join(cohort, "sqlite.env"), "/fvoci-run/sqlite.env"],
         [join(cohort, "handoff"), "/fvoci-run/handoff"],
         ...["registry", "git", "config", "config.toml"]
           .filter((name) => existsSync(join(cohort, "cargo", name)))
@@ -1109,7 +1717,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
         stdin: "ignore",
         stdout: logFd ?? "inherit",
         stderr: logFd ?? "inherit",
-        timeout: 20 * 60_000,
+        timeout: (phase === "prepare" ? 15 : 20) * 60_000,
       });
     } catch (error) {
       rmSync(envFile);
@@ -1319,13 +1927,13 @@ export function qualifyCommittedApi(
 ): string {
   const local = env.FVOCI_WEB_CONTAINER_LOCAL === "1";
   if (local) {
-    if (
-      request.selected ||
-      !/^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/.test(
-        env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
-      ) ||
-      Object.keys(env).some((key) => key.startsWith("GITHUB_"))
-    )
+    containerImage(
+      env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+      env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
+      env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1",
+      env,
+    );
+    if (request.selected || Object.keys(env).some((key) => key.startsWith("GITHUB_")))
       fail("requires an ordinary local browser container");
   } else if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
   const job = local ? env.FVOCI_WEB_CONTAINER_JOB : env.GITHUB_JOB;
@@ -1612,6 +2220,7 @@ function run(argv: string[]): string {
 if (import.meta.main) {
   try {
     const argv = process.argv.slice(2);
+    if (argv[0] === "entry") process.exit(await webEntry(argv[1] ?? "", argv.slice(2)));
     if (argv[0] === "container-browser") process.exit(await containerBrowser(argv.slice(1)));
     if (argv[0] === "browser-phase")
       process.exit(await browserPhase(argv[1] ?? "", argv[2] ?? "", argv.slice(3)));

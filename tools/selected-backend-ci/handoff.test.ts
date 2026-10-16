@@ -851,6 +851,8 @@ describe.serial("browser build packet", () => {
       FVOCI_WEB_CONTAINER_JOB: "workspace-browser-build",
       FVOCI_WEB_CONTAINER_SOURCE: SHA,
       FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+      FVOCI_WEB_CONTAINER_IMAGE_SOURCE: SHA,
     });
     exportPacket(f.host);
     const manifest = JSON.parse(readFileSync(join(f.packet, "handoff.json"), "utf8")) as Manifest;
@@ -864,6 +866,16 @@ describe.serial("browser build packet", () => {
     const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
     process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "b".repeat(64);
     await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 = "c".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 = "b".repeat(64);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "sha256:" + "a".repeat(64);
+    await assert.rejects(consume(f.host));
+    process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE = "1";
+    process.env.CI = "true";
+    await assert.rejects(consume(f.host), /local image cannot impersonate CI/);
+    Reflect.deleteProperty(process.env, "FVOCI_WEB_CONTAINER_LOCAL_IMAGE");
     process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
     process.env.GITHUB_JOB = "workspace-browser-shard";
     await assert.rejects(consume(f.host));

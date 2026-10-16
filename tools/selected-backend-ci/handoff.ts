@@ -188,6 +188,8 @@ export function distFiles(h: HostFacts = host): Record<string, string> {
 
 export interface Context {
   container_image?: string;
+  container_sdk_sha256?: string;
+  container_image_source?: string;
   platform?: { system: string; machine: string; os_release_sha256: string };
   repository: string;
   run: string;
@@ -237,8 +239,18 @@ export function context(job: string, h: HostFacts = host): Context {
   };
   if (local || process.env.FVOCI_WEB_CONTAINER_IMAGE) {
     const image = env("FVOCI_WEB_CONTAINER_IMAGE");
-    assert.match(image, /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/);
+    const localImage = process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1";
+    if (localImage) {
+      assert.ok(local && process.env.CI === undefined, "local image cannot impersonate CI");
+      assert.match(image, /^sha256:[a-f0-9]{64}$/);
+    } else assert.match(image, /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/);
     result.container_image = image;
+    const sdk = env("FVOCI_WEB_CONTAINER_SDK_SHA256");
+    assert.match(sdk, /^[a-f0-9]{64}$/);
+    result.container_sdk_sha256 = sdk;
+    const imageSource = env("FVOCI_WEB_CONTAINER_IMAGE_SOURCE");
+    assert.match(imageSource, /^[a-f0-9]{40}$/);
+    result.container_image_source = imageSource;
   }
   if (browser()) {
     assert.ok(
