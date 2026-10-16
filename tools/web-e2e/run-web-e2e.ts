@@ -7,6 +7,7 @@ import {
   appendFileSync,
   chmodSync,
   copyFileSync,
+  cpSync,
   closeSync,
   existsSync,
   fchmodSync,
@@ -17,12 +18,13 @@ import {
   readFileSync,
   readSync,
   readlinkSync,
+  readdirSync,
   realpathSync,
   statSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
@@ -37,6 +39,7 @@ import {
   assignShards,
   verifyPlan,
   DEFAULT_SHARD_COUNT,
+  TIMER_FILTERS,
 } from "./groups.ts";
 
 export const CI_WEB_IMAGE =
@@ -68,12 +71,12 @@ export function containerImage(
 }
 
 // Each admitted ordinary-browser shard retains every registered group.
-// Timer supervision and service-ledger fixtures retain their host boundary;
+// Service-ledger fixtures retain their host boundary;
 // they are never silently run with a socket or with those assertions skipped.
 export function containerShard(value: string | undefined): string {
-  if (!value || !["1", "2", "3", "4", "6", "7"].includes(value))
+  if (!value || !["0", "1", "2", "3", "4", "6", "7"].includes(value))
     fail(
-      "shared containers support complete shards 1,2,3,4,6,7; timer/service-ledger fixtures retain their host boundary",
+      "shared containers support complete shards 0,1,2,3,4,6,7; service-ledger fixtures retain their host boundary",
     );
   return value;
 }
@@ -242,7 +245,7 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
     !!browserPhase ||
     env.FVOCI_E2E_PENDING === "1" ||
     specs.length > 0 ||
-    ["0", "5"].includes(shard);
+    ["5"].includes(shard);
   if (hostRequired && imageOptions.length)
     fail("container image options cannot alter a required host/CI selection");
   return {
@@ -286,9 +289,9 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     );
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
   if (request.route !== "host") {
-    const dockerShards = request.route === "hybrid" ? "1,2,3,4,6,7" : shard;
+    const dockerShards = request.route === "hybrid" ? "0,1,2,3,4,6,7" : shard;
     process.stderr.write(
-      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=0,5" : ""}\n`,
+      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=5" : ""}\n`,
     );
     const status = await containerBrowser([
       root,
@@ -529,14 +532,14 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     return 0;
   }
   const group = (args: string[]) =>
-    command(["bash", join(root, "scripts/web-e2e-run-group.sh"), ...args], root);
+    command([process.execPath, "--no-env-file", import.meta.path, "group-wrapper", ...args], root);
   if (shard || request.route === "hybrid") {
     verifyPlan(undefined, DEFAULT_SHARD_COUNT);
     const plan = assignShards(discoverGroups(), DEFAULT_SHARD_COUNT);
     if (browserPhase === "consume")
       await stage("browser-handoff-consume", handoff("consume"), root);
     else await build();
-    for (const index of request.route === "hybrid" ? ["0", "5"] : [shard]) {
+    for (const index of request.route === "hybrid" ? ["5"] : [shard]) {
       process.stderr.write(`web-e2e host_complete_shard=${index}\n`);
       for (const specs of plan[Number(index)] ?? []) {
         const status = await group(specs);
@@ -1066,7 +1069,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
       for (const specs of plan[Number(shard)] ?? [])
         await stage(
           "browser-group",
-          ["bash", join(root, "scripts/web-e2e-run-group.sh"), ...specs],
+          [process.execPath, "--no-env-file", import.meta.path, "group-wrapper", ...specs],
           root,
           { ...process.env, CI: "true" },
         );
@@ -1077,6 +1080,389 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
     if (error instanceof RuntimeExit) return error.status;
     throw error;
   }
+}
+
+/** Explicit selection keeps its original argv and runtime scope. */
+export function groupInvocations(argv: string[], env: NodeJS.ProcessEnv): string[][] {
+  const timer = argv.filter(
+    (arg) => arg === "v050-task-timer.spec.ts" || arg === "e2e/v050-task-timer.spec.ts",
+  );
+  if (
+    timer.length !== 1 ||
+    argv.some((arg) => arg.endsWith(".spec.ts") && !timer.includes(arg)) ||
+    argv.some(
+      (arg) =>
+        ["--grep", "--grep-invert", "--shard", "--list", "--", "-g"].includes(arg) ||
+        ["--grep=", "--grep-invert=", "--shard=", "-g"].some((prefix) => arg.startsWith(prefix)),
+    ) ||
+    env.FVOCI_E2E_PENDING === "1"
+  )
+    return [[...argv]];
+  return [
+    [
+      "--grep-invert",
+      [TIMER_FILTERS.new_control, TIMER_FILTERS.recovery, TIMER_FILTERS.restart].join("|"),
+    ],
+    ["--grep", TIMER_FILTERS.recovery],
+    ["--grep", TIMER_FILTERS.restart],
+    ["--grep", TIMER_FILTERS.new_control],
+  ].map((selection) => [...argv, ...selection]);
+}
+
+export function groupEnvironment(
+  run: string,
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const specs = argv.filter((arg) => !arg.startsWith("-"));
+  const label = specs.length
+    ? specs
+        .slice(0, 2)
+        .map((arg) => basename(arg.replace(/\.spec\.ts$/, "")))
+        .join("+")
+    : env.FVOCI_E2E_PENDING === "1"
+      ? "collaboration-pending"
+      : "default-suite";
+  return {
+    ...env,
+    GROUP_LABEL: label,
+    RUN_DIR: run,
+    SERVER_LOG: join(run, "server.log"),
+    PEPPER: '{"test":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+    FVOCI_STATIC_DIR: join(run, "static"),
+    FVOCI_W5_EVIDENCE_DIR: env.FVOCI_W5_EVIDENCE_DIR || join(run, "playwright-output/w5-evidence"),
+    NET_MONITOR_LOG: join(run, "net-monitor.log"),
+    NET_MARKS_LOG: join(run, "net-marks.log"),
+    NET_MONITOR_PID: "",
+  };
+}
+
+export function redactGroupLog(text: string): string {
+  return text
+    .replace(/postgres(?:ql)?:\/\/\S+/g, "postgres://redacted")
+    .replace(/libsql:\/\/\S+/g, "libsql://redacted")
+    .replace(/https:\/\/\S*\.turso\.io\S*/g, "https://redacted")
+    .replace(
+      /\b(DATABASE_URL|DATABASE_APP_URL|FVOCI_E2E_ADMIN_DATABASE_URL|TEST_DATABASE_URL|FVOCI_LIBSQL_URL|FVOCI_LIBSQL_AUTH_TOKEN|FVOCI_TEST_TURSO_[A-Z0-9_]*URL|FVOCI_TEST_TURSO_AUTH_TOKEN|MEILI[A-Z_]*KEY|PASSWORD[A-Z_]*|ENCRYPTION_KEYS)=\S+/g,
+      "$1=redacted",
+    );
+}
+
+/** Every retention step is attempted; partial summaries never replace proof. */
+export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<number> {
+  const run = env.RUN_DIR ?? fail("RUN_DIR is required"),
+    label = env.GROUP_LABEL ?? "default-suite";
+  let errors = 0,
+    retained: string;
+  const report = (text: string) => {
+    try {
+      process.stderr.write(text);
+    } catch {
+      /* closed reader */
+    }
+  };
+  const error = (step: string, detail = "") => {
+    errors++;
+    report(
+      `web-e2e group ${label}: failure-artifact retention step ${step} failed${detail ? ": " + detail : ""}\n`,
+    );
+  };
+  const attempt = (step: string, body: () => void): boolean => {
+    try {
+      body();
+      return true;
+    } catch {
+      error(step);
+      return false;
+    }
+  };
+  try {
+    retained = mkdtempSync(join(env.TMPDIR || tmpdir(), "fvoci-collab-e2e-fail."));
+  } catch {
+    error("create-directory");
+    return 1;
+  }
+  attempt("chmod-directory", () => chmodSync(retained, 0o700));
+  if (env.GITHUB_OUTPUT)
+    attempt("github-output", () =>
+      appendFileSync(
+        env.GITHUB_OUTPUT as string,
+        `failure-artifacts=${retained}\nfailure-group=${label}\n`,
+      ),
+    );
+  attempt("copy-playwright-output", () => {
+    const from = join(run, "playwright-output");
+    if (existsSync(from) && readdirSync(from).length)
+      cpSync(from, join(retained, "playwright-output"), {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+  });
+  if (env.SERVER_LOG && existsSync(env.SERVER_LOG))
+    attempt("redact-server-log", () =>
+      writeFileSync(
+        join(retained, "server.log"),
+        redactGroupLog(readFileSync(env.SERVER_LOG as string, "utf8")),
+      ),
+    );
+  attempt("create-owned-server-directory", () =>
+    mkdirSync(join(retained, "owned-server"), { recursive: true }),
+  );
+  const logs: string[] = [];
+  const walk = (directory: string, visit: (path: string) => void, step: string) => {
+    try {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) walk(path, visit, step);
+        else if (entry.isFile()) visit(path);
+      }
+    } catch {
+      error(step);
+    }
+  };
+  walk(
+    run,
+    (path) => {
+      if (basename(path) === "server.log" && dirname(path) !== run) logs.push(path);
+    },
+    "find-owned-server-logs",
+  );
+  for (const log of logs)
+    attempt(`redact-owned-server-log (${log})`, () =>
+      writeFileSync(
+        join(retained, "owned-server", basename(dirname(log)) + ".log"),
+        redactGroupLog(readFileSync(log, "utf8")),
+      ),
+    );
+  const net = [env.NET_MONITOR_LOG, env.NET_MARKS_LOG].filter(
+    (path): path is string => !!path && existsSync(path),
+  );
+  if (net.length)
+    attempt("merge-net-events", () => {
+      const lines = net.flatMap((path) => readFileSync(path, "utf8").split("\n").filter(Boolean));
+      lines.sort((a, b) => {
+        const x = a.split(/\s/, 1)[0] ?? "",
+          y = b.split(/\s/, 1)[0] ?? "";
+        return x < y ? -1 : x > y ? 1 : 0;
+      });
+      writeFileSync(
+        join(retained, "net-events.log"),
+        redactGroupLog(
+          "# group namespace netlink address/link events (ip -o -tshort monitor address link, UTC) and group markers\n" +
+            lines.join("\n") +
+            "\n",
+        ),
+      );
+    });
+  const traces: string[] = [];
+  walk(
+    retained,
+    (path) => {
+      if (basename(path) === "trace.zip") traces.push(path);
+    },
+    "find-traces",
+  );
+  for (const trace of traces) {
+    const dest = join(dirname(trace), "browser-summary.txt");
+    try {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          join(env.ROOT ?? fail("ROOT is required"), "tools/web-e2e/trace-summary.ts"),
+          trace,
+        ],
+        { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+      );
+      const [stdout, stderr, status] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      if (status !== 0) {
+        attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+        error(
+          `trace-summary (${basename(dirname(trace))}/trace.zip, exit ${String(status)})`,
+          redactGroupLog(stderr).trimEnd().split("\n").slice(-5).join(" "),
+        );
+      } else if (!attempt("write-trace-summary", () => writeFileSync(dest, stdout)))
+        attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+    } catch {
+      attempt("remove-partial-summary", () => rmSync(dest, { force: true }));
+      error(`trace-summary (${basename(dirname(trace))}/trace.zip)`);
+    }
+  }
+  report(
+    `retained ${errors ? "incomplete " : ""}failure artifacts for group ${label} in ${retained}${errors ? ` (${String(errors)} retention steps failed)` : ""}\n`,
+  );
+  return errors ? 1 : 0;
+}
+
+/** Fresh namespace per invocation; the native server remains group-runtime's child. */
+export async function groupWrapper(argv: string[]): Promise<number> {
+  const root = process.env.ROOT || fail("ROOT is required");
+  if (!process.env.CARGO_TARGET_DIR) fail("CARGO_TARGET_DIR is required");
+  for (const args of groupInvocations(argv, process.env)) {
+    const run = mkdtempSync(join(tmpdir(), "fvoci-web-e2e."));
+    const env = groupEnvironment(run, args, process.env),
+      label = env.GROUP_LABEL;
+    let status = 0,
+      interrupted = 0;
+    type Child = ReturnType<typeof Bun.spawn>;
+    let child: Child | undefined, monitor: Child | undefined;
+    const report = (text: string) => {
+      try {
+        process.stderr.write(text);
+      } catch {
+        /* closed reader */
+      }
+    };
+    const send = (signal: NodeJS.Signals) => {
+      if (child) {
+        try {
+          process.kill(-child.pid, signal);
+        } catch {
+          /* already reaped */
+        }
+      }
+    };
+    const signals: [NodeJS.Signals, number][] = [
+      ["SIGHUP", 129],
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+      ["SIGPIPE", 141],
+    ];
+    const handlers = signals.map(([signal, code]) => {
+      const handler = () => {
+        interrupted ||= code;
+        send(signal);
+      };
+      process.on(signal, handler);
+      return [signal, handler] as const;
+    });
+    const closed = () => {
+      interrupted ||= 141;
+      send("SIGPIPE");
+    };
+    process.stderr.on("error", closed);
+    const mark = (text: string) => {
+      const micros = Math.floor((performance.timeOrigin + performance.now()) * 1000);
+      const stamp =
+        new Date(Math.floor(micros / 1_000_000) * 1000).toISOString().slice(0, 19) +
+        "." +
+        String(micros % 1_000_000).padStart(6, "0");
+      appendFileSync(env.NET_MARKS_LOG as string, `[${stamp}] # fvoci: ${text}\n`);
+    };
+    try {
+      if (
+        !existsSync(join(root, "apps/web/dist")) ||
+        !statSync(join(root, "apps/web/dist")).isDirectory()
+      )
+        fail("missing apps/web/dist; build web assets before running groups");
+      cpSync(join(root, "apps/web/dist"), env.FVOCI_STATIC_DIR as string, {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+      report(`=== web e2e group: ${label} ===\n`);
+      const shared = env.FVOCI_E2E_SHARED_SERVICES === "1";
+      if (shared)
+        for (const name of [
+          "TEST_DATABASE_URL",
+          "FVOCI_TEST_PG_CONTAINER",
+          "FVOCI_MEILI_URL",
+          "FVOCI_MEILI_KEY",
+          "MEILI_MASTER_KEY",
+          "FVOCI_TEST_MEILI_CONTAINER",
+        ])
+          if (!env[name])
+            fail(
+              `FVOCI_E2E_SHARED_SERVICES=1 requires ${name} from the scope that started the services`,
+            );
+      writeFileSync(env.NET_MONITOR_LOG as string, "");
+      if (Bun.which("ip", { PATH: env.PATH })) {
+        const fd = openSync(env.NET_MONITOR_LOG as string, "a");
+        try {
+          monitor = Bun.spawn(["ip", "-o", "-tshort", "monitor", "address", "link"], {
+            env: { ...env, TZ: "UTC" },
+            stdin: "ignore",
+            stdout: fd,
+            stderr: fd,
+          });
+        } finally {
+          closeSync(fd);
+        }
+        env.NET_MONITOR_PID = String(monitor.pid);
+        mark(`netlink monitor started (ip monitor address link, pid ${String(monitor.pid)})`);
+      } else {
+        mark("ip (iproute2) not found; no netlink event log");
+        report(`warning: ip (iproute2) not found; no netlink event log for group ${label}\n`);
+      }
+      mark(
+        shared
+          ? "using shared test containers (postgres, meilisearch)"
+          : "starting test containers (postgres, meilisearch)",
+      );
+      if (interrupted) throw new RuntimeExit(interrupted);
+      child = Bun.spawn(
+        [
+          "setsid",
+          ...(shared
+            ? []
+            : [
+                "bash",
+                join(root, "scripts/start-test-postgres.sh"),
+                "bash",
+                join(root, "scripts/start-test-meili.sh"),
+              ]),
+          process.execPath,
+          "--no-env-file",
+          import.meta.path,
+          "group-runtime",
+          ...args,
+        ],
+        { cwd: root, env, stdin: "ignore", stdout: "inherit", stderr: "inherit" },
+      );
+      status = await child.exited;
+      status = interrupted || status;
+    } catch (error) {
+      status = interrupted || (error instanceof RuntimeExit ? error.status : 1);
+      if (error instanceof CheckError) report(error.message + "\n");
+    } finally {
+      for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+      const ignore = () => {};
+      for (const [signal] of signals) process.on(signal, ignore);
+      process.stderr.removeListener("error", closed);
+      process.stderr.on("error", ignore);
+      try {
+        if (monitor) {
+          if (monitor.exitCode === null && monitor.signalCode === null) monitor.kill("SIGTERM");
+          await monitor.exited;
+        }
+      } catch {
+        report(`web-e2e group ${label}: could not retire netlink monitor\n`);
+        status ||= 1;
+      }
+      try {
+        mark(`group exiting with status ${String(status)}`);
+      } catch {
+        /* diagnostic only */
+      }
+      if (status !== 0 && (await retainFailureArtifacts(env)) !== 0)
+        report(
+          `web-e2e group ${label}: failure artifacts are incomplete; the group verdict stays exit ${String(status)}\n`,
+        );
+      try {
+        rmSync(run, { recursive: true, force: true });
+      } catch {
+        report(`web-e2e group ${label}: could not remove its run directory ${run}\n`);
+        status ||= 1;
+      }
+      process.stderr.removeListener("error", ignore);
+      for (const [signal] of signals) process.removeListener(signal, ignore);
+    }
+    if (status !== 0) return status;
+  }
+  return 0;
 }
 
 /** The existing group runtime, shared by ordinary host and image consumers. */
@@ -2683,6 +3069,7 @@ if (import.meta.main) {
     if (argv[0] === "browser-phase")
       process.exit(await browserPhase(argv[1] ?? "", argv[2] ?? "", argv.slice(3)));
     if (argv[0] === "group-runtime") process.exit(await groupRuntime(argv.slice(1)));
+    if (argv[0] === "group-wrapper") process.exit(await groupWrapper(argv.slice(1)));
     process.stdout.write(run(argv));
   } catch (error) {
     if (error instanceof RuntimeExit) process.exit(error.status);

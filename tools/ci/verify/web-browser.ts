@@ -70,7 +70,7 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
-export const HOST_BROWSER_IF = "contains(fromJSON('[0,5]'), matrix.shard)";
+export const HOST_BROWSER_IF = "contains(fromJSON('[5]'), matrix.shard)";
 export const IMAGE_BROWSER_IF = "!" + HOST_BROWSER_IF;
 const hostBrowserStep = (step: Mapping, job: string): Mapping =>
   job === "workspace-browser-shard" && step.if === HOST_BROWSER_IF
@@ -175,7 +175,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   for (const step of cs.slice(first, last + 1))
     if (step.id !== "sqlite_diagnostics")
       require(step.if ===
-        HOST_BROWSER_IF, "host preparation and assertions restricted exactly to shards0/5");
+        HOST_BROWSER_IF, "host preparation and assertions restricted exactly to shard5");
   require(cs.indexOf(admit as Mapping) < cs.indexOf(download[0] as Mapping) &&
     cs.indexOf(download[0] as Mapping) <
       cs.indexOf(runtime as Mapping), "admission/download/runtime ordering required");

@@ -12,6 +12,7 @@ import {
   symlinkSync,
   readFileSync,
   realpathSync,
+  readdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -26,6 +27,7 @@ import {
   shardPlanLines,
 } from "./groups.ts";
 import { groupDatabaseStatement } from "./database-urls.ts";
+import { groupEnvironment, retainFailureArtifacts } from "./run-web-e2e.ts";
 
 // Substitute only the Bun child executable in this fixture's private copied
 // runtime. Production always uses process.execPath; native binaries stay real
@@ -53,12 +55,9 @@ function fixtureRuntime(source: string, destination: string, executable: string)
   check(start >= 0 && end > start, "group runtime boundary missing");
   const body = text.slice(start, end);
   check(body.split("process.execPath").length === 5, "four native Bun child boundaries required");
-  writeFileSync(
-    destination,
-    text.slice(0, start) +
-      body.replaceAll("process.execPath", JSON.stringify(executable)) +
-      text.slice(end),
-  );
+  // The copied wrapper/retention now also launches Bun children. Substitute
+  // only this fixture-owned copy; native binaries remain direct paths.
+  writeFileSync(destination, text.replaceAll("process.execPath", JSON.stringify(executable)));
 }
 
 async function fakeBun(args: string[]): Promise<void> {
@@ -76,7 +75,7 @@ async function fakeBun(args: string[]): Promise<void> {
     process.exit(args[2] === "drop-database" && process.env.FVOCI_FIXTURE_DROP === "fail" ? 3 : 0);
   }
   if (
-    args[0]?.endsWith("/tools/web-e2e/trace-summary.ts") &&
+    args.some((arg) => arg.endsWith("/tools/web-e2e/trace-summary.ts")) &&
     process.env.FVOCI_FIXTURE_TRACE_SUMMARY === "fail"
   ) {
     process.stderr.write(
@@ -112,6 +111,35 @@ class FixtureError extends Error {}
 // Executables live only in the owned copied fixture. The production entry and
 // all of its argument/qualification logic execute, with downstream tools stubbed.
 export async function entryTool(tool: string, args: string[]): Promise<void> {
+  if (tool === "ip") return;
+  if (tool === "bun" && args[1]?.endsWith("/tools/web-e2e/run-web-e2e.ts")) {
+    const mode = args[2];
+    if (mode === "group-wrapper") {
+      if (process.env.FVOCI_TEST_CANCEL_PENDING === "1") {
+        const retired = new Promise<void>((resolve) => process.once("SIGTERM", resolve));
+        process.kill(process.ppid, "SIGTERM");
+        await retired;
+        console.log("cancelled pending child normal exit");
+        return;
+      }
+      console.log("fvoci-web-e2e-run-group " + args.slice(3).join(" "));
+      process.exit(Number(process.env.FVOCI_TEST_RUN_GROUP_EXIT ?? "0"));
+    }
+    if (mode === "group-runtime" && process.env.FVOCI_FIXTURE_TIMER === "1") {
+      if (process.env.FVOCI_FIXTURE_TIMER_NAMESPACES)
+        appendFileSync(
+          process.env.FVOCI_FIXTURE_TIMER_NAMESPACES,
+          JSON.stringify({
+            run: process.env.RUN_DIR,
+            evidence: process.env.FVOCI_W5_EVIDENCE_DIR,
+            root: process.env.ROOT,
+            target: process.env.CARGO_TARGET_DIR,
+          }) + "\n",
+        );
+      console.log(JSON.stringify(args.slice(3)));
+      process.exit(args.includes(process.env.FVOCI_TEST_TIMER_FAIL_FILTER ?? "unset") ? 7 : 0);
+    }
+  }
   if (tool === "cargo") {
     console.error("fvoci-web-e2e-fake-cargo " + args.join(" "));
     process.exit(Number(process.env.FVOCI_TEST_CARGO_EXIT ?? "0"));
@@ -130,24 +158,6 @@ export async function entryTool(tool: string, args: string[]): Promise<void> {
     if (name.endsWith("/generate-api.sh")) {
       console.error("fvoci-web-e2e-fake-generate-api");
       return;
-    }
-    if (name.endsWith("/web-e2e-run-group.sh")) {
-      await new Response(Bun.stdin.stream()).text();
-      if (process.env.FVOCI_TEST_CANCEL_PENDING === "1") {
-        const retired = new Promise<void>((resolve) => {
-          process.once("SIGTERM", resolve);
-        });
-        process.kill(process.ppid, "SIGTERM");
-        await retired;
-        console.log("cancelled pending child normal exit");
-        return;
-      }
-      if (process.env.FVOCI_FIXTURE_TIMER === "1") {
-        console.log(JSON.stringify(args.slice(1)));
-        process.exit(args.includes(process.env.FVOCI_TEST_TIMER_FAIL_FILTER ?? "unset") ? 7 : 0);
-      }
-      console.log("fvoci-web-e2e-run-group " + args.slice(1).join(" "));
-      process.exit(Number(process.env.FVOCI_TEST_RUN_GROUP_EXIT ?? "0"));
     }
     const child = Bun.spawn(["/bin/bash", ...args], {
       stdin: "inherit",
@@ -181,7 +191,7 @@ export async function entryTool(tool: string, args: string[]): Promise<void> {
   process.exit(await child.exited);
 }
 
-function ciShardFixture(source: string): void {
+async function ciShardFixture(source: string): Promise<void> {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-web-e2e-fixture.")));
   const checkout = join(directory, "checkout"),
     bin = join(directory, "bin");
@@ -208,7 +218,7 @@ function ciShardFixture(source: string): void {
           : text,
       );
     }
-    for (const tool of ["bun", "bash", "cargo"]) {
+    for (const tool of ["bun", "bash", "cargo", "ip"]) {
       const file = join(bin, tool);
       writeFileSync(
         file,
@@ -436,28 +446,39 @@ function ciShardFixture(source: string): void {
         !result.text.includes("unexpected selected runtime"),
       "pending cancellation launched selected work or became success",
     );
-    // Execute the unchanged production timer dispatch/export/retention source,
-    // keeping the existing exact title/filter and retained-evidence checks.
+    // Execute the real Bun wrapper, keeping exact filters, fresh initial
+    // namespaces, explicit selection, stop-on-failure and retained evidence.
     process.env.PATH = env.PATH;
     process.env.FVOCI_FIXTURE_TIMER = "1";
-    const groupSource = readFileSync(join(source, "scripts/web-e2e-run-group.sh"), "utf8");
-    const timer = join(checkout, "scripts/timer-dispatch-fixture.sh");
-    writeFileSync(
-      timer,
-      groupSource.slice(0, groupSource.indexOf("RUN_DIR=")) +
-        '\nbash "$ROOT/scripts/web-e2e-run-group.sh" "$@"\n',
-    );
+    mkdirSync(join(checkout, "apps/web/dist"), { recursive: true });
+    writeFileSync(join(checkout, "apps/web/dist/index.html"), "fixture");
+    const timer = join(checkout, "tools/web-e2e/run-web-e2e.ts");
+    const namespaces = join(directory, "timer-namespaces.jsonl");
     const timerRun = Bun.spawnSync(
       [
-        "/bin/bash",
+        process.execPath,
+        "--no-env-file",
         timer,
+        "group-wrapper",
         "--workers=1",
         "e2e/v050-task-timer.spec.ts",
         "--retries=0",
         "--trace=on",
       ],
       {
-        env: { ...process.env, ROOT: checkout, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR },
+        env: {
+          ...process.env,
+          ROOT: checkout,
+          CARGO_TARGET_DIR: env.CARGO_TARGET_DIR,
+          FVOCI_E2E_SHARED_SERVICES: "1",
+          TEST_DATABASE_URL: "fixture",
+          FVOCI_TEST_PG_CONTAINER: "fixture",
+          FVOCI_MEILI_URL: "fixture",
+          FVOCI_MEILI_KEY: "fixture",
+          MEILI_MASTER_KEY: "fixture",
+          FVOCI_TEST_MEILI_CONTAINER: "fixture",
+          FVOCI_FIXTURE_TIMER_NAMESPACES: namespaces,
+        },
         stdout: "pipe",
         stderr: "pipe",
       },
@@ -466,19 +487,30 @@ function ciShardFixture(source: string): void {
     const timerLog = join(directory, "timer.jsonl");
     writeFileSync(timerLog, timerRun.stdout);
     timerRows(timerLog, join(source, "apps/web/e2e/v050-task-timer.spec.ts"));
+    const contexts = readFileSync(namespaces, "utf8")
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as { run: string; evidence: string; root: string; target: string },
+      );
+    check(
+      contexts.length === 4 && new Set(contexts.map((context) => context.run)).size === 4,
+      "timer invocations reused a runtime namespace",
+    );
+    check(
+      contexts.every(
+        (context) =>
+          context.root === checkout &&
+          context.target === env.CARGO_TARGET_DIR &&
+          context.evidence === join(context.run, "playwright-output/w5-evidence") &&
+          !existsSync(context.run),
+      ),
+      "timer initial environment or cleanup differs",
+    );
     dispatchCases(timer, checkout);
-    const exported = join(directory, "evidence-export.sh"),
-      statement = groupSource
-        .split("\n")
-        .filter((line) => line.startsWith("export FVOCI_W5_EVIDENCE_DIR="));
-    check(statement.length === 1, "evidence export statement count");
-    writeFileSync(exported, statement.join("\n"));
-    evidenceExport(exported, checkout);
-    const retained = join(directory, "evidence-retention.sh"),
-      start = groupSource.indexOf("retain_failure_artifacts() {");
-    check(start >= 0, "retention source missing");
-    writeFileSync(retained, groupSource.slice(start, groupSource.indexOf("\n}", start) + 2));
-    retention(retained, checkout);
+    evidenceExport(checkout);
+    await retention(checkout);
     console.log("run-ci-shard-fixture-test: ok");
   } finally {
     if (previousPath === undefined) Reflect.deleteProperty(process.env, "PATH");
@@ -497,32 +529,6 @@ const same = (left: unknown, right: unknown): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
 type Env = Record<string, string | undefined>;
-
-function runBash(
-  argv: string[],
-  env: Env,
-): { status: number | null; stdout: string; stderr: string } {
-  const result = Bun.spawnSync(["bash", ...argv], {
-    env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  return {
-    status: result.exitCode,
-    stdout: UTF8.decode(result.stdout),
-    stderr: UTF8.decode(result.stderr),
-  };
-}
-
-function bashOk(argv: string[], env: Env): string {
-  const result = runBash(argv, env);
-  check(
-    result.status === 0,
-    `bash ${argv.join(" ")} exited ${String(result.status)}: ${result.stderr}`,
-  );
-  return result.stdout;
-}
 
 function argvRows(text: string): string[][] {
   if (text === "") return [];
@@ -596,7 +602,34 @@ function timerRows(log: string, spec: string): void {
 
 /** Explicit selections pass through once unchanged; each timer run's failure stops the dispatch. */
 function dispatchCases(script: string, root: string): void {
-  const env: Env = { ...process.env, ROOT: root, CARGO_TARGET_DIR: `${root}/target` };
+  const env: Env = {
+    ...process.env,
+    ROOT: root,
+    CARGO_TARGET_DIR: `${root}/target`,
+    FVOCI_E2E_SHARED_SERVICES: "1",
+    TEST_DATABASE_URL: "fixture",
+    FVOCI_TEST_PG_CONTAINER: "fixture",
+    FVOCI_MEILI_URL: "fixture",
+    FVOCI_MEILI_KEY: "fixture",
+    MEILI_MASTER_KEY: "fixture",
+    FVOCI_TEST_MEILI_CONTAINER: "fixture",
+  };
+  const invoke = (args: string[], variables = env) => {
+    const child = Bun.spawnSync(
+      [process.execPath, "--no-env-file", script, "group-wrapper", ...args],
+      { env: variables, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    return {
+      status: child.exitCode,
+      stdout: UTF8.decode(child.stdout),
+      stderr: UTF8.decode(child.stderr),
+    };
+  };
+  const successful = (args: string[], variables = env) => {
+    const result = invoke(args, variables);
+    check(result.status === 0, `group dispatch failed: ${result.stderr}`);
+    return result.stdout;
+  };
   delete env.FVOCI_E2E_PENDING;
   delete env.FVOCI_TEST_TIMER_FAIL_FILTER;
   const cases = [
@@ -615,19 +648,19 @@ function dispatchCases(script: string, root: string): void {
     [],
   ];
   for (const args of cases) {
-    const rows = argvRows(bashOk([script, ...args], env));
+    const rows = argvRows(successful(args));
     check(
       same(rows, [args]),
       `explicit selection changed: ${JSON.stringify(args)} -> ${JSON.stringify(rows)}`,
     );
   }
   const pendingArgs = ["v050-task-timer.spec.ts", "--workers=1"];
-  const pending = argvRows(bashOk([script, ...pendingArgs], { ...env, FVOCI_E2E_PENDING: "1" }));
+  const pending = argvRows(successful(pendingArgs, { ...env, FVOCI_E2E_PENDING: "1" }));
   check(same(pending, [pendingArgs]), `pending selection changed: ${JSON.stringify(pending)}`);
-  const runs = argvRows(bashOk([script, "v050-task-timer.spec.ts"], env));
+  const runs = argvRows(successful(["v050-task-timer.spec.ts"]));
   check(runs.length === 4, `expected 4 timer runs: ${JSON.stringify(runs)}`);
   runs.forEach((run, index) => {
-    const result = runBash([script, "v050-task-timer.spec.ts"], {
+    const result = invoke(["v050-task-timer.spec.ts"], {
       ...env,
       FVOCI_TEST_TIMER_FAIL_FILTER: run.at(-1),
     });
@@ -642,13 +675,12 @@ function dispatchCases(script: string, root: string): void {
   });
 }
 
-/** The real export statement: a per-run default beneath playwright-output; explicit paths survive. */
-function evidenceExport(statement: string, root: string): void {
-  const script = 'RUN_DIR="$1"; source "$2"; printf "%s" "$FVOCI_W5_EVIDENCE_DIR"';
+/** The production initial namespace: per-run defaults; explicit paths survive. */
+function evidenceExport(root: string): void {
   const clean: Env = { ...process.env };
   delete clean.FVOCI_W5_EVIDENCE_DIR;
   const evidence = (run: string, env: Env): string =>
-    bashOk(["-c", script, "fixture", run, statement], env);
+    groupEnvironment(run, [], env).FVOCI_W5_EVIDENCE_DIR ?? "";
   for (const run of ["run-first", "run-second"]) {
     const directory = join(root, run);
     const value = evidence(directory, clean);
@@ -665,7 +697,7 @@ function evidenceExport(statement: string, root: string): void {
 }
 
 /** The real retention function copies evidence files before the runtime directory is removed. */
-function retention(fn: string, root: string): void {
+async function retention(root: string): Promise<void> {
   const run = join(root, "run-retention");
   const evidence = join(run, "playwright-output", "w5-evidence");
   mkdirSync(evidence, { recursive: true });
@@ -687,10 +719,8 @@ function retention(fn: string, root: string): void {
     TMPDIR: temporary,
     GITHUB_OUTPUT: output,
   };
-  bashOk(
-    ["-eu", "-c", 'source "$1"; retain_failure_artifacts; rm -rf "$RUN_DIR"', "fixture", fn],
-    env,
-  );
+  check((await retainFailureArtifacts(env)) === 0, "production evidence retention failed");
+  rmSync(run, { recursive: true });
   const line = readFileSync(output, "utf8")
     .split("\n")
     .find((entry) => entry.startsWith("failure-artifacts="));
@@ -701,13 +731,44 @@ function retention(fn: string, root: string): void {
     const copy = join(retained, "playwright-output", "w5-evidence", name);
     check(readFileSync(copy, "utf8") === value, `retained ${name} differs`);
   }
+  // A failed publication/redaction still attempts later copying/merging and
+  // never creates a placeholder server log.
+  mkdirSync(evidence, { recursive: true });
+  for (const [name, value] of Object.entries(files)) writeFileSync(join(evidence, name), value);
+  const serverDirectory = join(run, "server.log");
+  mkdirSync(serverDirectory);
+  const net = join(run, "net-monitor.log");
+  writeFileSync(net, "[2026-01-01T00:00:00.000000] probe postgres://u:private-canary@h/db\n");
+  const previous = new Set(readdirSync(temporary));
+  check(
+    (await retainFailureArtifacts({
+      ...env,
+      GITHUB_OUTPUT: root,
+      SERVER_LOG: serverDirectory,
+      NET_MONITOR_LOG: net,
+    })) === 1,
+    "retention errors became success",
+  );
+  const created = readdirSync(temporary).filter((name) => !previous.has(name));
+  check(created.length === 1, "failed retention did not retain its directory");
+  const incomplete = join(temporary, created[0] ?? "");
+  check(!existsSync(join(incomplete, "server.log")), "failed redaction wrote a placeholder");
+  for (const [name, value] of Object.entries(files))
+    check(
+      readFileSync(join(incomplete, "playwright-output/w5-evidence", name), "utf8") === value,
+      "retention stopped after an earlier error",
+    );
+  check(
+    !readFileSync(join(incomplete, "net-events.log"), "utf8").includes("private-canary"),
+    "netlink diagnostics disclosed a private canary",
+  );
 }
 
 const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => unknown }> = {
   "ci-shard": {
     arity: 1,
     run: (root = "") => {
-      ciShardFixture(root);
+      return ciShardFixture(root);
     },
   },
   "fixture-runtime": {
@@ -731,15 +792,15 @@ const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => unkn
     },
   },
   "evidence-export": {
-    arity: 2,
-    run: (statement = "", root = "") => {
-      evidenceExport(statement, root);
+    arity: 1,
+    run: (root = "") => {
+      evidenceExport(root);
     },
   },
   retention: {
-    arity: 2,
-    run: (fn = "", root = "") => {
-      retention(fn, root);
+    arity: 1,
+    run: (root = "") => {
+      return retention(root);
     },
   },
 };

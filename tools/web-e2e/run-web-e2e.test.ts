@@ -232,8 +232,9 @@ describe("qualifyCommittedApi", () => {
 });
 
 test("containers admit complete migrated shards, never partial or required host fixtures", () => {
-  for (const value of ["1", "2", "3", "4", "6", "7"]) expect(containerShard(value)).toBe(value);
-  for (const value of [undefined, "", "0", "5", "-1", "6 --grep=skip", "8"])
+  for (const value of ["0", "1", "2", "3", "4", "6", "7"])
+    expect(containerShard(value)).toBe(value);
+  for (const value of [undefined, "", "5", "-1", "6 --grep=skip", "8"])
     expect(() => containerShard(value)).toThrow(CheckError);
 });
 
@@ -335,15 +336,15 @@ console.log(JSON.stringify({first,next,clean}));process.exit(first);`;
 
 test("maintained default preserves the full hybrid suite and exact host selections", () => {
   expect(webRequest([], {}).route).toBe("hybrid");
-  for (const shard of ["1", "2", "3", "4", "6", "7"])
+  for (const shard of ["0", "1", "2", "3", "4", "6", "7"])
     expect(webRequest(["--ci-shard", shard], {}).route).toBe("docker");
-  for (const shard of ["0", "5"]) expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
+  for (const shard of ["5"]) expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
   const args = ["e2e/v050-task-timer.spec.ts", "--grep", "exact original filter", "--workers=1"];
   expect(webRequest(args, {}).specs).toEqual(args);
   expect(webRequest(args, {}).route).toBe("host");
   expect(webRequest([], { FVOCI_E2E_PENDING: "1" }).route).toBe("host");
   expect(webRequest(["--host"], {}).route).toBe("host");
-  for (const shard of ["2", "3"]) {
+  for (const shard of ["0", "2", "3"]) {
     expect(webRequest(["--ci-shard", shard], { GITHUB_ACTIONS: "true" }).route).toBe("host");
     expect(webRequest(["--ci-shard", shard], { FVOCI_E2E_PENDING: "1" }).route).toBe("host");
     expect(webRequest(["--host", "--ci-shard", shard], {}).route).toBe("host");
@@ -352,7 +353,7 @@ test("maintained default preserves the full hybrid suite and exact host selectio
     ["--ci-shard", "8"],
     ["--ci-shard", "2", "x.spec.ts"],
     ["--host", "--local-image-sdk"],
-    ["--ci-shard", "0", "--image-pin", "local"],
+    ["--ci-shard", "5", "--image-pin", "local"],
     ["--ci-shard-count", "16"],
   ])
     expect(() => webRequest(args, {})).toThrow(CheckError);

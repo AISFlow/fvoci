@@ -279,7 +279,7 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
       download.if,
       name === "web" && producerId.startsWith("workspace-browser-")
         ? (producerId === "workspace-browser-container-build" ? "!" : "") +
-            "contains(fromJSON('[0,5]'), matrix.shard)"
+            "contains(fromJSON('[5]'), matrix.shard)"
         : undefined,
     );
     assert.equal(download.with?.["run-id"], undefined, "handoff must stay in the current run");
