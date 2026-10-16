@@ -127,6 +127,15 @@ export async function entryTool(tool: string, args: string[]): Promise<void> {
     }
     if (name.endsWith("/web-e2e-run-group.sh")) {
       await new Response(Bun.stdin.stream()).text();
+      if (process.env.FVOCI_TEST_CANCEL_PENDING === "1") {
+        const retired = new Promise<void>((resolve) => {
+          process.once("SIGTERM", resolve);
+        });
+        process.kill(process.ppid, "SIGTERM");
+        await retired;
+        console.log("cancelled pending child normal exit");
+        return;
+      }
       if (process.env.FVOCI_FIXTURE_TIMER === "1") {
         console.log(JSON.stringify(args.slice(1)));
         process.exit(args.includes(process.env.FVOCI_TEST_TIMER_FAIL_FILTER ?? "unset") ? 7 : 0);
@@ -142,6 +151,11 @@ export async function entryTool(tool: string, args: string[]): Promise<void> {
     process.exit(await child.exited);
   }
   if (args.join(" ") === "--bun x --no-install playwright --version") return;
+  if (args[0]?.endsWith("/run-selected-backend-e2e.ts")) {
+    if (["record-before", "record-after", "stage"].includes(args[1] ?? "")) return;
+    console.error("unexpected selected runtime after pending cancellation");
+    process.exit(79);
+  }
   if (args.join(" ") === "--bun run build") {
     console.error("fvoci-web-e2e-fake-bun-build");
     if (process.env.FVOCI_TEST_DIRTY_API_DURING_BUILD === "1")
@@ -397,6 +411,18 @@ function ciShardFixture(source: string): void {
         "missing selected SQLite export reached build",
       );
     }
+    result = invoke(["--with-selected-backends"], {
+      ...ci(),
+      GITHUB_JOB: "collaboration-flow",
+      FVOCI_E2E_PENDING: "1",
+      FVOCI_TEST_CANCEL_PENDING: "1",
+    });
+    check(
+      result.status === 143 &&
+        result.text.includes("cancelled pending child normal exit") &&
+        !result.text.includes("unexpected selected runtime"),
+      "pending cancellation launched selected work or became success",
+    );
     // Execute the unchanged production timer dispatch/export/retention source,
     // keeping the existing exact title/filter and retained-evidence checks.
     process.env.PATH = env.PATH;

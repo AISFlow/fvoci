@@ -63,7 +63,9 @@ export function containerShard(value: string | undefined): string {
   return value;
 }
 
-async function command(
+let entryCancellation = 0;
+
+export async function command(
   argv: string[],
   cwd: string,
   env = process.env,
@@ -71,7 +73,9 @@ async function command(
     stdout: "inherit",
     stderr: "inherit",
   },
+  cleanup = false,
 ): Promise<number> {
+  if (entryCancellation && !cleanup) return entryCancellation;
   const child = Bun.spawn(["setsid", ...argv], {
     cwd,
     env,
@@ -86,15 +90,18 @@ async function command(
     }
   };
   const interrupt = () => {
+      entryCancellation ||= 130;
       signal("SIGINT");
     },
     terminate = () => {
+      entryCancellation ||= 143;
       signal("SIGTERM");
     };
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", terminate);
   try {
-    return await child.exited;
+    const status = await child.exited;
+    return status || (cleanup ? 0 : entryCancellation);
   } finally {
     process.removeListener("SIGINT", interrupt);
     process.removeListener("SIGTERM", terminate);
@@ -229,6 +236,25 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
 }
 
 async function webEntry(root: string, argv: string[]): Promise<number> {
+  entryCancellation = 0;
+  const interrupt = () => {
+      entryCancellation ||= 130;
+    },
+    terminate = () => {
+      entryCancellation ||= 143;
+    };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
+  try {
+    const status = await webEntryBody(root, argv);
+    return status || entryCancellation;
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
+  }
+}
+
+async function webEntryBody(root: string, argv: string[]): Promise<number> {
   root = realpathSync(root);
   const request = webRequest(argv, process.env);
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
@@ -243,7 +269,8 @@ async function webEntry(root: string, argv: string[]): Promise<number> {
       dockerShards,
       ...request.imageOptions,
     ]);
-    if (status !== 0 || request.route === "docker") return status;
+    if (status !== 0 || entryCancellation || request.route === "docker")
+      return status || entryCancellation;
   } else process.stderr.write("web-e2e route=host requested selection retained\n");
   process.env.ROOT = root;
   process.env.CARGO_TARGET_DIR = resolvePath(
@@ -497,11 +524,21 @@ async function webEntry(root: string, argv: string[]): Promise<number> {
     return 0;
   }
   const pending = await group(specs);
-  if (!selected) return pending;
-  return selectedHost(root, pending, selectedPhase === "consume");
+  if (!selected || entryCancellation) return pending || entryCancellation;
+  try {
+    return await selectedHost(root, pending, selectedPhase === "consume");
+  } catch (error) {
+    if (pending) return pending;
+    throw error;
+  }
 }
 
-async function selectedHost(root: string, pending: number, consume: boolean): Promise<number> {
+export async function selectedHost(
+  root: string,
+  pending: number,
+  consume: boolean,
+): Promise<number> {
+  if (entryCancellation) return pending || entryCancellation;
   const required = (key: string) => {
     const value = process.env[key];
     if (!value) fail(`required ${key}`);
@@ -546,12 +583,6 @@ async function selectedHost(root: string, pending: number, consume: boolean): Pr
       process.env.FVOCI_CLOSED_INSTALL_RECEIPT = destination;
     }
   }
-  await stage("runtime-owner", ["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
-  await stage(
-    "runtime-temp",
-    ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
-    root,
-  );
   const preserved =
     "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB";
   const runtime = (mode: string, browser = false) => [
@@ -572,12 +603,18 @@ async function selectedHost(root: string, pending: number, consume: boolean): Pr
     output,
     ...(mode === "config-list" ? [] : laneArgs),
   ];
-  const capture = async (args: string[], stdout: string, stderr?: string) => {
+  const capture = async (args: string[], stdout: string, stderr?: string, cleanup = false) => {
     let out: number | undefined, err: number | undefined;
     try {
       out = openSync(join(diagnostics, stdout), "wx", 0o600);
       if (stderr) err = openSync(join(diagnostics, stderr), "wx", 0o600);
-      return await command(args, root, process.env, { stdout: out, stderr: err ?? "inherit" });
+      return await command(
+        args,
+        root,
+        process.env,
+        { stdout: out, stderr: err ?? "inherit" },
+        cleanup,
+      );
     } catch {
       process.stderr.write("selected private capture failed\n");
       return 1;
@@ -588,8 +625,13 @@ async function selectedHost(root: string, pending: number, consume: boolean): Pr
   };
   let config = "not-run",
     launcher = "not-run",
-    selected = 0;
-  if (consume) {
+    selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
+  if (selected === 0)
+    selected = await command(
+      ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
+      root,
+    );
+  if (consume && selected === 0 && !entryCancellation) {
     selected = await capture(
       runtime("config-list", true),
       "config-list.stdout.log",
@@ -597,14 +639,21 @@ async function selectedHost(root: string, pending: number, consume: boolean): Pr
     );
     config = String(selected);
   }
-  if (config === "not-run" || selected === 0) {
+  if (selected === 0 && !entryCancellation) {
     selected = await command(runtime("run", true), root);
     launcher = String(selected);
   }
-  const ownership = await capture(runtime("owner-return"), "ownership-stage.json");
+  selected ||= entryCancellation;
+  const ownership = await capture(runtime("owner-return"), "ownership-stage.json", undefined, true);
   if (ownership === 0) {
     if (
-      (await command(["sudo", "chown", "-h", "-R", uid + ":" + gid, output, sqlite], root)) !== 0
+      (await command(
+        ["sudo", "chown", "-h", "-R", uid + ":" + gid, output, sqlite],
+        root,
+        process.env,
+        { stdout: "inherit", stderr: "inherit" },
+        true,
+      )) !== 0
     ) {
       process.stderr.write("selected runtime ownership restoration failed\n");
       if (!selected) selected = 1;
@@ -638,6 +687,7 @@ async function selectedHost(root: string, pending: number, consume: boolean): Pr
     );
     if (!selected) selected = 1;
   }
+  selected ||= entryCancellation;
   try {
     writeLauncherReceipt(diagnostics, [
       launcher,
@@ -1397,6 +1447,30 @@ function checkedOutput(argv: string[], cwd: string): string {
   return result.stdout.toString().trim();
 }
 
+export function qualifyImageSource(root: string, imageSource: string, current: string): void {
+  if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
+    fail("exact image and consumer source revisions required");
+  checkedOutput(
+    [
+      "git",
+      "diff",
+      "--quiet",
+      imageSource,
+      current,
+      "--",
+      "docker/ci-base/Dockerfile",
+      "xtask/src",
+      "xtask/Cargo.toml",
+      "xtask/Cargo.lock",
+      ":(glob)xtask/*.tsv",
+      "tests/support/official_sqld.rs",
+      "rust-toolchain.toml",
+      ".bun-version",
+    ],
+    root,
+  );
+}
+
 // Reuse never relabels a packet: the image still runs the original exact
 // checkout and native qualifier. Only these host Docker functions may differ.
 export async function qualifyCohortHostProgram(
@@ -1492,23 +1566,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
   const imageSource =
     /^sha256:[a-f0-9]{64} linux amd64 ([a-f0-9]{40}) /.exec(metadata)?.[1] ??
     fail("the pinned image requires its actual source revision");
-  checkedOutput(
-    [
-      "git",
-      "diff",
-      "--quiet",
-      imageSource,
-      orchestratorSource,
-      "--",
-      "docker/ci-base/Dockerfile",
-      "xtask/src",
-      "xtask/Cargo.toml",
-      "xtask/Cargo.lock",
-      "rust-toolchain.toml",
-      ".bun-version",
-    ],
-    root,
-  );
+  qualifyImageSource(root, imageSource, orchestratorSource);
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(
@@ -1726,9 +1784,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
       if (logFd !== undefined) closeSync(logFd);
     }
     const interrupt = () => {
+        entryCancellation ||= 130;
         child.kill("SIGINT");
       },
       terminate = () => {
+        entryCancellation ||= 143;
         child.kill("SIGTERM");
       };
     process.once("SIGINT", interrupt);
@@ -1736,6 +1796,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     let result: number;
     try {
       result = await child.exited;
+      result ||= entryCancellation;
     } finally {
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", terminate);

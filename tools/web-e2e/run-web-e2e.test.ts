@@ -23,6 +23,7 @@ import {
   webRequest,
   containerShard,
   qualifyCohortHostProgram,
+  qualifyImageSource,
   sqliteEnvironment,
   committedApiJobs,
   createSafeDiagnostics,
@@ -228,6 +229,102 @@ test("containers admit complete migrated shards, never partial or required host 
   for (const value of [undefined, "", "0", "3", "5", "-1", "6 --grep=skip", "8"])
     expect(() => containerShard(value)).toThrow(CheckError);
 });
+
+test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
+  const { root } = committedCheckout();
+  for (const directory of ["xtask/tests", "tests/support"])
+    mkdirSync(join(root, directory), { recursive: true });
+  for (const file of ["xtask/catalog.tsv", "tests/support/official_sqld.rs"])
+    writeFileSync(join(root, file), "original input\n");
+  const commit = () => {
+    git(root, "add", ".");
+    git(
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "image input fixture",
+    );
+    return git(root, "rev-parse", "HEAD");
+  };
+  const image = commit();
+  writeFileSync(join(root, "xtask/tests/caller.rs"), "unrelated test\n");
+  expect(() => {
+    qualifyImageSource(root, image, commit());
+  }).not.toThrow();
+  for (const file of [
+    "xtask/catalog.tsv",
+    "tests/support/official_sqld.rs",
+    "xtask/new-catalog.tsv",
+  ]) {
+    writeFileSync(join(root, file), "changed copied input\n");
+    expect(() => {
+      qualifyImageSource(root, image, commit());
+    }).toThrow(CheckError);
+    if (file === "xtask/new-catalog.tsv") rmSync(join(root, file));
+    else writeFileSync(join(root, file), "original input\n");
+    commit();
+  }
+});
+
+test("real commands preserve normal and nonzero exits", () => {
+  for (const code of [0, 7]) {
+    const source = `import {command} from ${JSON.stringify(CLI)};process.exit(await command([process.execPath,"-e",${JSON.stringify(`process.exit(${String(code)})`)}],process.cwd()));`;
+    const child = Bun.spawnSync([process.execPath, "-e", source], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(code);
+  }
+});
+
+for (const [signal, status] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const)
+  test(`real ${signal} remains cancellation after child exit0 and stops new work`, async () => {
+    const directory = tempDir(),
+      bad = join(directory, "new-work"),
+      cleanup = join(directory, "cleanup");
+    const body = `await new Promise(resolve=>{process.once(${JSON.stringify(signal)},resolve);console.log("READY");});console.log("CHILD_NORMAL_EXIT");process.exit(0);`;
+    const write = (file: string) =>
+      `require("node:fs").writeFileSync(${JSON.stringify(file)},"observed");`;
+    const source = `import {command} from ${JSON.stringify(CLI)};
+const first=await command([process.execPath,"-e",${JSON.stringify(body)}],process.cwd());
+const next=await command([process.execPath,"-e",${JSON.stringify(write(bad))}],process.cwd());
+const clean=await command([process.execPath,"-e",${JSON.stringify(write(cleanup))}],process.cwd(),process.env,{stdout:"inherit",stderr:"inherit"},true);
+console.log(JSON.stringify({first,next,clean}));process.exit(first);`;
+    const child = Bun.spawn([process.execPath, "-e", source], { stdout: "pipe", stderr: "pipe" });
+    try {
+      const reader = child.stdout.getReader(),
+        decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("READY\n")) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("child exited before ready");
+        output += decoder.decode(chunk.value);
+      }
+      child.kill(signal);
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        output += decoder.decode(chunk.value);
+      }
+      expect(await child.exited).toBe(status);
+      expect(output).toContain("CHILD_NORMAL_EXIT");
+      expect(output).toContain(JSON.stringify({ first: status, next: status, clean: 0 }));
+      expect(() => readFileSync(bad)).toThrow();
+      expect(readFileSync(cleanup, "utf8")).toBe("observed");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM");
+      await child.exited;
+    }
+  });
 
 test("maintained default preserves the full hybrid suite and exact host selections", () => {
   expect(webRequest([], {}).route).toBe("hybrid");
