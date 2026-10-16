@@ -49,7 +49,10 @@ export function browserFailureDiagnostic(
           if (failures.length === 16) break;
           const error = plain(result.error);
           const message = stripAnsi(error.message);
-          const location = plain(result.errorLocation);
+          // Playwright preserves TestError.location; errorLocation is only a
+          // stack-derived fallback. An unqualified canonical location must not
+          // be replaced by a different, apparently admitted stack location.
+          const location = plain(error.location ?? result.errorLocation);
           const line =
             typeof location.line === "number" &&
             Number.isInteger(location.line) &&

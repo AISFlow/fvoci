@@ -26,7 +26,9 @@ test.beforeAll(async ({ browser }) => {
     }
     // A failed test replaces the Playwright worker; keep setup idempotent
     // so later independent tests still execute against this group's DB.
-    if (authSql(`SELECT count(*) FROM fvoci.users WHERE email = '${member.email}'`) === "0") {
+    if (
+      (await authSql(`SELECT count(*) FROM fvoci.users WHERE email = '${member.email}'`)) === "0"
+    ) {
       createE2eUser(member.email, member.password, "콘솔 멤버");
     }
   } finally {
@@ -186,7 +188,7 @@ test("Vue account saves profile and MFA preserves password whitespace without ca
   expect(secret).toMatch(/^[A-Z2-7=]+$/i);
   await expectSecretsAbsent(page, [secret, member.password]);
   expect(
-    authSql(
+    await authSql(
       `SELECT bool_and(totp_secret LIKE 'enc:v2:%') FROM fvoci.user_mfa m JOIN fvoci.users u ON u.id = m.user_id WHERE u.email = '${member.email}'`,
     ),
   ).toBe("t");
@@ -271,13 +273,13 @@ test("Vue personal API tokens show a secret once, persist metadata, and revoke a
       ).status(),
     ).toBe(404);
     // Bound expiry fixtures to this isolated DB; listing still uses real Rust.
-    authSql(`UPDATE fvoci.api_tokens SET expires_at = NULL WHERE id = '${output.id}'::uuid`);
+    await authSql(`UPDATE fvoci.api_tokens SET expires_at = NULL WHERE id = '${output.id}'::uuid`);
     await page.reload();
     await expect(secret).toHaveCount(0);
     const row = page.getByTestId("account-token-row").filter({ hasText: "콘솔 개인 토큰" });
     await expect(row).toBeVisible();
     await expect(row).toContainText("만료 없음");
-    authSql(
+    await authSql(
       `UPDATE fvoci.api_tokens SET expires_at = '2026-10-01T20:00:00Z'::timestamptz WHERE id = '${output.id}'::uuid`,
     );
     await page.reload();
@@ -437,7 +439,7 @@ test("Vue admin legal editor publishes versions and public legal stays read only
   await expect(page.getByRole("button", { name: "발행", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => "legalInjection" in window)).toBe(false);
   expect(
-    authSql(
+    await authSql(
       "SELECT count(*) FROM fvoci.legal_documents WHERE kind = 'terms' AND title = 'Vue 콘솔 약관'",
     ),
   ).toBe("1");

@@ -705,14 +705,78 @@ export FVOCI_BIND=127.0.0.1:8080
 cargo run --bin fvoci-server
 ```
 
-Browser end-to-end tests (isolated PostgreSQL, real app role, Playwright Chromium).
-Preparation installs dependencies and builds artifacts; the gate assumes preparation
-completed and rebuilds current contracts, assets and binaries offline:
+Browser end-to-end tests (isolated PostgreSQL, real app role, Playwright Chromium)
+use the pinned shared Docker image by default:
+
+```sh
+scripts/run-web-e2e.sh
+```
+
+The maintained ordinary browser entry selects shared Docker execution by default.
+Its published multi-architecture image digest and matching native AMD64/ARM64
+SQLite SDK seals are pinned together in tools/web-e2e/run-web-e2e.ts. Local and
+CI producer/consumer commands use that same selection:
+
+```sh
+scripts/run-web-e2e.sh --ci-shard 2
+```
+
+To select another verified SDK publication, supply both immutable identities:
+
+```sh
+scripts/run-web-e2e.sh --image-pin "$CI_WEB_IMAGE_PIN" --sdk-sha256 "$CI_WEB_SDK_SHA256" --ci-shard 2
+```
+
+The image must already exist locally; the command never pulls or builds an image.
+A registry selection must use an exact `ghcr.io/aisflow/fvoci-ci-web@sha256:…`
+reference. A locally verified Docker engine ID can
+be selected with `--image-pin sha256:… --sdk-sha256 … --local-image-sdk`.
+Local engine IDs are refused in CI and are never treated as registry digests.
+Partial overrides and mismatched seals fail rather than compiling/downloading
+SQLite. Promotion or rollback changes the image digest and both native seals
+together in that existing entrypoint after publication verification; CI does
+not maintain a second pin list. An image without the sealed SDK cannot be used.
+The client must be a native Linux or macOS process with a local Linux Docker
+daemon and image of the same physical architecture; translated clients and
+cross-architecture execution are refused.
+
+With no shard or spec selection, the entry runs the entire normal suite as
+complete Docker shards 0 through 7, sharing one source-qualified producer.
+`--ci-shard` selects one complete Docker shard from that same suite. Timer,
+archive/restart and service-ledger assertions remain included; no groups are
+silently omitted. The host Docker client binds the PostgreSQL/Meilisearch ledger
+to the owned container IDs, names, run labels and images, then revalidates all
+recorded fields after the consumer, including on failure, before retirement.
+Browser containers consume that ledger without Docker access.
+
+`--host`, explicit Playwright specs/filters and pending/selected suites retain
+their intentional host boundary and exact selection. Those paths still require
+Linux x64 and host preparation; container image options cannot change them:
 
 ```sh
 scripts/prepare-web-e2e.sh
-scripts/run-web-e2e.sh
+scripts/run-web-e2e.sh --host
 ```
+
+Host preparation installs dependencies and builds artifacts; host execution
+rebuilds current contracts, assets and binaries offline. It is not a prerequisite
+for the ordinary Docker default.
+
+The producer and every consumer adopt `/opt/fvoci-sqlite` through the image's
+existing native verifier. Full recipe, compiler/header/library/Rust/ABI bytes,
+source/tree, image revision, SDK seal, run/attempt, features/profile and artifact
+checks remain required. The container's immutable SDK source can precede the
+test source only when the Dockerfile, SDK implementation and toolchain inputs
+match. Each consumer owns its SDK input report, home/temp/Cargo locks, output
+and Vite configuration cache; shared dependency/native bytes are read-only.
+
+At most two complete Docker consumers run together, each with its own database,
+restricted app role, private PostgreSQL/Meilisearch network and explicit CPU,
+memory and PID limits. Browser containers receive no Docker socket or privilege;
+UID/GID come from the caller. A retained cohort can be selected with
+`--reuse-cohort /path/to/cohort` only for its exact image/SDK/source-qualified
+packet; product or in-container changes are refused. Linux amd64 is the actual
+local acceptance target; macOS Docker Desktop and ARM64 remain unverified.
 
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,

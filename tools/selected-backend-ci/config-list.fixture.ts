@@ -18,7 +18,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { browserInventory, configListInputs, expectedFiles } from "./admission.ts";
+import {
+  browserInventory,
+  collaborationStages,
+  configListInputs,
+  expectedFiles,
+} from "./admission.ts";
 import type { Consumed } from "./admission.ts";
 import type { Bundle } from "./types.ts";
 import { call, groups, read, sha, write } from "./io.ts";
@@ -98,7 +103,7 @@ try {
     "abi-receipt.json": { currentSource: head, host_runtime_files: {} },
   };
   for (const [name, value] of Object.entries(receipts)) write(join(output, name), value);
-  for (const stage of ["main", "lib", "install", "engine"])
+  for (const stage of collaborationStages)
     for (const suffix of ["-stage.json", "-compiler.jsonl"])
       write(join(output, stage + suffix), {});
   const received: Consumed["received"] = {};

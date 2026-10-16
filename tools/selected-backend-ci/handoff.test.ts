@@ -34,6 +34,7 @@ import {
   browserStage,
   buildInputs,
   consume,
+  context,
   distFiles,
   exportPacket,
   inputDiagnostics,
@@ -473,7 +474,7 @@ describe.serial("collaboration build packet", () => {
     rmSync(f.target, { recursive: true, force: true });
     rmSync(join(f.root, "crates/collab-engine/target"), { recursive: true, force: true });
     await consume(f.host);
-    expect(Object.keys((get("handoff-consumed.json") as Consumed).received)).toHaveLength(23);
+    expect(Object.keys((get("handoff-consumed.json") as Consumed).received)).toHaveLength(21);
   });
   test("a symlinked missing destination parent is refused", async () => {
     transfer();
@@ -510,7 +511,7 @@ describe.serial("collaboration build packet", () => {
     const receipt = get("handoff-consumed.json") as Consumed;
     expect(receipt.full_current_physical_inputs_equal).toBe(true);
     expect(receipt.fresh_dist_equal).toBe(true);
-    expect(Object.keys(receipt.received)).toHaveLength(23);
+    expect(Object.keys(receipt.received)).toHaveLength(21);
     for (const record of Object.values((get("bundle.json") as BundleRecord).binaries))
       expect(record.sha256).toBeString();
     for (const path of Object.keys((get("bundle.json") as BundleRecord).binaries))
@@ -599,7 +600,16 @@ describe.serial("collaboration build packet", () => {
       exportPacket(f.host);
     }).toThrow("compiler environment differs");
   });
-  test("missing receipt refused", () => {
+  test("missing remaining stage or receipt refused", () => {
+    for (const name of collaborationStages) {
+      const original = get(name + "-stage.json");
+      unlinkSync(join(f.output, name + "-stage.json"));
+      expect(() => {
+        exportPacket(f.host);
+      }).toThrow();
+      put(name + "-stage.json", original);
+      expect(existsSync(f.packet)).toBe(false);
+    }
     unlinkSync(join(f.output, "before.json"));
     expect(() => {
       exportPacket(f.host);
@@ -657,12 +667,24 @@ describe.serial("collaboration build packet", () => {
     expect(existsSync(join(f.output, "before.json"))).toBe(false);
   });
   test("changed stage receipt or native bytes refused", () => {
-    const original = get("main-stage.json") as Row;
-    put("main-stage.json", { ...original, exit_code: 7 });
+    const compile = get("compile-receipt.json") as Row & { stages: Row[] };
+    put("compile-receipt.json", {
+      ...compile,
+      stages: [
+        { ...first(compile.stages), command: ["actual-fixed-fixture", "main"] },
+        ...compile.stages,
+      ],
+    });
     expect(() => {
       exportPacket(f.host);
     }).toThrow();
-    put("main-stage.json", original);
+    put("compile-receipt.json", compile);
+    const original = get("lib-stage.json") as Row;
+    put("lib-stage.json", { ...original, exit_code: 7 });
+    expect(() => {
+      exportPacket(f.host);
+    }).toThrow();
+    put("lib-stage.json", original);
     writeFileSync(
       Object.keys((get("bundle.json") as BundleRecord).binaries)[0] as string,
       "changed physical ELF",
@@ -835,6 +857,102 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
 
+  test("CLI refusal identifies only its numeric own-source check", async () => {
+    const cli = join(import.meta.dir, "handoff.ts");
+    const child = Bun.spawn([process.execPath, "--no-env-file", cli, "consume"], {
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exit).toBe(1);
+    expect(stdout).toBe("");
+    const location = /^web build handoff check_line=([1-9][0-9]{0,5})$/m.exec(stderr);
+    expect(location).not.toBeNull();
+    expect(readFileSync(cli, "utf8").split("\n")[Number(location?.[1]) - 1]).toContain(
+      "assert.equal(actual, job,",
+    );
+    expect(stderr).not.toContain("PRIVATE_HANDOFF_CANARY");
+    expect(stderr).not.toContain(cli);
+  });
+
+  test("isolated CI image producer and consumer bind the actual job and full packet identity", async () => {
+    Object.assign(process.env, {
+      GITHUB_JOB: "workspace-browser-container-build",
+      FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+      FVOCI_WEB_CONTAINER_IMAGE_SOURCE: SHA,
+    });
+    expect(context("workspace-browser-container-build", f.host).repository).not.toBe(
+      "local-container",
+    );
+    expect(() => context("workspace-browser-build", f.host)).toThrow(/wrong handoff job/);
+    const manifest = transfer("workspace-browser-shard");
+    expect(manifest.producer_job).toBe("workspace-browser-container-build");
+    const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "c".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    await consume(f.host);
+    expect((get("handoff-consumed.json") as Consumed).full_current_physical_inputs_equal).toBe(
+      true,
+    );
+  });
+
+  test("a local job name cannot reassign the actual GitHub browser job", () => {
+    process.env.FVOCI_WEB_CONTAINER_JOB = "workspace-browser-shard";
+    expect(context("workspace-browser-build", f.host).source).toBe(SHA);
+    expect(() => context("workspace-browser-shard", f.host)).toThrow(/wrong handoff job/);
+  });
+
+  test("local container packet retains full admission and rejects another image or GitHub identity", async () => {
+    for (const key of Object.keys(process.env))
+      if (key.startsWith("GITHUB_")) Reflect.deleteProperty(process.env, key);
+    Object.assign(process.env, {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_RUN: "a".repeat(32),
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-build",
+      FVOCI_WEB_CONTAINER_SOURCE: SHA,
+      FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+      FVOCI_WEB_CONTAINER_IMAGE_SOURCE: SHA,
+    });
+    exportPacket(f.host);
+    const manifest = JSON.parse(readFileSync(join(f.packet, "handoff.json"), "utf8")) as Manifest;
+    expect(manifest.repository).toBe("local-container");
+    for (const entry of Object.values(manifest.entries)) unlinkSync(entry.path);
+    Object.assign(process.env, {
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
+      FVOCI_WEB_BUILD_PHASE: "consume",
+      FVOCI_WEB_BUILD_HANDOFF_SHA256: sha(join(f.packet, "handoff.json")),
+    });
+    const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "b".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 = "c".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 = "b".repeat(64);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "sha256:" + "a".repeat(64);
+    await assert.rejects(consume(f.host));
+    process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE = "1";
+    process.env.CI = "true";
+    await assert.rejects(consume(f.host), /local image cannot impersonate CI/);
+    Reflect.deleteProperty(process.env, "FVOCI_WEB_CONTAINER_LOCAL_IMAGE");
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    process.env.GITHUB_JOB = "workspace-browser-shard";
+    await assert.rejects(consume(f.host));
+    Reflect.deleteProperty(process.env, "GITHUB_JOB");
+    await consume(f.host);
+    expect((get("handoff-consumed.json") as Consumed).full_current_physical_inputs_equal).toBe(
+      true,
+    );
+  });
+
   test("a fresh shard without target or dist directories installs the packet", async () => {
     const assets = distFiles(f.host);
     browserTransfer();
@@ -963,6 +1081,18 @@ describe.serial("browser build packet", () => {
     expect(() => {
       exportPacket(f.host);
     }).toThrow();
+  });
+  test("cross Rust host and explicit cross target refuse the native browser packet", () => {
+    const environment = get("build-environment.json") as { rustc: string };
+    environment.rustc = "release: 1.99.0\nhost: aarch64-unknown-linux-gnu";
+    put("build-environment.json", environment);
+    f.host.toolchain = () => ({ ...toolchain(), rustc: environment.rustc });
+    expect(() => {
+      exportPacket(f.host);
+    }).toThrow();
+    process.env.CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
+    expect(() => context("workspace-browser-build", f.host)).toThrow(/native Linux/);
+    expect(existsSync(f.packet)).toBe(false);
   });
   test("existing dist destination and symlink asset refused", async () => {
     browserTransfer();

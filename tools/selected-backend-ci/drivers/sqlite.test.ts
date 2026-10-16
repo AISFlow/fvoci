@@ -707,6 +707,7 @@ function world(
     },
     restart: (context) => {
       expect(context.sqliteProducts).toBeDefined();
+      expect(context.projectBrowser).toBe(true);
       return Promise.resolve({ restartBrowserExit: 0 });
     },
     emit(line) {

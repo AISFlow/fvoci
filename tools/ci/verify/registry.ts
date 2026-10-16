@@ -20,16 +20,16 @@ import {
 
 export const GATED_WORKFLOWS = ["web", "rust", "documents", "collab-engine", "install"] as const;
 export type GatedWorkflow = (typeof GATED_WORKFLOWS)[number];
+export const WEB_BROWSER_RUNNER =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}";
 
 export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> = {
   web: [
     "web-static",
     "web-checks",
     "web-native-checks",
-    "workspace-browser-build",
+    "workspace-browser-container-build",
     "workspace-browser-shard",
-    "collaboration-main-build",
-    "collaboration-test-build",
     "collaboration-build",
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -174,7 +174,7 @@ export function selectOutputKey(job: string): string {
   // their consumers.
   const shared: Record<string, string> = {
     "web-native-checks": "web-checks",
-    "workspace-browser-build": "workspace-browser-shard",
+    "workspace-browser-container-build": "workspace-browser-shard",
     "postgres-build": "postgres",
     "install-image": "install-smoke",
   };
@@ -363,7 +363,12 @@ function verifyRunnersAndCaches(file: string, data: Mapping): string[] {
   const sqliteSaver = sqlitePrefixCacheSteps(true)[2];
   for (const [jobId, job] of Object.entries(jobs)) {
     if (!isMapping(job)) continue;
-    const runners = jobRunners(job);
+    const runners =
+      file === "web.yml" &&
+      ["workspace-browser-container-build", "workspace-browser-shard"].includes(jobId) &&
+      get(job, "runs-on") === WEB_BROWSER_RUNNER
+        ? ["ubuntu-26.04", "ubuntu-26.04-arm"]
+        : jobRunners(job);
     if (
       runners.length === 0 ||
       runners.some(

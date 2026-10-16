@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -57,6 +58,11 @@ type TimerNative = {
   procStartTicks: string;
   supervision?: "direct Playwright fixture child";
 };
+const TIMER_LAUNCHER = path.resolve("../../tools/web-e2e/run-web-e2e.ts");
+function isTimerLauncher(argv: string[], launcher: string): boolean {
+  const index = argv.indexOf(launcher);
+  return launcher === TIMER_LAUNCHER && index >= 0 && argv[index + 1] === "group-runtime";
+}
 type NativeClose = {
   code: number | null;
   signal: NodeJS.Signals | null;
@@ -181,7 +187,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         `/proc/${String(original.parentPid)}/cmdline`,
         "utf8",
       ).split("\0");
-      expect(launcherArguments).toContain(path.resolve("../../scripts/web-e2e-inner.sh"));
+      expect(isTimerLauncher(launcherArguments, original.launcher)).toBe(true);
       const inherited = Object.fromEntries(
         Object.entries(process.env).filter(([name]) => !preparationVariable(name)),
       );
@@ -258,11 +264,14 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
           exitCode: "NOTCAPTURED: original server is the surviving launcher's child",
         };
       }
-      // The original shell is still the owner of this SAME database/storage group.
+      // The original supervisor still owns this SAME database/storage group.
       process.kill(original.parentPid, 0);
       expect(
-        readFileSync(`/proc/${String(original.parentPid)}/cmdline`, "utf8").split("\0"),
-      ).toContain(original.launcher);
+        isTimerLauncher(
+          readFileSync(`/proc/${String(original.parentPid)}/cmdline`, "utf8").split("\0"),
+          original.launcher,
+        ),
+      ).toBe(true);
       const afterStopRaw = timerDatabaseEffectsForRestart();
       const afterStopSnapshot = retainSnapshot("after-stop", afterStopRaw);
       expect(afterStopRaw).toBe(beforeRaw);
@@ -376,7 +385,7 @@ const test = base.extend<{ restartTimerServer: TimerRestart }>({
         originalLauncherCredentialBoundary:
           "NOT PROVEN: original shared launcher inherited owner diagnostics; fixture children omit these, app-role witness alone does not prove original absence",
         exportedInputBasis:
-          "identical inner.sh runtime input subset including app credential, filtered preparation/owner variables for fixture spawns; original /proc/environ intentionally unavailable",
+          "identical group-runtime input subset including app credential, filtered preparation/owner variables for fixture spawns; original /proc/environ intentionally unavailable",
         originalLauncherSourceSha256: createHash("sha256")
           .update(readFileSync(original.launcher))
           .digest("hex"),
@@ -543,24 +552,11 @@ function diagnosticDatabase() {
   };
 }
 function diagnosticSql(sql: string): string {
-  const { container, database } = diagnosticDatabase();
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      database,
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-qAt",
-    ],
-    { input: sql, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
-  ).trim();
+  return execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+    input: sql,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  }).trim();
 }
 const witnessRows = z.array(
   z.object({
@@ -647,8 +643,11 @@ function captureTimerNative(page: Page) {
     expect(origin).toBe(new URL(page.url()).origin);
     process.kill(owned.original.parentPid, 0);
     expect(
-      readFileSync(`/proc/${String(owned.original.parentPid)}/cmdline`, "utf8").split("\0"),
-    ).toContain(owned.original.launcher);
+      isTimerLauncher(
+        readFileSync(`/proc/${String(owned.original.parentPid)}/cmdline`, "utf8").split("\0"),
+        owned.original.launcher,
+      ),
+    ).toBe(true);
     native.push({ ...owned.witness });
   }
   for (const entry of readdirSync("/proc")) {
@@ -663,8 +662,8 @@ function captureTimerNative(page: Page) {
       const parentPid = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1];
       if (!parentPid || !/^\d+$/.test(parentPid)) continue;
       const parentArgv = readFileSync(`/proc/${parentPid}/cmdline`, "utf8").split("\0");
-      const launcher = path.resolve("../../scripts/web-e2e-inner.sh");
-      if (!parentArgv.includes(launcher)) continue;
+      const launcher = TIMER_LAUNCHER;
+      if (!isTimerLauncher(parentArgv, launcher)) continue;
       const allowed = new Set([
         "RUN_DIR",
         "SERVER_LOG",

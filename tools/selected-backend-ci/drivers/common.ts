@@ -826,13 +826,19 @@ function knownSource(path: unknown, suffix: string): boolean {
   );
 }
 function locationOf(result: Json): Json | null {
+  if (
+    isRecord(result.error) &&
+    result.error.location !== undefined &&
+    result.error.location !== null
+  )
+    return isRecord(result.error.location) ? result.error.location : null;
   if (isRecord(result.errorLocation)) return result.errorLocation;
   const errors = result.errors;
   if (Array.isArray(errors) && isRecord(errors[0]) && isRecord(errors[0].location))
     return errors[0].location;
   return null;
 }
-// Reads the reporter's errorLocation fields only. Stacks and messages are never
+// Reads only the reporter's structured locations. Stacks and messages are never
 // parsed; a missing location stays null. `report` comes from io.read so its
 // integers keep their source tokens.
 export function knownBrowserCheckpoint(

@@ -1,4 +1,5 @@
 import { RUST_COLLAB_INTEGRATION_RUN } from "./rust-shared.ts";
+import { WEB_BROWSER_RUNNER } from "./registry.ts";
 // Workflow mutations shared by the registry tests. Each case edits one real
 // workflow text and names a message the verifier must report for it.
 
@@ -158,11 +159,28 @@ function caseList(): MutationCase[] {
     "opt-in-on-other-workflow",
     "web.yml",
     swap(
-      "  workflow_dispatch:\n",
-      "  workflow_dispatch:\n    inputs:\n      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n",
+      "      browser_arm64:\n",
+      "      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n      browser_arm64:\n",
     ),
-    "web: workflow_dispatch inputs must be exactly []",
+    "web: workflow_dispatch inputs must be exactly ['browser_arm64']",
   );
+  for (const [name, old, replacement, needle] of [
+    [
+      "missing",
+      "      browser_arm64:\n",
+      "      unknown:\n",
+      "workflow_dispatch inputs must be exactly",
+    ],
+    [
+      "default",
+      "        default: false\n",
+      "        default: true\n",
+      "input browser_arm64 must be",
+    ],
+    ["type", "        type: boolean\n", "        type: string\n", "input browser_arm64 must be"],
+  ] as const) {
+    add("web-arm64-" + name, "web.yml", swap(old, replacement), needle);
+  }
   add(
     "missing-selector-output",
     "web.yml",
@@ -392,6 +410,12 @@ function caseList(): MutationCase[] {
   }
 
   // Runner labels and cache qualification.
+  add(
+    "web-arm64-mode-on-non-browser-job",
+    "web.yml",
+    swap("runs-on: ubuntu-26.04", "runs-on: " + WEB_BROWSER_RUNNER),
+    "requires explicit Ubuntu 26.04 runners",
+  );
   for (const file of [
     ...GATED.map((workflow) => `${workflow}.yml`),
     "release.yml",
@@ -1484,9 +1508,9 @@ function caseList(): MutationCase[] {
   const webCases: [string, string, Edit, string][] = [
     [
       "untimed-python-helper",
-      "workspace-browser-build",
+      "collaboration-build",
       swap(`        run: |\n${META_BUILD}`, `        run: ${META_PYTHON}\n`),
-      helper("workspace-browser-build"),
+      helper("collaboration-build"),
     ],
     [
       "timed-python-helper",
@@ -1502,9 +1526,9 @@ function caseList(): MutationCase[] {
     ],
     [
       "target-dir-override-kept",
-      "workspace-browser-shard",
+      "collaboration-build",
       swap("-u CARGO_TARGET_DIR ", ""),
-      helper("workspace-browser-shard"),
+      helper("collaboration-build"),
     ],
     [
       "cargo-alias",
@@ -1531,16 +1555,10 @@ function caseList(): MutationCase[] {
       helper("collaboration-sqlite-on"),
     ],
     [
-      "stale-timing-label",
-      "collaboration-install-on",
-      swap("collaboration-install-on-step-05 started", "collaboration-install-on-step-04 started"),
-      helper("collaboration-install-on"),
-    ],
-    [
       "before-cargo-restore",
-      "workspace-browser-build",
+      "collaboration-build",
       swapWithNext("      - name: Restore Cargo downloads\n"),
-      order("workspace-browser-build"),
+      order("collaboration-build"),
     ],
     [
       "after-sqlite",
@@ -1554,12 +1572,7 @@ function caseList(): MutationCase[] {
       swap(META, "      - name: Prepare Rustup component metadata\n"),
       once("collaboration-build"),
     ],
-    [
-      "step-duplicated",
-      "workspace-browser-shard",
-      duplicateStep(META),
-      once("workspace-browser-shard"),
-    ],
+    ["step-duplicated", "collaboration-build", duplicateStep(META), once("collaboration-build")],
     [
       "extra-python-step",
       "collaboration-build",
@@ -1599,18 +1612,18 @@ function caseList(): MutationCase[] {
     ],
     [
       "setup-python",
-      "workspace-browser-shard",
+      "collaboration-build",
       swap(SQLITE_STEP, `      - uses: actions/setup-python@${"2".repeat(40)}\n${SQLITE_STEP}`),
-      python("workspace-browser-shard"),
+      python("collaboration-build"),
     ],
     [
       "job-env-python",
-      "workspace-browser-build",
+      "collaboration-build",
       swap(
-        "    timeout-minutes: 20\n",
-        "    timeout-minutes: 20\n    env:\n      PYTHONPATH: scripts\n",
+        "    timeout-minutes: 15\n",
+        "    timeout-minutes: 15\n    env:\n      PYTHONPATH: scripts\n",
       ),
-      python("workspace-browser-build"),
+      python("collaboration-build"),
     ],
     [
       "lane-extra-python",
@@ -1685,12 +1698,12 @@ function caseList(): MutationCase[] {
     "web-rustup-restore-wrong-action",
     "web.yml",
     inJob(
-      "workspace-browser-shard",
+      "collaboration-build",
       within("      - name: Restore Cargo downloads\n", "      - name:", (step) =>
-        step.replace("uses: actions/cache@", "uses: actions/upload-artifact@"),
+        step.replace("uses: actions/cache/restore@", "uses: actions/upload-artifact@"),
       ),
     ),
-    order("workspace-browser-shard"),
+    order("collaboration-build"),
   );
   const SMOKE = "web: web-static must type-check and test the install smoke helpers";
   add(

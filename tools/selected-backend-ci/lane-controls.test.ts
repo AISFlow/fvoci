@@ -1120,53 +1120,56 @@ describe("lease order", () => {
 });
 
 // The consume-phase config-list leaf and its launcher gate in
-// scripts/run-web-e2e.sh, with sudo replaced by a recorder.
+// the maintained selectedHost TS implementation, with sudo replaced by a recorder.
 describe("config-list launcher gate", () => {
-  const script = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
-  const start = script.indexOf("  config_list_exit=not-run\n"),
-    end = script.indexOf('\nfi\nif [[ "$pending_status"', start);
   function gate(leaf: number, ownerExit: number, occupied?: "stdout" | "stderr") {
-    expect(start).toBeGreaterThan(0);
-    expect(end).toBeGreaterThan(start);
     const base = directory(),
-      safe = join(base, "safe");
-    mkdirSync(safe, { mode: 0o700 });
-    if (occupied) writeFileSync(join(safe, `config-list.${occupied}.log`), "OLD_CAPTURE");
-    const fragment = join(base, "fragment.sh");
+      safe = join(base, "fvoci-selected-diagnostics"),
+      bin = join(base, "bin"),
+      web = join(base, "tools/web-e2e");
+    mkdirSync(bin);
+    mkdirSync(web, { recursive: true });
+    const shared = join(base, "tools/selected-backend-ci");
+    mkdirSync(shared, { recursive: true });
+    copyFileSync(join(root, "tools/selected-backend-ci/types.ts"), join(shared, "types.ts"));
+    mkdirSync(join(base, "sqlite/lib"), { recursive: true });
+    mkdirSync(join(base, "output"));
+    for (const name of ["run-web-e2e.ts", "groups.ts", "compat.ts"]) {
+      const source = readFileSync(join(root, "tools/web-e2e", name), "utf8");
+      writeFileSync(
+        join(web, name),
+        name === "run-web-e2e.ts"
+          ? source.replaceAll("process.execPath", JSON.stringify(join(bin, "bun")))
+          : source,
+      );
+    }
+    const marks = join(base, "marks");
+    const scripts: Record<string, string> = {
+      bun: String.raw`const fs=require("node:fs"),path=require("node:path");const args=process.argv.slice(2);if(args.includes("permissions")){if(process.env.OCCUPIED)fs.writeFileSync(path.join(process.env.RUNNER_TEMP,"fvoci-selected-diagnostics","config-list."+process.env.OCCUPIED+".log"),"OLD_CAPTURE");console.log("1000");}else process.exit(99);`,
+      stat: `console.log("1000");`,
+      sudo: String.raw`const fs=require("node:fs"),args=process.argv.slice(2);const mode=["config-list","run","owner-return"].find(name=>args.includes(name));if(mode){fs.appendFileSync(process.env.MARKS,(mode==="config-list"?"list":mode==="owner-return"?"owner":"run")+String.fromCharCode(10));if(mode==="config-list"){console.log("CREDENTIAL_FREE_LIST");console.error("ORIGINAL_LOAD_ERROR");process.exit(Number(process.env.LEAF));}if(mode==="owner-return"){console.log(JSON.stringify({ownership_return_qualified:false}));process.exit(Number(process.env.OWNER_EXIT));}}`,
+    };
+    for (const [name, body] of Object.entries(scripts)) {
+      writeFileSync(join(bin, name), "#!" + process.execPath + "\n" + body + "\n");
+      chmodSync(join(bin, name), 0o755);
+    }
+    const fragment = join(base, "gate.ts");
     writeFileSync(
       fragment,
-      `set -euo pipefail
-sudo() {
-  for arg in "$@"; do
-    case "$arg" in
-      config-list) printf 'list\\n' >> "$MARKS"; printf 'CREDENTIAL_FREE_LIST\\n'; printf 'ORIGINAL_LOAD_ERROR\\n' >&2; return "$LEAF" ;;
-      run) printf 'run\\n' >> "$MARKS"; return 0 ;;
-      owner-return) printf 'owner\\n' >> "$MARKS"; printf '{"ownership_return_qualified":false}\\n'; return "$OWNER_EXIT" ;;
-    esac
-  done
-  return 0
-}
-` +
-        script.slice(start, end) +
-        '\nexit "$selected_status"\n',
+      `import {selectedHost} from "./tools/web-e2e/run-web-e2e.ts";process.exit(await selectedHost(process.env.ROOT,0,true));`,
     );
-    const marks = join(base, "marks");
-    const result = spawnSync(["bash", fragment], {
+    const result = spawnSync([process.execPath, fragment], {
       env: {
-        PATH: join(process.execPath, "..") + ":/usr/bin:/bin",
-        SELECTED_PHASE: "consume",
-        ROOT: root,
-        safe_diagnostics: safe,
+        PATH: bin + ":/usr/bin:/bin",
+        ROOT: base,
+        RUNNER_TEMP: base,
         FVOCI_SELECTED_CI_OUTPUT: join(base, "output"),
         FVOCI_SELECTED_CI_SQLITE_PARENT: join(base, "sqlite"),
-        runtime_groups: "1000",
-        runner_uid: "1000",
-        runner_gid: "1000",
-        selected_status: "0",
-        pending_status: "0",
+        SQLITE3_LIB_DIR: join(base, "sqlite/lib"),
         LEAF: String(leaf),
         OWNER_EXIT: String(ownerExit),
         MARKS: marks,
+        ...(occupied ? { OCCUPIED: occupied } : {}),
       },
       stdout: "pipe",
       stderr: "pipe",

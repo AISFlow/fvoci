@@ -1,4 +1,4 @@
-// The run-web-e2e.sh selected footer with real kernel UID/GID 1000, sudo and
+// The maintained selectedHost TS boundary with real kernel UID/GID 1000, sudo and
 // setpriv, and the Bun runner CLI. A root preparation process with primary
 // GID 1001 models a distinct CI preparation owner without creating an account.
 // footer.fixture.ts replaces only identity, the browser copy and lane drivers.
@@ -134,13 +134,12 @@ function footerCase(
     }
     writeFileSync(join(output, "bundle.json"), JSON.stringify({ binaries: { [chrome]: {} } }));
     chmodSync(join(output, "bundle.json"), 0o600);
-    const source = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8"),
-      start = source.indexOf("selected_status=0\n");
-    expect(source.slice(0, start)).toContain('\nSELECTED_PHASE="whole"\n');
-    const script = join(temp, "footer.sh");
+    const script = join(temp, "footer.ts");
     writeFileSync(
       script,
-      "set -euo pipefail\npending_status=" + String(pending) + "\n" + source.slice(start),
+      'import {selectedHost,webRequest} from "./repo/tools/web-e2e/run-web-e2e.ts";\n' +
+        'if(webRequest(["--with-selected-backends"],{FVOCI_E2E_PENDING:"1"}).selectedPhase!=="whole")throw Error("selected default changed");\n' +
+        `process.exit(await selectedHost(process.env.ROOT,${String(pending)},false));\n`,
     );
     const destination = join(temp, "fvoci-selected-diagnostics");
     if (fault === "destination-symlink") sudo("ln", "-s", output, destination);
@@ -158,9 +157,6 @@ function footerCase(
       PATH: fake + ":" + bunDirectory + ":/bin:/usr/bin",
       ROOT: repo,
       RUNNER_TEMP: temp,
-      // Footer extraction omits the wrapper's real argument-parser default.
-      SELECTED_PHASE: "whole",
-      SELECTED_BACKENDS: "true",
       FVOCI_SELECTED_CI_OUTPUT: output,
       FVOCI_SELECTED_CI_SQLITE_PARENT: sqlite,
       SQLITE3_LIB_DIR: lib,
@@ -183,7 +179,7 @@ function footerCase(
       "env",
       "-i",
       ...Object.entries(environment).map(([key, value]) => key + "=" + value),
-      "/bin/bash",
+      bun,
       script,
     ]);
     // Ownership facts as the footer left them, then return the owned fixture

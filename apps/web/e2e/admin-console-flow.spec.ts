@@ -159,7 +159,7 @@ test("instance admin edits settings and publishes terms; members consent before 
   await expect(memberPage.getByText("소속 워크스페이스가 없습니다.")).toBeVisible();
   expect((await memberPage.request.get("/api/v1/auth/me")).status()).toBe(200);
   expect(
-    authSql(
+    await authSql(
       "SELECT count(*) FROM fvoci.user_consents c JOIN fvoci.users u ON c.user_id = u.id WHERE u.email = 'console-member@example.com' AND c.kind = 'terms' AND c.version = 1",
     ),
   ).toBe("1");

@@ -825,6 +825,39 @@ const workflow = Bun.YAML.parse(
 test("current workflow obeys publication policy", () => {
   verifyWorkflow(workflow);
 });
+for (const event of ["push", "pull_request"] as const) {
+  test.each([
+    "docker/ci-base/**",
+    ".dockerignore",
+    "tools/ci/ci-base-image.ts",
+    "tools/ci/ci-base-image.test.ts",
+    ".github/workflows/ci-base-image.yml",
+    "rust-toolchain.toml",
+    "xtask/Cargo.toml",
+    "xtask/Cargo.lock",
+    "xtask/src/**",
+    "xtask/*.tsv",
+    "tests/support/official_sqld.rs",
+    ".bun-version",
+    "apps/web/package.json",
+  ])(`reject ${event} missing image input: %s`, (path) => {
+    const data = structuredClone(workflow);
+    data.on[event].paths = data.on[event].paths.filter((input) => input !== path);
+    expect(() => {
+      verifyWorkflow(data);
+    }).toThrow("image edits must trigger builds");
+  });
+  test.each(["tools/ci/**", "xtask/**", "!xtask/src/sqlite_ci.rs"])(
+    `reject ${event} broad or excluding image filter: %s`,
+    (path) => {
+      const data = structuredClone(workflow);
+      data.on[event].paths = [...data.on[event].paths, path];
+      expect(() => {
+        verifyWorkflow(data);
+      }).toThrow("image edits must trigger builds");
+    },
+  );
+}
 const mutations: [string, (data: Workflow) => void, string][] = [
   [
     "default write",

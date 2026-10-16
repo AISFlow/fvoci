@@ -1,5 +1,5 @@
 // Actual children for the runner's exit/output/interrupt controls, not mocks.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pause, UiProcesses, withProcesses } from "../turso/ui-processes.ts";
 import { addSecret } from "./redact.ts";
@@ -40,7 +40,9 @@ if (kind === "body") {
         await pause(20);
       }
     }
-    writeFileSync(mode === "descendant" ? ready + "-descendant" : ready, String(process.pid));
+    const destination = mode === "descendant" ? ready + "-descendant" : ready;
+    writeFileSync(destination + ".tmp", String(process.pid), { flag: "wx", mode: 0o600 });
+    renameSync(destination + ".tmp", destination);
     await new Promise(() => {});
   } else process.exit(mode === "failure" ? 7 : 0);
 } else {

@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 // Official Nuxt UI editor chrome on FVOCI's existing Tiptap/Yjs host.
 // Real browser, Rust server, DB, peer and persisted ACK; no demo document/store.
 import { spawnSync } from "node:child_process";
@@ -529,7 +530,7 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
       throw new Error("Missing owned isolated PostgreSQL app-role fixture");
     const app = new URL(connection);
     if (
-      app.hostname !== "127.0.0.1" ||
+      app.hostname !== new URL(process.env.FVOCI_E2E_ADMIN_DATABASE_URL ?? "").hostname ||
       !/^fvoci_app_fvoci_e2e_[a-f0-9]{16}$/.test(app.username) ||
       !/^\/fvoci_e2e_[a-f0-9]{16}$/.test(app.pathname)
     )
@@ -537,24 +538,8 @@ test("link popup keeps native selection and composing Enter cannot apply the URL
     for (const id of [workspace, document])
       if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
         throw new Error("Invalid fixture identity");
-    const result = spawnSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        container,
-        "psql",
-        "-X",
-        "-qAt",
-        "-U",
-        app.username,
-        "-d",
-        app.pathname.slice(1),
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      {
-        input: `BEGIN READ ONLY;
+    const result = spawnSync(process.execPath, fixtureQueryArgs("app"), {
+      input: `BEGIN READ ONLY;
 SET LOCAL app.tenant_id = '${workspace}';
 SELECT jsonb_build_object('role', current_user, 'superuser', r.rolsuper,
  'bypassRls', r.rolbypassrls, 'tenant', public.app_tenant_id(),
@@ -566,10 +551,9 @@ FROM pg_roles r JOIN pg_class c ON c.oid = 'fvoci.documents'::regclass
 JOIN fvoci.documents d ON d.id = '${document}' AND d.workspace_id = '${workspace}'
 WHERE r.rolname = current_user;
 ROLLBACK;`,
-        encoding: "utf8",
-        timeout: 10000,
-      },
-    );
+      encoding: "utf8",
+      timeout: 10000,
+    });
     expect(result.status, "restricted read-only DB witness exit").toBe(0);
     const witness: unknown = JSON.parse(result.stdout);
     expect(witness).toMatchObject({

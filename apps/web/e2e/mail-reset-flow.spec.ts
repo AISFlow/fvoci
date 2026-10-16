@@ -81,7 +81,9 @@ test("invitation email is delivered and password reset uses the captured link", 
   await page.getByRole("button", { name: "비밀번호 변경" }).click();
   await expect(page).toHaveURL(/\/login\?reset=1/);
   expect(
-    authSql(`SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`),
+    await authSql(
+      `SELECT count(*) FROM fvoci.magic_tokens WHERE token_hash = '${tokenHash(token)}'`,
+    ),
   ).toBe("0");
   const replay = await page.request.post("/api/v1/auth/password-reset/confirm", {
     data: { token, newPassword: owner.newPassword },

@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { expect, test, type Page } from "@playwright/test";
 import { readJson, flowSchemas, watchCspViolations } from "./helpers";
@@ -10,22 +11,7 @@ function fixtureSql(sql: string): void {
   if (!admin || !container) {
     throw new Error("isolated Rust/PostgreSQL fixture required");
   }
-  execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-U",
-      "postgres",
-      "-d",
-      new URL(admin).pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-    ],
-    { input: sql, stdio: "pipe" },
-  );
+  execFileSync(process.execPath, fixtureQueryArgs("admin"), { input: sql, stdio: "pipe" });
 }
 
 function uuid(value: string): string {

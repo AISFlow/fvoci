@@ -26,7 +26,15 @@ import process from "node:process";
 import { Header, Parser } from "tar";
 import type { ReadEntry } from "tar";
 import { browserStages, collaborationStages, expectedFiles, identity } from "./admission.ts";
-import { abiFiles, buildEnv, compilerStage, elfDependencies, inputs, reference } from "./build.ts";
+import {
+  abiFiles,
+  buildEnv,
+  compilerStage,
+  elfDependencies,
+  inputs,
+  nativeHost,
+  reference,
+} from "./build.ts";
 import {
   below,
   call,
@@ -97,12 +105,26 @@ function ldd(path: string): { exitCode: number; stdout: string; stderr: string }
 }
 const distOf = (h: HostFacts) => join(h.checkout, "apps/web/dist");
 
+const browserJob = () =>
+  (process.env.FVOCI_WEB_CONTAINER_LOCAL === "1"
+    ? process.env.FVOCI_WEB_CONTAINER_JOB
+    : process.env.GITHUB_JOB) ?? "";
 export const browser = () =>
-  ["workspace-browser-build", "workspace-browser-shard"].includes(process.env.GITHUB_JOB ?? "");
+  [
+    "workspace-browser-build",
+    "workspace-browser-container-build",
+    "workspace-browser-shard",
+  ].includes(browserJob());
+const nativeTarget = () => (browser() ? nativeHost().target : "x86_64-unknown-linux-gnu");
 const stages = (): readonly string[] => (browser() ? browserStages : collaborationStages);
 const jobs = (): readonly [string, string] =>
   browser()
-    ? ["workspace-browser-build", "workspace-browser-shard"]
+    ? [
+        process.env.FVOCI_WEB_CONTAINER_IMAGE && process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1"
+          ? "workspace-browser-container-build"
+          : "workspace-browser-build",
+        "workspace-browser-shard",
+      ]
     : ["collaboration-build", "collaboration-flow"];
 
 // An absolute lexical path whose existing part has no symlink. Missing parents
@@ -183,6 +205,9 @@ export function distFiles(h: HostFacts = host): Record<string, string> {
 }
 
 export interface Context {
+  container_image?: string;
+  container_sdk_sha256?: string;
+  container_image_source?: string;
   platform?: { system: string; machine: string; os_release_sha256: string };
   repository: string;
   run: string;
@@ -191,14 +216,19 @@ export interface Context {
   tree: string;
 }
 export function context(job: string, h: HostFacts = host): Context {
-  assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
-  const actual = process.env.GITHUB_JOB ?? "";
+  const local = process.env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  const actual = browserJob();
+  if (local) {
+    assert.ok(browser() && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
+    assert.ok(process.getuid?.() !== 0, "browser container must be non-root");
+    assert.match(env("FVOCI_WEB_CONTAINER_RUN"), /^[a-f0-9]{32}$/);
+  } else assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
   if (job === "collaboration-flow" && collaborationConsumers.includes(actual)) job = actual;
   assert.equal(actual, job, "wrong handoff job");
   if (browser()) {
     assert.equal(
       call(["git", "rev-parse", "HEAD"], h.checkout),
-      env("GITHUB_SHA"),
+      env(local ? "FVOCI_WEB_CONTAINER_SOURCE" : "GITHUB_SHA"),
       "checkout differs from tested SHA",
     );
     assert.equal(
@@ -208,7 +238,10 @@ export function context(job: string, h: HostFacts = host): Context {
       0,
       "checkout has tracked changes",
     );
-    assert.ok(/^[0-9]+$/.test(env("GITHUB_RUN_ID")) && /^[0-9]+$/.test(env("GITHUB_RUN_ATTEMPT")));
+    if (!local)
+      assert.ok(
+        /^[0-9]+$/.test(env("GITHUB_RUN_ID")) && /^[0-9]+$/.test(env("GITHUB_RUN_ATTEMPT")),
+      );
   } else identity("handoff", undefined, h.checkout);
   assert.equal(
     process.env.FVOCI_WEB_BUILD_PHASE,
@@ -216,20 +249,36 @@ export function context(job: string, h: HostFacts = host): Context {
     "wrong web build phase",
   );
   const result: Context = {
-    repository: env("GITHUB_REPOSITORY"),
-    run: env("GITHUB_RUN_ID"),
-    attempt: env("GITHUB_RUN_ATTEMPT"),
+    repository: local ? "local-container" : env("GITHUB_REPOSITORY"),
+    run: env(local ? "FVOCI_WEB_CONTAINER_RUN" : "GITHUB_RUN_ID"),
+    attempt: local ? "1" : env("GITHUB_RUN_ATTEMPT"),
     source: call(["git", "rev-parse", "HEAD"], h.checkout),
     tree: call(["git", "rev-parse", "HEAD^{tree}"], h.checkout),
   };
+  if (local || process.env.FVOCI_WEB_CONTAINER_IMAGE) {
+    const image = env("FVOCI_WEB_CONTAINER_IMAGE");
+    const localImage = process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1";
+    if (localImage) {
+      assert.ok(local && process.env.CI === undefined, "local image cannot impersonate CI");
+      assert.match(image, /^sha256:[a-f0-9]{64}$/);
+    } else assert.match(image, /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/);
+    result.container_image = image;
+    const sdk = env("FVOCI_WEB_CONTAINER_SDK_SHA256");
+    assert.match(sdk, /^[a-f0-9]{64}$/);
+    result.container_sdk_sha256 = sdk;
+    const imageSource = env("FVOCI_WEB_CONTAINER_IMAGE_SOURCE");
+    assert.match(imageSource, /^[a-f0-9]{40}$/);
+    result.container_image_source = imageSource;
+  }
   if (browser()) {
+    const native = nativeHost();
     assert.ok(
-      process.platform === "linux" && process.arch === "x64",
-      "unsupported browser platform",
+      result.container_image || native.machine === "x86_64",
+      "ARM browser packets require the qualified container boundary",
     );
     result.platform = {
       system: "Linux",
-      machine: "x86_64",
+      machine: native.machine,
       os_release_sha256: digest(readFileSync("/etc/os-release")),
     };
   }
@@ -428,7 +477,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
     const name = record.target.name;
     names.add(name);
     assert.equal(record.compiledSource, before.head);
-    assert.equal(record.targetTriple, "x86_64-unknown-linux-gnu");
+    assert.equal(record.targetTriple, nativeTarget());
     assert.ok(
       deepEquals(
         [...record.features].sort(),
@@ -458,7 +507,7 @@ export function qualify(output: string, h: HostFacts = host): Bundle {
   assert.equal(environment.os_release, readFileSync("/etc/os-release", "utf8"));
   assert.ok(
     environment.rustc.includes("release: 1.99.0") &&
-      environment.rustc.includes("host: x86_64-unknown-linux-gnu"),
+      environment.rustc.split("\n").includes("host: " + nativeTarget()),
   );
   assert.ok(
     deepEquals(environment.features, browser() ? [] : ["api-schema", "db-tests"]) &&
@@ -626,10 +675,11 @@ export function exportPacket(h: HostFacts = host): void {
     entries,
   };
   write(join(packet, "handoff.json"), manifest);
-  appendFileSync(
-    env("GITHUB_OUTPUT"),
-    "handoff_sha256=" + sha(join(packet, "handoff.json")) + "\n",
-  );
+  if (process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1")
+    appendFileSync(
+      env("GITHUB_OUTPUT"),
+      "handoff_sha256=" + sha(join(packet, "handoff.json")) + "\n",
+    );
 }
 
 export function admit(h: HostFacts = host) {
@@ -830,14 +880,18 @@ function osRelease(): Record<string, string> {
   );
 }
 export function browserBefore(h: HostFacts = host): void {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   assert.ok(browser() && !existsSync(distOf(h)), "producer must start without dist");
   const release = osRelease();
   assert.ok(release.ID === "ubuntu" && release.VERSION_ID === "26.04");
-  assert.equal(
-    process.env.CARGO_BUILD_TARGET ?? "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-gnu",
+  const target = nativeTarget();
+  assert.ok(
+    h
+      .toolchain()
+      .rustc.split("\n")
+      .includes("host: " + target),
+    "Rust host must be native",
   );
   assert.equal(process.env.FVOCI_E2E_PROFILE ?? "debug", "debug", "browser packet is debug only");
   write(join(output, "build-env-inputs.json"), buildEnv());
@@ -857,7 +911,7 @@ export function browserBefore(h: HostFacts = host): void {
   });
 }
 export async function browserStage(name: string | undefined, h: HostFacts = host): Promise<number> {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   assert.ok(name && (browserStages as readonly string[]).includes(name));
   const commands: Record<string, string[]> = {
@@ -895,10 +949,11 @@ export async function browserStage(name: string | undefined, h: HostFacts = host
     ],
   };
   const command = [...(commands[name] ?? []), "--message-format=json-render-diagnostics"];
+  if (process.env.FVOCI_WEB_CONTAINER_IMAGE) command.push("--jobs", "2");
   return await compilerStage(output, name, command, read(output, "before.json") as Inputs);
 }
 export function browserAfter(h: HostFacts = host): void {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   const before = read(output, "before.json") as Inputs,
     after = buildInputs(h);
@@ -931,7 +986,7 @@ export function browserAfter(h: HostFacts = host): void {
       sha256: sha(path),
       bytes: statSync(path).size,
       compiledSource: before.head,
-      targetTriple: "x86_64-unknown-linux-gnu",
+      targetTriple: nativeTarget(),
       target: artifact.target,
       features: artifact.features,
       profile: artifact.profile,
@@ -1009,6 +1064,18 @@ if (import.meta.main) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
+    const ownFrame =
+      error instanceof Error
+        ? error.stack
+            ?.split("\n")
+            .find(
+              (line) => line.trimStart().startsWith("at ") && line.includes(import.meta.path + ":"),
+            )
+        : undefined;
+    const checkLine =
+      ownFrame?.split(import.meta.path + ":")[1]?.match(/^([1-9][0-9]{0,5}):[0-9]+\)?$/)?.[1] ??
+      "0";
+    process.stderr.write("web build handoff check_line=" + checkLine + "\n");
     // Fixed handoff refusals name only the failed check; no packet bytes.
     process.stderr.write(
       "web build handoff refused: " +

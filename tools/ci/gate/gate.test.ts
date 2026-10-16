@@ -25,22 +25,32 @@ import {
   WORKFLOWS,
   WORKFLOW_JOBS,
   gateJobId,
+  isRecord,
   type Plan,
   type Workflow,
   validatePlanSchema,
 } from "./schema.ts";
 
-test("collaboration preparation and packet producer must be selected together", () => {
+test("collaboration consumers require the single packet producer and closed installation", () => {
   const complete = {
-    "collaboration-main-build": true,
-    "collaboration-test-build": true,
     "collaboration-build": true,
+    "collaboration-install-on": true,
+    "collaboration-postgres-on": true,
+    "collaboration-sqlite-on": true,
+    "collaboration-postgres-off": true,
+    "collaboration-sqlite-off": true,
   };
   expect(validatePlanSchema(plan("web", complete), "web")).toBeNull();
-  for (const name of Object.keys(complete)) {
+  for (const name of ["collaboration-build", "collaboration-install-on"]) {
     expect(validatePlanSchema(plan("web", { ...complete, [name]: false }), "web")).toBe(
       "PLAN_COLLABORATION_PREPARATION_SELECTION",
     );
+  }
+  for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
+    const stale = plan("web", complete);
+    if (!isRecord(stale.jobs)) throw new Error("expected fixture jobs object");
+    stale.jobs[name] = { selected: true };
+    expect(validatePlanSchema(stale, "web")).toBe("PLAN_JOB_SET");
   }
 });
 import { isBlank, strip } from "./text.ts";

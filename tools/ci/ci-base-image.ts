@@ -194,11 +194,24 @@ export function verifyWorkflow(data: unknown) {
   for (const event of ["push", "pull_request"]) {
     const paths = list(at(on, event, "paths"));
     check(
-      paths?.includes("docker/ci-base/**") &&
-        paths.includes(".github/workflows/ci-base-image.yml") &&
-        paths.includes("tools/ci/**") &&
-        paths.includes("xtask/**") &&
-        paths.includes("tests/support/official_sqld.rs"),
+      Bun.deepEquals(
+        paths?.slice().sort(),
+        [
+          "docker/ci-base/**",
+          ".dockerignore",
+          "tools/ci/ci-base-image.ts",
+          "tools/ci/ci-base-image.test.ts",
+          ".github/workflows/ci-base-image.yml",
+          "rust-toolchain.toml",
+          "xtask/Cargo.toml",
+          "xtask/Cargo.lock",
+          "xtask/src/**",
+          "xtask/*.tsv",
+          "tests/support/official_sqld.rs",
+          ".bun-version",
+          "apps/web/package.json",
+        ].sort(),
+      ),
       "image edits must trigger builds",
     );
   }

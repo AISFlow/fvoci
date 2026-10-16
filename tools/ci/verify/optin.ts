@@ -10,7 +10,7 @@ export const OPT_IN_RUNNER: Readonly<Record<string, string>> = {
   "upgrade-smoke-arm64": "ubuntu-26.04-arm",
 };
 
-/** workflow_dispatch declares exactly the opt-in booleans (default false). */
+/** Dispatch declares opt-in jobs and Web's runner-only boolean (default false). */
 export function verifyOptInWiring(workflow: string, data: Mapping, jobs: Mapping): string[] {
   const errors: string[] = [];
   const triggers = triggersOf(data);
@@ -26,7 +26,9 @@ export function verifyOptInWiring(workflow: string, data: Mapping, jobs: Mapping
     return [`${workflow}: workflow_dispatch inputs must be a mapping`];
   }
   const optIns = (Object.hasOwn(OPT_IN_JOBS, workflow) ? OPT_IN_JOBS[workflow] : undefined) ?? {};
-  const expected = [...new Set(Object.values(optIns))].sort();
+  const expected = [
+    ...new Set([...Object.values(optIns), ...(workflow === "web" ? ["browser_arm64"] : [])]),
+  ].sort();
   const declared = isMapping(inputs) ? Object.keys(inputs) : [];
   if (declared.length !== expected.length || !expected.every((name) => declared.includes(name))) {
     return [`${workflow}: workflow_dispatch inputs must be exactly ${pyReprList(expected)}`];

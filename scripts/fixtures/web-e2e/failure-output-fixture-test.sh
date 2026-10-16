@@ -18,10 +18,19 @@
 # shares are started once for its groups.
 set -euo pipefail
 
+signals_only=false
+if [[ $# == 1 && $1 == --signals-only ]]; then
+  signals_only=true
+elif (( $# != 0 )); then
+  echo "usage: failure-output-fixture-test.sh [--signals-only]" >&2
+  exit 2
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # The web workspace's install (bun ci at the repository root).
 WORKSPACE_MODULES="$ROOT/node_modules"
 REAL_BUN="$(command -v bun)"
+export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN"
 REAL_SLEEP="$(command -v sleep)"
 REAL_SEQ="$(command -v seq)"
 if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
@@ -62,7 +71,7 @@ cp "$ROOT/tools/web-e2e/trace-summary.ts" "$ROOT/tools/web-e2e/compat.ts" "$FIXT
 cp "$ROOT/scripts/perf/perf-inner.sh" "$FIXTURE_ROOT/scripts/perf/"
 cp "$ROOT/tools/perf/perf-inner.ts" "$FIXTURE_ROOT/tools/perf/"
 cp "$ROOT/tools/web-e2e/smtp-sink.ts" "$ROOT/tools/web-e2e/network-settle.ts" \
-  "$ROOT/tools/web-e2e/database-urls.ts" "$FIXTURE_ROOT/tools/web-e2e/"
+  "$ROOT/tools/web-e2e/database-urls.ts" "$ROOT/tools/web-e2e/run-web-e2e.ts" "$ROOT/tools/web-e2e/groups.ts" "$ROOT/tools/web-e2e/shard-fixture.ts" "$FIXTURE_ROOT/tools/web-e2e/"
 cp "$ROOT/apps/web/playwright.config.ts" "$FIXTURE_ROOT/apps/web/"
 cp "$ROOT/apps/web/e2e-pending/collab-playwright.config.ts" "$FIXTURE_ROOT/apps/web/e2e-pending/"
 ln -s "$WORKSPACE_MODULES" "$FIXTURE_ROOT/node_modules"
@@ -329,29 +338,11 @@ STUB
 # FVOCI_FIXTURE_PLAYWRIGHT_EXIT=<n> replaces the Playwright run by that exit.
 cat >"$FAKE_BIN/bun" <<'STUB'
 #!/usr/bin/env bash
-case "${1:-}" in
-  */tools/web-e2e/smtp-sink.ts) echo "$$" >"$FVOCI_FIXTURE_NET_STATE.smtp-pid" ;;
-  */tools/web-e2e/trace-summary.ts)
-    if [[ "${FVOCI_FIXTURE_TRACE_SUMMARY:-ok}" == fail ]]; then
-      echo "fixture summarizer error postgres://u:fixture-secret@h/db MEILI_MASTER_KEY=fixture-meili-master-secret" >&2
-      exit 3
-    fi
-    ;;
-esac
-if [[ "${1:-}" == "--bun" && "${2:-}" == "x" && "${3:-}" == "--no-install" && "${4:-}" == "playwright" && "${5:-}" == "test" ]]; then
-  if [[ "${FVOCI_FIXTURE_RECORD_PLAYWRIGHT:-0}" == "1" ]]; then
-    echo "launch" >>"$FVOCI_FIXTURE_NET_STATE.playwright-launches"
-    if [[ "${6:-}" == "--config=e2e/perf/perf.config.ts" ]]; then
-      exit 0
-    fi
-  fi
-  if [[ -n "${FVOCI_FIXTURE_PLAYWRIGHT_EXIT:-}" ]]; then
-    exit "$FVOCI_FIXTURE_PLAYWRIGHT_EXIT"
-  fi
-fi
-exec "$FVOCI_FIXTURE_REAL_BUN" "$@"
+exec "$FVOCI_FIXTURE_REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fake-bun "$@"
 STUB
 chmod +x "$FIXTURE_ROOT"/scripts/*.sh "$FIXTURE_ROOT/target/debug/"* "$FAKE_BIN/"*
+"$REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fixture-runtime \
+  "$ROOT/tools/web-e2e/run-web-e2e.ts" "$FIXTURE_ROOT/tools/web-e2e/run-web-e2e.ts" "$FAKE_BIN/bun"
 
 # run_group <pending:0|1> <outcome:pass|fail> <net-mode> <log> <github-output>
 run_group() {
@@ -426,6 +417,12 @@ check_retired() {
   done
 }
 
+# Used by default and focused cancellation cases without changing assertions.
+retained_of() {
+  sed -n 's/^failure-artifacts=//p' "$1"
+}
+
+if [[ "$signals_only" == false ]]; then
 # pending: 0 ordinary, 1 pending; each failing run keeps a monitor, the ordinary
 # pass run never settles (bounded wait) and the pending pass run has no monitor.
 for pending in 0 1; do
@@ -614,11 +611,6 @@ for wrapper in ordinary perf; do
     echo "readiness fixture: $label status=$status setup-probes=$probes Playwright-launches=$launches"
   done
 done
-
-# retained_of <github-output>: the retained directory a failed group named.
-retained_of() {
-  sed -n 's/^failure-artifacts=//p' "$1"
-}
 
 # A failing setup step is named with its own exit status; nothing later runs
 # and what was already created is retired.
@@ -810,6 +802,7 @@ grep -qx 'FVOCI_E2E_SHARED_SERVICES=1 requires TEST_DATABASE_URL from the scope 
 [[ ! -e "$NET_STATE.service-starts" && ! -e "$NET_STATE.sql" ]] || fail "shared missing: services or database touched" "$log"
 rm -rf "$(retained_of "$gh_output")"
 
+fi
 # SIGINT while Playwright runs (a Ctrl-C reaches the whole process group):
 # exit 130, and the database, server, its child and the SMTP sink are retired.
 log="$WORK/sigint.log"

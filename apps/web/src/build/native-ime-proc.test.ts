@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -106,11 +106,31 @@ describe.skipIf(process.platform !== "linux")("/proc process identification", ()
 
   test("an unparseable title that carries a profile flag aborts the scan", async () => {
     const profile = join(root, "profile-unbalanced");
+    const title = `chrome --user-data-dir=${profile} 'open`;
     const bad = Bun.spawn(["cat"], {
-      argv0: `chrome --user-data-dir=${profile} 'open`,
+      argv0: title,
       stdin: "pipe",
+      stdout: "pipe",
     });
     try {
+      // Actual cat output proves exec completed; keeping stdin open holds the
+      // malformed single-element title alive for the real /proc scan.
+      const ready = "native-ime-proc-ready\n";
+      await bad.stdin.write(ready);
+      await bad.stdin.flush();
+      const reader = bad.stdout.getReader();
+      let echoed = "";
+      try {
+        while (echoed.length < ready.length) {
+          const { done, value } = await reader.read();
+          if (done) throw new Error("process fixture exited before readiness");
+          echoed += new TextDecoder().decode(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      expect(echoed).toBe(ready);
+      expect(readFileSync(`/proc/${String(bad.pid)}/cmdline`, "utf8")).toBe(title + "\0");
       expect(() => browserProcesses(profile)).toThrow("No closing quotation");
     } finally {
       bad.kill("SIGKILL");

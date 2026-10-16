@@ -138,7 +138,12 @@ fn local_root_callers_require_preflight_and_forward_cargo_arguments() {
             command.output().unwrap()
         };
         let out = run(None);
-        assert_eq!(out.status.code(), Some(0), "{script}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(r.trace().lines().last(), Some(expected), "{script}");
         assert_eq!(run(Some("19")).status.code(), Some(19), "{script}");
     }
@@ -148,15 +153,45 @@ fn local_root_callers_require_preflight_and_forward_cargo_arguments() {
 fn web_build_stops_on_preflight_failure() {
     let _serial = serial();
     let r = CallerRoot::new(&["run-web-e2e.sh"]);
+    let bun = Command::new("bun")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(bun.status.success());
+    let bun = String::from_utf8(bun.stdout).unwrap().trim().to_owned();
+    let tools = r.root.join("tools/web-e2e");
+    fs::create_dir_all(&tools).unwrap();
+    for name in ["run-web-e2e.ts", "groups.ts", "compat.ts"] {
+        let source = fs::read_to_string(repo().join("tools/web-e2e").join(name)).unwrap();
+        let source = if name == "run-web-e2e.ts" {
+            source.replace(
+                "process.execPath",
+                &serde_json::to_string(&r.bin.join("bun")).unwrap(),
+            )
+        } else {
+            source
+        };
+        fs::write(tools.join(name), source).unwrap();
+    }
+    let selected = r.root.join("tools/selected-backend-ci");
+    fs::create_dir_all(&selected).unwrap();
+    fs::copy(
+        repo().join("tools/selected-backend-ci/types.ts"),
+        selected.join("types.ts"),
+    )
+    .unwrap();
     write_exec(
         &r.bin.join("bun"),
-        "#!/usr/bin/env bash\necho \"bun $*\" >>\"$TRACE\"\n[ \"$*\" = '--bun x --no-install playwright --version' ]\n",
+        &format!(
+            "#!{bun}\nconst args=process.argv.slice(2);require('node:fs').appendFileSync(process.env.TRACE,'bun '+args.join(' ')+'\\n');if(args.join(' ')==='--bun x --no-install playwright --version')process.exit(0);const child=Bun.spawnSync([{},...args],{{stdin:'ignore',stdout:'inherit',stderr:'inherit'}});process.exit(child.exitCode);\n",
+            serde_json::to_string(&bun).unwrap()
+        ),
     );
     write_exec(
         &r.root.join("scripts/prepare-sqlite-ci.sh"),
         "#!/usr/bin/env bash\nprintf '%s\\n' \"preflight $*\" >>\"$TRACE\"\nexit 19\n",
     );
-    let out = r.command("run-web-e2e.sh").output().unwrap();
+    let out = r.command("run-web-e2e.sh").arg("--host").output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -325,15 +360,8 @@ fn masked(block: &str) -> bool {
 }
 
 const IDENTITY: &str = "${{ steps.sqlite.outputs.cache_identity }}";
-/// The former run-scoped cache key's arch/toolchain/SHA/attempt/SQLite parts.
-const NATIVE_IDENTITY: &str = "${{ runner.arch }}-1.99.0-${{ github.sha }}-${{ github.run_attempt }}-${{ steps.sqlite.outputs.cache_identity }}";
 /// Finished native cohorts consumed from postgres-build, without output caches.
 const RUST_HANDOFFS: [(&str, &str); 2] = [("postgres", "postgres"), ("collaboration", "helper")];
-/// (consumer, producer) of the web preparation target artifacts.
-const NATIVE_HANDOFFS: [(&str, &str); 2] = [
-    ("collaboration-test-build", "collaboration-main-build"),
-    ("collaboration-build", "collaboration-test-build"),
-];
 const COLLAB_LANES: [&str; 5] = [
     "collaboration-install-on",
     "collaboration-postgres-on",
@@ -360,10 +388,6 @@ fn contract(root: &Path) -> Check {
             &[
                 "web-checks",
                 "web-native-checks",
-                "workspace-browser-build",
-                "workspace-browser-shard",
-                "collaboration-main-build",
-                "collaboration-test-build",
                 "collaboration-build",
                 "collaboration-install-on",
                 "collaboration-postgres-on",
@@ -383,6 +407,78 @@ fn contract(root: &Path) -> Check {
             .filter(|(_, (s, e))| has_line(&text[*s..*e], "        id: sqlite"))
             .map(|(n, _)| n.as_str())
             .collect();
+        if workflow == "web" {
+            for obsolete in [
+                "collaboration-main-build",
+                "collaboration-test-build",
+                "workspace-browser-build",
+            ] {
+                ensure(!all.iter().any(|(name, _)| name == obsolete), || {
+                    format!("obsolete preparation job {obsolete}")
+                })?;
+            }
+        }
+        if workflow == "web" {
+            let producer = job(&text, "workspace-browser-container-build")
+                .ok_or("missing container producer")?;
+            let consumer =
+                job(&text, "workspace-browser-shard").ok_or("missing container consumer")?;
+            contains(
+                producer,
+                "--prepare --handoff \"$RUNNER_TEMP/fvoci-browser-container-packet\"",
+                "container producer",
+            )?;
+            contains(
+                producer,
+                "name: web-browser-container-build-${{ github.run_attempt }}",
+                "container producer",
+            )?;
+            contains(
+                consumer,
+                "needs: [ci-plan, workspace-browser-container-build]",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "shard: [0, 1, 2, 3, 4, 5, 6, 7]",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "artifact-ids: ${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "--consume ${{ matrix.shard }} --handoff \"$RUNNER_TEMP/fvoci-browser-container-packet\"",
+                "container consumer",
+            )?;
+            contains(
+                consumer,
+                "--handoff-sha256 \"$FVOCI_WEB_BUILD_HANDOFF_SHA256\"",
+                "container consumer",
+            )?;
+            for (body, required) in [
+                (producer, "id: prepare"),
+                (producer, "id: publish"),
+                (consumer, "id: container_browser"),
+            ] {
+                let matching: Vec<_> = blocks(body)
+                    .into_iter()
+                    .filter(|(s, e)| body[*s..*e].contains(required))
+                    .collect();
+                ensure(
+                    matching.len() == 1 && !masked(&body[matching[0].0..matching[0].1]),
+                    || "container preparation/consumption must be unmasked".into(),
+                )?;
+            }
+            for body in [producer, consumer] {
+                excludes(body, "id: sqlite", "container handoff")?;
+                excludes(body, "cargo ", "container handoff")?;
+                excludes(body, "playwright install", "container handoff")?;
+                excludes(body, "--ci-consume-browser", "container handoff")?;
+            }
+        }
         actual.sort_unstable();
         let mut wanted = expected.to_vec();
         wanted.sort_unstable();
@@ -402,30 +498,20 @@ fn contract(root: &Path) -> Check {
                 contains(body, "Restore prepared SQLite prefix", what)?;
                 contains(
                     body,
-                    &format!("name: rust-{cohort}-${{{{ runner.arch }}}}-${{{{ github.sha }}}}-${{{{ github.run_attempt }}}}\n"),
+                    &format!(
+                        "name: rust-{cohort}-${{{{ runner.arch }}}}-${{{{ github.sha }}}}-${{{{ github.run_attempt }}}}\n"
+                    ),
                     what,
                 )?;
                 let download = find(body, &format!("Download required {cohort}"))?;
                 let unpack = find(
                     body,
-                    &format!("rust-binaries unpack --cohort {cohort} --directory \"$RUNNER_TEMP/rust-binaries\" --sqlite-identity \"{IDENTITY}\""),
+                    &format!(
+                        "rust-binaries unpack --cohort {cohort} --directory \"$RUNNER_TEMP/rust-binaries\" --sqlite-identity \"{IDENTITY}\""
+                    ),
                 )?;
                 less(find(body, "Verify cached SQLite prefix")?, download, what)?;
                 less(download, unpack, what)?;
-            } else if workflow == "web" && *name == "workspace-browser-shard" {
-                excludes(body, "path: target", what)?;
-                contains(body, "needs: [ci-plan, workspace-browser-build]", what)?;
-                contains(
-                    body,
-                    "artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}",
-                    what,
-                )?;
-                contains(body, "--ci-consume-browser", what)?;
-                less(
-                    find(body, "id: sqlite")?,
-                    find(body, "Download this run")?,
-                    what,
-                )?;
             } else if workflow == "web" && COLLAB_LANES.contains(name) {
                 // Each lane prepares its own SDK before admitting the producer's exact artifact.
                 excludes(body, "path: target", what)?;
@@ -462,42 +548,6 @@ fn contract(root: &Path) -> Check {
                 less(
                     find(body, "Download this run")?,
                     find(body, "id: browser")?,
-                    what,
-                )?;
-            } else if let Some((_, producer)) = NATIVE_HANDOFFS
-                .iter()
-                .find(|(consumer, _)| workflow == "web" && consumer == name)
-            {
-                // The phase target arrives as this run's exact producer
-                // artifact, admitted only for this job's own SQLite identity.
-                excludes(body, "path: target", what)?;
-                contains(
-                    body,
-                    &format!("artifact-ids: ${{{{ needs.{producer}.outputs.artifact_id }}}}\n"),
-                    what,
-                )?;
-                contains(
-                    body,
-                    &format!(
-                        "PRODUCER_IDENTITY: ${{{{ needs.{producer}.outputs.native_identity }}}}\n"
-                    ),
-                    what,
-                )?;
-                contains(
-                    body,
-                    &format!("CURRENT_IDENTITY: {NATIVE_IDENTITY}\n"),
-                    what,
-                )?;
-                let require = find(
-                    body,
-                    "      - name: Require exact current native preparation",
-                )?;
-                let download = find(body, "      - name: Download this run")?;
-                less(find(body, "id: sqlite")?, require, what)?;
-                less(require, download, what)?;
-                less(
-                    download,
-                    find(body, "      - name: Restore current native preparation")?,
                     what,
                 )?;
             } else {
@@ -548,45 +598,52 @@ fn contract(root: &Path) -> Check {
                 contains(text_of(ready), "--github-env \"$GITHUB_ENV\"", what)?;
             }
             for preparation in [prepare, ready] {
-                ensure(!masked(text_of(preparation)), || {
+                let preparation = text_of(preparation);
+                let unguarded = preparation;
+                ensure(!masked(unguarded), || {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
             }
-            let phase = match (workflow, *name) {
-                ("web", "collaboration-main-build") => Some("main"),
-                ("web", "collaboration-test-build") => Some("tests"),
-                _ => None,
-            };
-            if let Some(phase) = phase {
-                // New run-scoped, unqualified preparation output; it advances
-                // the phase as an artifact bound to this job's SQLite identity.
-                contains(
-                    body,
-                    &format!("      native_identity: {NATIVE_IDENTITY}\n"),
-                    what,
-                )?;
-                let step_named = |line: &str| {
-                    steps
+            if workflow == "web" && *name == "collaboration-build" {
+                contains(body, "    needs: ci-plan\n", what)?;
+                contains(body, "    timeout-minutes: 15\n", what)?;
+                excludes(body, "actions/download-artifact@", what)?;
+                excludes(body, "touch -", what)?;
+                let required = |line: &str| -> Result<(usize, usize), String> {
+                    let matching: Vec<_> = steps
                         .iter()
                         .copied()
-                        .find(|b| has_line(text_of(*b), line))
-                        .ok_or_else(|| format!("{what}: missing {line:?}"))
+                        .filter(|b| has_line(text_of(*b), line))
+                        .collect();
+                    ensure(matching.len() == 1, || {
+                        format!("{what}: missing/duplicate {line}")
+                    })?;
+                    Ok(matching[0])
                 };
-                let compile = step_named("      - name: Compile native preparation")?;
-                let save = step_named("      - name: Save current native preparation")?;
-                for block in [compile, save] {
+                let compile = required("        id: prepare")?;
+                let publish = required("        id: publish")?;
+                for block in [compile, publish] {
                     ensure(!masked(text_of(block)), || {
-                        format!("{what}: current preparation must be unmasked")
+                        format!("{what}: qualification/publication must be unmasked")
                     })?;
                 }
-                less_equal(ready.1, compile.0, what)?;
-                less_equal(compile.1, save.0, what)?;
-                contains(text_of(save), "uses: actions/upload-artifact@", what)?;
                 contains(
-                    text_of(save),
-                    &format!("name: web-native-{phase}-${{{{ github.run_attempt }}}}\n"),
+                    text_of(compile),
+                    "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected\n",
                     what,
                 )?;
+                contains(
+                    text_of(publish),
+                    "name: web-current-build-${{ github.run_attempt }}\n",
+                    what,
+                )?;
+                contains(
+                    body,
+                    "handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}\n",
+                    what,
+                )?;
+                less_equal(ready.1, compile.0, what)?;
+                less_equal(compile.1, publish.0, what)?;
             }
             for block in &steps {
                 let step = text_of(*block);
@@ -786,10 +843,7 @@ fn assert_mutations_fail(
 fn new_producer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
-    for (workflow, name) in [
-        ("rust", "postgres-build"),
-        ("web", "workspace-browser-build"),
-    ] {
+    for (workflow, name) in [("rust", "postgres-build"), ("web", "collaboration-build")] {
         let path = root.join(format!(".github/workflows/{workflow}.yml"));
         let original = fs::read_to_string(&path).unwrap();
         let span = job_span(&original, name);
@@ -804,10 +858,10 @@ fn new_producer_mutations_fail_same_wiring_contract() {
             .iter()
             .find(|b| text_of(**b).lines().any(is_target_path_line))
             .unwrap();
-        let helper = *steps
+        let helper = steps
             .iter()
             .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
-            .unwrap();
+            .copied();
         let cache_text = text_of(cache);
         let move_cache_before = |anchor: (usize, usize)| {
             format!(
@@ -818,21 +872,45 @@ fn new_producer_mutations_fail_same_wiring_contract() {
             )
         };
         let mut changes: Vec<(String, String, Option<&str>)> = vec![
-            ("missing producer preparation".into(), replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"), None),
-            ("output cache before preparation".into(), move_cache_before(prep), None),
+            (
+                "missing producer preparation".into(),
+                replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"),
+                None,
+            ),
+            (
+                "output cache before preparation".into(),
+                move_cache_before(prep),
+                None,
+            ),
             (
                 "unqualified producer cache".into(),
-                replace_once(body, cache_text, &cache_text.replacen("steps.sqlite.outputs.cache_identity", "foreign_identity", 1)),
+                replace_once(
+                    body,
+                    cache_text,
+                    &cache_text.replacen(
+                        "steps.sqlite.outputs.cache_identity",
+                        "foreign_identity",
+                        1,
+                    ),
+                ),
                 None,
             ),
             (
                 "fallback producer cache".into(),
-                replace_once(body, cache_text, &format!("{cache_text}          restore-keys: unsafe\n")),
+                replace_once(
+                    body,
+                    cache_text,
+                    &format!("{cache_text}          restore-keys: unsafe\n"),
+                ),
                 None,
             ),
             (
                 "compile before preparation".into(),
-                format!("{}      - run: cargo build --locked\n{}", &body[..prep.0], &body[prep.0..]),
+                format!(
+                    "{}      - run: cargo build --locked\n{}",
+                    &body[..prep.0],
+                    &body[prep.0..]
+                ),
                 None,
             ),
             (
@@ -842,24 +920,35 @@ fn new_producer_mutations_fail_same_wiring_contract() {
             ),
             (
                 "masked producer preparation".into(),
-                replace_once(body, "id: sqlite\n", "id: sqlite\n        continue-on-error: true\n"),
+                replace_once(
+                    body,
+                    "id: sqlite\n",
+                    "id: sqlite\n        continue-on-error: true\n",
+                ),
                 None,
             ),
             (
                 "second unqualified root cache".into(),
-                format!("{body}      - uses: actions/cache@fixture\n        with:\n          path: target/extra\n          key: unqualified\n"),
-                None,
-            ),
-            (
-                "helper borrows SQLite inputs".into(),
-                replace_once(
-                    body,
-                    text_of(helper),
-                    &format!("{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n", text_of(helper)),
+                format!(
+                    "{body}      - uses: actions/cache@fixture\n        with:\n          path: target/extra\n          key: unqualified\n"
                 ),
                 None,
             ),
         ];
+        if let Some(helper) = helper {
+            changes.push((
+                "helper borrows SQLite inputs".into(),
+                replace_once(
+                    body,
+                    text_of(helper),
+                    &format!(
+                        "{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n",
+                        text_of(helper)
+                    ),
+                ),
+                None,
+            ));
+        }
         if workflow == "rust" {
             let verify = *steps
                 .iter()
@@ -888,11 +977,7 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 replace_once(
                     body,
                     text_of(save),
-                    &text_of(save).replacen(
-                        "v1-web-browser-default-fixture-",
-                        "v1-web-browser-drifted-",
-                        1,
-                    ),
+                    &text_of(save).replacen("v2-web-", "v2-drifted-", 1),
                 ),
                 None,
             ));
@@ -921,13 +1006,61 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             .find(|b| text_of(**b).contains(&format!("name: Download required {cohort}")))
             .unwrap();
         let changes = vec![
-            ("missing consumer preparation".into(), replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"), None),
-            ("missing consumer verification".into(), format!("{}{}", &body[..verify.0], &body[verify.1..]), None),
-            ("artifact before usable preparation".into(), format!("{}{}{}{}", &body[..verify.0], text_of(download), &body[verify.0..download.0], &body[download.1..]), None),
-            ("foreign cohort artifact".into(), replace_once(body, &format!("name: rust-{cohort}-"), "name: rust-foreign-"), None),
-            ("artifact omits current attempt".into(), replace_once(body, text_of(download), &text_of(download).replace("github.run_attempt", "foreign_attempt")), None),
-            ("unpack omits SQLite binding".into(), replace_once(body, &format!("--sqlite-identity \"{IDENTITY}\""), "--sqlite-identity foreign"), None),
-            ("consumer borrows root output cache".into(), format!("{body}      - uses: actions/cache@fixture\n        with:\n          path: target/db-tests\n          key: unqualified\n"), None),
+            (
+                "missing consumer preparation".into(),
+                replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"),
+                None,
+            ),
+            (
+                "missing consumer verification".into(),
+                format!("{}{}", &body[..verify.0], &body[verify.1..]),
+                None,
+            ),
+            (
+                "artifact before usable preparation".into(),
+                format!(
+                    "{}{}{}{}",
+                    &body[..verify.0],
+                    text_of(download),
+                    &body[verify.0..download.0],
+                    &body[download.1..]
+                ),
+                None,
+            ),
+            (
+                "foreign cohort artifact".into(),
+                replace_once(
+                    body,
+                    &format!("name: rust-{cohort}-"),
+                    "name: rust-foreign-",
+                ),
+                None,
+            ),
+            (
+                "artifact omits current attempt".into(),
+                replace_once(
+                    body,
+                    text_of(download),
+                    &text_of(download).replace("github.run_attempt", "foreign_attempt"),
+                ),
+                None,
+            ),
+            (
+                "unpack omits SQLite binding".into(),
+                replace_once(
+                    body,
+                    &format!("--sqlite-identity \"{IDENTITY}\""),
+                    "--sqlite-identity foreign",
+                ),
+                None,
+            ),
+            (
+                "consumer borrows root output cache".into(),
+                format!(
+                    "{body}      - uses: actions/cache@fixture\n        with:\n          path: target/db-tests\n          key: unqualified\n"
+                ),
+                None,
+            ),
         ];
         assert_mutations_fail(&rust_path, &root, &rust, span, changes);
     }
@@ -935,31 +1068,93 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     let original = fs::read_to_string(&path).unwrap();
     contract(&root).unwrap();
     for (name, old, new) in [
-        ("collaboration-main-build", "id: sqlite", "id: missing-sqlite"),
-        ("collaboration-test-build", "id: sqlite", "id: missing-sqlite"),
-        ("collaboration-main-build", "name: web-native-main-", "name: web-native-foreign-"),
-        ("collaboration-test-build", "name: web-native-tests-", "name: web-native-foreign-"),
-        ("collaboration-main-build", "      native_identity: ${{ runner.arch }}", "      native_identity: ${{ runner.os }}"),
-        ("collaboration-main-build", "name: Save current native preparation\n", "name: Save current native preparation\n        if: false\n"),
-        ("collaboration-test-build", "name: Compile native preparation\n", "name: Compile native preparation\n        continue-on-error: true\n"),
-        ("collaboration-test-build", "CURRENT_IDENTITY: ${{ runner.arch }}", "CURRENT_IDENTITY: ${{ runner.os }}"),
-        ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         (
-            "collaboration-build",
-            "artifact-ids: ${{ needs.collaboration-test-build.outputs.artifact_id }}",
+            "workspace-browser-shard",
+            "needs: [ci-plan, workspace-browser-container-build]",
+            "needs: [ci-plan]",
+        ),
+        (
+            "workspace-browser-shard",
+            "artifact-ids: ${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
             "artifact-ids: foreign",
         ),
         (
+            "workspace-browser-shard",
+            "id: container_browser\n",
+            "id: container_browser\n        if: false\n",
+        ),
+        (
+            "workspace-browser-shard",
+            "id: container_browser\n",
+            "id: container_browser\n        continue-on-error: true\n",
+        ),
+        (
+            "workspace-browser-shard",
+            "--consume ${{ matrix.shard }}",
+            "--consume 2",
+        ),
+        (
+            "workspace-browser-container-build",
+            "--prepare --handoff",
+            "--consume 2 --handoff",
+        ),
+        (
+            "workspace-browser-container-build",
+            "        id: prepare\n",
+            "        id: prepare\n        if: false\n",
+        ),
+        (
+            "workspace-browser-container-build",
+            "name: web-browser-container-build-${{ github.run_attempt }}",
+            "name: foreign-packet",
+        ),
+        ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
+        (
             "collaboration-build",
-            "PRODUCER_IDENTITY: ${{ needs.collaboration-test-build.outputs.native_identity }}",
-            "PRODUCER_IDENTITY: ${{ needs.collaboration-main-build.outputs.native_identity }}",
+            "    needs: ci-plan\n",
+            "    needs: foreign\n",
         ),
         (
             "collaboration-build",
-            "      - name: Download this run",
-            "      - uses: actions/cache/restore@fixture\n        with:\n          path: target\n          key: fixture\n      - name: Download this run",
+            "timeout-minutes: 15",
+            "timeout-minutes: 16",
         ),
-        ("collaboration-install-on", "id: sqlite", "id: missing-sqlite"),
+        ("collaboration-build", "id: prepare", "id: foreign"),
+        (
+            "collaboration-build",
+            "        id: prepare\n",
+            "        id: prepare\n        if: false\n",
+        ),
+        (
+            "collaboration-build",
+            "--ci-prepare-selected",
+            "--ci-prepare-browser",
+        ),
+        (
+            "collaboration-build",
+            "        id: publish\n",
+            "        id: publish\n        continue-on-error: true\n",
+        ),
+        (
+            "collaboration-build",
+            "name: web-current-build-",
+            "name: foreign-build-",
+        ),
+        (
+            "collaboration-build",
+            "name: web-current-build-${{ github.run_attempt }}",
+            "name: web-current-build-1",
+        ),
+        (
+            "collaboration-build",
+            "handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}",
+            "handoff_sha256: foreign",
+        ),
+        (
+            "collaboration-install-on",
+            "id: sqlite",
+            "id: missing-sqlite",
+        ),
         (
             "collaboration-install-on",
             "artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}",
@@ -970,18 +1165,33 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             "FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}",
             "FVOCI_WEB_BUILD_HANDOFF_SHA256: foreign",
         ),
-        ("collaboration-install-on", "--ci-consume-selected", "--with-selected-backends"),
+        (
+            "collaboration-install-on",
+            "--ci-consume-selected",
+            "--with-selected-backends",
+        ),
         (
             "collaboration-install-on",
             "      - name: Download this run",
             "      - uses: actions/cache@fixture\n        with:\n          path: target\n      - name: Download this run",
+        ),
+        (
+            "collaboration-sqlite-on",
+            "needs: [ci-plan, collaboration-build, collaboration-install-on]",
+            "needs: [ci-plan, collaboration-build]",
         ),
     ] {
         let span = job_span(&original, name);
         let body = &original[span.0..span.1];
         assert!(body.contains(old), "{name}: {old}");
         let changed = replace_once(body, old, new);
-        assert_mutations_fail(&path, &root, &original, span, vec![(format!("{name}: {old}"), changed, None)]);
+        assert_mutations_fail(
+            &path,
+            &root,
+            &original,
+            span,
+            vec![(format!("{name}: {old}"), changed, None)],
+        );
     }
 }
 

@@ -68,6 +68,7 @@ export function eventShas(event: PyValue, eventName: string): [PyValue, PyValue]
  * Every other event selects nothing whatever its payload carries. GitHub
  * writes dispatch booleans as the strings "true"/"false"; a missing input is
  * not chosen, while an unknown input or any other value is an error.
+ * Web's runner-only browser_arm64 mode is validated but never returned as chosen.
  */
 export function dispatchOptIns(
   workflow: Workflow,
@@ -81,13 +82,16 @@ export function dispatchOptIns(
   if (raw === null) return { chosen: none, error: null };
   if (!isMapping(raw)) return { chosen: none, error: "DISPATCH_INPUTS_INVALID" };
   const allowed = new Set(Object.values(OPT_IN_JOBS[workflow] ?? {}));
+  // This mode selects native runners, never jobs; ordinary selection is unchanged.
+  if (workflow === "web") allowed.add("browser_arm64");
   if ([...raw.keys()].some((name) => !allowed.has(name))) {
     return { chosen: none, error: "DISPATCH_INPUTS_UNKNOWN" };
   }
   const chosen = new Set<string>();
   for (const [name, value] of raw) {
-    if (value === true || value === "true") chosen.add(name);
-    else if (!(value === false || value === "false")) {
+    if (value === true || value === "true") {
+      if (workflow !== "web" || name !== "browser_arm64") chosen.add(name);
+    } else if (!(value === false || value === "false")) {
       return { chosen: none, error: "DISPATCH_INPUT_VALUE_INVALID" };
     }
   }

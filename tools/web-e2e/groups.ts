@@ -19,8 +19,8 @@ export const PAIR_SECOND = "workspace-wiki-flow.spec.ts";
 // web.yml matrix check read it through the `shards`/`matrix` queries below.
 export const DEFAULT_SHARD_COUNT = 8;
 // The timer spec runs as four fresh-runtime Playwright invocations (see the
-// cost note below). These are its --grep filters; scripts/web-e2e-run-group.sh
-// still carries its own copy, which the shard fixture compares to these.
+// cost note below). run-web-e2e.ts uses these --grep filters; the shard
+// fixture proves their disjoint cover and exact fresh-runtime dispatch.
 export const TIMER_FILTERS = {
   new_control:
     "ordinary research plan persists|task widget retires|a late task-widget R1|owner releases opaque legacy reservations|a late legacy release",

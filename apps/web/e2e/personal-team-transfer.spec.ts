@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
@@ -45,36 +46,12 @@ const graphSchema = z.object({
 // credentials stay in the child environment and never enter evidence.
 function committed(workspaceId: string, select: string): unknown {
   z.guid().parse(workspaceId);
-  const url = new URL(process.env.DATABASE_APP_URL ?? "");
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!container) throw new Error("isolated PostgreSQL container is required");
   try {
-    const output = execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        "-e",
-        `PGPASSWORD=${decodeURIComponent(url.password)}`,
-        container,
-        "psql",
-        "-X",
-        "-qAt",
-        "-h",
-        "127.0.0.1",
-        "-U",
-        decodeURIComponent(url.username),
-        "-d",
-        url.pathname.slice(1),
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      {
-        input: `BEGIN; SET LOCAL app.tenant_id='${workspaceId}'; ${select}; ROLLBACK;`,
-        stdio: "pipe",
-        encoding: "utf8",
-      },
-    );
+    const output = execFileSync(process.execPath, fixtureQueryArgs("app"), {
+      input: `BEGIN; SET LOCAL app.tenant_id='${workspaceId}'; ${select}; ROLLBACK;`,
+      stdio: "pipe",
+      encoding: "utf8",
+    });
     return JSON.parse(output.trim()) as unknown;
   } catch {
     throw new Error("restricted committed DB observation failed (credentials omitted)");
@@ -252,21 +229,64 @@ async function witness(workspaceId: string, testInfo: TestInfo): Promise<void> {
   ]);
   for (const relation of observed.relations)
     expect(relation).toMatchObject({ enabled: true, active: true, ownerMember: false });
-  const ledger = ["FVOCI_TEST_PG_CONTAINER", "FVOCI_TEST_MEILI_CONTAINER"].map((name) => {
-    const container = process.env[name] ?? "";
-    if (!container) return { name, container: null };
-    const inspected = execFileSync(
-      "docker",
-      [
-        "inspect",
-        "--format",
-        "{{json .Config.Image}}|{{json .State.StartedAt}}|{{json .State.Pid}}|{{json .Config.Labels}}|{{json .Mounts}}",
-        container,
-      ],
-      { encoding: "utf8" },
-    ).trim();
-    return { name, container, inspected };
-  });
+  const names = ["FVOCI_TEST_PG_CONTAINER", "FVOCI_TEST_MEILI_CONTAINER"] as const;
+  const run = process.env.FVOCI_WEB_CONTAINER_RUN;
+  const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+  const relay = process.env.FVOCI_E2E_SERVICE_WITNESS;
+  const ledger = (() => {
+    if (run !== undefined || image !== undefined) {
+      try {
+        if (
+          !run?.trim() ||
+          !image?.trim() ||
+          process.env.FVOCI_WEB_BUILD_PHASE !== "consume" ||
+          !relay
+        )
+          throw new Error();
+        const entries = z
+          .array(
+            z.strictObject({
+              name: z.enum(names),
+              container: z.string().min(1),
+              inspected: z.string().min(1),
+            }),
+          )
+          .length(2)
+          .parse(JSON.parse(relay) as unknown);
+        return names.map((name) => {
+          const matching = entries.filter((entry) => entry.name === name);
+          const entry = matching[0];
+          if (
+            matching.length !== 1 ||
+            !entry ||
+            !process.env[name]?.trim() ||
+            entry.container !== process.env[name] ||
+            !entry.inspected.trim()
+          )
+            throw new Error();
+          return entry;
+        });
+      } catch {
+        throw new Error("container service witness invalid (contents withheld)");
+      }
+    }
+    if (relay !== undefined) throw new Error("service witness relay requires container context");
+    return names.map((name) => {
+      const container = process.env[name] ?? "";
+      if (!container) return { name, container: null };
+      const inspected = execFileSync(
+        "docker",
+        [
+          "inspect",
+          "--format",
+          "{{json .Config.Image}}|{{json .State.StartedAt}}|{{json .State.Pid}}|{{json .Config.Labels}}|{{json .Mounts}}",
+          container,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+      return { name, container, inspected };
+    });
+  })();
   const body = JSON.stringify({ test: testInfo.title, observed, ledger }, null, 1);
   await testInfo.attach("restricted-role-and-service-witness", {
     body,
@@ -1018,29 +1038,13 @@ test("COPY with an attachment: the copy gets a new file id a fresh teammate down
 
 const identitySchema = z.object({ userId: z.guid(), sessionId: z.guid() });
 const timerReceiptSchema = z.object({ runId: z.guid(), version: z.number().int() });
-/** Labelled admin fixture (isolated run DB, local socket): states no current route creates. */
+/** Labelled admin fixture (isolated run DB): states no current route creates. */
 function adminFixture(sql: string): string {
-  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!adminUrl || !container) throw new Error("isolated PostgreSQL fixture is required");
-  return execFileSync(
-    "docker",
-    [
-      "exec",
-      "-i",
-      container,
-      "psql",
-      "-X",
-      "-qAt",
-      "-U",
-      "postgres",
-      "-d",
-      new URL(adminUrl).pathname.slice(1),
-      "-v",
-      "ON_ERROR_STOP=1",
-    ],
-    { input: sql, encoding: "utf8", stdio: "pipe" },
-  ).trim();
+  return execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+    input: sql,
+    encoding: "utf8",
+    stdio: "pipe",
+  }).trim();
 }
 
 test("MOVE discloses and carries the time records and my timer; COPY keeps them private; a timer running elsewhere refuses with no effects", async ({

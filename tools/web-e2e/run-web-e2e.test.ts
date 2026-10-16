@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -18,6 +19,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CheckError,
+  CI_WEB_IMAGE,
+  containerImage,
+  containerRequest,
+  containerFailureArtifacts,
+  webRequest,
+  containerShard,
+  containerArchitecture,
+  containerImageSource,
+  qualifyContainerDaemon,
+  commandProcess,
+  qualifyCohortHostProgram,
+  qualifyImageSource,
+  sqliteEnvironment,
   committedApiJobs,
   createSafeDiagnostics,
   launcherReceipt,
@@ -29,6 +43,7 @@ import {
   writeLauncherReceipt,
   type CommittedApiRequest,
 } from "./run-web-e2e.ts";
+import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
@@ -143,6 +158,27 @@ describe("qualifyCommittedApi", () => {
     expect(qualifyCommittedApi(root, request, ciEnv(sha))).toBe(sha);
   });
 
+  test("local ordinary browser identity is distinct from GitHub and still checks the exact source", () => {
+    const { root, sha } = committedCheckout();
+    const local = {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_JOB: "workspace-browser-shard",
+      FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+      FVOCI_WEB_CONTAINER_SOURCE: sha,
+    };
+    expect(qualifyCommittedApi(root, request, local)).toBe(sha);
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, GITHUB_ACTIONS: "true" }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_SOURCE: "0".repeat(40) }),
+    ).toThrow();
+    expect(() =>
+      qualifyCommittedApi(root, request, { ...local, FVOCI_WEB_CONTAINER_IMAGE: "latest" }),
+    ).toThrow();
+  });
+
   test("refuses outside CI, in another job, at another SHA or through a symlinked root", () => {
     const { root, sha } = committedCheckout();
     refused(
@@ -194,6 +230,833 @@ describe("qualifyCommittedApi", () => {
       "git rev-parse HEAD failed with exit 128",
     );
   });
+});
+
+test("containers admit every complete ordinary shard, never a partial selection", () => {
+  for (const value of ["0", "1", "2", "3", "4", "5", "6", "7"])
+    expect(containerShard(value)).toBe(value);
+  for (const value of [undefined, "", "-1", "6 --grep=skip", "8"])
+    expect(() => containerShard(value)).toThrow(CheckError);
+});
+
+test("modeled service inspection binds owned identities and revalidates all fields before cleanup, even on body failure", async () => {
+  const root = tempDir(),
+    bin = join(root, "bin"),
+    state = join(root, "state"),
+    calls = join(root, "calls");
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "docker"),
+    `#!${process.execPath}
+import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+const args = process.argv.slice(2), path = process.env.FIXTURE_STATE;
+const state = JSON.parse(readFileSync(path, "utf8"));
+appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify(args) + "\\n");
+const save = () => writeFileSync(path, JSON.stringify(state));
+if (args[0] === "run") {
+  const name = args[args.indexOf("--name") + 1];
+  const id = (state.mode === "collision" ? "c" : name.includes("-pg-") ? "a" : "b").repeat(64);
+  state.services[id] = { id, name, image: args[args.indexOf("--env-file") + 2], label: state.mode === "collision" ? "WITHHELD_SERVICE_CANARY" : args[args.indexOf("--label") + 1].split("=")[1] };
+  save();
+  if (state.mode === "partial" || state.mode === "collision") process.exit(23);
+  console.log(id);
+} else if (args[0] === "exec") {
+  if (args.includes("psql")) console.log("180006");
+} else if (args[0] === "inspect") {
+  const format = args[args.indexOf("--format") + 1], key = args.at(-1);
+  const service = state.services[key] ?? Object.values(state.services).find(s => s.name === key);
+  if (!service) process.exit(3);
+  if (format.includes(".Config.Env")) process.exit(90);
+  if (format === "{{.Id}}") console.log(service.id);
+  else if (format.includes(".State.Running")) console.log("false " + (service.name.includes("-pg-") ? "0" : "143") + " false");
+  else if (!format.includes(".State.StartedAt")) console.log(JSON.stringify([service.id, "/" + service.name, service.image, {"fvoci.test-run": service.label}]));
+  else {
+    const fields = [service.id, "/" + service.name, service.image, "2026-10-17T00:00:00Z", 123, {"fvoci.test-run": service.label}, []];
+    if (!state.body && state.mode === "missing") process.exit(3);
+    if (!state.body && state.mode === "foreign") fields[5] = {"fvoci.test-run": "WITHHELD_SERVICE_CANARY"};
+    if (state.body && state.mode.startsWith("change-")) {
+      const at = Number(state.mode.slice(7));
+      fields[at] = at === 4 ? 456 : at === 5 ? {"fvoci.test-run": service.label, extra: true} : at === 6 ? [{Source: "changed"}] : fields[at] + "changed";
+    }
+    console.log(JSON.stringify(fields) + "\\n" + fields.slice(2).map(v => JSON.stringify(v)).join("|"));
+  }
+} else if (args[0] === "stop" && state.mode === "cleanup") process.exit(3);
+else if (args[0] === "rm") { delete state.services[args.at(-1)]; save(); }
+`,
+    { mode: 0o755 },
+  );
+  const driver = `
+import { browserServices } from ${JSON.stringify(CLI)};
+import {readFileSync,writeFileSync} from "node:fs";
+const path = process.env.FIXTURE_STATE;
+try {
+ const result = await browserServices(${JSON.stringify(root)}, ${JSON.stringify(root)}, "owned-fixture-network", "linux/amd64", async env => {
+  const ledger = JSON.parse(env.FVOCI_E2E_SERVICE_WITNESS);
+  if (ledger.length !== 2 || ledger.some((e,i) => e.name !== ["FVOCI_TEST_PG_CONTAINER","FVOCI_TEST_MEILI_CONTAINER"][i] || e.container !== env[e.name] || e.inspected.split("|").length !== 5)) throw Error("invalid relay");
+  const state = JSON.parse(readFileSync(path,"utf8")); state.body = true; writeFileSync(path,JSON.stringify(state));
+  if (state.throwBody) throw Error("WITHHELD_SERVICE_CANARY");
+  return state.bodyStatus;
+ });
+ console.log("RESULT=" + result);
+} catch (error) {
+ if (["partial","collision"].includes(JSON.parse(readFileSync(path,"utf8")).mode))
+  console.log("ORIGINAL_CREATE_FAILURE=" + Number(error.message === "container browser prerequisite failed"));
+ console.log("RESULT=11");
+}
+`;
+  for (const [mode, bodyStatus, throwBody, expected, bodyRan] of [
+    ["valid", 0, false, 0, true],
+    ["missing", 0, false, 11, false],
+    ["foreign", 0, false, 11, false],
+    ["partial", 0, false, 11, false],
+    ["collision", 0, false, 11, false],
+    ...Array.from({ length: 7 }, (_, at) => ["change-" + String(at), 0, false, 1, true]),
+    ["valid", 17, false, 17, true],
+    ["change-3", 17, false, 17, true],
+    ["valid", 0, true, 11, true],
+    ["cleanup", 0, false, 1, true],
+  ] as [string, number, boolean, number, boolean][]) {
+    writeFileSync(
+      state,
+      JSON.stringify({ mode, bodyStatus, throwBody, body: false, services: {} }),
+    );
+    writeFileSync(calls, "");
+    const child = Bun.spawn([process.execPath, "--no-env-file", "-e", driver], {
+      cwd: root,
+      env: {
+        ...process.env,
+        PATH: bin + ":" + (process.env.PATH ?? ""),
+        FIXTURE_STATE: state,
+        FIXTURE_CALLS: calls,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, out, err] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exit, mode).toBe(0);
+    expect(out, mode).toBe(
+      (["partial", "collision"].includes(mode) ? "ORIGINAL_CREATE_FAILURE=1\n" : "") +
+        "RESULT=" +
+        String(expected) +
+        "\n",
+    );
+    expect(out + err).not.toContain("WITHHELD_SERVICE_CANARY");
+    const final = JSON.parse(readFileSync(state, "utf8")) as {
+      body: boolean;
+      services: Record<string, unknown>;
+    };
+    expect(final.body, mode).toBe(bodyRan);
+    if (mode === "collision") expect(Object.keys(final.services), mode).toEqual(["c".repeat(64)]);
+    else expect(final.services, mode).toEqual({});
+    const commands = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    expect(commands.filter((args) => args[0] === "stop").length, mode).toBe(
+      mode === "collision" ? 0 : mode === "partial" ? 1 : 2,
+    );
+    expect(
+      commands.some(
+        (args) => ["stop", "rm"].includes(args[0] ?? "") && args.includes("c".repeat(64)),
+      ),
+    ).toBe(false);
+    expect(commands.at(-1), mode).toEqual(["network", "rm", "owned-fixture-network"]);
+    expect(
+      readdirSync(root).some((name) => name.endsWith(".env")),
+      mode,
+    ).toBe(false);
+    if (mode === "valid" && bodyRan) expect(err).toContain("service_witness_unchanged=PASS");
+    if (mode.startsWith("change-")) expect(err).toContain("service witness revalidation failed");
+  }
+});
+
+test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
+  const { root } = committedCheckout();
+  for (const directory of ["xtask/tests", "tests/support"])
+    mkdirSync(join(root, directory), { recursive: true });
+  for (const file of ["xtask/catalog.tsv", "tests/support/official_sqld.rs"])
+    writeFileSync(join(root, file), "original input\n");
+  const commit = () => {
+    git(root, "add", ".");
+    git(
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "image input fixture",
+    );
+    return git(root, "rev-parse", "HEAD");
+  };
+  const image = commit();
+  writeFileSync(join(root, "xtask/tests/caller.rs"), "unrelated test\n");
+  expect(() => {
+    qualifyImageSource(root, image, commit());
+  }).not.toThrow();
+  for (const file of [
+    "xtask/catalog.tsv",
+    "tests/support/official_sqld.rs",
+    "xtask/new-catalog.tsv",
+  ]) {
+    writeFileSync(join(root, file), "changed copied input\n");
+    expect(() => {
+      qualifyImageSource(root, image, commit());
+    }).toThrow(CheckError);
+    if (file === "xtask/new-catalog.tsv") rmSync(join(root, file));
+    else writeFileSync(join(root, file), "original input\n");
+    commit();
+  }
+});
+
+test("real commands preserve normal and nonzero exits", () => {
+  for (const code of [0, 7]) {
+    const source = `import {command} from ${JSON.stringify(CLI)};process.exit(await command([process.execPath,"-e",${JSON.stringify(`process.exit(${String(code)})`)}],process.cwd()));`;
+    const child = Bun.spawnSync([process.execPath, "-e", source], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode).toBe(code);
+  }
+});
+
+for (const [signal, status] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+] as const)
+  test(`real ${signal} remains cancellation after child exit0 and stops new work`, async () => {
+    const directory = tempDir(),
+      bad = join(directory, "new-work"),
+      cleanup = join(directory, "cleanup");
+    const body = `await new Promise(resolve=>{process.once(${JSON.stringify(signal)},resolve);console.log("READY");});console.log("CHILD_NORMAL_EXIT");process.exit(0);`;
+    const write = (file: string) =>
+      `require("node:fs").writeFileSync(${JSON.stringify(file)},"observed");`;
+    const source = `import {command} from ${JSON.stringify(CLI)};
+const first=await command([process.execPath,"-e",${JSON.stringify(body)}],process.cwd());
+const next=await command([process.execPath,"-e",${JSON.stringify(write(bad))}],process.cwd());
+const clean=await command([process.execPath,"-e",${JSON.stringify(write(cleanup))}],process.cwd(),process.env,{stdout:"inherit",stderr:"inherit"},true);
+console.log(JSON.stringify({first,next,clean}));process.exit(first);`;
+    const child = Bun.spawn([process.execPath, "-e", source], { stdout: "pipe", stderr: "pipe" });
+    try {
+      const reader = child.stdout.getReader(),
+        decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("READY\n")) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("child exited before ready");
+        output += decoder.decode(chunk.value);
+      }
+      child.kill(signal);
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        output += decoder.decode(chunk.value);
+      }
+      expect(await child.exited).toBe(status);
+      expect(output).toContain("CHILD_NORMAL_EXIT");
+      expect(output).toContain(JSON.stringify({ first: status, next: status, clean: 0 }));
+      expect(() => readFileSync(bad)).toThrow();
+      expect(readFileSync(cleanup, "utf8")).toBe("observed");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM");
+      await child.exited;
+    }
+  });
+
+test("maintained default runs all ordinary shards in Docker and preserves explicit host selections", () => {
+  expect(webRequest([], {}).route).toBe("docker");
+  for (const shard of ["0", "1", "2", "3", "4", "5", "6", "7"])
+    expect(webRequest(["--ci-shard", shard], {}).route).toBe("docker");
+  const args = ["e2e/v050-task-timer.spec.ts", "--grep", "exact original filter", "--workers=1"];
+  expect(webRequest(args, {}).specs).toEqual(args);
+  expect(webRequest(args, {}).route).toBe("host");
+  expect(webRequest([], { FVOCI_E2E_PENDING: "1" }).route).toBe("host");
+  expect(webRequest(["--host"], {}).route).toBe("host");
+  for (const shard of ["0", "2", "3"]) {
+    expect(webRequest(["--ci-shard", shard], { GITHUB_ACTIONS: "true" }).route).toBe("host");
+    expect(webRequest(["--ci-shard", shard], { FVOCI_E2E_PENDING: "1" }).route).toBe("host");
+    expect(webRequest(["--host", "--ci-shard", shard], {}).route).toBe("host");
+  }
+  for (const args of [
+    ["--ci-shard", "8"],
+    ["--ci-shard", "2", "x.spec.ts"],
+    ["--host", "--local-image-sdk"],
+    ["--ci-shard-count", "16"],
+  ])
+    expect(() => webRequest(args, {})).toThrow(CheckError);
+});
+
+test("sealed SDK selection distinguishes local engine IDs from registry and CI authority", () => {
+  const seal = "b".repeat(64),
+    image = "sha256:" + "a".repeat(64);
+  expect(containerImage(image, seal, true, {})).toEqual({ image, sdk: seal, local: true });
+  expect(containerImage(CI_WEB_IMAGE, seal, false, { CI: "true" }).image).toBe(CI_WEB_IMAGE);
+  for (const [pin, sdk, local, env] of [
+    [image, seal, false, {}],
+    [CI_WEB_IMAGE, seal, true, {}],
+    [image, seal, true, { CI: "true" }],
+    [image, seal, true, { GITHUB_ACTIONS: "true" }],
+    [CI_WEB_IMAGE, "", false, {}],
+    ["latest", seal, false, {}],
+  ] as const)
+    expect(() => containerImage(pin, sdk, local, env)).toThrow(CheckError);
+});
+
+test("published defaults bind native SDK seals in both local and actual CI requests", () => {
+  const ci = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    GITHUB_JOB: "workspace-browser-container-build",
+    GITHUB_SHA: "c".repeat(40),
+    GITHUB_RUN_ID: "12",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_REPOSITORY: "owner/repo",
+  };
+  expect(CI_WEB_IMAGE).toBe(
+    "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c",
+  );
+  for (const [aliases, sdk] of [
+    [
+      ["x64", "x86_64", "amd64"],
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+    ],
+    [["arm64", "aarch64"], "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca"],
+  ] as const) {
+    for (const architecture of aliases) {
+      const local = containerRequest(["/checkout", "--ci-shard", "2"], {}, architecture);
+      const producer = containerRequest(
+        ["/checkout", "--prepare", "--handoff", "/owned/packet"],
+        ci,
+        architecture,
+      );
+      const consumer = containerRequest(
+        [
+          "/checkout",
+          "--consume",
+          "2",
+          "--handoff",
+          "/owned/packet",
+          "--handoff-sha256",
+          "d".repeat(64),
+        ],
+        { ...ci, GITHUB_JOB: "workspace-browser-shard" },
+        architecture,
+      );
+      expect(local.sdk).toEqual({ image: CI_WEB_IMAGE, sdk, local: false });
+      expect(producer.sdk).toEqual(local.sdk);
+      expect(consumer.sdk).toEqual(local.sdk);
+    }
+  }
+  for (const args of [
+    ["--image-pin", CI_WEB_IMAGE],
+    ["--sdk-sha256", "b".repeat(64)],
+    ["--local-image-sdk"],
+  ])
+    expect(() => containerRequest(["/checkout", "--ci-shard", "2", ...args], {})).toThrow(
+      CheckError,
+    );
+  expect(() => containerRequest(["/checkout", "--ci-shard", "2"], {}, "riscv64")).toThrow();
+});
+
+test("separate image phases require actual CI allocation and immutable packet admission", () => {
+  const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    seal = "b".repeat(64);
+  const prepare = [
+    "/checkout",
+    "--prepare",
+    "--handoff",
+    "/owned/packet",
+    "--image-pin",
+    pin,
+    "--sdk-sha256",
+    seal,
+  ];
+  const ci = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    GITHUB_JOB: "workspace-browser-container-build",
+    GITHUB_SHA: "c".repeat(40),
+    GITHUB_RUN_ID: "12",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_REPOSITORY: "owner/repo",
+  };
+  expect(containerRequest(prepare, ci).phase).toBe("prepare");
+  const consume = [
+    "/checkout",
+    "--consume",
+    "2",
+    ...prepare.slice(2),
+    "--handoff-sha256",
+    "d".repeat(64),
+  ];
+  expect(
+    containerRequest(consume, { ...ci, GITHUB_JOB: "workspace-browser-shard" }).shards,
+  ).toEqual(["2"]);
+  for (const changed of [
+    { GITHUB_JOB: "workspace-browser-build" },
+    { GITHUB_SHA: "main" },
+    { GITHUB_RUN_ATTEMPT: "0" },
+    { CI: "false" },
+    { GITHUB_ACTIONS: "false" },
+    { GITHUB_REPOSITORY: "foreign" },
+  ])
+    expect(() => containerRequest(prepare, { ...ci, ...changed })).toThrow(CheckError);
+  for (const args of [
+    consume.slice(0, -2),
+    consume.map((v) => (v === "2" ? "0" : v)),
+    [...prepare, "--local-image-sdk"],
+    prepare.filter((v) => v !== "--handoff" && v !== "/owned/packet"),
+  ])
+    expect(() => containerRequest(args, ci)).toThrow();
+  expect(() =>
+    containerRequest(["/checkout", "--ci-shard", "2", ...prepare.slice(4)], ci),
+  ).toThrow();
+});
+
+test("container diagnostics expose only the owned mapped failure directory", () => {
+  const run = tempDir();
+  mkdirSync(join(run, "tmp"));
+  const retained = join(run, "tmp/fvoci-collab-e2e-fail.Abc123");
+  mkdirSync(retained, { mode: 0o700 });
+  expect(
+    containerFailureArtifacts(
+      "failure-artifacts=/fvoci-run/tmp/fvoci-collab-e2e-fail.Abc123\n",
+      run,
+    ),
+  ).toBe(retained);
+  for (const output of [
+    "failure-artifacts=/foreign\n",
+    "failure-artifacts=/fvoci-run/tmp/../foreign\n",
+    "failure-artifacts=/fvoci-run/tmp/fvoci-collab-e2e-fail.Abc123\nfailure-artifacts=/foreign\n",
+    "x".repeat(16385),
+  ])
+    expect(() => containerFailureArtifacts(output, run)).toThrow(CheckError);
+});
+
+test("dependency phases refuse credentials and cross targets and preserve fetch failures", async () => {
+  const child = Bun.spawn(
+    [process.execPath, "--no-env-file", CLI, "browser-phase", "/unused", "inputs", "2"],
+    {
+      env: {
+        ...process.env,
+        FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+        TEST_DATABASE_URL: "PRIVATE_DEPENDENCY_CANARY",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  expect(code).toBe(1);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("credential-free phase");
+  expect(stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+
+  const { root, sha } = committedCheckout(),
+    bin = tempDir(),
+    calls = join(bin, "calls");
+  writeFileSync(
+    join(bin, "cargo"),
+    "#!" +
+      process.execPath +
+      '\nconst fs=require("node:fs"),args=process.argv.slice(2);fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify({args,cwd:process.cwd(),offline:process.env.CARGO_NET_OFFLINE})+"\\n");process.exit(args.includes("--manifest-path")?17:0);\n',
+    { mode: 0o755 },
+  );
+  const target = nativeArchitecture(process.arch) + "-unknown-linux-gnu";
+  for (const phase of ["prepare", "inputs"]) {
+    for (const crossTarget of [false, true]) {
+      writeFileSync(calls, "");
+      const result = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          CLI,
+          "browser-phase",
+          root,
+          phase,
+          ...(phase === "inputs" ? ["2"] : []),
+        ],
+        {
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([key]) => key !== "CI" && !key.startsWith("GITHUB_"),
+              ),
+            ),
+            PATH: bin + ":" + (process.env.PATH ?? ""),
+            FIXTURE_CALLS: calls,
+            FVOCI_WEB_CONTAINER_LOCAL: "1",
+            FVOCI_WEB_CONTAINER_JOB:
+              phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+            FVOCI_WEB_CONTAINER_SOURCE: sha,
+            FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+            FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+            CARGO_BUILD_TARGET: crossTarget ? "wasm32-unknown-unknown" : target,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [exit, out, err] = await Promise.all([
+        result.exited,
+        new Response(result.stdout).text(),
+        new Response(result.stderr).text(),
+      ]);
+      expect(exit, err).toBe(crossTarget ? 1 : 17);
+      expect(out).toBe("");
+      const recorded = readFileSync(calls, "utf8");
+      if (crossTarget) {
+        expect(recorded).toBe("");
+        expect(err).toContain("native Linux runtime, kernel and Rust target must match");
+      } else {
+        expect(
+          recorded
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as unknown),
+        ).toEqual([
+          { args: ["fetch", "--locked", "--target", target], cwd: root, offline: "false" },
+          {
+            args: [
+              "fetch",
+              "--locked",
+              "--target",
+              target,
+              "--manifest-path",
+              join(root, "crates/collab-engine/Cargo.toml"),
+            ],
+            cwd: root,
+            offline: "false",
+          },
+        ]);
+        expect(err).toContain("stage=engine-fetch");
+        expect(err).not.toContain("stage=dependencies");
+      }
+    }
+  }
+});
+
+test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure", () => {
+  const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
+  for (const aliases of [
+    ["x64", "x86_64", "amd64"],
+    ["arm64", "aarch64"],
+  ]) {
+    const machine = nativeArchitecture(aliases[0] as string);
+    for (const alias of aliases) {
+      expect(containerArchitecture("linux", alias, machine)).toBe(machine);
+      expect(
+        containerArchitecture("darwin", alias, machine, machine === "aarch64" ? "1" : "0"),
+      ).toBe(machine);
+      qualifyContainerDaemon("unix:///owned/docker.sock", "linux " + alias, machine);
+      expect(
+        containerImageSource(
+          "sha256:" +
+            "b".repeat(64) +
+            " linux " +
+            alias +
+            " " +
+            "c".repeat(40) +
+            " " +
+            JSON.stringify([pin]),
+          { image: pin, local: false },
+          machine,
+        ),
+      ).toBe("c".repeat(40));
+      const native = nativeLinux("linux", alias, machine, machine + "-unknown-linux-gnu");
+      expect(native.target).toBe(machine + "-unknown-linux-gnu");
+      expect(native.abi).toEqual([
+        machine === "x86_64" ? "/lib64/ld-linux-x86-64.so.2" : "/lib/ld-linux-aarch64.so.1",
+        ...["libc.so.6", "libm.so.6", "libgcc_s.so.1"].map(
+          (name) => "/lib/" + machine + "-linux-gnu/" + name,
+        ),
+      ]);
+    }
+  }
+  for (const args of [
+    ["linux", "x64", "aarch64"],
+    ["darwin", "x64", "x86_64", "1"],
+    ["darwin", "arm64", "aarch64", "0"],
+    ["darwin", "arm64", "aarch64"],
+    ["win32", "x64", "x86_64"],
+    ["linux", "riscv64", "riscv64"],
+  ])
+    expect(() =>
+      containerArchitecture(args[0] as string, args[1] as string, args[2] as string, args[3]),
+    ).toThrow();
+  for (const args of [
+    ["linux", "arm64", "x86_64"],
+    ["darwin", "x64", "x86_64"],
+    ["linux", "x64", "x86_64", "aarch64-unknown-linux-gnu"],
+    ["linux", "arm64", "aarch64", "x86_64-unknown-linux-gnu"],
+    ["linux", "x64", "x86_64", ""],
+  ])
+    expect(() =>
+      nativeLinux(args[0] as string, args[1] as string, args[2] as string, args[3]),
+    ).toThrow();
+  for (const endpoint of [
+    "tcp://PRIVATE_ENDPOINT_CANARY",
+    "ssh://PRIVATE_ENDPOINT_CANARY",
+    "unix://foreign/socket",
+    "unix:///socket\n",
+  ])
+    expect(() => {
+      qualifyContainerDaemon(endpoint, "linux amd64", "x86_64");
+    }).toThrow();
+  expect(commandProcess(["docker", "pull", pin], "darwin")).toEqual({
+    argv: ["docker", "pull", pin],
+    group: false,
+  });
+  expect(commandProcess(["docker", "pull", pin], "linux").group).toBe(true);
+  expect(() => commandProcess(["bash", "host-only"], "darwin")).toThrow(/host-only/);
+});
+
+for (const mode of [
+  "normal",
+  "published-default",
+  ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
+  "inputs-fail",
+  "consume-fail",
+  "remove-fail",
+  "daemon-mismatch",
+  "image-mismatch",
+  "foreign-digest",
+  "remote-endpoint",
+])
+  test("isolated CI Docker topology: " + mode, async () => {
+    const { root, sha } = committedCheckout(),
+      bin = tempDir(),
+      state = join(bin, "state.json"),
+      calls = join(bin, "calls");
+    const packet = join(bin, "packet"),
+      output = join(bin, "github-output");
+    mkdirSync(packet, { mode: 0o700 });
+    writeFileSync(join(packet, "handoff.json"), "{}");
+    writeFileSync(join(packet, "payload.tar"), "");
+    writeFileSync(state, "{}");
+    mkdirSync(join(bin, "tmp"), { mode: 0o711 });
+    const pin =
+      mode === "published-default"
+        ? CI_WEB_IMAGE
+        : "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
+    const docker = String.raw`
+const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STATE,s=JSON.parse(fs.readFileSync(file,"utf8"));
+const save=()=>fs.writeFileSync(file,JSON.stringify(s));
+const name=a[a.indexOf("--name")+1];
+const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
+if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
+fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
+if(a[0]==="pull"){}
+else if(a[0]==="context"&&a[1]==="inspect")console.log(JSON.stringify(process.env.FIXTURE_MODE==="remote-endpoint"?"tcp://PRIVATE_ENDPOINT_CANARY":"unix:///fixture/docker.sock"));
+else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-mismatch"?process.env.FIXTURE_OTHER_ARCH:["amd64","x64","arm64"].includes(process.env.FIXTURE_MODE)?process.env.FIXTURE_MODE:process.env.FIXTURE_ARCH));
+else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
+else if(a[0]==="network"){}
+else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
+else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
+else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
+else if(a[0]==="stop"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);if(typeof s[key]==="object")s[key].running=false;else s[key]=false;save();}
+else if(a[0]==="rm"){if(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
+else process.exit(42);
+`;
+    writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        CLI,
+        "container-browser",
+        root,
+        "--consume",
+        "2",
+        "--handoff",
+        packet,
+        "--handoff-sha256",
+        new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
+        ...(mode === "published-default"
+          ? []
+          : ["--image-pin", pin, "--sdk-sha256", "c".repeat(64)]),
+      ],
+      {
+        env: {
+          ...process.env,
+          TMPDIR: join(bin, "tmp"),
+          PATH: bin + ":" + (process.env.PATH ?? ""),
+          CI: "true",
+          GITHUB_ACTIONS: "true",
+          GITHUB_JOB: "workspace-browser-shard",
+          GITHUB_SHA: sha,
+          GITHUB_REPOSITORY: "fixture/repo",
+          GITHUB_RUN_ID: "12",
+          GITHUB_RUN_ATTEMPT: "1",
+          GITHUB_OUTPUT: output,
+          FIXTURE_STATE: state,
+          FIXTURE_CALLS: calls,
+          FIXTURE_SHA: sha,
+          FIXTURE_PIN: pin,
+          FIXTURE_MODE: mode,
+          FIXTURE_ARCH: nativeArchitecture(process.arch),
+          FIXTURE_OTHER_ARCH: nativeArchitecture(process.arch) === "x86_64" ? "aarch64" : "x86_64",
+          DOCKER_CONTEXT: "fixture",
+          DOCKER_HOST: "",
+          DOCKER_DEFAULT_PLATFORM:
+            "linux/" + (nativeArchitecture(process.arch) === "x86_64" ? "amd64" : "arm64"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const refused = [
+      "daemon-mismatch",
+      "image-mismatch",
+      "foreign-digest",
+      "remote-endpoint",
+    ].includes(mode);
+    expect(code, stderr).toBe(
+      refused || mode === "remove-fail"
+        ? 1
+        : mode === "inputs-fail"
+          ? 17
+          : mode === "consume-fail"
+            ? 19
+            : 0,
+    );
+    expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_CONSOLE_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_REMOVE_CANARY");
+    if (mode === "consume-fail" || mode === "remove-fail") {
+      expect(stderr).toContain("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");
+      expect(stderr).toContain("web-e2e stage=browser-handoff-consume started");
+      expect(stderr).toContain(
+        mode === "consume-fail"
+          ? "container-browser failure child_exit=19 inspect_exit=0 running=0 container_exit=19 oom=0 remove_exit=0"
+          : "container-browser failure child_exit=0 inspect_exit=0 running=0 container_exit=0 oom=0 remove_exit=23",
+      );
+      if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
+    }
+    const rows = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            op: string[];
+            phase?: string;
+            network?: string | null;
+            hasDatabase?: boolean;
+            hasMeili?: boolean;
+            platform?: string;
+            sdk?: string;
+            imagePinned?: boolean;
+            serviceWitness?: boolean;
+          },
+      );
+    expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(
+      refused ? (["daemon-mismatch", "remote-endpoint"].includes(mode) ? 0 : 1) : 3,
+    );
+    if (refused) {
+      expect(rows.some((row) => row.op[0] === "run" || row.op[0] === "network")).toBe(false);
+      expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+      return;
+    }
+    for (const row of rows.filter((row) => ["pull", "run"].includes(row.op[0] ?? "")))
+      expect(row.platform).toBe(
+        "linux/" + (nativeArchitecture(process.arch) === "x86_64" ? "amd64" : "arm64"),
+      );
+    if (mode === "published-default")
+      for (const row of rows.filter((row) => row.phase === "inputs" || row.phase === "consume")) {
+        expect(row.imagePinned).toBe(true);
+        expect(row.sdk).toBe(
+          nativeArchitecture(process.arch) === "x86_64"
+            ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
+            : "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+        );
+      }
+    const inputs = rows.findIndex((row) => row.phase === "inputs"),
+      consume = rows.findIndex((row) => row.phase === "consume"),
+      network = rows.findIndex((row) => row.op[0] === "network" && row.op[1] === "create");
+    expect(inputs).toBeGreaterThan(-1);
+    expect(rows[inputs]?.network).toBeNull();
+    expect(rows[inputs]?.hasDatabase).toBe(false);
+    expect(rows[inputs]?.hasMeili).toBe(false);
+    if (mode !== "inputs-fail") {
+      expect(network).toBeGreaterThan(inputs);
+      expect(consume).toBeGreaterThan(network);
+      expect(rows[consume]?.network).toMatch(/^fvoci-browser-/);
+      expect(rows[consume]?.hasDatabase).toBe(true);
+      expect(rows[consume]?.serviceWitness).toBe(true);
+    } else {
+      expect(network).toBe(-1);
+      expect(consume).toBe(-1);
+    }
+    const remaining: unknown = JSON.parse(readFileSync(state, "utf8"));
+    if (mode === "remove-fail") {
+      expect(Object.keys(remaining as object)).toHaveLength(1);
+      expect(Object.entries(remaining as object)[0]).toEqual([
+        expect.stringMatching(/-consume2$/),
+        false,
+      ]);
+    } else expect(remaining).toEqual({});
+  });
+
+test("SQLite exports are four data fields, never shell evaluation", () => {
+  const valid =
+    "export SQLITE3_LIB_DIR=/owned/lib\nexport SQLITE3_INCLUDE_DIR=/owned/include\nexport SQLITE3_STATIC=1\nexport SQLITE3_NO_PKG_CONFIG=1\n";
+  expect(sqliteEnvironment(valid).SQLITE3_LIB_DIR).toBe("/owned/lib");
+  for (const text of [
+    valid + "export PATH=/foreign\n",
+    valid.replace("/owned/lib", "$(foreign)"),
+    valid.replace("SQLITE3_NO_PKG_CONFIG", "SQLITE3_STATIC"),
+    valid.replace("export SQLITE3_STATIC=1\n", ""),
+  ])
+    expect(() => sqliteEnvironment(text)).toThrow(CheckError);
+});
+
+test("cohort reuse retains the complete in-container program and rejects product source changes", async () => {
+  const before =
+    "const IMAGE='fixed'; async function browserPhase(){return 7;} async function containerBrowser(){return 0;}";
+  const hostChange = before.replace(
+    "containerBrowser(){return 0;}",
+    "containerBrowser(){return 1;}",
+  );
+  await qualifyCohortHostProgram(before, hostChange, ["tools/web-e2e/run-web-e2e.ts"]);
+  const rejected = async (promise: Promise<void>) => {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CheckError);
+  };
+  await rejected(qualifyCohortHostProgram(before, hostChange, ["src/main.rs"]));
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("return 7", "return 8"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("'fixed'", "'foreign'"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
 });
 
 describe("planSpecs", () => {

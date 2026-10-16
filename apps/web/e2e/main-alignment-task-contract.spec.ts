@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import type { Editor } from "@tiptap/core";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import * as Y from "yjs";
@@ -97,27 +98,10 @@ function readTaskBodyDb(workspace: string, task: string) {
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
       throw new Error("Invalid fixture resource");
   const result = JSON.parse(
-    execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        container,
-        "psql",
-        "-X",
-        "-qAt",
-        "-U",
-        app.username,
-        "-d",
-        app.pathname.slice(1),
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      {
-        input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT jsonb_build_object('contentJson',t.content_json,'version',t.version,'role',current_user,'superuser',r.rolsuper,'bypassRls',r.rolbypassrls,'rlsActive',row_security_active(c.oid),'notOwner',pg_get_userbyid(c.relowner) <> current_user) FROM fvoci.tasks t JOIN pg_roles r ON r.rolname=current_user JOIN pg_class c ON c.oid='fvoci.tasks'::regclass WHERE t.id='${task}' AND t.workspace_id='${workspace}'; ROLLBACK;`,
-        encoding: "utf8",
-      },
-    ),
+    execFileSync(process.execPath, fixtureQueryArgs("app"), {
+      input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT jsonb_build_object('contentJson',t.content_json,'version',t.version,'role',current_user,'superuser',r.rolsuper,'bypassRls',r.rolbypassrls,'rlsActive',row_security_active(c.oid),'notOwner',pg_get_userbyid(c.relowner) <> current_user) FROM fvoci.tasks t JOIN pg_roles r ON r.rolname=current_user JOIN pg_class c ON c.oid='fvoci.tasks'::regclass WHERE t.id='${task}' AND t.workspace_id='${workspace}'; ROLLBACK;`,
+      encoding: "utf8",
+    }),
   ) as unknown;
   const witness = z
     .object({
@@ -187,27 +171,7 @@ test("real PATCH omission/null/date/version and 409 preserve the committed row",
     if (!database) throw new Error("Actual DB tracer requires wrapper-owned database");
     const sql = `SELECT json_build_object('startDate',start_date,'dueDate',due_date,'dueAt',due_at,'version',version) FROM fvoci.tasks WHERE id='${f.task.id}'::uuid`;
     const row = JSON.parse(
-      execFileSync(
-        "docker",
-        [
-          "exec",
-          process.env.FVOCI_TEST_PG_CONTAINER ?? "",
-          "psql",
-          "-U",
-          "postgres",
-          "-d",
-          new URL(database).pathname.slice(1),
-          "-X",
-          "-At",
-          "-v",
-          "ON_ERROR_STOP=1",
-          "-c",
-          sql,
-        ],
-        {
-          encoding: "utf8",
-        },
-      ),
+      execFileSync(process.execPath, fixtureQueryArgs("admin"), { encoding: "utf8", input: sql }),
     ) as { startDate: string; dueDate: null; dueAt: string; version: number };
     expect(row.startDate).toBe(timed.startDate);
     expect(row.dueDate).toBeNull();
@@ -818,25 +782,10 @@ for (const archivedTarget of [false, true]) {
         const database = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
         if (!database) throw new Error("Actual DB tracer requires wrapper-owned database");
         const row = JSON.parse(
-          execFileSync(
-            "docker",
-            [
-              "exec",
-              process.env.FVOCI_TEST_PG_CONTAINER ?? "",
-              "psql",
-              "-U",
-              "postgres",
-              "-d",
-              new URL(database).pathname.slice(1),
-              "-X",
-              "-At",
-              "-v",
-              "ON_ERROR_STOP=1",
-              "-c",
-              `SELECT json_build_object('id',id,'taskId',task_id,'durationSeconds',duration_seconds,'note',note) FROM fvoci.time_entries WHERE id='${entry.id}'::uuid`,
-            ],
-            { encoding: "utf8" },
-          ),
+          execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+            encoding: "utf8",
+            input: `SELECT json_build_object('id',id,'taskId',task_id,'durationSeconds',duration_seconds,'note',note) FROM fvoci.time_entries WHERE id='${entry.id}'::uuid`,
+          }),
         ) as { id: string; taskId: string; durationSeconds: number; note: string };
         expect(row).toEqual({ ...entry, taskId: parent.id });
         if (!adminAuth) throw new Error("Fresh client requires the earlier real admin session");
@@ -1076,27 +1025,10 @@ for (const archivedTarget of [false, true]) {
         )
           throw new Error("Requires restricted fixture role");
         const storedBody = JSON.parse(
-          execFileSync(
-            "docker",
-            [
-              "exec",
-              "-i",
-              container,
-              "psql",
-              "-X",
-              "-qAt",
-              "-U",
-              app.username,
-              "-d",
-              app.pathname.slice(1),
-              "-v",
-              "ON_ERROR_STOP=1",
-            ],
-            {
-              input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${parent.id}'; ROLLBACK;`,
-              encoding: "utf8",
-            },
-          ),
+          execFileSync(process.execPath, fixtureQueryArgs("app"), {
+            input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${parent.id}'; ROLLBACK;`,
+            encoding: "utf8",
+          }),
         ) as unknown;
         expect(storedBody).toEqual(committed);
         const newest = await browser.newContext({ baseURL, storageState: adminAuth });
@@ -1451,6 +1383,13 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
     const page = await context.newPage();
     let releaseFrame = () => {};
     let releaseClose = async () => {};
+    let phase = "initial";
+    let coherence: Record<string, unknown> | undefined;
+    const wire: string[] = [];
+    const record = (generation: number, event: string) => {
+      if (wire.length === 256) wire.shift();
+      wire.push(`${phase} generation=${String(generation)} ${event}`);
+    };
     try {
       const f = await fixture(
         page,
@@ -1473,16 +1412,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       const acks: { generation: number; id: string }[] = [];
       await page.routeWebSocket(/\/collab(?:\?|$)/, (socket) => {
         const current = ++generation;
+        record(current, "connect");
         const server = socket.connectToServer();
         let holdClose = false;
         let closeFrame: { code: number | undefined; reason: string | undefined } | undefined;
         server.onClose(async (code, reason) => {
+          record(current, `server-close code=${String(code)}`);
           closes.push({ generation: current, code });
           if (holdClose) closeFrame = { code, reason };
           else await socket.close({ code, reason });
         });
         socket.onMessage((message) => {
           const frame = decodeHocuspocusFrame(frameBytes(message));
+          record(current, `client-frame kind=${frame?.kind ?? "undecoded"}`);
           if (
             schedule === "server-readonly" &&
             current > 1 &&
@@ -1508,6 +1450,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         });
         server.onMessage((message) => {
           const frame = decodeHocuspocusFrame(frameBytes(message));
+          record(current, `server-frame kind=${frame?.kind ?? "undecoded"}`);
           if (frame?.kind === "auth-scope" && frame.routingKey === routingKey) {
             const admission = { generation: current, scope: frame.scope, delivered: false };
             admissions.push(admission);
@@ -1738,6 +1681,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         updates: 0,
       });
       const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+      phase = "unarchive";
       expect((await page.request.patch(f.endpoint, { data: { archived: false } })).status()).toBe(
         200,
       );
@@ -1759,6 +1703,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             response.request().method() === "GET" &&
             !z.object({ canEdit: z.boolean() }).parse(await response.json()).canEdit,
         );
+        phase = "retire-metadata";
         expect((await page.request.patch(f.endpoint, { data: { archived: true } })).status()).toBe(
           200,
         );
@@ -1767,17 +1712,19 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         if (schedule === "retired-grant") {
           // A real sync request forces the revoked connection's authorization
           // check, so close-before-grant is exercised without relying on timing.
+          phase = "revoked-sync";
           await page.evaluate(() => {
             const owner = window as Window & {
               taskFreshAdmission?: { provider: HocuspocusProvider };
             };
             if (!owner.taskFreshAdmission) throw new Error("Missing actual task admission");
-            owner.taskFreshAdmission.provider.startSync();
+            owner.taskFreshAdmission.provider.forceSync();
           });
           await expect
             .poll(() => closes)
             .toContainEqual({ generation: admissionGeneration, code: 1008 });
         }
+        phase = "release-grant";
         releaseFrame();
       }
       await expect.poll(observe).toMatchObject({
@@ -1892,6 +1839,7 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
       ).toBe(true);
       expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin);
       if (schedule === "retired-grant") {
+        phase = "release-close";
         await releaseClose();
         await expect.poll(observe).toMatchObject({
           ...finalAdmission,
@@ -1933,27 +1881,10 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
         )
           throw new Error("Invalid app-role fixture");
         const stored = JSON.parse(
-          execFileSync(
-            "docker",
-            [
-              "exec",
-              "-i",
-              container,
-              "psql",
-              "-X",
-              "-qAt",
-              "-U",
-              app.username,
-              "-d",
-              app.pathname.slice(1),
-              "-v",
-              "ON_ERROR_STOP=1",
-            ],
-            {
-              input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${f.task.id}'; ROLLBACK;`,
-              encoding: "utf8",
-            },
-          ),
+          execFileSync(process.execPath, fixtureQueryArgs("app"), {
+            input: `BEGIN READ ONLY; SET LOCAL app.tenant_id = '${workspace}'; SELECT content_json FROM fvoci.tasks WHERE id='${f.task.id}'; ROLLBACK;`,
+            encoding: "utf8",
+          }),
         ) as unknown;
         expect(stored).toEqual(committed);
         const fresh = await browser.newContext({ baseURL, storageState: adminAuth });
@@ -1981,27 +1912,33 @@ for (const schedule of ["natural", "server-readonly", "retired-grant"] as const)
             .parse(await response.json()),
         ).toEqual(originalBody);
       }
-      await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
-        body: JSON.stringify({
-          admissions,
-          closes,
-          frames,
-          state: await observe(),
-          requests,
-          acks,
-        }),
-        contentType: "application/json",
-      });
+      coherence = {
+        admissions,
+        closes,
+        frames,
+        state: await observe(),
+        requests,
+        acks,
+      };
     } finally {
-      releaseFrame();
-      await releaseClose();
-      await page
-        .evaluate(() => {
-          const owner = window as Window & { taskFreshAdmission?: { running: boolean } };
-          if (owner.taskFreshAdmission) owner.taskFreshAdmission.running = false;
-        })
-        .catch(() => undefined);
-      await context.close();
+      phase = "cleanup";
+      try {
+        releaseFrame();
+        await releaseClose();
+        await page
+          .evaluate(() => {
+            const owner = window as Window & { taskFreshAdmission?: { running: boolean } };
+            if (owner.taskFreshAdmission) owner.taskFreshAdmission.running = false;
+          })
+          .catch(() => undefined);
+        await context.close();
+      } finally {
+        console.log(`task-admission-wire ${schedule} ${JSON.stringify(wire)}`);
+        await testInfo.attach(`w3-task-${schedule}-wire-coherence.json`, {
+          body: JSON.stringify({ ...coherence, wire }),
+          contentType: "application/json",
+        });
+      }
     }
   });
 }

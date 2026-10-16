@@ -138,6 +138,7 @@ export const registeredModules = [
   "tools/selected-backend-ci/config-list.ts",
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
+  "tools/selected-backend-ci/types.ts",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/equal-work.ts",
   "tools/selected-backend-ci/drivers/equal-work-policy.ts",
@@ -635,7 +636,7 @@ export function runtimeAccess(files: string[], browser: Browser): void {
   for (const path of [browser.bun.path, browser.chromium.path])
     assert.ok(accessible(path, constants.R_OK | constants.X_OK));
 }
-export const collaborationStages = ["main", "lib", "install", "engine"] as const;
+export const collaborationStages = ["lib", "install", "engine"] as const;
 export const browserStages = ["fixture", "default", "engine"] as const;
 // The packet file list of a collaboration build, or of a browser build when its
 // web receipt is given (browser stages, served dist assets, no schema core).
