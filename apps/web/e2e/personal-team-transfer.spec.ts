@@ -229,21 +229,114 @@ async function witness(workspaceId: string, testInfo: TestInfo): Promise<void> {
   ]);
   for (const relation of observed.relations)
     expect(relation).toMatchObject({ enabled: true, active: true, ownerMember: false });
-  const ledger = ["FVOCI_TEST_PG_CONTAINER", "FVOCI_TEST_MEILI_CONTAINER"].map((name) => {
-    const container = process.env[name] ?? "";
-    if (!container) return { name, container: null };
-    const inspected = execFileSync(
-      "docker",
-      [
-        "inspect",
-        "--format",
-        "{{json .Config.Image}}|{{json .State.StartedAt}}|{{json .State.Pid}}|{{json .Config.Labels}}|{{json .Mounts}}",
-        container,
-      ],
-      { encoding: "utf8" },
-    ).trim();
-    return { name, container, inspected };
-  });
+  const names = ["FVOCI_TEST_PG_CONTAINER", "FVOCI_TEST_MEILI_CONTAINER"] as const;
+  const run = process.env.FVOCI_WEB_CONTAINER_RUN;
+  const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+  const relay = process.env.FVOCI_E2E_SERVICE_WITNESS;
+  const ledger = (() => {
+    if (run !== undefined || image !== undefined) {
+      try {
+        const context = z
+          .object({
+            run: z.string().regex(/^[a-f0-9]{32}$/),
+            image: z
+              .string()
+              .regex(/^(?:ghcr\.io\/aisflow\/fvoci-ci-web@sha256:|sha256:)[a-f0-9]{64}$/),
+          })
+          .parse({ run, image });
+        if (
+          process.env.FVOCI_WEB_BUILD_PHASE !== "consume" ||
+          process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE !==
+            (context.image.startsWith("sha256:") ? "1" : "0") ||
+          !relay ||
+          Buffer.byteLength(relay, "utf8") > 65536
+        )
+          throw new Error();
+        const value = z
+          .strictObject({
+            run: z.literal(context.run),
+            image: z.literal(context.image),
+            ledger: z
+              .array(
+                z.strictObject({
+                  name: z.enum(names),
+                  container: z.string(),
+                  inspected: z.strictObject({
+                    Image: z.string(),
+                    StartedAt: z.iso.datetime(),
+                    Pid: z.number().int().positive().max(2147483647),
+                    Labels: z.record(z.string(), z.string()),
+                    Mounts: z.array(
+                      z.strictObject({
+                        Type: z.enum(["bind", "volume", "tmpfs"]),
+                        Name: z.string().optional(),
+                        Source: z.string(),
+                        Destination: z.string().startsWith("/"),
+                        Driver: z.string().optional(),
+                        Mode: z.string(),
+                        RW: z.boolean(),
+                        Propagation: z.string(),
+                      }),
+                    ),
+                  }),
+                }),
+              )
+              .length(2),
+          })
+          .parse(JSON.parse(relay) as unknown);
+        let serviceRun: string | undefined;
+        return names.map((name) => {
+          const entries = value.ledger.filter((entry) => entry.name === name);
+          const entry = entries[0];
+          const postgres = name === "FVOCI_TEST_PG_CONTAINER";
+          const owned = new RegExp(
+            "^fvoci-rust-test-" + (postgres ? "pg" : "meili") + "-([a-f0-9]{32})$",
+          ).exec(process.env[name] ?? "");
+          if (
+            entries.length !== 1 ||
+            !entry ||
+            !owned?.[1] ||
+            entry.container !== process.env[name] ||
+            (serviceRun !== undefined && serviceRun !== owned[1]) ||
+            entry.inspected.Labels["fvoci.test-run"] !== owned[1] ||
+            !(
+              postgres
+                ? /^postgres:[\w.-]+@sha256:[a-f0-9]{64}$/
+                : /^getmeili\/meilisearch:[\w.-]+@sha256:[a-f0-9]{64}$/
+            ).test(entry.inspected.Image)
+          )
+            throw new Error();
+          serviceRun = owned[1];
+          const { Image, StartedAt, Pid, Labels, Mounts } = entry.inspected;
+          return {
+            name,
+            container: entry.container,
+            inspected: [Image, StartedAt, Pid, Labels, Mounts]
+              .map((field) => JSON.stringify(field))
+              .join("|"),
+          };
+        });
+      } catch {
+        throw new Error("container service witness invalid (contents withheld)");
+      }
+    }
+    if (relay !== undefined) throw new Error("service witness relay requires container context");
+    return names.map((name) => {
+      const container = process.env[name] ?? "";
+      if (!container) return { name, container: null };
+      const inspected = execFileSync(
+        "docker",
+        [
+          "inspect",
+          "--format",
+          "{{json .Config.Image}}|{{json .State.StartedAt}}|{{json .State.Pid}}|{{json .Config.Labels}}|{{json .Mounts}}",
+          container,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+      return { name, container, inspected };
+    });
+  })();
   const body = JSON.stringify({ test: testInfo.title, observed, ledger }, null, 1);
   await testInfo.attach("restricted-role-and-service-witness", {
     body,
