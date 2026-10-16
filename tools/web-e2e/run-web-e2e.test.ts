@@ -582,7 +582,7 @@ test("dependency phases refuse credentials and cross targets and preserve fetch 
           recorded
             .trim()
             .split("\n")
-            .map((line) => JSON.parse(line)),
+            .map((line) => JSON.parse(line) as unknown),
         ).toEqual([
           { args: ["fetch", "--locked", "--target", target], cwd: root, offline: "false" },
           {
