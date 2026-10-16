@@ -502,7 +502,7 @@ test("container diagnostics expose only the owned mapped failure directory", () 
     expect(() => containerFailureArtifacts(output, run)).toThrow(CheckError);
 });
 
-test("dependency phase refuses service credentials before any command or output", async () => {
+test("dependency phases refuse credentials and cross targets and preserve fetch failures", async () => {
   const child = Bun.spawn(
     [process.execPath, "--no-env-file", CLI, "browser-phase", "/unused", "inputs", "2"],
     {
@@ -524,6 +524,85 @@ test("dependency phase refuses service credentials before any command or output"
   expect(stdout).toBe("");
   expect(stderr).toContain("credential-free phase");
   expect(stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+
+  const { root, sha } = committedCheckout(),
+    bin = tempDir(),
+    calls = join(bin, "calls");
+  writeFileSync(
+    join(bin, "cargo"),
+    "#!" +
+      process.execPath +
+      '\nconst fs=require("node:fs"),args=process.argv.slice(2);fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify({args,cwd:process.cwd(),offline:process.env.CARGO_NET_OFFLINE})+"\\n");process.exit(args.includes("--manifest-path")?17:0);\n',
+    { mode: 0o755 },
+  );
+  const target = nativeArchitecture(process.arch) + "-unknown-linux-gnu";
+  for (const phase of ["prepare", "inputs"]) {
+    for (const crossTarget of [false, true]) {
+      writeFileSync(calls, "");
+      const result = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          CLI,
+          "browser-phase",
+          root,
+          phase,
+          ...(phase === "inputs" ? ["2"] : []),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: bin + ":" + (process.env.PATH ?? ""),
+            FIXTURE_CALLS: calls,
+            FVOCI_WEB_CONTAINER_LOCAL: "1",
+            FVOCI_WEB_CONTAINER_JOB:
+              phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+            FVOCI_WEB_CONTAINER_SOURCE: sha,
+            FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+            FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+            CARGO_BUILD_TARGET: crossTarget ? "wasm32-unknown-unknown" : target,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [exit, out, err] = await Promise.all([
+        result.exited,
+        new Response(result.stdout).text(),
+        new Response(result.stderr).text(),
+      ]);
+      expect(exit, err).toBe(crossTarget ? 1 : 17);
+      expect(out).toBe("");
+      const recorded = readFileSync(calls, "utf8");
+      if (crossTarget) {
+        expect(recorded).toBe("");
+        expect(err).toContain("native Linux runtime, kernel and Rust target must match");
+      } else {
+        expect(
+          recorded
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+        ).toEqual([
+          { args: ["fetch", "--locked", "--target", target], cwd: root, offline: "false" },
+          {
+            args: [
+              "fetch",
+              "--locked",
+              "--target",
+              target,
+              "--manifest-path",
+              join(root, "crates/collab-engine/Cargo.toml"),
+            ],
+            cwd: root,
+            offline: "false",
+          },
+        ]);
+        expect(err).toContain("stage=engine-fetch");
+        expect(err).not.toContain("stage=dependencies");
+      }
+    }
+  }
 });
 
 test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure", () => {

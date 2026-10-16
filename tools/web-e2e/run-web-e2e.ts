@@ -25,7 +25,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
-import { nativeArchitecture, type NativeArchitecture } from "../selected-backend-ci/types.ts";
+import {
+  nativeArchitecture,
+  nativeLinux,
+  type NativeArchitecture,
+} from "../selected-backend-ci/types.ts";
 import {
   validateSpecRelpath,
   discoverGroups,
@@ -945,14 +949,27 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
     // Isolated jobs reconstruct their locked inputs; only the qualified native
     // packet crosses jobs. Local cohorts already share these bytes read-only.
     if (phase === "prepare" || phase === "inputs") {
+      const target = nativeLinux(
+        process.platform,
+        process.arch,
+        checkedOutput(["uname", "-m"], root),
+        process.env.CARGO_BUILD_TARGET,
+      ).target;
       const fetchEnv = { ...process.env, CARGO_NET_OFFLINE: "false" };
-      await stage("cargo-fetch", ["cargo", "fetch", "--locked"], root, fetchEnv);
+      await stage(
+        "cargo-fetch",
+        ["cargo", "fetch", "--locked", "--target", target],
+        root,
+        fetchEnv,
+      );
       await stage(
         "engine-fetch",
         [
           "cargo",
           "fetch",
           "--locked",
+          "--target",
+          target,
           "--manifest-path",
           join(root, "crates/collab-engine/Cargo.toml"),
         ],
