@@ -1936,7 +1936,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
       "browser-phase",
       root,
       phase,
-      ...(phase === "consume" ? [shard] : []),
+      ...(phase === "prepare" ? [] : [shard]),
     );
     const started = performance.now();
     const logFd =

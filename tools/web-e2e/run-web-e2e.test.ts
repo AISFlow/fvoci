@@ -492,7 +492,7 @@ else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" 
 else if(a[0]==="network"){}
 else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
-else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" 0 false");
+else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" "+(!s[a.at(-1)]&&a.at(-1).includes("meili")?"143":"0")+" false");
 else if(a[0]==="stop"){s[a.at(-1)]=false;save();}
 else if(a[0]==="rm"){delete s[a.at(-1)];save();}
 else process.exit(42);
