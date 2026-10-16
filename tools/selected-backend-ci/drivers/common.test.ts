@@ -514,11 +514,11 @@ test("an external operation abort awaits fixture cleanup and reaping", async () 
   const pidPath = join(directory, "fixture.pid");
   const cleaned = join(directory, "cleaned");
   writeFileSync(log, "");
-  const ready = Promise.withResolvers<void>();
+  const ready = Promise.withResolvers<undefined>();
   const watcher = watch(log, () => {
     if (!readFileSync(log, "utf8").includes("ready\n")) return;
     controller.abort(reason);
-    ready.resolve();
+    ready.resolve(undefined);
   });
   let pid: number | undefined;
   try {

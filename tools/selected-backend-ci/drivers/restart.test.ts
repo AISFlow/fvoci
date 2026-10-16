@@ -565,12 +565,12 @@ async function failureProbe(options: Probe = {}) {
 
 describe("restart failure and cleanup", () => {
   test("live settlement completes before normal stop even after a browser failure", async () => {
-    const entered = Promise.withResolvers<void>();
-    const settled = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<undefined>();
+    const settled = Promise.withResolvers<undefined>();
     const result = failureProbe({
       async beforeStop(commands) {
         expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
-        entered.resolve();
+        entered.resolve(undefined);
         await settled.promise;
         expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
       },
@@ -578,7 +578,7 @@ describe("restart failure and cleanup", () => {
     try {
       await entered.promise;
     } finally {
-      settled.resolve();
+      settled.resolve(undefined);
     }
     const { receipt, observed } = await result;
     expect(receipt.cleanupErrors).toEqual([]);

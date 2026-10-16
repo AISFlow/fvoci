@@ -379,7 +379,9 @@ export const command: Command = async (args, options = {}) => {
   const interrupt = () => {
     forward(interruptError());
   };
-  const abort = () => forward(options.signal?.reason);
+  const abort = () => {
+    forward(options.signal?.reason);
+  };
   inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
   let deadline: ReturnType<typeof setTimeout> | undefined;
