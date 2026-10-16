@@ -826,7 +826,11 @@ function knownSource(path: unknown, suffix: string): boolean {
   );
 }
 function locationOf(result: Json): Json | null {
-  if (isRecord(result.error) && result.error.location !== undefined && result.error.location !== null)
+  if (
+    isRecord(result.error) &&
+    result.error.location !== undefined &&
+    result.error.location !== null
+  )
     return isRecord(result.error.location) ? result.error.location : null;
   if (isRecord(result.errorLocation)) return result.errorLocation;
   const errors = result.errors;
