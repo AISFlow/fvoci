@@ -1,4 +1,5 @@
 import { RUST_COLLAB_INTEGRATION_RUN } from "./rust-shared.ts";
+import { WEB_BROWSER_RUNNER } from "./registry.ts";
 // Workflow mutations shared by the registry tests. Each case edits one real
 // workflow text and names a message the verifier must report for it.
 
@@ -409,6 +410,12 @@ function caseList(): MutationCase[] {
   }
 
   // Runner labels and cache qualification.
+  add(
+    "web-arm64-mode-on-non-browser-job",
+    "web.yml",
+    swap("runs-on: ubuntu-26.04", "runs-on: " + WEB_BROWSER_RUNNER),
+    "requires explicit Ubuntu 26.04 runners",
+  );
   for (const file of [
     ...GATED.map((workflow) => `${workflow}.yml`),
     "release.yml",

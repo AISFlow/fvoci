@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { rawBlockScalar } from "./raw-yaml.ts";
 import { get as safeGet } from "./load.ts";
-import { gatedWorkflowJobs } from "./registry.ts";
+import { gatedWorkflowJobs, WEB_BROWSER_RUNNER } from "./registry.ts";
 import { HOST_APT_PREPARATION_RUN, readUtf8, type VerifyContext } from "./rust-shared.ts";
 
 export const WEB_WORKFLOW_FILE = "web.yml";
@@ -70,8 +70,6 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
-const WEB_BROWSER_RUNNER =
-  "${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}";
 export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const errors: string[] = [];
   const require = (value: boolean, message: string) => {

@@ -20,6 +20,8 @@ import {
 
 export const GATED_WORKFLOWS = ["web", "rust", "documents", "collab-engine", "install"] as const;
 export type GatedWorkflow = (typeof GATED_WORKFLOWS)[number];
+export const WEB_BROWSER_RUNNER =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}";
 
 export const WORKFLOW_JOBS: Readonly<Record<GatedWorkflow, readonly string[]>> = {
   web: [
@@ -361,7 +363,12 @@ function verifyRunnersAndCaches(file: string, data: Mapping): string[] {
   const sqliteSaver = sqlitePrefixCacheSteps(true)[2];
   for (const [jobId, job] of Object.entries(jobs)) {
     if (!isMapping(job)) continue;
-    const runners = jobRunners(job);
+    const runners =
+      file === "web.yml" &&
+      ["workspace-browser-container-build", "workspace-browser-shard"].includes(jobId) &&
+      get(job, "runs-on") === WEB_BROWSER_RUNNER
+        ? ["ubuntu-26.04", "ubuntu-26.04-arm"]
+        : jobRunners(job);
     if (
       runners.length === 0 ||
       runners.some(
