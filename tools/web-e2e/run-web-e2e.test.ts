@@ -337,8 +337,7 @@ test("maintained default preserves the full hybrid suite and exact host selectio
   expect(webRequest([], {}).route).toBe("hybrid");
   for (const shard of ["1", "2", "3", "4", "6", "7"])
     expect(webRequest(["--ci-shard", shard], {}).route).toBe("docker");
-  for (const shard of ["0", "5"])
-    expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
+  for (const shard of ["0", "5"]) expect(webRequest(["--ci-shard", shard], {}).route).toBe("host");
   const args = ["e2e/v050-task-timer.spec.ts", "--grep", "exact original filter", "--workers=1"];
   expect(webRequest(args, {}).specs).toEqual(args);
   expect(webRequest(args, {}).route).toBe("host");
