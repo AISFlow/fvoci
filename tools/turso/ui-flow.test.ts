@@ -476,9 +476,14 @@ describe("consumer flow", () => {
       );
       for (const canary of ["PRIVATE_", "private-target.invalid"])
         expect(output.all).not.toContain(canary);
-      if (blocker === "none") expect(() => admitSerialBaseline(baseline)).not.toThrow();
+      if (blocker === "none")
+        expect(() => {
+          admitSerialBaseline(baseline);
+        }).not.toThrow();
       else
-        expect(() => admitSerialBaseline(baseline)).toThrow("UI_EXISTING_BACKGROUND_WORK_REFUSED");
+        expect(() => {
+          admitSerialBaseline(baseline);
+        }).toThrow("UI_EXISTING_BACKGROUND_WORK_REFUSED");
       expect(privateRead(join(directory, "baseline.private.json"))).toEqual(baseline);
       rmSync(join(directory, "baseline.private.json"));
     }
