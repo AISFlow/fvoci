@@ -440,6 +440,15 @@ test("ordinary image route requires all eight shards and qualified current-run a
     (bad) => {
       (bad["workspace-browser-container-build"] as Mapping)["timeout-minutes"] = 21;
     },
+    ...["workspace-browser-container-build", "workspace-browser-shard"].flatMap((job) =>
+      [
+        "ubuntu-26.04",
+        "ubuntu-26.04-arm",
+        "${{ inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}",
+      ].map((runner) => (bad: Mapping) => {
+        (bad[job] as Mapping)["runs-on"] = runner;
+      }),
+    ),
     (bad) => {
       stepWith(bad, "workspace-browser-shard", byId("container_browser"))["run"] = "true";
     },

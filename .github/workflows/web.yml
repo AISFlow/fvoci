@@ -8,6 +8,11 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      browser_arm64:
+        description: Run the ordinary browser producer and all shards on native ARM64
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -304,7 +309,7 @@ jobs:
   workspace-browser-container-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     timeout-minutes: 20
     outputs:
       artifact_id: ${{ steps.publish.outputs.artifact-id }}
@@ -343,7 +348,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     # Dependencies and groups retain their budgets; compilation is producer-only.
     timeout-minutes: 20
     steps:

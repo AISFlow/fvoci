@@ -158,11 +158,28 @@ function caseList(): MutationCase[] {
     "opt-in-on-other-workflow",
     "web.yml",
     swap(
-      "  workflow_dispatch:\n",
-      "  workflow_dispatch:\n    inputs:\n      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n",
+      "      browser_arm64:\n",
+      "      run_upgrade_smoke_arm:\n        type: boolean\n        default: false\n      browser_arm64:\n",
     ),
-    "web: workflow_dispatch inputs must be exactly []",
+    "web: workflow_dispatch inputs must be exactly ['browser_arm64']",
   );
+  for (const [name, old, replacement, needle] of [
+    [
+      "missing",
+      "      browser_arm64:\n",
+      "      unknown:\n",
+      "workflow_dispatch inputs must be exactly",
+    ],
+    [
+      "default",
+      "        default: false\n",
+      "        default: true\n",
+      "input browser_arm64 must be",
+    ],
+    ["type", "        type: boolean\n", "        type: string\n", "input browser_arm64 must be"],
+  ] as const) {
+    add("web-arm64-" + name, "web.yml", swap(old, replacement), needle);
+  }
   add(
     "missing-selector-output",
     "web.yml",

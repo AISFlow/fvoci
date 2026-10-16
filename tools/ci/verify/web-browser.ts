@@ -70,6 +70,8 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
+const WEB_BROWSER_RUNNER =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.browser_arm64 == true && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}";
 export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const errors: string[] = [];
   const require = (value: boolean, message: string) => {
@@ -86,7 +88,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   require(isMapping(producer) &&
     producer.needs === "ci-plan" &&
     producer.if === "needs.ci-plan.outputs.select_workspace_browser_shard == 'true'" &&
-    producer["runs-on"] === "ubuntu-26.04" &&
+    producer["runs-on"] === WEB_BROWSER_RUNNER &&
     producer["timeout-minutes"] === 20 &&
     !has(producer, "continue-on-error"), "fixed selected producer and budget required");
   require(ps.length === 4 &&
@@ -166,7 +168,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   require(!has(jobs, "workspace-browser-build"), "obsolete host producer must be absent");
   require(isMapping(consumer) &&
     pyEq(consumer.strategy, { "fail-fast": false, matrix: { shard: [0, 1, 2, 3, 4, 5, 6, 7] } }) &&
-    consumer["runs-on"] === "ubuntu-26.04" &&
+    consumer["runs-on"] === WEB_BROWSER_RUNNER &&
     consumer["timeout-minutes"] === 20 &&
     !has(consumer, "continue-on-error"), "all eight complete image shards and budget required");
   require(cs.every(

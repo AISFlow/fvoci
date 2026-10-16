@@ -348,6 +348,57 @@ describe("event payloads", () => {
     }
   });
 
+  test("Web ARM64 dispatch mode validates without opting into or removing jobs", () => {
+    const baseline = planAll(null, "workflow_dispatch", { optInInputs: new Set() }).web;
+    expect(selectedJobs(baseline)).toEqual(ALL_BUT_OPT_IN.web);
+    for (const value of [true, false, "true", "false"]) {
+      const input = dispatchOptIns(
+        "web",
+        "workflow_dispatch",
+        ev(
+          JSON.stringify({
+            inputs: { browser_arm64: value },
+          }),
+        ),
+      );
+      expect(input).toEqual({ chosen: new Set(), error: null });
+      expect(planAll(null, "workflow_dispatch", { optInInputs: input.chosen }).web).toEqual(
+        baseline,
+      );
+    }
+    for (const value of ["TRUE", "", 1, null, [], {}]) {
+      expect(
+        dispatchOptIns(
+          "web",
+          "workflow_dispatch",
+          ev(
+            JSON.stringify({
+              inputs: { browser_arm64: value },
+            }),
+          ),
+        ),
+      ).toEqual({ chosen: new Set(), error: "DISPATCH_INPUT_VALUE_INVALID" });
+    }
+    expect(
+      dispatchOptIns(
+        "web",
+        "workflow_dispatch",
+        ev('{"inputs":{"browser_arm64":true,"unknown":false}}'),
+      ),
+    ).toEqual({ chosen: new Set(), error: "DISPATCH_INPUTS_UNKNOWN" });
+    for (const workflow of WORKFLOWS.filter((workflow) => workflow !== "web")) {
+      expect(
+        dispatchOptIns(workflow, "workflow_dispatch", ev('{"inputs":{"browser_arm64":true}}')),
+      ).toEqual({ chosen: new Set(), error: "DISPATCH_INPUTS_UNKNOWN" });
+    }
+    for (const eventName of ["pull_request", "push", "merge_group"]) {
+      expect(dispatchOptIns("web", eventName, ev('{"inputs":{"browser_arm64":true}}'))).toEqual({
+        chosen: new Set(),
+        error: null,
+      });
+    }
+  });
+
   test("dispatch opt-ins fail closed", () => {
     const install = (json: string) => dispatchOptIns("install", "workflow_dispatch", ev(json));
     for (const json of [
