@@ -11,13 +11,19 @@ function imageInterrupts() {
     process.exitCode = code;
     controller.abort();
   };
-  const onInt = () => interrupt(130),
-    onTerm = () => interrupt(143);
+  const onInt = () => {
+      interrupt(130);
+    },
+    onTerm = () => {
+      interrupt(143);
+    };
   process.on("SIGINT", onInt);
   process.on("SIGTERM", onTerm);
   return {
     signal: controller.signal,
-    check: () => check(!controller.signal.aborted, "image operation interrupted"),
+    check: () => {
+      check(!controller.signal.aborted, "image operation interrupted");
+    },
     close: () => {
       process.off("SIGINT", onInt);
       process.off("SIGTERM", onTerm);
@@ -434,7 +440,9 @@ async function scanSavedImage(
       stderr: "pipe",
       env: { ...process.env, LC_ALL: "C", TAR_OPTIONS: "" },
     });
-    const stop = () => listing.kill("SIGTERM");
+    const stop = () => {
+      listing.kill("SIGTERM");
+    };
     operation.signal.addEventListener("abort", stop, { once: true });
     const reads = [
       new Response(listing.stdout).text(),
@@ -691,7 +699,7 @@ export async function imageCommand(
   delete environment.GHCR_TOKEN;
   delete environment.GITHUB_TOKEN;
   const stage = imageStage(argv);
-  let interrupted = false;
+  const interruption = { received: false };
   const child = (() => {
     try {
       return Bun.spawn(argv, {
@@ -705,12 +713,16 @@ export async function imageCommand(
     }
   })();
   const interrupt = (code: number) => {
-    interrupted = true;
+    interruption.received = true;
     process.exitCode = code;
     child.kill("SIGTERM");
   };
-  const onInt = () => interrupt(130),
-    onTerm = () => interrupt(143);
+  const onInt = () => {
+      interrupt(130);
+    },
+    onTerm = () => {
+      interrupt(143);
+    };
   process.once("SIGINT", onInt);
   process.once("SIGTERM", onTerm);
   let output = "",
@@ -730,12 +742,7 @@ export async function imageCommand(
   }
   try {
     const input = child.stdin;
-    if (
-      options.input !== undefined &&
-      input !== undefined &&
-      input !== null &&
-      typeof input !== "number"
-    ) {
+    if (options.input !== undefined && input !== undefined && typeof input !== "number") {
       await input.write(options.input);
       await input.end();
     }
@@ -745,18 +752,21 @@ export async function imageCommand(
     ]);
     const code = await child.exited;
     check(
-      !interrupted &&
+      !interruption.received &&
         drained.every((result) => result.status === "fulfilled") &&
         code === 0 &&
         !child.signalCode,
-      `image stage=${stage} exit=${String(code)} signal=${child.signalCode ?? "none"} interrupted=${String(interrupted)} failed`,
+      `image stage=${stage} exit=${String(code)} signal=${child.signalCode ?? "none"} interrupted=${String(interruption.received)} failed`,
     );
     return output.trim();
   } catch (cause) {
     if (cause instanceof PolicyError) throw cause;
-    throw new PolicyError(`image stage=${stage} I/O failed interrupted=${String(interrupted)}`, {
-      cause,
-    });
+    throw new PolicyError(
+      `image stage=${stage} I/O failed interrupted=${String(interruption.received)}`,
+      {
+        cause,
+      },
+    );
   } finally {
     process.off("SIGINT", onInt);
     process.off("SIGTERM", onTerm);
@@ -882,7 +892,9 @@ async function nativeImageBuild() {
   let builderOwned = false,
     failure: unknown;
   const cleanupErrors: unknown[] = [];
-  const summary = (line: string) => appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  const summary = (line: string) => {
+    appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  };
   try {
     await run([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
     await run([process.execPath, "test", "tools/ci/ci-base-image.test.ts"]);
@@ -981,7 +993,9 @@ async function publishImageManifest() {
   const work = mkdtempSync(join(imageEnv("RUNNER_TEMP"), "ci-base-manifest-"));
   let failure: unknown;
   const cleanupErrors: unknown[] = [];
-  const summary = (line: string) => appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  const summary = (line: string) => {
+    appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+  };
   try {
     await imageLogin();
     const sources: string[] = [];
@@ -1040,7 +1054,7 @@ async function publishImageManifest() {
         "{{json .Manifest}}",
       ]),
     );
-    summary(`Multi-arch reference: ${plan.image}@${String(verifyManifest(index, sources))}`);
+    summary(`Multi-arch reference: ${plan.image}@${verifyManifest(index, sources)}`);
     summary(`Manifest publish: ${String((performance.now() - started) / 1000)}s`);
   } catch (error) {
     failure = error;
@@ -1114,7 +1128,7 @@ function ownedImageName(name: string): void {
     "deterministic run-owned image resource name required",
   );
 }
-async function namedContainer(name: string): Promise<unknown | null> {
+async function namedContainer(name: string): Promise<unknown> {
   const ids = await imageCommand([
     "docker",
     "container",
