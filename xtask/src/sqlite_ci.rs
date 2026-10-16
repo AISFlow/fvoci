@@ -512,8 +512,6 @@ fn prepare(
                 )?
                 .stdout,
         )?;
-        identity["rust_files"] =
-            crate::sqlite::native_files(&[&rustc_path, Path::new(sysroot.trim())])?;
         identity["rustc_path"] = json!(fs::canonicalize(rustc_path)?);
         identity["rust_sysroot"] = json!(fs::canonicalize(sysroot.trim())?);
         identity["image_sdk"] = json!(true);
@@ -933,11 +931,6 @@ fn adopt_image(
         sealed
             .get("libclang_files")
             .ok_or("image SDK LLVM files missing")?,
-    )?;
-    revalidate_native_files(
-        sealed
-            .get("rust_files")
-            .ok_or("image SDK Rust files missing")?,
     )?;
     for (arguments, field) in [
         (&["-vV"][..], "rustc"),

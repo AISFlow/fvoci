@@ -1047,10 +1047,11 @@ function imageOutcome(
       : error instanceof AggregateError
         ? error.errors.map(safe).join("; ")
         : "image operation failed; details withheld";
-  throw new AggregateError(
+  const cause = new AggregateError(
     [...(failure ? [failure] : []), ...cleanup],
     `image ${stage} first=${failure ? safe(failure) : "none"}; cleanup=${cleanup.map(safe).join("; ") || "none"}`,
   );
+  throw new PolicyError(cause.message, { cause });
 }
 function ownedImageName(name: string): void {
   check(

@@ -1099,6 +1099,36 @@ test("partial builder create retires its claimed allocation and retains safe fir
     fixture.restore();
   }
 });
+test("production CLI retains safe first failure and cleanup outcome without private stderr", async () => {
+  const fixture = await dockerChildFixture("smoke-fail");
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        new URL("./ci-base-image.ts", import.meta.url).pathname,
+        "smoke",
+        "sha256:" + "a".repeat(64),
+        "ci-web",
+        "fixture-smoke",
+      ],
+      { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("image smoke first=");
+    expect(stderr).toContain("docker-run exit=9");
+    expect(stderr).toContain("cleanup=none");
+    expect(stderr).not.toContain("PRIVATE_STDERR_CANARY");
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({ smoke: null });
+  } finally {
+    fixture.restore();
+  }
+});
 test("builder collision never adopts or retires a preexisting resource", async () => {
   const fixture = await dockerChildFixture("collision");
   try {
