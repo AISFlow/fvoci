@@ -143,12 +143,12 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
   assert(project);
   const milestonesPath = `/api/v1/workspaces/${wsId}/projects/${project.id}/milestones`;
   const initialList = Promise.withResolvers<APIResponse>();
-  const releaseInitialList = Promise.withResolvers<void>();
-  const initialListFinished = Promise.withResolvers<void>();
-  let claimed = false;
+  const releaseInitialList = Promise.withResolvers<undefined>();
+  const initialListFinished = Promise.withResolvers<undefined>();
+  const initialListState = { claimed: false };
   const holdInitialList = async (route: Route) => {
-    if (route.request().method() !== "GET" || claimed) return route.fallback();
-    claimed = true;
+    if (route.request().method() !== "GET" || initialListState.claimed) return route.fallback();
+    initialListState.claimed = true;
     try {
       // Capture the real empty list before creation, but deliver it after POST.
       const response = await route.fetch();
@@ -159,7 +159,7 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
       initialList.reject(error);
       throw error;
     } finally {
-      initialListFinished.resolve();
+      initialListFinished.resolve(undefined);
     }
   };
   await page.route(`**${milestonesPath}`, holdInitialList);
@@ -178,12 +178,12 @@ test("milestone picker and task dependency round-trip through the edit UI", asyn
     await page.getByTestId("project-milestone-add").click();
     expect((await created).status()).toBe(201);
     await expect(page.getByTestId("project-milestone-name")).toHaveValue("");
-    releaseInitialList.resolve();
+    releaseInitialList.resolve(undefined);
     await initialListFinished.promise;
     await expect(page.locator('[data-testid^="project-milestone-name-"]')).toHaveValue("출시");
   } finally {
-    releaseInitialList.resolve();
-    if (claimed) await initialListFinished.promise;
+    releaseInitialList.resolve(undefined);
+    if (initialListState.claimed) await initialListFinished.promise;
     await page.unroute(`**${milestonesPath}`, holdInitialList);
   }
   const milestonesRes = await page.request.get(
