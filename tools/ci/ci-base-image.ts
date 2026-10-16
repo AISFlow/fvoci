@@ -5,6 +5,25 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { gunzipSync } from "node:zlib";
 
 class PolicyError extends Error {}
+function imageInterrupts() {
+  const controller = new AbortController();
+  const interrupt = (code: number) => {
+    process.exitCode = code;
+    controller.abort();
+  };
+  const onInt = () => interrupt(130),
+    onTerm = () => interrupt(143);
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
+  return {
+    signal: controller.signal,
+    check: () => check(!controller.signal.aborted, "image operation interrupted"),
+    close: () => {
+      process.off("SIGINT", onInt);
+      process.off("SIGTERM", onTerm);
+    },
+  };
+}
 function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new PolicyError(message);
 }
@@ -293,6 +312,20 @@ export function verifyMetadata(info: unknown, architecture: string) {
 }
 
 export async function scanImage(path: string, inspection: string, arch: string) {
+  const operation = imageInterrupts();
+  try {
+    await scanSavedImage(path, inspection, arch, operation);
+    operation.check();
+  } finally {
+    operation.close();
+  }
+}
+async function scanSavedImage(
+  path: string,
+  inspection: string,
+  arch: string,
+  operation: ReturnType<typeof imageInterrupts>,
+) {
   verifyMetadata(await json(inspection), arch);
   const image = new Bun.Archive(await Bun.file(path).bytes());
   async function entry(name: string, missing = "saved image entry missing") {
@@ -371,6 +404,7 @@ export async function scanImage(path: string, inspection: string, arch: string) 
   checkText(utf8.decode(config));
   // Include lower layers: deleting a credential later does not remove it.
   for (const [index, descriptor] of layers.entries()) {
+    operation.check();
     const layer = descriptorName(descriptor);
     let bytes: Uint8Array = await descriptorBytes(descriptor);
     const identity = layerIdentity(index, layer, bytes);
@@ -393,17 +427,30 @@ export async function scanImage(path: string, inspection: string, arch: string) 
       throw new PolicyError(`layer decompression failed: ${identity}; content withheld`);
     }
     // Include entries after zero blocks/concatenated archives, including non-regulars.
+    operation.check();
     const listing = Bun.spawn(["tar", "--ignore-zeros", "-tf", "-"], {
       stdin: bytes,
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, LC_ALL: "C", TAR_OPTIONS: "" },
     });
-    const [names, stderr, exitCode] = await Promise.all([
+    const stop = () => listing.kill("SIGTERM");
+    operation.signal.addEventListener("abort", stop, { once: true });
+    const reads = [
       new Response(listing.stdout).text(),
       tarStderrPrefix(listing.stderr),
       listing.exited,
-    ]);
+    ] as const;
+    let names: string, stderr: string, exitCode: number;
+    try {
+      operation.check();
+      [names, stderr, exitCode] = await Promise.all(reads);
+      operation.check();
+    } finally {
+      operation.signal.removeEventListener("abort", stop);
+      if (listing.exitCode === null) listing.kill("SIGTERM");
+      await Promise.allSettled(reads);
+    }
     // GNU tar can ignore a final partial block; reject that framing without parsing headers.
     const framing = bytes.length % 512 === 0 ? "" : "incomplete tar block; ";
     check(
@@ -421,6 +468,7 @@ export async function scanImage(path: string, inspection: string, arch: string) 
     );
     const files = await new Bun.Archive(bytes).files();
     for (const [name, file] of files) {
+      operation.check();
       check(
         basename(name) !== ".env" && !basename(name).startsWith(".env."),
         "environment file found; content withheld",
@@ -821,7 +869,14 @@ export async function smokeImage(ref: string, target: string, name: string) {
 }
 async function nativeImageBuild() {
   const plan = imageBuildPlan(process.env, process.arch);
-  const work = mkdtempSync(join(imageEnv("RUNNER_TEMP"), "ci-base-"));
+  const dockerConfig = imageEnv("DOCKER_CONFIG");
+  const runnerTemp = imageEnv("RUNNER_TEMP");
+  const work = mkdtempSync(join(runnerTemp, "ci-base-"));
+  const operation = imageInterrupts();
+  const run: typeof imageCommand = (argv, options) => {
+    operation.check();
+    return imageCommand(argv, options);
+  };
   const log = join(work, "build.log"),
     inspection = join(work, "image.json");
   let builderOwned = false,
@@ -829,14 +884,15 @@ async function nativeImageBuild() {
   const cleanupErrors: unknown[] = [];
   const summary = (line: string) => appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
   try {
-    await imageCommand([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
-    await imageCommand([process.execPath, "test", "tools/ci/ci-base-image.test.ts"]);
-    await imageCommand(["docker", "buildx", "version"]);
+    await run([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
+    await run([process.execPath, "test", "tools/ci/ci-base-image.test.ts"]);
+    await run(["docker", "buildx", "version"]);
+    operation.check();
     await allocateImageBuilder(plan.builder);
     builderOwned = true;
-    await imageCommand(["docker", "buildx", "inspect", "--bootstrap"]);
+    await run(["docker", "buildx", "inspect", "--bootstrap"]);
     const started = performance.now();
-    await imageCommand(
+    await run(
       [
         "docker",
         "buildx",
@@ -855,18 +911,20 @@ async function nativeImageBuild() {
       `Native build ${plan.target}/${plan.arch}: ${String((performance.now() - started) / 1000)}s`,
     );
     const metadata: unknown = JSON.parse(
-      await imageCommand(["docker", "image", "inspect", plan.ref, "--format", "{{json .}}"]),
+      await run(["docker", "image", "inspect", plan.ref, "--format", "{{json .}}"]),
     );
     await Bun.write(inspection, JSON.stringify(metadata));
-    await imageCommand(["docker", "image", "save", plan.ref, "--output", join(work, "image.tar")]);
+    await run(["docker", "image", "save", plan.ref, "--output", join(work, "image.tar")]);
     await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    operation.check();
     const id = at(metadata, "Id");
     check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
     await smokeImage(id, plan.target, plan.builder + "-smoke");
+    operation.check();
     if (process.env.PUBLISH === "true") {
       const started = performance.now();
-      await imageCommand(["docker", "push", plan.ref]);
-      await imageCommand([
+      await run(["docker", "push", plan.ref]);
+      await run([
         "docker",
         "buildx",
         "build",
@@ -880,7 +938,7 @@ async function nativeImageBuild() {
       summary(
         `Image/cache publish ${plan.target}/${plan.arch}: ${String((performance.now() - started) / 1000)}s`,
       );
-      summary(await imageCommand(["docker", "buildx", "imagetools", "inspect", plan.ref]));
+      summary(await run(["docker", "buildx", "imagetools", "inspect", plan.ref]));
     }
   } catch (error) {
     failure = error;
@@ -907,16 +965,13 @@ async function nativeImageBuild() {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    for (const path of [
-      work,
-      imageEnv("DOCKER_CONFIG"),
-      join(imageEnv("RUNNER_TEMP"), "ci-base-bun"),
-    ])
+    for (const path of [work, dockerConfig, join(runnerTemp, "ci-base-bun")])
       try {
         rmSync(path, { recursive: true, force: true });
       } catch (error) {
         cleanupErrors.push(error);
       }
+    operation.close();
   }
   imageOutcome("build", failure, cleanupErrors);
 }

@@ -1048,6 +1048,10 @@ async function dockerChildFixture(mode: string) {
       builder: mode === "collision",
       worker: mode === "collision",
       smoke: null,
+      metadata: {
+        ...info(process.arch === "arm64" ? "arm64" : "amd64"),
+        Id: "sha256:" + "a".repeat(64),
+      },
     }),
   );
   const code = String.raw`
@@ -1056,8 +1060,12 @@ const file=path.join(dir,"state.json"),state=JSON.parse(fs.readFileSync(file,"ut
 const save=()=>fs.writeFileSync(file,JSON.stringify(state));
 fs.appendFileSync(path.join(dir,"calls"),JSON.stringify(a)+"\n");
 if(a[0]==="buildx" && a[1]==="ls") console.log(state.builder?state.name:"");
-else if(a[0]==="buildx" && a[1]==="create") {state.builder=true;state.worker=true;save();if(mode==="create-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(17);}}
+else if(a[0]==="buildx" && a[1]==="create") {state.name=a[a.indexOf("--name")+1];state.builder=true;state.worker=true;save();if(mode==="create-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(17);}}
 else if(a[0]==="buildx" && a[1]==="rm") {state.builder=false;state.worker=false;save();}
+else if(a[0]==="buildx" && ["version","inspect","build"].includes(a[1])) {}
+else if(a[0]==="image" && a[1]==="inspect") console.log(JSON.stringify(state.metadata));
+else if(a[0]==="image" && a[1]==="save") fs.copyFileSync(path.join(dir,"image.tar"),a[a.indexOf("--output")+1]);
+else if(a[0]==="logout") {}
 else if(a[0]==="container" && a[1]==="ls") {const filter=a[a.indexOf("--filter")+1];if(filter.includes("buildx_buildkit_")?state.worker:state.smoke!==null)console.log("abcdefabcdef");}
 else if(a[0]==="container" && a[1]==="inspect") {const worker=a[2].startsWith("buildx_buildkit_");console.log(JSON.stringify(worker?{Name:"/buildx_buildkit_"+state.name+"0",Config:{Env:["FVOCI_CI_BUILDER_OWNER="+state.name]}}:{Name:"/"+state.smoke.name,Image:state.smoke.ref,Config:{Labels:{"org.fvoci.ci.smoke-owner":state.smoke.name}}}));}
 else if(a[0]==="container" && a[1]==="rm") {if(a.at(-1).startsWith("buildx_buildkit_"))state.worker=false;else state.smoke=null;save();}
@@ -1224,4 +1232,106 @@ test("image command waits for normal real-child stdin/stdout completion", async 
       { input: "fixture-input" },
     ),
   ).toBe("fixture-input");
+});
+
+test("native image CLI interrupt during direct scan settles tar then retires its owned builder", async () => {
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  await saved([{ "safe.txt": "safe" }]);
+  const fixture = await dockerChildFixture("scan-interrupt");
+  const checkout = join(root, "checkout"),
+    runnerTemp = join(root, "runner");
+  let watcher: ReturnType<typeof watch> | undefined;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    await mkdir(join(checkout, "tools/ci"), { recursive: true });
+    await mkdir(join(checkout, ".github/workflows"), { recursive: true });
+    await mkdir(join(checkout, "apps/web"), { recursive: true });
+    await mkdir(runnerTemp);
+    for (const path of [
+      "tools/ci/ci-base-image.ts",
+      ".github/workflows/ci-base-image.yml",
+      "rust-toolchain.toml",
+      ".bun-version",
+      "apps/web/package.json",
+    ])
+      await writeFile(join(checkout, path), await readFile(path));
+    // A fixture checkout executes the production CLI and scanner. Its unit
+    // prerequisite is a bounded stand-in, avoiding recursive execution of this test.
+    await writeFile(
+      join(checkout, "tools/ci/ci-base-image.test.ts"),
+      'import {test,expect} from "bun:test";test("fixture prerequisite",()=>expect(true).toBe(true));',
+    );
+    await writeFile(
+      join(root, "bin/tar"),
+      "#!" +
+        process.execPath +
+        "\n" +
+        String.raw`
+const fs=require("node:fs"),path=require("node:path"),dir=process.env.FVOCI_IMAGE_FIXTURE;
+process.on("SIGTERM",()=>{fs.writeFileSync(path.join(dir,"tar-settled"),"settled");process.exit(0);});
+fs.writeFileSync(path.join(dir,"tar-pid"),String(process.pid));fs.writeFileSync(path.join(dir,"scan-ready"),"ready");
+setInterval(()=>{},1000);
+`,
+    );
+    await chmod(join(root, "bin/tar"), 0o755);
+    const ready = new Promise<void>((resolve) => {
+      watcher = watch(root, (_event, name) => {
+        if (name?.toString() === "scan-ready") {
+          watcher?.close();
+          resolve();
+        }
+      });
+    });
+    const runningChild = Bun.spawn(
+      [process.execPath, "tools/ci/ci-base-image.ts", "native-build"],
+      {
+        cwd: checkout,
+        env: {
+          ...process.env,
+          ARCH: arch,
+          TARGET: "ci-base",
+          PUBLISH: "false",
+          GITHUB_SHA: "b".repeat(40),
+          GITHUB_RUN_ID: "11",
+          GITHUB_RUN_ATTEMPT: "1",
+          RUNNER_TEMP: runnerTemp,
+          DOCKER_CONFIG: join(runnerTemp, "ci-base-docker"),
+          GITHUB_STEP_SUMMARY: join(root, "summary"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    child = runningChild;
+    const output = new Response(runningChild.stdout).text(),
+      errors = new Response(runningChild.stderr).text();
+    await Promise.race([
+      ready,
+      child.exited.then(async (code) => {
+        throw new Error(`fixture image CLI exited before scan: ${String(code)} ${await errors}`);
+      }),
+    ]);
+    child.kill("SIGTERM");
+    const [code, stdout, stderr] = await Promise.all([child.exited, output, errors]);
+    expect(code).toBe(143);
+    expect(stderr).toContain("image operation interrupted");
+    expect(stdout + stderr).not.toContain("PRIVATE_STDERR_CANARY");
+    expect(await readFile(join(root, "tar-settled"), "utf8")).toBe("settled");
+    const tarPid = Number(await readFile(join(root, "tar-pid"), "utf8"));
+    expect(() => process.kill(tarPid, 0)).toThrow();
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
+      builder: false,
+      worker: false,
+      smoke: null,
+    });
+    const calls = await readFile(join(root, "calls"), "utf8");
+    expect(calls).toContain('"buildx","rm","ci-base-11-1-' + arch + '"');
+    expect(calls).not.toContain('"run"');
+    expect(calls).not.toContain('"push"');
+  } finally {
+    watcher?.close();
+    if (child?.exitCode === null) child.kill("SIGTERM");
+    if (child) await child.exited;
+    fixture.restore();
+  }
 });
