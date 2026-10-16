@@ -729,7 +729,7 @@ check(fs.readdirSync("/usr/local/share/ca-certificates").length===0);
 check(fs.statSync("/etc/ssl/certs/ca-certificates.crt").size>0 && fs.existsSync(path.join(process.env.LIBCLANG_PATH,"libclang.so")));
 const parent=fs.mkdtempSync("/tmp/fvoci-image-sdk-");
 try { const identity=new Bun.CryptoHasher("sha256").update(fs.readFileSync("/opt/fvoci-sqlite/consumer-inputs.json")).digest("hex");
- run(["/usr/local/bin/fvoci-ci-tools","sqlite-ci","--image-sdk","/opt/fvoci-sqlite","--expected-sdk-sha256",identity,"--image-ref",process.env.FVOCI_SDK_IMAGE_REF,"--parent",parent]);
+ run(["/usr/local/bin/fvoci-ci-tools","sqlite-ci","--local-image-sdk","--image-sdk","/opt/fvoci-sqlite","--expected-sdk-sha256",identity,"--image-ref",process.env.FVOCI_SDK_IMAGE_REF,"--parent",parent]);
  if(process.env.FVOCI_IMAGE_TARGET === "ci-web") { function browser(root) { for(const name of fs.readdirSync(root)){const p=path.join(root,name),s=fs.statSync(p);if(s.isDirectory()){const b=browser(p);if(b)return b;} else if(name==="chrome" && /chrome-linux/.test(p))return p;} } const executable=browser(process.env.PLAYWRIGHT_BROWSERS_PATH);check(executable);check(run([executable,"--headless","--no-sandbox","--disable-gpu","--user-data-dir="+path.join(parent,"chromium"),"--dump-dom","about:blank"]).includes("<html")); }
 } finally { fs.rmSync(parent,{recursive:true,force:true}); }
 `;

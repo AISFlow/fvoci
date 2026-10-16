@@ -226,6 +226,7 @@ pub fn run(
             args::value("expected-sdk-sha256"),
             args::value("image-ref"),
             args::flag("seal-image-sdk"),
+            args::flag("local-image-sdk"),
         ],
         true,
     ) {
@@ -263,7 +264,10 @@ fn prepare(
     if parsed.get("image-sdk").is_some() {
         return adopt_image(parsed, context, out);
     }
-    if parsed.get("expected-sdk-sha256").is_some() || parsed.get("image-ref").is_some() {
+    if parsed.get("expected-sdk-sha256").is_some()
+        || parsed.get("image-ref").is_some()
+        || parsed.has("local-image-sdk")
+    {
         return Err("image SDK arguments require --image-sdk".into());
     }
     if parsed.has("seal-image-sdk")
@@ -751,6 +755,20 @@ fn adopt_image(
         .get("image-ref")
         .filter(|value| digest_pin(value))
         .ok_or("image SDK adoption requires an immutable image digest pin")?;
+    let local = parsed.has("local-image-sdk");
+    if image.starts_with("sha256:") != local
+        || (local
+            && (context.var("CI").is_some()
+                || context
+                    .env
+                    .keys()
+                    .any(|key| key.to_string_lossy().starts_with("GITHUB_"))))
+    {
+        return Err(
+            "local config image ID requires explicit local-only mode; CI requires registry digest"
+                .into(),
+        );
+    }
     let expected = parsed
         .get("expected-sdk-sha256")
         .filter(|digest| {
@@ -963,6 +981,14 @@ fn adopt_image(
         )),
     );
     identity.insert("image_reference".into(), json!(image));
+    identity.insert(
+        "image_reference_kind".into(),
+        json!(if local {
+            "local-config"
+        } else {
+            "registry-manifest"
+        }),
+    );
     identity.insert("image_sdk_sha256".into(), json!(expected));
     let cache_identity = sha256_hex(json!(identity).to_string().as_bytes());
     if parsed
