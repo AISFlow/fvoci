@@ -21,7 +21,7 @@ import { sha, write } from "../selected-backend-ci/io.ts";
 import { OFF, ON } from "./ui-audit.ts";
 import { AUTH_SPEC } from "./ui-auth-session.ts";
 import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
-import { failureCode, UiError, type Record_ } from "./ui-common.ts";
+import { failureCode, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { browser, fixture, start, stop } from "./ui-native.ts";
 import { linuxKernel, UiProcesses, withProcesses } from "./ui-processes.ts";
@@ -73,6 +73,103 @@ const baselinePacket = (): Record_ => ({
 });
 
 describe("native fixture", () => {
+  test("closed flat baseline and serial envelopes bind the same complete logical dataset", async () => {
+    const dataset = {
+      schema: 1,
+      backend: "libsql-remote",
+      schemaCurrent: true,
+      schemaSha256: "a".repeat(64),
+      lineage: "fvoci-sqlite-060",
+      ledger: [
+        [
+          ["integer", "12"],
+          ["text", "fvoci-sqlite-060"],
+        ],
+      ],
+      rows: 26,
+      setupNeeded: true,
+      startupHazards: 0,
+      liveOutboxLeases: 0,
+      fingerprints: { event_sequence: { ["b".repeat(64)]: 1 } },
+      allocations: { event_sequence: { ["b".repeat(64)]: {} } },
+      operations: {
+        event_sequence: [
+          [
+            ["integer", "1"],
+            ["integer", "0"],
+          ],
+        ],
+      },
+      instanceConfig: [],
+      futureDatasetField: { exact: ["integer", "9007199254740993"] },
+    };
+    const lifecycle = {
+      nativeOutcome: { operation: "confirmed", rollback: "confirmed", commit: "not-attempted" },
+      lifecycleDrain: "confirmed",
+      leases: 0,
+      drainOutcome: "confirmed",
+      serverCloseReceipt: "not-exposed-by-sdk",
+    };
+    const read = async (mode: string, data: typeof dataset) => {
+      const packet =
+        mode === "baseline"
+          ? { ...data, ...lifecycle }
+          : { dataset: data, checks: { clockMicros: "123456789" }, ...lifecycle };
+      const { scope, calls } = fakeScope({
+        spawn: (args) => {
+          expect(args).toEqual(["/never/executed", mode]);
+          return exitedChild(0, JSON.stringify(packet));
+        },
+      });
+      const value = await fixture(scope, fixtureManifest, mode, {});
+      expect(calls.finish).toHaveLength(1);
+      return value;
+    };
+    const baseline = await read("baseline", dataset);
+    const serial = await read("serial-observe", dataset);
+    expect(baseline).toEqual(dataset);
+    expect(serial).toEqual({ dataset, checks: { clockMicros: "123456789" }, ...lifecycle });
+    expect(valueDigest(baseline)).toBe(valueDigest(serial.dataset));
+    expect(valueDigest({ ...dataset, ...lifecycle })).not.toBe(valueDigest(serial.dataset));
+    const changed = await read("baseline", {
+      ...dataset,
+      operations: {
+        event_sequence: [
+          [
+            ["integer", "1"],
+            ["integer", "1"],
+          ],
+        ],
+      },
+    });
+    expect(valueDigest(changed)).not.toBe(valueDigest(serial.dataset));
+  });
+
+  test("baseline normalization cannot bypass native drain or process closure refusal", async () => {
+    for (const fault of ["drain", "lease", "sdk-close", "process-close"]) {
+      const packet = {
+        schema: 1,
+        rows: 26,
+        nativeOutcome: { operation: "confirmed", rollback: "confirmed", commit: "not-attempted" },
+        lifecycleDrain: fault === "drain" ? "unconfirmed" : "confirmed",
+        leases: fault === "lease" ? 1 : 0,
+        drainOutcome: "confirmed",
+        serverCloseReceipt: fault === "sdk-close" ? "fabricated" : "not-exposed-by-sdk",
+      };
+      const { scope, calls } = fakeScope({
+        spawn: () => exitedChild(0, JSON.stringify(packet)),
+        finish: () => {
+          if (fault === "process-close") throw new UiError("UI_PROCESS_CLOSURE_FAILED");
+          return 0;
+        },
+      });
+      expect(await failureOf(fixture(scope, fixtureManifest, "baseline", {}))).toContain(
+        fault === "process-close" ? "UI_PROCESS_CLOSURE_FAILED" : "UI_NATIVE_DRAIN_FAILED",
+      );
+      expect(calls.finish).toHaveLength(1);
+    }
+  });
+
   test("baseline nonzero publishes before the packet write and process cleanup", async () => {
     for (const fault of ["none", "write", "finish", "both", "diagnostic-write"]) {
       const events: string[] = [];
