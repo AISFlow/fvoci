@@ -255,9 +255,11 @@ appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify(args) + "\\n");
 const save = () => writeFileSync(path, JSON.stringify(state));
 if (args[0] === "run") {
   const name = args[args.indexOf("--name") + 1];
-  const id = (name.includes("-pg-") ? "a" : "b").repeat(64);
-  state.services[id] = { id, name, image: args[args.indexOf("--env-file") + 2], label: args[args.indexOf("--label") + 1].split("=")[1] };
-  save(); console.log(id);
+  const id = (state.mode === "collision" ? "c" : name.includes("-pg-") ? "a" : "b").repeat(64);
+  state.services[id] = { id, name, image: args[args.indexOf("--env-file") + 2], label: state.mode === "collision" ? "WITHHELD_SERVICE_CANARY" : args[args.indexOf("--label") + 1].split("=")[1] };
+  save();
+  if (state.mode === "partial" || state.mode === "collision") process.exit(23);
+  console.log(id);
 } else if (args[0] === "exec") {
   if (args.includes("psql")) console.log("180006");
 } else if (args[0] === "inspect") {
@@ -267,6 +269,7 @@ if (args[0] === "run") {
   if (format.includes(".Config.Env")) process.exit(90);
   if (format === "{{.Id}}") console.log(service.id);
   else if (format.includes(".State.Running")) console.log("false " + (service.name.includes("-pg-") ? "0" : "143") + " false");
+  else if (!format.includes(".State.StartedAt")) console.log(JSON.stringify([service.id, "/" + service.name, service.image, {"fvoci.test-run": service.label}]));
   else {
     const fields = [service.id, "/" + service.name, service.image, "2026-10-17T00:00:00Z", 123, {"fvoci.test-run": service.label}, []];
     if (!state.body && state.mode === "missing") process.exit(3);
@@ -295,13 +298,19 @@ try {
   return state.bodyStatus;
  });
  console.log("RESULT=" + result);
-} catch { console.log("RESULT=11"); }
+} catch (error) {
+ if (["partial","collision"].includes(JSON.parse(readFileSync(path,"utf8")).mode))
+  console.log("ORIGINAL_CREATE_FAILURE=" + Number(error.message === "container browser prerequisite failed"));
+ console.log("RESULT=11");
+}
 `;
   for (const [mode, bodyStatus, throwBody, expected, bodyRan] of [
     ["valid", 0, false, 0, true],
     ["missing", 0, false, 11, false],
     ["foreign", 0, false, 11, false],
-    ...Array.from({ length: 7 }, (_, at) => ["change-" + at, 0, false, 1, true]),
+    ["partial", 0, false, 11, false],
+    ["collision", 0, false, 11, false],
+    ...Array.from({ length: 7 }, (_, at) => ["change-" + String(at), 0, false, 1, true]),
     ["valid", 17, false, 17, true],
     ["change-3", 17, false, 17, true],
     ["valid", 0, true, 11, true],
@@ -316,7 +325,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        PATH: bin + ":" + process.env.PATH,
+        PATH: bin + ":" + (process.env.PATH ?? ""),
         FIXTURE_STATE: state,
         FIXTURE_CALLS: calls,
       },
@@ -329,19 +338,32 @@ try {
       new Response(child.stderr).text(),
     ]);
     expect(exit, mode).toBe(0);
-    expect(out, mode).toBe("RESULT=" + expected + "\n");
+    expect(out, mode).toBe(
+      (["partial", "collision"].includes(mode) ? "ORIGINAL_CREATE_FAILURE=1\n" : "") +
+        "RESULT=" +
+        String(expected) +
+        "\n",
+    );
     expect(out + err).not.toContain("WITHHELD_SERVICE_CANARY");
     const final = JSON.parse(readFileSync(state, "utf8")) as {
       body: boolean;
       services: Record<string, unknown>;
     };
     expect(final.body, mode).toBe(bodyRan);
-    expect(final.services, mode).toEqual({});
+    if (mode === "collision") expect(Object.keys(final.services), mode).toEqual(["c".repeat(64)]);
+    else expect(final.services, mode).toEqual({});
     const commands = readFileSync(calls, "utf8")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as string[]);
-    expect(commands.filter((args) => args[0] === "stop").length, mode).toBe(2);
+    expect(commands.filter((args) => args[0] === "stop").length, mode).toBe(
+      mode === "collision" ? 0 : mode === "partial" ? 1 : 2,
+    );
+    expect(
+      commands.some(
+        (args) => ["stop", "rm"].includes(args[0] ?? "") && args.includes("c".repeat(64)),
+      ),
+    ).toBe(false);
     expect(commands.at(-1), mode).toEqual(["network", "rm", "owned-fixture-network"]);
     expect(
       readdirSync(root).some((name) => name.endsWith(".env")),

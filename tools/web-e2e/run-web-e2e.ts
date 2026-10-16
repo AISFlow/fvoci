@@ -827,6 +827,8 @@ export async function browserServices(
         ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"],
       ],
     ] as const) {
+      const attempted = { name, container: "", image };
+      identities.push(attempted);
       const container = checkedOutput(
         [
           "docker",
@@ -854,7 +856,7 @@ export async function browserServices(
         root,
       );
       if (!/^[0-9a-f]{64}$/.test(container)) fail("owned service container ID invalid");
-      identities.push({ name, container, image });
+      attempted.container = container;
       const deadline = performance.now() + 30_000;
       for (;;) {
         if (interrupted) throw new RuntimeExit(interrupted);
@@ -899,7 +901,47 @@ export async function browserServices(
         if (status === 0) status = 1;
       }
     }
-    for (const { name, container } of [...identities].reverse()) {
+    for (const attempted of [...identities].reverse()) {
+      const { name, image } = attempted;
+      let { container } = attempted;
+      if (!container) {
+        try {
+          const fields: unknown = JSON.parse(
+            checkedOutput(
+              [
+                "docker",
+                "inspect",
+                "--format",
+                "[{{json .Id}},{{json .Name}},{{json .Config.Image}},{{json .Config.Labels}}]",
+                name,
+              ],
+              root,
+            ),
+          );
+          if (
+            Array.isArray(fields) &&
+            fields.length === 4 &&
+            typeof fields[0] === "string" &&
+            /^[0-9a-f]{64}$/.test(fields[0]) &&
+            fields[1] === "/" + name &&
+            fields[2] === image &&
+            fields[3] &&
+            typeof fields[3] === "object" &&
+            !Array.isArray(fields[3]) &&
+            (fields[3] as Record<string, unknown>)["fvoci.test-run"] === id
+          )
+            container = fields[0];
+        } catch {
+          /* Absent or foreign attempted names never authorize retirement. */
+        }
+        if (!container) {
+          process.stderr.write(
+            "container-browser attempted service ownership unproven; retirement refused\n",
+          );
+          if (status === 0) status = 1;
+          continue;
+        }
+      }
       let retired = true;
       const present = Bun.spawnSync(["docker", "inspect", "--format", "{{.Id}}", container], {
         stdout: "ignore",
