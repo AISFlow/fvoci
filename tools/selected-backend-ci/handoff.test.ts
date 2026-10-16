@@ -836,6 +836,28 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
 
+  test("CLI refusal identifies only its numeric own-source check", async () => {
+    const cli = join(import.meta.dir, "handoff.ts");
+    const child = Bun.spawn([process.execPath, "--no-env-file", cli, "consume"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exit).toBe(1);
+    expect(stdout).toBe("");
+    const location = /^web build handoff check_line=([1-9][0-9]{0,5})$/m.exec(stderr);
+    expect(location).not.toBeNull();
+    expect(readFileSync(cli, "utf8").split("\n")[Number(location?.[1]) - 1]).toContain(
+      "assert.equal(actual, job,",
+    );
+    expect(stderr).not.toContain("PRIVATE_HANDOFF_CANARY");
+    expect(stderr).not.toContain(cli);
+  });
+
   test("isolated CI image producer and consumer bind the actual job and full packet identity", async () => {
     Object.assign(process.env, {
       GITHUB_JOB: "workspace-browser-container-build",

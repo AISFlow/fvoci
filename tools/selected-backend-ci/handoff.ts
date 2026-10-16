@@ -1064,6 +1064,18 @@ if (import.meta.main) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
+    const ownFrame =
+      error instanceof Error
+        ? error.stack
+            ?.split("\n")
+            .find(
+              (line) => line.trimStart().startsWith("at ") && line.includes(import.meta.path + ":"),
+            )
+        : undefined;
+    const checkLine =
+      ownFrame?.split(import.meta.path + ":")[1]?.match(/^([1-9][0-9]{0,5}):[0-9]+\)?$/)?.[1] ??
+      "0";
+    process.stderr.write("web build handoff check_line=" + checkLine + "\n");
     // Fixed handoff refusals name only the failed check; no packet bytes.
     process.stderr.write(
       "web build handoff refused: " +

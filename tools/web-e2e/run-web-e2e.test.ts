@@ -685,6 +685,8 @@ for (const mode of [
   "published-default",
   ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
   "inputs-fail",
+  "consume-fail",
+  "remove-fail",
   "daemon-mismatch",
   "image-mismatch",
   "foreign-digest",
@@ -719,11 +721,11 @@ else if(a[0]==="context"&&a[1]==="inspect")console.log(JSON.stringify(process.en
 else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-mismatch"?process.env.FIXTURE_OTHER_ARCH:["amd64","x64","arm64"].includes(process.env.FIXTURE_MODE)?process.env.FIXTURE_MODE:process.env.FIXTURE_ARCH));
 else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
 else if(a[0]==="network"){}
-else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);}
+else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
-else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" "+(!s[a.at(-1)]&&a.at(-1).includes("meili")?"143":"0")+" false");
+else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" "+(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"?"19":!s[a.at(-1)]&&a.at(-1).includes("meili")?"143":"0")+" false");
 else if(a[0]==="stop"){s[a.at(-1)]=false;save();}
-else if(a[0]==="rm"){delete s[a.at(-1)];save();}
+else if(a[0]==="rm"){if(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}delete s[a.at(-1)];save();}
 else process.exit(42);
 `;
     writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
@@ -784,9 +786,29 @@ else process.exit(42);
       "foreign-digest",
       "remote-endpoint",
     ].includes(mode);
-    expect(code, stderr).toBe(refused ? 1 : mode === "inputs-fail" ? 17 : 0);
+    expect(code, stderr).toBe(
+      refused || mode === "remove-fail"
+        ? 1
+        : mode === "inputs-fail"
+          ? 17
+          : mode === "consume-fail"
+            ? 19
+            : 0,
+    );
     expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
     expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_CONSOLE_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_REMOVE_CANARY");
+    if (mode === "consume-fail" || mode === "remove-fail") {
+      expect(stderr).toContain("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");
+      expect(stderr).toContain("web-e2e stage=browser-handoff-consume started");
+      expect(stderr).toContain(
+        mode === "consume-fail"
+          ? "container-browser failure child_exit=19 inspect_exit=0 running=0 container_exit=19 oom=0 remove_exit=0"
+          : "container-browser failure child_exit=0 inspect_exit=0 running=0 container_exit=0 oom=0 remove_exit=23",
+      );
+      if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
+    }
     const rows = readFileSync(calls, "utf8")
       .trim()
       .split("\n")
@@ -840,7 +862,14 @@ else process.exit(42);
       expect(network).toBe(-1);
       expect(consume).toBe(-1);
     }
-    expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+    const remaining: unknown = JSON.parse(readFileSync(state, "utf8"));
+    if (mode === "remove-fail") {
+      expect(Object.keys(remaining as object)).toHaveLength(1);
+      expect(Object.entries(remaining as object)[0]).toEqual([
+        expect.stringMatching(/-consume2$/),
+        false,
+      ]);
+    } else expect(remaining).toEqual({});
   });
 
 test("SQLite exports are four data fields, never shell evaluation", () => {

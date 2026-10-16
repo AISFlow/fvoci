@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   realpathSync,
   statSync,
@@ -2088,9 +2089,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
       };
     process.once("SIGINT", interrupt);
     process.once("SIGTERM", terminate);
-    let result: number;
+    let result: number, childExit: number;
     try {
-      result = await child.exited;
+      childExit = await child.exited;
+      result = childExit;
       result ||= entryCancellation;
     } finally {
       process.removeListener("SIGINT", interrupt);
@@ -2107,6 +2109,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
+    let removeExit = -1;
     if (inspect.exitCode === 0) {
       if (result === 0 && inspect.stdout.toString().trim() !== "false 0 false") result = 1;
       if (!inspect.stdout.toString().startsWith("false ")) {
@@ -2119,6 +2122,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
         stdout: "pipe",
         stderr: "pipe",
       });
+      removeExit = removed.exitCode;
       if (removed.exitCode !== 0 && result === 0) result = 1;
     } else if (result === 0) result = 1;
     if (ci && phase === "consume") {
@@ -2137,6 +2141,44 @@ async function containerBrowser(argv: string[]): Promise<number> {
       } catch {
         process.stderr.write("container browser safe diagnostic retention failed\n");
         result ||= 1;
+      }
+    }
+    if (result !== 0) {
+      const state =
+        inspect.exitCode === 0
+          ? /^(true|false) ([0-9]{1,3}) (true|false)$/.exec(inspect.stdout.toString().trim())
+          : null;
+      process.stderr.write(
+        `container-browser failure child_exit=${String(childExit)} inspect_exit=${String(inspect.exitCode)} running=${state ? (state[1] === "true" ? "1" : "0") : "-1"} container_exit=${state?.[2] ?? "-1"} oom=${state ? (state[3] === "true" ? "1" : "0") : "-1"} remove_exit=${String(removeExit)}\n`,
+      );
+      if (logFd !== undefined) {
+        try {
+          const path = join(
+              runDirectory,
+              phase === "consume" ? "console.log" : "inputs-console.log",
+            ),
+            size = statSync(path).size,
+            bytes = Buffer.alloc(Math.min(size, 16384)),
+            offset = size - bytes.length,
+            fd = openSync(path, "r");
+          try {
+            readSync(fd, bytes, 0, bytes.length, offset);
+          } finally {
+            closeSync(fd);
+          }
+          for (const line of bytes
+            .toString("utf8")
+            .split("\n")
+            .slice(offset ? 1 : 0))
+            if (
+              /^(?:web-e2e stage=(?:cargo-fetch|engine-fetch|dependencies|browser-version|sqlite-sdk-admit|browser-input-before|web-build|fixture-build|default-server-build|worker-build|browser-input-after|browser-handoff-export|browser-handoff-consume|browser-group) (?:started|elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})|web build handoff check_line=[0-9]{1,6})$/.test(
+                line,
+              )
+            )
+              process.stderr.write(line + "\n");
+        } catch {
+          process.stderr.write("container-browser diagnostics_unavailable=1\n");
+        }
       }
     }
     process.stderr.write(
