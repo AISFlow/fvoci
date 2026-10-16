@@ -1,3 +1,9 @@
+import { MessageType } from "@hocuspocus/provider";
+import * as decoding from "lib0/decoding";
+import { messageYjsSyncStep2, messageYjsUpdate } from "y-protocols/sync";
+import { frameBytes, persistParts } from "./collab-wire";
+import type { CollabWireLog } from "./collab-helpers";
+import { restoreStateDigest } from "../../../tools/turso/ui-restore";
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
@@ -389,4 +395,98 @@ export async function restoredReadback(page: Page, state: Checkpoint): Promise<v
     jobSchema,
   );
   expect(job).toEqual({ ...destination.job, status: "completed", projectId: source.project.id });
+}
+
+/** Installed lib0/Yjs codecs read only document sync writes and SyncStatus.
+ * Auth, awareness and unknown frame bodies are never read or retained here;
+ * stateless capture retains only the existing allowlisted persist UUIDs. */
+export function freshSyncWitness(page: Page, routingKey: string, before: Record<string, unknown>) {
+  const sync: Array<{
+    sha: string;
+    len: number;
+    empty: boolean;
+    applied: boolean;
+    fullStateUnchanged: boolean;
+  }> = [];
+  let invalid = false;
+  let connections = 0;
+  let order = 0;
+  const syncOrder: number[] = [];
+  const persistOrder = new Map<string, number>();
+  const wire: CollabWireLog = { sent: [], received: [] };
+  page.on("websocket", (ws) => {
+    connections += 1;
+    const pending: typeof sync = [];
+    const read = (payload: string | Buffer, sent: boolean) => {
+      const frameOrder = order++;
+      const bytes = frameBytes(payload);
+      if (bytes.length <= 1) return;
+      try {
+        const decoder = decoding.createDecoder(bytes);
+        const routing = decoding.readVarString(decoder);
+        const type = MessageType[decoding.readVarUint(decoder)];
+        if (sent && type === "Sync") {
+          const step = decoding.readVarUint(decoder);
+          if (step !== messageYjsSyncStep2 && step !== messageYjsUpdate) return;
+          if (routing !== routingKey) {
+            invalid = true;
+            return;
+          }
+          const update = decoding.readVarUint8Array(decoder);
+          if (decoding.hasContent(decoder) || update.length === 0) {
+            invalid = true;
+            return;
+          }
+          const record = {
+            sha: hash(update),
+            len: update.length,
+            empty: update.length === 2 && update[0] === 0 && update[1] === 0,
+            applied: false,
+            fullStateUnchanged: restoreStateDigest(before, [update]) === restoreStateDigest(before),
+          };
+          sync.push(record);
+          syncOrder.push(frameOrder);
+          pending.push(record);
+        } else if (!sent && type === "SyncStatus") {
+          if (routing !== routingKey) {
+            invalid = true;
+            return;
+          }
+          const applied = decoding.readVarInt(decoder);
+          const write = pending.shift();
+          if (!write || applied !== 1 || decoding.hasContent(decoder)) {
+            invalid = true;
+            return;
+          }
+          write.applied = true;
+        } else if (type === "Stateless" && routing === routingKey) {
+          const payload = decoding.readVarString(decoder);
+          const parts = persistParts(payload);
+          if (parts && !decoding.hasContent(decoder)) {
+            (sent ? wire.sent : wire.received).push({ kind: "stateless", routingKey, payload });
+            if (sent && parts.kind === "request") persistOrder.set(parts.id, frameOrder);
+          }
+        }
+      } catch {
+        invalid = true;
+      }
+    };
+    ws.on("framesent", (frame) => {
+      read(frame.payload, true);
+    });
+    ws.on("framereceived", (frame) => {
+      read(frame.payload, false);
+    });
+  });
+  return {
+    sync,
+    wire,
+    facts: () => ({ invalid, connections }),
+    valid: (requestId: string) =>
+      !invalid &&
+      connections === 1 &&
+      sync.length > 0 &&
+      sync.every((item) => item.applied) &&
+      syncOrder.every((sent) => sent < (persistOrder.get(requestId) ?? -1)),
+  };
 }

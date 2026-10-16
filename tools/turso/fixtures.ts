@@ -2,7 +2,7 @@
 // Credential-free, network-free admission fixtures of the manual Turso
 // workflow: the guard, the UI consumer and the turso-test.yml literal checks.
 // They are not Turso runtime tests; no credential, Environment, network or
-// compiled binary is used, and no dependency install is needed.
+// compiled binary is used. Locked dependencies must be installed first.
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";

@@ -587,9 +587,9 @@ fn sqlite_invitation_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::E
         "acceptedAt":exact(cell("accepted_at")?.clone()),"expiresAt":exact(cell("expires_at")?.clone())}))
 }
 
-// Only the selected SQLite PRODUCT4 document upload producer is witnessed.
+// Only the SQLite-family owned document upload producer is witnessed.
 // Its system transaction deliberately stores a NULL actor and channel `web`.
-fn sqlite_attachment_extracted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+fn attachment_extracted_witness(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
     let cell = |name: &str| {
         columns
             .iter()
@@ -616,14 +616,14 @@ fn sqlite_attachment_extracted_witness(columns: &[(String, Cell)]) -> Result<Val
         return Ok(Value::Null);
     }
     Ok(
-        json!({"class":"sqlite-attachment-extracted","sequence":exact(cell("seq")?.clone()),
+        json!({"class":"attachment-extracted","sequence":exact(cell("seq")?.clone()),
         "target":hex::encode(target.as_bytes()),
         "columns":columns.iter().map(|(name,_)| name).collect::<Vec<_>>(),
         "cells":columns.iter().map(|(_,cell)| exact(cell.clone())).collect::<Vec<_>>()}),
     )
 }
 
-fn sqlite_extracted_attachment_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
+fn extracted_attachment_fields(columns: &[(String, Cell)]) -> Result<Value, sqlx::Error> {
     let cell = |name: &str| {
         columns
             .iter()
@@ -667,11 +667,9 @@ fn sqlite_extracted_attachment_fields(columns: &[(String, Cell)]) -> Result<Valu
     Ok(json!({"columns":names,"cells":cells}))
 }
 
-fn row_allocation(
-    table: &str,
-    row: &FamilyRow,
-    selected_sqlite: bool,
-) -> Result<Value, sqlx::Error> {
+fn row_allocation(table: &str, row: &FamilyRow, backend: &str) -> Result<Value, sqlx::Error> {
+    let selected_sqlite = backend == "sqlite";
+    let sqlite_family = matches!(backend, "sqlite" | "libsql-remote");
     let columns = column_names(row)?;
     let mut workspaces = Vec::new();
     let mut actors = Vec::new();
@@ -682,7 +680,8 @@ fn row_allocation(
     for (i, name) in columns.into_iter().enumerate() {
         let cell = row.cell(i)?;
         if table == "events"
-            || (selected_sqlite && matches!(table, "notifications" | "invitations" | "attachments"))
+            || (selected_sqlite && matches!(table, "notifications" | "invitations"))
+            || (sqlite_family && table == "attachments")
         {
             event_columns.push((name.to_string(), cell.clone()));
         }
@@ -706,7 +705,7 @@ fn row_allocation(
             && (matches!(
                 table,
                 "users" | "workspaces" | "events" | "documents" | "tasks" | "identity_links"
-            ) || (selected_sqlite && table == "attachments"))
+            ) || (sqlite_family && table == "attachments"))
         {
             let bytes = cell.bytes()?;
             if bytes.len() != 16 {
@@ -727,16 +726,16 @@ fn row_allocation(
             if allocation["eventWitness"].is_null() {
                 allocation["eventWitness"] = sqlite_invitation_accepted_witness(&event_columns)?;
             }
-            if allocation["eventWitness"].is_null() {
-                allocation["eventWitness"] = sqlite_attachment_extracted_witness(&event_columns)?;
-            }
+        }
+        if sqlite_family && allocation["eventWitness"].is_null() {
+            allocation["eventWitness"] = attachment_extracted_witness(&event_columns)?;
         }
     }
     if selected_sqlite && table == "invitations" {
         allocation["invitation"] = sqlite_invitation_fields(&event_columns)?;
     }
-    if selected_sqlite && table == "attachments" {
-        allocation["extraction"] = sqlite_extracted_attachment_fields(&event_columns)?;
+    if sqlite_family && table == "attachments" {
+        allocation["extraction"] = extracted_attachment_fields(&event_columns)?;
         if !allocation["extraction"].is_null() {
             allocation["extraction"]["sha256"] = json!(row_hash(row)?);
         }
@@ -1164,7 +1163,7 @@ async fn capture_primary_read(
                     instance_config.push(instance_config_witness(&hash, &columns)?);
                 }
                 phase = "row-allocation";
-                owners.insert(hash.clone(), row_allocation(name, row, backend == "sqlite")?);
+                owners.insert(hash.clone(), row_allocation(name, row, backend)?);
                 *hashes.entry(hash).or_default() += 1;
             }
             fingerprints.insert(*name, hashes);
@@ -2318,6 +2317,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extraction_allocation_shares_sqlite_family_proof_without_other_event_exceptions() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut tx = connection.begin().await.unwrap();
+        let mut reader = NativeRead::OwnedSqlite(&mut tx);
+        let id = Uuid::from_u128(1);
+        let workspace = Uuid::from_u128(2);
+        let document = Uuid::from_u128(3);
+        let uploader = Uuid::from_u128(4);
+        let events = reader.query("SELECT ?1 AS id,9 AS seq,?2 AS workspace_id,NULL AS actor_user_id,'attachment.extracted' AS verb,'attachment' AS target_type,?3 AS target_id,?4 AS payload,'web' AS channel,50 AS created_at", &[Cell::uuid(Uuid::from_u128(5)),Cell::uuid(workspace),Cell::uuid(id),Cell::json(&json!({"attachmentId":id.to_string(),"status":"ok"})).unwrap()]).await.unwrap();
+        let attachments = reader.query("SELECT ?1 AS id,?2 AS workspace_id,?3 AS document_id,NULL AS task_id,?4 AS uploader_id,'stored' AS status,'ok' AS extract_status,1 AS extract_attempts,NULL AS extract_lease_token,NULL AS extract_lease_expires_at,40 AS completed_at,'PRIVATE_EXTRACTION_CANARY' AS storage_key", &[Cell::uuid(id),Cell::uuid(workspace),Cell::uuid(document),Cell::uuid(uploader)]).await.unwrap();
+        for backend in ["sqlite", "libsql-remote"] {
+            let event = row_allocation("events", &events[0], backend).unwrap();
+            assert_eq!(event["actors"], json!([]));
+            assert_eq!(event["eventWitness"]["class"], "attachment-extracted");
+            let attachment = row_allocation("attachments", &attachments[0], backend).unwrap();
+            assert_eq!(attachment["self"], hex::encode(id.as_bytes()));
+            assert_eq!(
+                attachment["actors"],
+                json!([hex::encode(uploader.as_bytes())])
+            );
+            assert_eq!(
+                attachment["extraction"]["sha256"],
+                row_hash(&attachments[0]).unwrap()
+            );
+            assert_eq!(
+                attachment["extraction"]["cells"].as_array().unwrap().len(),
+                11
+            );
+            assert!(!attachment.to_string().contains("PRIVATE_EXTRACTION_CANARY"));
+        }
+        assert!(
+            row_allocation("events", &events[0], "postgres").unwrap()["eventWitness"].is_null()
+        );
+        let login = reader.query("SELECT ?1 AS id,10 AS seq,NULL AS workspace_id,?2 AS actor_user_id,'auth.login' AS verb,'user' AS target_type,?2 AS target_id,?3 AS payload,'web' AS channel,50 AS created_at", &[Cell::uuid(Uuid::from_u128(6)),Cell::uuid(uploader),Cell::json(&json!({"userId":uploader.to_string(),"method":"invitation"})).unwrap()]).await.unwrap();
+        assert_eq!(
+            row_allocation("events", &login[0], "sqlite").unwrap()["eventWitness"]["class"],
+            "actor-invitation-login"
+        );
+        assert!(
+            row_allocation("events", &login[0], "libsql-remote").unwrap()["eventWitness"].is_null()
+        );
+        tx.rollback().await.unwrap();
+        connection.begin().await.unwrap().rollback().await.unwrap();
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn remote_primary_entry_still_refuses_local_backend_before_connect() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
@@ -2369,7 +2417,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_extraction_witness_requires_exact_producer_and_closed_document_attachment() {
+    fn extraction_witness_requires_exact_producer_and_closed_document_attachment() {
         let id = Uuid::from_u128(1);
         let event = vec![
             ("id".into(), Cell::uuid(Uuid::from_u128(2))),
@@ -2387,8 +2435,8 @@ mod tests {
             ("created_at".into(), Cell::Integer(50)),
         ];
         assert_eq!(event_witness(&event).unwrap(), Value::Null);
-        let witness = sqlite_attachment_extracted_witness(&event).unwrap();
-        assert_eq!(witness["class"], "sqlite-attachment-extracted");
+        let witness = attachment_extracted_witness(&event).unwrap();
+        assert_eq!(witness["class"], "attachment-extracted");
         assert_eq!(witness["cells"].as_array().unwrap().len(), 10);
         for (name, value) in [
             ("id", Cell::Blob(vec![1; 15])),
@@ -2417,7 +2465,7 @@ mod tests {
                 .unwrap()
                 .1 = value;
             assert_eq!(
-                sqlite_attachment_extracted_witness(&changed).unwrap(),
+                attachment_extracted_witness(&changed).unwrap(),
                 Value::Null,
                 "{name}"
             );
@@ -2443,7 +2491,7 @@ mod tests {
                 Cell::text("PRIVATE_EXTRACTION_CANARY"),
             ),
         ];
-        let fields = sqlite_extracted_attachment_fields(&attachment).unwrap();
+        let fields = extracted_attachment_fields(&attachment).unwrap();
         assert_eq!(fields["cells"].as_array().unwrap().len(), 11);
         assert!(!fields.to_string().contains("PRIVATE_EXTRACTION_CANARY"));
         for (name, value) in [
@@ -2466,7 +2514,7 @@ mod tests {
                 .unwrap()
                 .1 = value;
             assert_eq!(
-                sqlite_extracted_attachment_fields(&changed).unwrap(),
+                extracted_attachment_fields(&changed).unwrap(),
                 Value::Null,
                 "{name}"
             );

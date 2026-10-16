@@ -273,7 +273,8 @@ owns the destructive flag lifecycle, and retains one hosted primary. The worker
 does not access hosted credentials or dispatch that execution.
 
 Pure local checks: `bun tools/turso/fixtures.ts` (the admission fixtures, from
-any directory and without `bun install`: it runs the pinned guard
+any directory after `bun install --frozen-lockfile --ignore-scripts` at the
+repository root: it runs the pinned guard
 `tools/turso/guard*.test.ts`, UI consumer `tools/turso/ui*.test.ts` and
 `turso-test.yml` literal `tools/ci/verify/registry.test.ts` suites with only
 `PATH` and `TMPDIR`, and refuses if a pinned suite is missing) and, from the
