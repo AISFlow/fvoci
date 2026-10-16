@@ -1895,8 +1895,10 @@ export async function productCallbacks(
     async beforeRestartStop() {
       // Browser actors have closed; let the live dispatcher finish their
       // committed tail before cancellation deliberately leaves queued work.
+      checkInterrupt(true);
       const signal = AbortSignal.timeout(FIXTURE_BUDGET * 1000);
       for (let sample = 0; ; sample++) {
+        checkInterrupt(true);
         signal.throwIfAborted();
         const observation = await serial("settlement-" + String(sample), false, signal);
         const checks = observation.checks;

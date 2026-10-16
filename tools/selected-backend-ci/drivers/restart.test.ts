@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import type { Inputs } from "../types.ts";
-import type { Child, Command, Row } from "./common.ts";
+import { inodeOf, type Child, type Command, type Row } from "./common.ts";
 import {
   restartBrowserArgs,
   restartedRoleFacts,
@@ -252,6 +252,7 @@ const exited = (code: number): Child => ({
 // allocation, files, report and receipt are real.
 async function failureProbe(options: Probe = {}) {
   const report = options.report ?? "structured";
+  const selected = options.beforeStop ? "sqlite" : "postgres";
   const run = join(root, "run"),
     storage = join(root, "storage"),
     dist = join(root, "dist");
@@ -283,7 +284,7 @@ async function failureProbe(options: Probe = {}) {
     source: "a".repeat(40),
     tree: "b".repeat(40),
     compiledSource: "a".repeat(40),
-    backend: "postgres",
+    backend: selected,
     runRoot: run,
     parentDriverSha256: hash(parent),
     restartHelperSha256: hash(restartHelper),
@@ -307,12 +308,12 @@ async function failureProbe(options: Probe = {}) {
       source: "a".repeat(40),
       compiledSource: "a".repeat(40),
       tree: "b".repeat(40),
-      backend: "postgres",
+      backend: selected,
       binding,
     }),
   );
   const seed = {
-    selected: "postgres",
+    selected,
     firstAck: "first",
     finalAck: "final",
     creatorId: "creator",
@@ -476,7 +477,7 @@ async function failureProbe(options: Probe = {}) {
     run,
     name: "pure-container",
     browserEnv: {
-      FVOCI_E2E_SELECTED_BACKEND: "postgres",
+      FVOCI_E2E_SELECTED_BACKEND: selected,
       PATH: "/usr/bin",
       LANG: "C.UTF-8",
       PRIVATE_TOKEN: secret,
@@ -512,17 +513,35 @@ async function failureProbe(options: Probe = {}) {
     role: "owned_app",
     masterKey: "different synthetic owner key",
   };
-  if (options.beforeStop)
+  if (options.beforeStop) {
+    const dbroot = join(root, "database");
+    mkdirSync(dbroot, { mode: 0o700 });
+    context.dbroot = dbroot;
+    context.db = join(dbroot, "app.sqlite");
+    writeFileSync(context.db, "synthetic SQLite identity only; no database I/O", { mode: 0o600 });
+    laneReceipt.database_inode = inodeOf(context.db);
+    writeFileSync(
+      join(dbroot, "actor-fresh.json"),
+      JSON.stringify({
+        backend: "sqlite",
+        commit: "confirmed",
+        poolClosed: true,
+        connectionClose: "confirmed",
+        operationSucceeded: true,
+      }),
+      { mode: 0o600 },
+    );
     context.sqliteProducts = {
       afterSeedStopped: () => Promise.resolve(),
       afterReadback: () => Promise.resolve(),
       beforeRestartStop: () => options.beforeStop?.(observed) ?? Promise.resolve(),
       afterRestartStopped: () => {
-        expect(observed.some((args) => args.includes("-TERM"))).toBe(true);
+        expect(observed.some((args) => args.includes("-TERM") && args.includes("22"))).toBe(true);
         observed.push(["POST-STOP-FULL-GUARD"]);
         return Promise.resolve();
       },
     };
+  }
   if (options.cliMissing) unlinkSync(cli);
   const saved = { ...process.env };
   Object.assign(process.env, {
@@ -569,14 +588,14 @@ describe("restart failure and cleanup", () => {
     const settled = Promise.withResolvers<undefined>();
     const result = failureProbe({
       async beforeStop(commands) {
-        expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
+        expect(commands.some((args) => args.includes("-TERM") && args.includes("22"))).toBe(false);
         entered.resolve(undefined);
         await settled.promise;
-        expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
+        expect(commands.some((args) => args.includes("-TERM") && args.includes("22"))).toBe(false);
       },
     });
     try {
-      await entered.promise;
+      await Promise.race([entered.promise, result]);
     } finally {
       settled.resolve(undefined);
     }
@@ -587,17 +606,19 @@ describe("restart failure and cleanup", () => {
       "preserve original restart browser failure",
     );
   });
-  test("settlement failure retains browser failure and still stops and validates", async () => {
-    const { receipt, observed } = await failureProbe({
-      beforeStop: () => Promise.reject(new Error("owned relay deadline")),
+  for (const type of ["TimeoutError", "KeyboardInterrupt"])
+    test(`settlement ${type} retains browser failure and still stops and validates`, async () => {
+      const { receipt, observed } = await failureProbe({
+        beforeStop: () =>
+          Promise.reject(Object.assign(new Error("owned relay settlement"), { name: type })),
+      });
+      expect(receipt.cleanupErrors).toEqual([{ type, message: "owned relay settlement" }]);
+      expect(receipt.restartServerExit).toBe(0);
+      expect(observed.at(-1)).toEqual(["POST-STOP-FULL-GUARD"]);
+      expect((receipt.originalFailure as { message: string }).message).toBe(
+        "preserve original restart browser failure",
+      );
     });
-    expect(receipt.cleanupErrors).toEqual([{ type: "Error", message: "owned relay deadline" }]);
-    expect(receipt.restartServerExit).toBe(0);
-    expect(observed.at(-1)).toEqual(["POST-STOP-FULL-GUARD"]);
-    expect((receipt.originalFailure as { message: string }).message).toBe(
-      "preserve original restart browser failure",
-    );
-  });
   test("browser first failure keeps the structured checkpoint and cleans up normally", async () => {
     const { safe, receipt, laneReceipt } = await failureProbe();
     expect(safe.restart_browser_exit).toBe(7);

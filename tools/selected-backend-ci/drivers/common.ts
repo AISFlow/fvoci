@@ -72,8 +72,8 @@ export function trapInterrupts(): void {
     for (const interrupt of inFlight) interrupt();
   });
 }
-export function checkInterrupt(): void {
-  if (interrupted && cleanupDepth === 0) throw interruptError();
+export function checkInterrupt(duringCleanup = false): void {
+  if (interrupted && (cleanupDepth === 0 || duringCleanup)) throw interruptError();
 }
 export async function cleanupScope<T>(operation: () => Promise<T>): Promise<T> {
   cleanupDepth += 1;
@@ -371,7 +371,7 @@ export const command: Command = async (args, options = {}) => {
   // pipe they inherited would hold the wait open, so its output goes to a file.
   assert.ok(!options.waitOnInterrupt || options.log !== undefined, "waited wrapper log required");
   options.signal?.throwIfAborted();
-  checkInterrupt();
+  checkInterrupt(options.signal !== undefined);
   const controller = new AbortController();
   let forward = (reason: unknown) => {
     controller.abort(reason);
@@ -412,7 +412,7 @@ export const command: Command = async (args, options = {}) => {
       closeSync(status[1]);
       status[1] = -1;
       forward = (reason: unknown) => {
-        if (controller.signal.aborted) return;
+        if (options.signal !== undefined && controller.signal.aborted) return;
         controller.abort(reason);
         child.kill("SIGINT");
         // The first SIGINT starts the bound; a later one does not extend it.

@@ -506,6 +506,29 @@ test("an already aborted operation never launches its fixture wrapper", async ()
     rmSync(directory, { recursive: true });
   }
 });
+test("a prior SIGINT refuses readiness but still allows normal cleanup", async () => {
+  const script =
+    `import {trapInterrupts,cleanupScope,command} from ${JSON.stringify(join(import.meta.dir, "common.ts"))};` +
+    'trapInterrupts();const interrupted=new Promise(resolve=>process.once("SIGINT",resolve));' +
+    'process.kill(process.pid,"SIGINT");await interrupted;' +
+    "await cleanupScope(async()=>{let readiness;" +
+    'try{await command([process.execPath,"--no-env-file","-e","throw new Error(\'launched\')"],' +
+    "{signal:new AbortController().signal})}catch(error){readiness=error.name}" +
+    'const cleanup=await command([process.execPath,"--no-env-file","-e","process.exit(0)"]);' +
+    "console.log(JSON.stringify({readiness,cleanup:cleanup.returncode}))});";
+  const child = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit).toBe(0);
+  expect(stderr).toBe("");
+  expect(JSON.parse(stdout) as unknown).toEqual({ readiness: "KeyboardInterrupt", cleanup: 0 });
+});
 test("an external operation abort awaits fixture cleanup and reaping", async () => {
   const directory = temporary();
   const controller = new AbortController();
