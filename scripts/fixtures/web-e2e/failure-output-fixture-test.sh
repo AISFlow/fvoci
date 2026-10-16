@@ -18,6 +18,14 @@
 # shares are started once for its groups.
 set -euo pipefail
 
+signals_only=false
+if [[ $# == 1 && $1 == --signals-only ]]; then
+  signals_only=true
+elif (( $# != 0 )); then
+  echo "usage: failure-output-fixture-test.sh [--signals-only]" >&2
+  exit 2
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # The web workspace's install (bun ci at the repository root).
 WORKSPACE_MODULES="$ROOT/node_modules"
@@ -409,6 +417,12 @@ check_retired() {
   done
 }
 
+# Used by default and focused cancellation cases without changing assertions.
+retained_of() {
+  sed -n 's/^failure-artifacts=//p' "$1"
+}
+
+if [[ "$signals_only" == false ]]; then
 # pending: 0 ordinary, 1 pending; each failing run keeps a monitor, the ordinary
 # pass run never settles (bounded wait) and the pending pass run has no monitor.
 for pending in 0 1; do
@@ -597,11 +611,6 @@ for wrapper in ordinary perf; do
     echo "readiness fixture: $label status=$status setup-probes=$probes Playwright-launches=$launches"
   done
 done
-
-# retained_of <github-output>: the retained directory a failed group named.
-retained_of() {
-  sed -n 's/^failure-artifacts=//p' "$1"
-}
 
 # A failing setup step is named with its own exit status; nothing later runs
 # and what was already created is retired.
@@ -793,6 +802,7 @@ grep -qx 'FVOCI_E2E_SHARED_SERVICES=1 requires TEST_DATABASE_URL from the scope 
 [[ ! -e "$NET_STATE.service-starts" && ! -e "$NET_STATE.sql" ]] || fail "shared missing: services or database touched" "$log"
 rm -rf "$(retained_of "$gh_output")"
 
+fi
 # SIGINT while Playwright runs (a Ctrl-C reaches the whole process group):
 # exit 130, and the database, server, its child and the SMTP sink are retired.
 log="$WORK/sigint.log"

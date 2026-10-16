@@ -15,6 +15,7 @@ import {
   readdirSync,
   statSync,
   writeFileSync,
+  watch,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -110,8 +111,54 @@ class FixtureError extends Error {}
 
 // Executables live only in the owned copied fixture. The production entry and
 // all of its argument/qualification logic execute, with downstream tools stubbed.
+// The controlled monitor acknowledges real signal delivery through the
+// existing net-marks file. No fixed delay decides a cancellation assertion.
+function cancellationBarrier(path: string, observed: (text: string) => boolean): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const watcher = watch(dirname(path), () => {
+      inspect();
+    });
+    const timer = setTimeout(() => {
+      finish(new FixtureError("cleanup cancellation barrier deadline"));
+    }, 60000);
+    function finish(error?: Error): void {
+      watcher.close();
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    }
+    function inspect(): void {
+      try {
+        if (!existsSync(dirname(path)))
+          throw new FixtureError("owned cancellation directory retired");
+        if (existsSync(path) && observed(readFileSync(path, "utf8"))) finish();
+      } catch (error) {
+        finish(error instanceof Error ? error : new FixtureError("cancellation barrier failed"));
+      }
+    }
+    watcher.on("error", finish);
+    inspect();
+  });
+}
+
 export async function entryTool(tool: string, args: string[]): Promise<void> {
-  if (tool === "ip") return;
+  if (tool === "ip") {
+    const barrier = process.env.FVOCI_FIXTURE_MONITOR_BARRIER;
+    if (!barrier) return;
+    const stopped = new Promise<void>((resolve) => {
+      process.once("SIGTERM", resolve);
+    });
+    writeFileSync(barrier + ".ready", "ready");
+    await stopped;
+    writeFileSync(barrier + ".retiring", "retiring");
+    const marks = process.env.NET_MARKS_LOG ?? "";
+    const latched = cancellationBarrier(marks, (text) =>
+      text.includes("# fvoci: group cancellation status 143\n"),
+    );
+    process.kill(process.ppid, "SIGTERM");
+    await latched;
+    return;
+  }
   if (tool === "bun" && args[1]?.endsWith("/tools/web-e2e/run-web-e2e.ts")) {
     const mode = args[2];
     if (mode === "group-wrapper") {
@@ -126,6 +173,11 @@ export async function entryTool(tool: string, args: string[]): Promise<void> {
       process.exit(Number(process.env.FVOCI_TEST_RUN_GROUP_EXIT ?? "0"));
     }
     if (mode === "group-runtime" && process.env.FVOCI_FIXTURE_TIMER === "1") {
+      if (process.env.FVOCI_FIXTURE_MONITOR_BARRIER)
+        await cancellationBarrier(
+          process.env.FVOCI_FIXTURE_MONITOR_BARRIER + ".ready",
+          (text) => text === "ready",
+        );
       if (process.env.FVOCI_FIXTURE_TIMER_NAMESPACES)
         appendFileSync(
           process.env.FVOCI_FIXTURE_TIMER_NAMESPACES,
@@ -509,6 +561,7 @@ async function ciShardFixture(source: string): Promise<void> {
       "timer initial environment or cleanup differs",
     );
     dispatchCases(timer, checkout);
+    await cleanupCancellationCases(timer, checkout, directory);
     evidenceExport(checkout);
     await retention(checkout);
     console.log("run-ci-shard-fixture-test: ok");
@@ -676,6 +729,65 @@ function dispatchCases(script: string, root: string): void {
 }
 
 /** The production initial namespace: per-run defaults; explicit paths survive. */
+async function cleanupCancellationCases(
+  module: string,
+  root: string,
+  directory: string,
+): Promise<void> {
+  for (const expected of [143, 7]) {
+    const barrier = join(directory, "cleanup-cancel-" + String(expected)),
+      temporary = join(directory, "cleanup-tmp-" + String(expected));
+    mkdirSync(temporary);
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", module, "group-wrapper", "v050-task-timer.spec.ts"],
+      {
+        env: {
+          ...process.env,
+          ROOT: root,
+          CARGO_TARGET_DIR: join(root, "target"),
+          TMPDIR: temporary,
+          FVOCI_E2E_PENDING: "",
+          FVOCI_E2E_SHARED_SERVICES: "1",
+          TEST_DATABASE_URL: "fixture",
+          FVOCI_TEST_PG_CONTAINER: "fixture",
+          FVOCI_MEILI_URL: "fixture",
+          FVOCI_MEILI_KEY: "fixture",
+          MEILI_MASTER_KEY: "fixture",
+          FVOCI_TEST_MEILI_CONTAINER: "fixture",
+          FVOCI_W5_EVIDENCE_DIR: "",
+          FVOCI_FIXTURE_MONITOR_BARRIER: barrier,
+          FVOCI_TEST_TIMER_FAIL_FILTER:
+            expected === 7
+              ? [TIMER_FILTERS.new_control, TIMER_FILTERS.recovery, TIMER_FILTERS.restart].join("|")
+              : "",
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 60000,
+        killSignal: "SIGKILL",
+      },
+    );
+    const [stdout, stderr, status] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    check(
+      status === expected,
+      `cleanup-time cancellation expected ${String(expected)}, received ${String(status)}: ${stderr}`,
+    );
+    check(
+      existsSync(barrier + ".retiring"),
+      "cancellation did not occur during monitor retirement",
+    );
+    check(
+      argvRows(stdout).length === 1,
+      "cleanup-time cancellation launched another timer runtime",
+    );
+  }
+}
+
 function evidenceExport(root: string): void {
   const clean: Env = { ...process.env };
   delete clean.FVOCI_W5_EVIDENCE_DIR;

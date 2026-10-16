@@ -1314,167 +1314,185 @@ export async function retainFailureArtifacts(env: NodeJS.ProcessEnv): Promise<nu
 export async function groupWrapper(argv: string[]): Promise<number> {
   const root = process.env.ROOT || fail("ROOT is required");
   if (!process.env.CARGO_TARGET_DIR) fail("CARGO_TARGET_DIR is required");
-  for (const args of groupInvocations(argv, process.env)) {
-    const run = mkdtempSync(join(tmpdir(), "fvoci-web-e2e."));
-    const env = groupEnvironment(run, args, process.env),
-      label = env.GROUP_LABEL ?? "default-suite";
-    let status = 0,
-      interrupted = 0;
-    type Child = ReturnType<typeof Bun.spawn>;
-    let child: Child | undefined, monitor: Child | undefined;
-    const report = (text: string) => {
-      try {
-        process.stderr.write(text);
-      } catch {
-        /* closed reader */
-      }
-    };
-    const send = (signal: NodeJS.Signals) => {
-      if (child) {
-        try {
-          process.kill(-child.pid, signal);
-        } catch {
-          /* already reaped */
-        }
-      }
-    };
-    const signals: [NodeJS.Signals, number][] = [
-      ["SIGHUP", 129],
-      ["SIGINT", 130],
-      ["SIGTERM", 143],
-      ["SIGPIPE", 141],
-    ];
-    const handlers = signals.map(([signal, code]) => {
-      const handler = () => {
-        interrupted ||= code;
-        send(signal);
-      };
-      process.on(signal, handler);
-      return [signal, handler] as const;
-    });
-    const closed = () => {
-      interrupted ||= 141;
-      send("SIGPIPE");
-    };
-    process.stderr.on("error", closed);
-    const mark = (text: string) => {
-      const micros = Math.floor((performance.timeOrigin + performance.now()) * 1000);
-      const stamp =
-        new Date(Math.floor(micros / 1_000_000) * 1000).toISOString().slice(0, 19) +
-        "." +
-        String(micros % 1_000_000).padStart(6, "0");
-      appendFileSync(env.NET_MARKS_LOG as string, `[${stamp}] # fvoci: ${text}\n`);
-    };
+  type Child = ReturnType<typeof Bun.spawn>;
+  let child: Child | undefined,
+    interrupted = 0,
+    retiring = false;
+  let markCancellation: ((text: string) => void) | undefined;
+  const cancel = (signal: NodeJS.Signals, code: number) => {
+    if (interrupted) return;
+    interrupted = code;
     try {
-      if (
-        !existsSync(join(root, "apps/web/dist")) ||
-        !statSync(join(root, "apps/web/dist")).isDirectory()
-      )
-        fail("missing apps/web/dist; build web assets before running groups");
-      cpSync(join(root, "apps/web/dist"), env.FVOCI_STATIC_DIR as string, {
-        recursive: true,
-        preserveTimestamps: true,
-      });
-      report(`=== web e2e group: ${label} ===\n`);
-      const shared = env.FVOCI_E2E_SHARED_SERVICES === "1";
-      if (shared)
-        for (const name of [
-          "TEST_DATABASE_URL",
-          "FVOCI_TEST_PG_CONTAINER",
-          "FVOCI_MEILI_URL",
-          "FVOCI_MEILI_KEY",
-          "MEILI_MASTER_KEY",
-          "FVOCI_TEST_MEILI_CONTAINER",
-        ])
-          if (!env[name])
-            fail(
-              `FVOCI_E2E_SHARED_SERVICES=1 requires ${name} from the scope that started the services`,
-            );
-      writeFileSync(env.NET_MONITOR_LOG as string, "");
-      if (Bun.which("ip", { PATH: env.PATH })) {
-        const fd = openSync(env.NET_MONITOR_LOG as string, "a");
-        try {
-          monitor = Bun.spawn(["ip", "-o", "-tshort", "monitor", "address", "link"], {
-            env: { ...env, TZ: "UTC" },
-            stdin: "ignore",
-            stdout: fd,
-            stderr: fd,
-          });
-        } finally {
-          closeSync(fd);
-        }
-        env.NET_MONITOR_PID = String(monitor.pid);
-        mark(`netlink monitor started (ip monitor address link, pid ${String(monitor.pid)})`);
-      } else {
-        mark("ip (iproute2) not found; no netlink event log");
-        report(`warning: ip (iproute2) not found; no netlink event log for group ${label}\n`);
-      }
-      mark(
-        shared
-          ? "using shared test containers (postgres, meilisearch)"
-          : "starting test containers (postgres, meilisearch)",
-      );
-      if (interrupted) throw new RuntimeExit(interrupted);
-      child = Bun.spawn(
-        [
-          "setsid",
-          ...(shared
-            ? []
-            : [
-                "bash",
-                join(root, "scripts/start-test-postgres.sh"),
-                "bash",
-                join(root, "scripts/start-test-meili.sh"),
-              ]),
-          process.execPath,
-          "--no-env-file",
-          import.meta.path,
-          "group-runtime",
-          ...args,
-        ],
-        { cwd: root, env, stdin: "ignore", stdout: "inherit", stderr: "inherit" },
-      );
-      status = await child.exited;
-      status = interrupted || status;
-    } catch (error) {
-      status = interrupted || (error instanceof RuntimeExit ? error.status : 1);
-      if (error instanceof CheckError) report(error.message + "\n");
-    } finally {
-      for (const [signal, handler] of handlers) process.removeListener(signal, handler);
-      const ignore = () => {};
-      for (const [signal] of signals) process.on(signal, ignore);
-      process.stderr.removeListener("error", closed);
-      process.stderr.on("error", ignore);
-      try {
-        if (monitor) {
-          if (monitor.exitCode === null && monitor.signalCode === null) monitor.kill("SIGTERM");
-          await monitor.exited;
-        }
-      } catch {
-        report(`web-e2e group ${label}: could not retire netlink monitor\n`);
-        status ||= 1;
-      }
-      try {
-        mark(`group exiting with status ${String(status)}`);
-      } catch {
-        /* diagnostic only */
-      }
-      if (status !== 0 && (await retainFailureArtifacts(env)) !== 0)
-        report(
-          `web-e2e group ${label}: failure artifacts are incomplete; the group verdict stays exit ${String(status)}\n`,
-        );
-      try {
-        rmSync(run, { recursive: true, force: true });
-      } catch {
-        report(`web-e2e group ${label}: could not remove its run directory ${run}\n`);
-        status ||= 1;
-      }
-      process.stderr.removeListener("error", ignore);
-      for (const [signal] of signals) process.removeListener(signal, ignore);
+      markCancellation?.("group cancellation status " + String(code));
+    } catch {
+      /* diagnostic only */
     }
-    if (status !== 0) return status;
+    // Record cleanup-time cancellation without interrupting necessary retirement.
+    if (!retiring && child) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        /* already reaped */
+      }
+    }
+  };
+  const signals: [NodeJS.Signals, number][] = [
+    ["SIGHUP", 129],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["SIGPIPE", 141],
+  ];
+  const handlers = signals.map(([signal, code]) => {
+    const handler = () => {
+      cancel(signal, code);
+    };
+    process.on(signal, handler);
+    return [signal, handler] as const;
+  });
+  const closed = () => {
+    cancel("SIGPIPE", 141);
+  };
+  process.stderr.on("error", closed);
+  try {
+    for (const args of groupInvocations(argv, process.env)) {
+      if (interrupted) return interrupted;
+      child = undefined;
+      retiring = false;
+      const run = mkdtempSync(join(tmpdir(), "fvoci-web-e2e."));
+      const env = groupEnvironment(run, args, process.env),
+        label = env.GROUP_LABEL ?? "default-suite";
+      let status = 0;
+      let monitor: Child | undefined;
+      const report = (text: string) => {
+        try {
+          process.stderr.write(text);
+        } catch {
+          /* closed reader */
+        }
+      };
+      const mark = (text: string) => {
+        const micros = Math.floor((performance.timeOrigin + performance.now()) * 1000);
+        const stamp =
+          new Date(Math.floor(micros / 1_000_000) * 1000).toISOString().slice(0, 19) +
+          "." +
+          String(micros % 1_000_000).padStart(6, "0");
+        appendFileSync(env.NET_MARKS_LOG as string, `[${stamp}] # fvoci: ${text}\n`);
+      };
+      markCancellation = mark;
+      try {
+        if (
+          !existsSync(join(root, "apps/web/dist")) ||
+          !statSync(join(root, "apps/web/dist")).isDirectory()
+        )
+          fail("missing apps/web/dist; build web assets before running groups");
+        cpSync(join(root, "apps/web/dist"), env.FVOCI_STATIC_DIR as string, {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+        report(`=== web e2e group: ${label} ===\n`);
+        const shared = env.FVOCI_E2E_SHARED_SERVICES === "1";
+        if (shared)
+          for (const name of [
+            "TEST_DATABASE_URL",
+            "FVOCI_TEST_PG_CONTAINER",
+            "FVOCI_MEILI_URL",
+            "FVOCI_MEILI_KEY",
+            "MEILI_MASTER_KEY",
+            "FVOCI_TEST_MEILI_CONTAINER",
+          ])
+            if (!env[name])
+              fail(
+                `FVOCI_E2E_SHARED_SERVICES=1 requires ${name} from the scope that started the services`,
+              );
+        writeFileSync(env.NET_MONITOR_LOG as string, "");
+        if (Bun.which("ip", { PATH: env.PATH })) {
+          const fd = openSync(env.NET_MONITOR_LOG as string, "a");
+          try {
+            monitor = Bun.spawn(["ip", "-o", "-tshort", "monitor", "address", "link"], {
+              env: { ...env, TZ: "UTC" },
+              stdin: "ignore",
+              stdout: fd,
+              stderr: fd,
+            });
+          } finally {
+            closeSync(fd);
+          }
+          env.NET_MONITOR_PID = String(monitor.pid);
+          mark(`netlink monitor started (ip monitor address link, pid ${String(monitor.pid)})`);
+        } else {
+          mark("ip (iproute2) not found; no netlink event log");
+          report(`warning: ip (iproute2) not found; no netlink event log for group ${label}\n`);
+        }
+        mark(
+          shared
+            ? "using shared test containers (postgres, meilisearch)"
+            : "starting test containers (postgres, meilisearch)",
+        );
+        if (interrupted) throw new RuntimeExit(interrupted);
+        child = Bun.spawn(
+          [
+            "setsid",
+            ...(shared
+              ? []
+              : [
+                  "bash",
+                  join(root, "scripts/start-test-postgres.sh"),
+                  "bash",
+                  join(root, "scripts/start-test-meili.sh"),
+                ]),
+            process.execPath,
+            "--no-env-file",
+            import.meta.path,
+            "group-runtime",
+            ...args,
+          ],
+          { cwd: root, env, stdin: "ignore", stdout: "inherit", stderr: "inherit" },
+        );
+        status = await child.exited;
+        status ||= interrupted;
+      } catch (error) {
+        status = error instanceof RuntimeExit ? error.status : 1;
+        if (error instanceof CheckError) report(error.message + "\n");
+      } finally {
+        retiring = true;
+        try {
+          if (monitor) {
+            if (monitor.exitCode === null && monitor.signalCode === null) monitor.kill("SIGTERM");
+            await monitor.exited;
+          }
+        } catch {
+          report(`web-e2e group ${label}: could not retire netlink monitor\n`);
+          status ||= 1;
+        }
+        status ||= interrupted;
+        try {
+          mark(`group exiting with status ${String(status)}`);
+        } catch {
+          /* diagnostic only */
+        }
+        if (status !== 0 && (await retainFailureArtifacts(env)) !== 0)
+          report(
+            `web-e2e group ${label}: failure artifacts are incomplete; the group verdict stays exit ${String(status)}\n`,
+          );
+        try {
+          rmSync(run, { recursive: true, force: true });
+        } catch {
+          report(`web-e2e group ${label}: could not remove its run directory ${run}\n`);
+          status ||= 1;
+        }
+      }
+      // Process queued signal callbacks before opening another fresh namespace.
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      status ||= interrupted;
+      if (status !== 0) return status;
+    }
+    return interrupted;
+  } finally {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    process.stderr.removeListener("error", closed);
   }
-  return 0;
 }
 
 /** The existing group runtime, shared by ordinary host and image consumers. */
