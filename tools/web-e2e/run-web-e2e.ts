@@ -67,13 +67,13 @@ export function containerImage(
   return { image, sdk, local };
 }
 
-// This first ordinary-browser slice retains the complete registered shard.
-// The other shards still have host Docker/psql fixture oracles to migrate;
+// Each admitted ordinary-browser shard retains every registered group.
+// Timer supervision and service-ledger fixtures retain their host boundary;
 // they are never silently run with a socket or with those assertions skipped.
 export function containerShard(value: string | undefined): string {
-  if (!value || !["1", "2", "4", "6", "7"].includes(value))
+  if (!value || !["1", "2", "3", "4", "6", "7"].includes(value))
     fail(
-      "shared containers support complete shards 1,2,4,6,7; timer/archive/service-ledger fixtures retain their host boundary",
+      "shared containers support complete shards 1,2,3,4,6,7; timer/service-ledger fixtures retain their host boundary",
     );
   return value;
 }
@@ -242,7 +242,7 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
     !!browserPhase ||
     env.FVOCI_E2E_PENDING === "1" ||
     specs.length > 0 ||
-    ["0", "3", "5"].includes(shard);
+    ["0", "5"].includes(shard);
   if (hostRequired && imageOptions.length)
     fail("container image options cannot alter a required host/CI selection");
   return {
@@ -286,9 +286,9 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     );
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
   if (request.route !== "host") {
-    const dockerShards = request.route === "hybrid" ? "1,2,4,6,7" : shard;
+    const dockerShards = request.route === "hybrid" ? "1,2,3,4,6,7" : shard;
     process.stderr.write(
-      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=0,3,5" : ""}\n`,
+      `web-e2e route=docker shards=${dockerShards}${request.route === "hybrid" ? " host_required=0,5" : ""}\n`,
     );
     const status = await containerBrowser([
       root,
@@ -536,7 +536,7 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     if (browserPhase === "consume")
       await stage("browser-handoff-consume", handoff("consume"), root);
     else await build();
-    for (const index of request.route === "hybrid" ? ["0", "3", "5"] : [shard]) {
+    for (const index of request.route === "hybrid" ? ["0", "5"] : [shard]) {
       process.stderr.write(`web-e2e host_complete_shard=${index}\n`);
       for (const specs of plan[Number(index)] ?? []) {
         const status = await group(specs);

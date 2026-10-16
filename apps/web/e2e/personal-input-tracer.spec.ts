@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -46,36 +47,12 @@ const taskSchema = z
 // role. Credentials remain in the child environment and never enter evidence.
 function committed(workspaceId: string, select: string): unknown {
   z.guid().parse(workspaceId);
-  const url = new URL(process.env.DATABASE_APP_URL ?? "");
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  if (!container) throw new Error("isolated PostgreSQL container is required");
   try {
-    const output = execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        "-e",
-        `PGPASSWORD=${decodeURIComponent(url.password)}`,
-        container,
-        "psql",
-        "-X",
-        "-qAt",
-        "-h",
-        "127.0.0.1",
-        "-U",
-        decodeURIComponent(url.username),
-        "-d",
-        url.pathname.slice(1),
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      {
-        input: `BEGIN; SET LOCAL app.tenant_id='${workspaceId}'; ${select}; ROLLBACK;`,
-        stdio: "pipe",
-        encoding: "utf8",
-      },
-    );
+    const output = execFileSync(process.execPath, fixtureQueryArgs("app"), {
+      input: `BEGIN; SET LOCAL app.tenant_id='${workspaceId}'; ${select}; ROLLBACK;`,
+      stdio: "pipe",
+      encoding: "utf8",
+    });
     return JSON.parse(output.trim()) as unknown;
   } catch {
     throw new Error("restricted committed DB observation failed (credentials omitted)");
