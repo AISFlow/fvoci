@@ -714,6 +714,7 @@ jobs:
           path: |
             ${{ runner.temp }}/fvoci-web-build-handoff/handoff.json
             ${{ runner.temp }}/fvoci-web-build-handoff/payload.tar
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
       - name: Retain failed current compilation diagnostics

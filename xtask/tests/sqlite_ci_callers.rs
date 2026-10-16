@@ -553,7 +553,15 @@ fn contract(root: &Path) -> Check {
                 contains(text_of(ready), "--github-env \"$GITHUB_ENV\"", what)?;
             }
             for preparation in [prepare, ready] {
-                ensure(!masked(text_of(preparation)), || {
+                let preparation = text_of(preparation);
+                let unguarded = if workflow == "web" && *name == "workspace-browser-shard" {
+                    let host = "        if: contains(fromJSON('[0,3,5]'), matrix.shard)\n";
+                    contains(preparation, host, what)?;
+                    preparation.replacen(host, "", 1)
+                } else {
+                    preparation.to_owned()
+                };
+                ensure(!masked(&unguarded), || {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
             }
@@ -1035,6 +1043,21 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             "workspace-browser-shard",
             "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
             "needs: [ci-plan, workspace-browser-container-build]",
+        ),
+        (
+            "workspace-browser-shard",
+            "id: sqlite\n",
+            "id: sqlite\n        if: false\n",
+        ),
+        (
+            "workspace-browser-shard",
+            "id: sqlite\n",
+            "id: sqlite\n        continue-on-error: true\n",
+        ),
+        (
+            "workspace-browser-shard",
+            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0,3,5]'), matrix.shard)",
+            "      - name: Prepare pinned SQLite root build inputs\n        if: contains(fromJSON('[0,3]'), matrix.shard)",
         ),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         (
