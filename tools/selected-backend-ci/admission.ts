@@ -138,6 +138,7 @@ export const registeredModules = [
   "tools/selected-backend-ci/config-list.ts",
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
+  "tools/selected-backend-ci/types.ts",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/equal-work.ts",
   "tools/selected-backend-ci/drivers/equal-work-policy.ts",
