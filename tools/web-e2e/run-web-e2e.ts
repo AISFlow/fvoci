@@ -255,6 +255,7 @@ async function webEntry(root: string, argv: string[]): Promise<number> {
 }
 
 async function webEntryBody(root: string, argv: string[]): Promise<number> {
+  if (entryCancellation) return entryCancellation;
   root = realpathSync(root);
   const request = webRequest(argv, process.env);
   const { shard, selected, committed, selectedPhase, browserPhase, specs } = request;
@@ -810,6 +811,7 @@ async function browserServices(
       )
     )
       fail("owned PostgreSQL version mismatch");
+    if (interrupted || entryCancellation) throw new RuntimeExit(interrupted || entryCancellation);
     status = await body({
       TEST_DATABASE_URL: `postgres://postgres:${password}@fvoci-pg:5432/postgres`,
       FVOCI_TEST_PG_CONTAINER: pg,
@@ -1650,6 +1652,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     services: NodeJS.ProcessEnv = {},
     shard = "",
   ): Promise<number> {
+    if (entryCancellation) return entryCancellation;
     const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
     const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
     const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
@@ -1839,6 +1842,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
   mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
   let firstFailure = 0;
   for (let at = 0; at < shards.length; at += 2) {
+    if (entryCancellation) return firstFailure || entryCancellation;
     const settled = await Promise.allSettled(
       shards.slice(at, at + 2).map(async (shard) => {
         const status = await browserServices(
