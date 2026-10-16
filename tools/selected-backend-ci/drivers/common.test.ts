@@ -88,8 +88,13 @@ describe("known browser checkpoint", () => {
   test("reads only the emitted location fields", () => {
     const found = project({
       status: "failed",
-      errorLocation: { file: specFile, line: 413, column: 5 },
-      error: { message: secret, stack: secret, snippet: secret },
+      errorLocation: { file: specFile, line: 9, column: 1 },
+      error: {
+        location: { file: specFile, line: 413, column: 5 },
+        message: secret,
+        stack: secret,
+        snippet: secret,
+      },
       errors: [{ message: secret, location: { file: specFile, line: 9, column: 1 } }],
     });
     expect(found).toEqual({
@@ -113,6 +118,23 @@ describe("known browser checkpoint", () => {
           ),
         ).known_browser_checkpoint,
       ).toBeNull();
+  });
+  test("an invalid canonical location cannot borrow a legacy checkpoint", () => {
+    for (const location of [
+      { file: secret, line: 413 },
+      { file: specFile, line: 0 },
+      { file: specFile, line: 10001 },
+      { file: specFile, line: 4.5 },
+      { file: specFile, line: "413" },
+    ]) {
+      const found = project({
+        status: "failed",
+        error: { location, message: secret, stack: secret },
+        errorLocation: { file: specFile, line: 9 },
+      });
+      expect(found.known_browser_checkpoint).toBeNull();
+      expect(JSON.stringify(found)).not.toContain("PRIVATE");
+    }
   });
   test("timedOut, the auxiliary source and the first error location", () => {
     const timed = project({
