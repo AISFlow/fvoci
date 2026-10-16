@@ -374,6 +374,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
     pyEq(get(publish[0] as Mapping, "with"), {
       name: "web-current-build-${{ github.run_attempt }}",
       path: "${{ runner.temp }}/fvoci-web-build-handoff/handoff.json\n${{ runner.temp }}/fvoci-web-build-handoff/payload.tar\n",
+      "compression-level": 0,
       "if-no-files-found": "error",
       "retention-days": 1,
     }) &&
