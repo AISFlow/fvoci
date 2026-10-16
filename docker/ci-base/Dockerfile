@@ -1,4 +1,4 @@
-# Tool-only CI image; no application source, credentials or SQLite prefix.
+# CI tools and pinned native SQLite SDK; no application source or credentials.
 # Borrow the Debian bookworm CA bundle from the digest-pinned Rust image only
 # for HTTPS bootstrap before apt installs Ubuntu's ca-certificates package.
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS rust-toolchain
@@ -93,7 +93,7 @@ RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.
  && bun --bun x --no-install playwright install-deps chromium \
  && test -n "$(find /ci-web-archives -maxdepth 1 -name '*.deb' -print -quit)"
 
-FROM rust-tools AS ci-base
+FROM rust-tools AS ci-base-tools
 # CI tools use pinned official binaries.
 COPY --from=bun-tool --chown=0:0 /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx \
@@ -119,7 +119,7 @@ WORKDIR /home/ci
 
 # Browser-only extension of the exact pinned common recipe above. Building both
 # targets avoids inventing a GHCR parent digest before its first publication.
-FROM ci-base AS ci-web
+FROM ci-base-tools AS ci-web-tools
 USER root
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN --mount=type=bind,from=ci-web-debs,source=/ci-web-archives,target=/tmp/ci-web-prefetched,readonly \
@@ -136,4 +136,49 @@ RUN --mount=type=bind,from=ci-web-debs,source=/ci-web-archives,target=/tmp/ci-we
  && cat /usr/local/share/ci-web-build-packages.txt \
  && rm /etc/apt/apt.conf.d/99-ci-web-archives \
  && rm -rf /tmp/ci-web /tmp/ci-web-archives /root/.bun /var/lib/apt/lists/*
+USER 1000:1000
+
+# Compile the existing task tool in a builder-only source stage. Both image
+# variants use this exact binary; neither final image contains the checkout.
+FROM ci-base-tools AS sqlite-tool-build
+USER root
+COPY xtask/Cargo.toml xtask/Cargo.lock /tmp/ci-sqlite-tool/xtask/
+COPY xtask/src /tmp/ci-sqlite-tool/xtask/src
+COPY xtask/*.tsv /tmp/ci-sqlite-tool/xtask/
+COPY tests/support/official_sqld.rs /tmp/ci-sqlite-tool/tests/support/official_sqld.rs
+RUN --mount=type=cache,target=/tmp/sqlite-ci-cargo \
+    --mount=type=cache,target=/tmp/sqlite-ci-target \
+    CARGO_HOME=/tmp/sqlite-ci-cargo CARGO_BUILD_JOBS=2 \
+      cargo build --locked --release --manifest-path /tmp/ci-sqlite-tool/xtask/Cargo.toml \
+      --target-dir /tmp/sqlite-ci-target --jobs 2 \
+ && install -o 0 -g 0 -m 0755 /tmp/sqlite-ci-target/release/xtask /usr/local/bin/fvoci-ci-tools
+
+# Native inputs are measured in each variant's own final compiler/header/ABI
+# environment. Browser APT closure must not borrow the base SDK's identity.
+FROM ci-base-tools AS sqlite-base-build
+USER root
+COPY --from=sqlite-tool-build /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci-ci-tools
+RUN mkdir -m 0755 /opt/fvoci-sqlite \
+ && /usr/local/bin/fvoci-ci-tools sqlite-ci --seal-image-sdk --parent /opt/fvoci-sqlite \
+ && chmod -R a-w /opt/fvoci-sqlite
+# Mutable build prefixes start private; the sealed public SDK is readable by any UID.
+RUN chmod -R a+rX,a-w /opt/fvoci-sqlite
+
+FROM ci-web-tools AS sqlite-web-build
+USER root
+COPY --from=sqlite-tool-build /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci-ci-tools
+# Reuse the authenticated archive download, then build against this actual SDK.
+COPY --from=sqlite-base-build /opt/fvoci-sqlite/sqlite-amalgamation-3530400.zip /opt/fvoci-sqlite/sqlite-amalgamation-3530400.zip
+RUN /usr/local/bin/fvoci-ci-tools sqlite-ci --seal-image-sdk --parent /opt/fvoci-sqlite \
+ && chmod -R a-w /opt/fvoci-sqlite
+RUN chmod -R a+rX,a-w /opt/fvoci-sqlite
+
+FROM ci-base-tools AS ci-base
+COPY --from=sqlite-tool-build --chown=0:0 /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci-ci-tools
+COPY --from=sqlite-base-build --chown=0:0 /opt/fvoci-sqlite /opt/fvoci-sqlite
+USER 1000:1000
+
+FROM ci-web-tools AS ci-web
+COPY --from=sqlite-tool-build --chown=0:0 /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci-ci-tools
+COPY --from=sqlite-web-build --chown=0:0 /opt/fvoci-sqlite /opt/fvoci-sqlite
 USER 1000:1000
