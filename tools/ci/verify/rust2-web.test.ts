@@ -15,6 +15,7 @@ import {
   verifyCollaborationPreparationJobs,
   verifyNoRunScopedCacheKeys,
   verifyWebHostInputsJobs,
+  verifyWebContainerHandoffJobs,
   WEB_SQLITE_JOBS,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
@@ -427,6 +428,43 @@ test("normal browser job budget is measured and fail closed", () => {
   expect(verifyWebBrowserBudgetJobs(missing, "20")).toEqual([
     "web: normal browser shard must be a mapping",
   ]);
+});
+
+test("ordinary image route preserves every host shard and qualified current-run artifact", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyWebContainerHandoffJobs(jobs)).toEqual([]);
+  const mutations: ((bad: Mapping) => void)[] = [
+    (bad) => {
+      delete bad["workspace-browser-container-build"];
+    },
+    (bad) => {
+      (bad["workspace-browser-container-build"] as Mapping)["timeout-minutes"] = 21;
+    },
+    (bad) => {
+      stepWith(bad, "workspace-browser-shard", byId("container_browser"))["run"] = "true";
+    },
+    (bad) => {
+      stepWith(bad, "workspace-browser-shard", byId("browser"))["if"] = "false";
+    },
+    (bad) => {
+      stepWith(bad, "workspace-browser-shard", byId("sqlite"))["if"] = "true";
+    },
+    (bad) => {
+      const dl = stepWith(
+        bad,
+        "workspace-browser-shard",
+        (step) =>
+          usesOf(step).startsWith("actions/download-artifact") &&
+          String((step["with"] as Mapping)["artifact-ids"]).includes("container-build"),
+      );
+      (dl["with"] as Mapping)["run-id"] = "foreign";
+    },
+  ];
+  for (const mutate of mutations) {
+    const bad = clone(jobs);
+    mutate(bad);
+    expect(verifyWebContainerHandoffJobs(bad).length).toBeGreaterThan(0);
+  }
 });
 
 test("web current build handoff positive and fail closed", () => {

@@ -6,6 +6,7 @@
 import {
   appendFileSync,
   chmodSync,
+  copyFileSync,
   closeSync,
   existsSync,
   fchmodSync,
@@ -20,7 +21,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
@@ -890,15 +891,22 @@ export function sqliteEnvironment(text: string): Record<string, string> {
 }
 
 async function browserPhase(root: string, phase: string, shards: string[]): Promise<number> {
-  if (process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1" || !["prepare", "consume"].includes(phase))
+  if (!process.env.FVOCI_WEB_CONTAINER_IMAGE || !["prepare", "consume"].includes(phase))
     fail("ordinary container phase required");
   process.env.ROOT = root;
   process.env.FVOCI_COLLAB_ENGINE = join(root, "crates/collab-engine/target/debug/collab-engine");
   process.env.FVOCI_WEB_BUILD_PHASE = phase;
   try {
-    if (phase === "prepare") {
-      if (shards.length || existsSync(join(root, "apps/web/dist")))
-        fail("producer requires absent dist and no shard");
+    qualifyCommittedApi(
+      root,
+      { shard: shards[0] ?? "", selected: false, browserPhase: phase as "prepare" | "consume" },
+      process.env,
+    );
+    if (phase === "prepare" && (shards.length || existsSync(join(root, "apps/web/dist"))))
+      fail("producer requires absent dist and no shard");
+    // Isolated jobs reconstruct their locked inputs; only the qualified native
+    // packet crosses jobs. Local cohorts already share these bytes read-only.
+    if (phase === "prepare" || process.env.FVOCI_WEB_CONTAINER_FRESH_INPUTS === "1") {
       await stage("cargo-fetch", ["cargo", "fetch", "--locked"], root);
       await stage(
         "engine-fetch",
@@ -924,7 +932,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
       );
     }
     const sdk = containerImage(
-      process.env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+      process.env.FVOCI_WEB_CONTAINER_IMAGE,
       process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
       process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1",
       process.env,
@@ -1505,17 +1513,43 @@ export async function qualifyCohortHostProgram(
     fail("cohort reuse cannot replace any in-container program");
 }
 
-/** One pinned image, existing producer packet, then one real isolated shard. */
-async function containerBrowser(argv: string[]): Promise<number> {
-  if (!argv[0] || !["--ci-shard", "--ci-shards"].includes(argv[1] ?? ""))
-    throw new UsageError("container-browser ROOT {--ci-shard N|--ci-shards N,N,...}");
+export function containerFailureArtifacts(
+  output: string,
+  runDirectory: string,
+): string | undefined {
+  if (Buffer.byteLength(output) > 16384) fail("container output exceeds diagnostic bound");
+  const lines = output.split("\n").filter((line) => line.startsWith("failure-artifacts="));
+  if (!lines.length) return undefined;
+  const match =
+    lines.length === 1 &&
+    /^failure-artifacts=\/fvoci-run\/tmp\/(fvoci-collab-e2e-fail\.[A-Za-z0-9]+)$/.exec(
+      lines[0] ?? "",
+    );
+  if (!match) fail("container failure diagnostics require an owned temporary directory");
+  const directory = join(runDirectory, "tmp", match[1] ?? "");
+  if (realpathSync(directory) !== directory || !isPrivateDirectory(directory))
+    fail("container failure diagnostics are not private and physical");
+  return directory;
+}
+
+export function containerRequest(argv: string[], env: NodeJS.ProcessEnv) {
+  const mode = argv[1];
+  if (!argv[0] || !["--prepare", "--consume", "--ci-shard", "--ci-shards"].includes(mode ?? ""))
+    throw new UsageError(
+      "container-browser ROOT {--prepare|--consume N|--ci-shard N|--ci-shards N,N,...}",
+    );
   const options = new Map<string, string>();
-  for (let at = 3; at < argv.length; at++) {
+  for (let at = mode === "--prepare" ? 2 : 3; at < argv.length; at++) {
     const name = argv[at] ?? "";
     const value = argv[at + 1];
     if (options.has(name)) throw new UsageError("duplicate container option");
     if (name === "--local-image-sdk") options.set(name, "1");
-    else if (["--image-pin", "--sdk-sha256", "--reuse-cohort"].includes(name) && value) {
+    else if (
+      ["--image-pin", "--sdk-sha256", "--reuse-cohort", "--handoff", "--handoff-sha256"].includes(
+        name,
+      ) &&
+      value
+    ) {
       options.set(name, value);
       at++;
     } else throw new UsageError("unknown or incomplete container option");
@@ -1524,22 +1558,56 @@ async function containerBrowser(argv: string[]): Promise<number> {
     options.get("--image-pin") ?? CI_WEB_IMAGE,
     options.get("--sdk-sha256") ?? "",
     options.has("--local-image-sdk"),
-    process.env,
+    env,
   );
-  const root = realpathSync(argv[0]);
-  if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
-  const shards = (argv[2] ?? "").split(",").map(containerShard);
-  if (new Set(shards).size !== shards.length || (argv[1] === "--ci-shard" && shards.length !== 1))
-    fail("duplicate or invalid shard selection");
+  const phase = mode === "--prepare" ? "prepare" : mode === "--consume" ? "consume" : "all";
+  const shards = phase === "prepare" ? [] : (argv[2] ?? "").split(",").map(containerShard);
   if (
-    process.env.GITHUB_ACTIONS ||
-    Object.keys(process.env).some((key) => key.startsWith("GITHUB_"))
+    new Set(shards).size !== shards.length ||
+    (mode !== "--ci-shards" && phase !== "prepare" && shards.length !== 1)
   )
-    fail("local container execution cannot impersonate a GitHub job");
+    fail("duplicate or invalid shard selection");
+  const ci =
+    env.GITHUB_ACTIONS !== undefined || Object.keys(env).some((key) => key.startsWith("GITHUB_"));
+  if (
+    ci &&
+    (env.CI !== "true" ||
+      env.GITHUB_ACTIONS !== "true" ||
+      phase === "all" ||
+      env.GITHUB_JOB !==
+        (phase === "prepare" ? "workspace-browser-container-build" : "workspace-browser-shard") ||
+      !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? "") ||
+      !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") ||
+      !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? "") ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? ""))
+  )
+    fail("container phase requires its actual GitHub source/run/attempt/repository/job");
+  if (phase !== "all" && (!options.get("--handoff") || options.has("--reuse-cohort")))
+    fail("separate container phases require an explicit packet path without cohort reuse");
+  if (phase === "all" && (options.has("--handoff") || options.has("--handoff-sha256")))
+    fail("combined local cohort cannot accept a cross-job packet");
+  if (
+    (phase === "consume" && !/^[a-f0-9]{64}$/.test(options.get("--handoff-sha256") ?? "")) ||
+    (phase === "prepare" && options.has("--handoff-sha256"))
+  )
+    fail("consumer requires the successful producer packet SHA-256");
+  return { sdk, phase, shards, ci, options };
+}
+
+/** Shared local/CI execution: one pinned image and the existing qualified packet. */
+async function containerBrowser(argv: string[]): Promise<number> {
+  const { sdk, phase: requestedPhase, shards, ci, options } = containerRequest(argv, process.env);
+  const root = realpathSync(argv[0] ?? fail("container root required"));
+  if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
   const uid = process.getuid?.(),
     gid = process.getgid?.();
   if (!uid || gid === undefined) fail("a non-root POSIX Docker client is required");
+  const orchestratorSource = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  if (ci && orchestratorSource !== process.env.GITHUB_SHA)
+    fail("container checkout differs from tested SHA");
+  checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const image = sdk.image;
+  if (ci) await stage("image-fetch", ["docker", "pull", image], root);
   if (
     !/^linux (?:x86_64|amd64)$/.test(
       checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
@@ -1564,7 +1632,6 @@ async function containerBrowser(argv: string[]): Promise<number> {
         metadata.includes(JSON.stringify(image)))
   )
     fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
-  const orchestratorSource = checkedOutput(["git", "rev-parse", "HEAD"], root);
   const imageSource =
     /^sha256:[a-f0-9]{64} linux amd64 ([a-f0-9]{40}) /.exec(metadata)?.[1] ??
     fail("the pinned image requires its actual source revision");
@@ -1582,6 +1649,61 @@ async function containerBrowser(argv: string[]): Promise<number> {
   const cohort = reuse === undefined ? batch : realpathSync(reuse);
   let run = randomBytes(16).toString("hex");
   const resources = randomBytes(16).toString("hex");
+  const packet = options.get("--handoff");
+  if (packet) {
+    if (
+      !isAbsolute(packet) ||
+      resolve(packet) !== packet ||
+      realpathSync(dirname(packet)) !== dirname(packet) ||
+      statSync(dirname(packet)).uid !== uid ||
+      (requestedPhase === "prepare" && existsSync(packet))
+    )
+      fail("packet requires an owned physical parent and an absent producer destination");
+    if (requestedPhase === "consume") {
+      if (
+        realpathSync(packet) !== packet ||
+        !statSync(packet).isDirectory() ||
+        statSync(packet).uid !== uid
+      )
+        fail("consumer packet must be an owned physical directory");
+      for (const name of ["handoff.json", "payload.tar"]) {
+        const file = join(packet, name);
+        if (
+          lstatSync(file).isSymbolicLink() ||
+          !statSync(file).isFile() ||
+          statSync(file).uid !== uid
+        )
+          fail("consumer packet requires owned regular files");
+      }
+      if (
+        createHash("sha256")
+          .update(readFileSync(join(packet, "handoff.json")))
+          .digest("hex") !== options.get("--handoff-sha256")
+      )
+        fail("consumer packet differs from successful producer digest");
+      if (!ci) {
+        const manifest: unknown = JSON.parse(readFileSync(join(packet, "handoff.json"), "utf8"));
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
+          fail("invalid local packet");
+        const value = manifest as Record<string, unknown>;
+        if (
+          value.source !== source ||
+          value.root !== root ||
+          value.repository !== "local-container" ||
+          value.container_image !== image ||
+          value.container_sdk_sha256 !== sdk.sdk ||
+          value.container_image_source !== imageSource ||
+          typeof value.run !== "string" ||
+          !/^[a-f0-9]{32}$/.test(value.run)
+        )
+          fail("local packet source/image/run mismatch");
+        run = value.run;
+      }
+      mkdirSync(join(batch, "handoff"), { mode: 0o700 });
+      for (const name of ["handoff.json", "payload.tar"])
+        copyFileSync(join(packet, name), join(batch, "handoff", name));
+    }
+  }
   if (cohort !== batch) {
     if (statSync(cohort).uid !== uid || (statSync(cohort).mode & 0o777) !== 0o700)
       fail("owned private producer cohort required");
@@ -1622,7 +1744,9 @@ async function containerBrowser(argv: string[]): Promise<number> {
   const producer = join(cohort, "producer");
   {
     for (const directory of [
-      ...(cohort === batch ? [producer, "cargo", "home", "tmp", "sqlite", "producer-output"] : []),
+      ...(cohort === batch && requestedPhase !== "consume"
+        ? [producer, "cargo", "home", "tmp", "sqlite", "producer-output"]
+        : []),
       ...shards.map((shard) => join(batch, "consumer-" + shard)),
       ...shards.map((shard) => "consumer-output-" + shard),
     ].map((p) => (p.startsWith(batch) ? p : join(batch, p))))
@@ -1631,7 +1755,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     // copies occupy the same physical path inside the image, preserving the
     // existing packet's no-relocation and full-current-input checks.
     for (const directory of [
-      ...(cohort === batch ? [producer] : []),
+      ...(cohort === batch && requestedPhase !== "consume" ? [producer] : []),
       ...shards.map((shard) => join(batch, "consumer-" + shard)),
     ]) {
       checkedOutput(
@@ -1668,11 +1792,23 @@ async function containerBrowser(argv: string[]): Promise<number> {
       CARGO_PROFILE_DEV_DEBUG: "0",
       CARGO_PROFILE_TEST_DEBUG: "0",
       GIT_OPTIONAL_LOCKS: "0",
-      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      ...(ci
+        ? {
+            CI: "true",
+            GITHUB_ACTIONS: "true",
+            GITHUB_SHA: process.env.GITHUB_SHA ?? "",
+            GITHUB_REPOSITORY: process.env.GITHUB_REPOSITORY ?? "",
+            GITHUB_RUN_ID: process.env.GITHUB_RUN_ID ?? "",
+            GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT ?? "",
+            GITHUB_JOB: process.env.GITHUB_JOB ?? "",
+            GITHUB_OUTPUT: "/fvoci-run/github-output",
+          }
+        : { FVOCI_WEB_CONTAINER_LOCAL: "1" }),
       FVOCI_WEB_CONTAINER_IMAGE: image,
       FVOCI_WEB_CONTAINER_LOCAL_IMAGE: sdk.local ? "1" : "0",
       FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
       FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
+      FVOCI_WEB_CONTAINER_FRESH_INPUTS: requestedPhase === "all" ? "0" : "1",
       FVOCI_WEB_CONTAINER_RUN: run,
       FVOCI_WEB_CONTAINER_SOURCE: source,
       FVOCI_WEB_CONTAINER_JOB:
@@ -1694,9 +1830,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
       ])
         variables[name] = services[name] ?? "";
       variables.FVOCI_MEILI_URL = "http://fvoci-meili:7700";
-      variables.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
-        .update(readFileSync(join(cohort, "handoff/handoff.json")))
-        .digest("hex");
+      variables.FVOCI_WEB_BUILD_HANDOFF_SHA256 =
+        options.get("--handoff-sha256") ??
+        createHash("sha256")
+          .update(readFileSync(join(cohort, "handoff/handoff.json")))
+          .digest("hex");
     }
     const envFile = join(batch, phase + shard + ".env");
     writeFileSync(
@@ -1739,25 +1877,26 @@ async function containerBrowser(argv: string[]): Promise<number> {
       args.push("--mount", `type=bind,source=${from},target=${to}${readonly ? ",readonly" : ""}`);
     }
     if (phase === "consume") {
-      args.push(
-        "--network",
-        "fvoci-browser-" + resources + "-" + shard,
-        "--mount",
-        `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
-      );
+      args.push("--network", "fvoci-browser-" + resources + "-" + shard);
+      if (requestedPhase === "all")
+        args.push(
+          "--mount",
+          `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
+        );
       for (const [from, to] of [
         [join(cohort, "handoff"), "/fvoci-run/handoff"],
-        ...["registry", "git", "config", "config.toml"]
+        ...(requestedPhase === "all" ? ["registry", "git", "config", "config.toml"] : [])
           .filter((name) => existsSync(join(cohort, "cargo", name)))
           .map((name) => [join(cohort, "cargo", name), "/fvoci-run/cargo/" + name]),
       ]) {
         if (!from || !to || from.includes(",")) fail("invalid shared native input mount");
         args.push("--mount", `type=bind,source=${from},target=${to},readonly`);
       }
-      args.push(
-        "--mount",
-        `type=bind,source=${runDirectory}/vite-temp,target=${root}/node_modules/.vite-temp`,
-      );
+      if (requestedPhase === "all")
+        args.push(
+          "--mount",
+          `type=bind,source=${runDirectory}/vite-temp,target=${root}/node_modules/.vite-temp`,
+        );
     }
     args.push(
       image,
@@ -1829,17 +1968,55 @@ async function containerBrowser(argv: string[]): Promise<number> {
       });
       if (removed.exitCode !== 0 && result === 0) result = 1;
     } else if (result === 0) result = 1;
+    if (ci && phase === "consume") {
+      try {
+        const output = process.env.GITHUB_OUTPUT;
+        if (!output) fail("consumer GitHub output path required");
+        const retained = join(runDirectory, "github-output");
+        if (existsSync(retained)) {
+          const directory = containerFailureArtifacts(readFileSync(retained, "utf8"), runDirectory);
+          if (directory) appendFileSync(output, "failure-artifacts=" + directory + "\n");
+        }
+        appendFileSync(
+          output,
+          "handoff-diagnostics=" + join(batch, "consumer-output-" + shard) + "\n",
+        );
+      } catch {
+        process.stderr.write("container browser safe diagnostic retention failed\n");
+        result ||= 1;
+      }
+    }
     process.stderr.write(
       `container-browser phase=${phase} shard=${shard || "producer"} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(result)}${phase === "consume" ? " log=" + join(runDirectory, "console.log") : ""}\n`,
     );
     return result;
   }
-  if (cohort === batch) {
+  if (cohort === batch && requestedPhase !== "consume") {
     const prepared = await runContainer("prepare");
     if (prepared !== 0) return prepared;
   }
+  if (requestedPhase === "prepare") {
+    if (!packet) fail("producer packet destination missing");
+    mkdirSync(packet, { mode: 0o700 });
+    for (const name of ["handoff.json", "payload.tar"])
+      copyFileSync(join(batch, "handoff", name), join(packet, name));
+    if (ci) {
+      const output = process.env.GITHUB_OUTPUT;
+      if (!output) fail("producer GitHub output path required");
+      appendFileSync(
+        output,
+        "handoff_sha256=" +
+          createHash("sha256")
+            .update(readFileSync(join(packet, "handoff.json")))
+            .digest("hex") +
+          "\n",
+      );
+    }
+    return 0;
+  }
   // Only an empty mountpoint is added: no dependency file/input hash changes.
-  mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
+  if (requestedPhase === "all")
+    mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
   let firstFailure = 0;
   for (let at = 0; at < shards.length; at += 2) {
     if (entryCancellation) return firstFailure || entryCancellation;
@@ -1905,7 +2082,8 @@ export function committedApiJobs(
   githubJob: string | undefined,
 ): ReadonlySet<string> {
   let job = request.shard ? "workspace-browser-shard" : "collaboration-flow";
-  if (request.browserPhase === "prepare") job = "workspace-browser-build";
+  if (request.browserPhase === "prepare")
+    job = githubJob === "workspace-browser-container-build" ? githubJob : "workspace-browser-build";
   if (githubJob === "collaboration-build" && request.selected) job = "collaboration-build";
   if (!request.shard && !request.selected && request.browserPhase !== "prepare") {
     fail("requires a browser shard or selected companion");
@@ -2238,6 +2416,15 @@ function arity(rest: string[], count: number): void {
 function run(argv: string[]): string {
   const [command, ...rest] = argv;
   switch (command) {
+    case "require-browser-producer":
+      arity(rest, 0);
+      if (
+        process.env.PRODUCER_RESULT !== "success" ||
+        !/^[1-9][0-9]*$/.test(process.env.PRODUCER_ARTIFACT ?? "") ||
+        !/^[a-f0-9]{64}$/.test(process.env.PRODUCER_DIGEST ?? "")
+      )
+        fail("successful immutable browser producer artifact and digest required");
+      return "";
     case "committed-api": {
       arity(rest, 4);
       const [root = "", shard = "", selected = "", browserPhase = ""] = rest;

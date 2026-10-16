@@ -70,6 +70,117 @@ const RECEIPT_DOWNLOAD_WITH = {
 };
 export const DOWNLOAD_PIN = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333";
 const UPLOAD_PIN = "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9";
+export const HOST_BROWSER_IF = "contains(fromJSON('[0,3,5]'), matrix.shard)";
+export const IMAGE_BROWSER_IF = "!" + HOST_BROWSER_IF;
+const hostBrowserStep = (step: Mapping, job: string): Mapping =>
+  job === "workspace-browser-shard" && step.if === HOST_BROWSER_IF
+    ? Object.fromEntries(Object.entries(step).filter(([key]) => key !== "if"))
+    : step;
+
+export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
+  const errors: string[] = [];
+  const require = (value: boolean, message: string) => {
+    if (!value) errors.push("web: container browser " + message);
+  };
+  const producer = jobs["workspace-browser-container-build"];
+  const consumer = jobs["workspace-browser-shard"];
+  const steps = (job: unknown): Mapping[] =>
+    isMapping(job) && Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
+  const ps = steps(producer),
+    cs = steps(consumer);
+  const command = (phase: string) =>
+    'bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" ' +
+    phase +
+    ' --image-pin "$FVOCI_CI_WEB_IMAGE" --sdk-sha256 "$FVOCI_CI_WEB_SDK_SHA256"';
+  require(isMapping(producer) &&
+    producer.needs === "ci-plan" &&
+    producer.if === "needs.ci-plan.outputs.select_workspace_browser_shard == 'true'" &&
+    producer["runs-on"] === "ubuntu-26.04" &&
+    producer["timeout-minutes"] === 20 &&
+    !has(producer, "continue-on-error"), "fixed selected producer and budget required");
+  require(ps.length === 4 &&
+    ps.every(
+      unmasked,
+    ), "producer must run checkout/setup/prepare/publish without host preparation or bypass");
+  const prepare = ps.find((step) => step.id === "prepare");
+  require(prepare?.run ===
+    command(
+      '--prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"',
+    ), "shared explicit prepare command required");
+  const publish = ps.find((step) => step.id === "publish");
+  require(publish?.uses === UPLOAD_PIN &&
+    pyEq(publish.with, {
+      name: "web-browser-container-build-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/fvoci-browser-container-packet/handoff.json\n${{ runner.temp }}/fvoci-browser-container-packet/payload.tar\n",
+      "if-no-files-found": "error",
+      "retention-days": 1,
+    }) &&
+    isMapping(producer) &&
+    pyEq(producer.outputs, {
+      artifact_id: "${{ steps.publish.outputs.artifact-id }}",
+      handoff_sha256: "${{ steps.prepare.outputs.handoff_sha256 }}",
+    }), "complete immutable packet and digest outputs required");
+  require(isMapping(consumer) &&
+    pyEq(consumer.needs, [
+      "ci-plan",
+      "workspace-browser-build",
+      "workspace-browser-container-build",
+    ]), "both independent host/image producers must be required");
+  for (const list of [ps, cs]) {
+    const checkout = list.find((step) => usesPrefix(step, "actions/checkout@"));
+    require(pyEq(checkout?.with, {
+      "persist-credentials": false,
+      "fetch-depth": 0,
+    }), "exact source and image history checkout required");
+  }
+  const download = cs.filter(
+    (step) =>
+      isMapping(step.with) &&
+      step.with["artifact-ids"] ===
+        "${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+  );
+  require(download.length === 1 &&
+    download[0] !== undefined &&
+    download[0].uses === DOWNLOAD_PIN &&
+    download[0].if === IMAGE_BROWSER_IF &&
+    pyEq(download[0].with, {
+      "artifact-ids": "${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+      "merge-multiple": true,
+      path: "${{ runner.temp }}/fvoci-browser-container-packet",
+    }), "image shards require the successful current-run immutable artifact ID");
+  const admit = cs.find(
+    (step) => step.name === "Require a successful exact container browser producer artifact",
+  );
+  require(admit?.if === IMAGE_BROWSER_IF &&
+    admit.run === "bun --no-env-file tools/web-e2e/run-web-e2e.ts require-browser-producer" &&
+    pyEq(admit.env, {
+      PRODUCER_RESULT: "${{ needs.workspace-browser-container-build.result }}",
+      PRODUCER_ARTIFACT: "${{ needs.workspace-browser-container-build.outputs.artifact_id }}",
+      PRODUCER_DIGEST: "${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}",
+    }), "producer success and artifact digest admission required");
+  const runtime = cs.find((step) => step.id === "container_browser");
+  require(runtime?.if === IMAGE_BROWSER_IF &&
+    runtime.run ===
+      command(
+        '--consume ${{ matrix.shard }} --handoff "$RUNNER_TEMP/fvoci-browser-container-packet" --handoff-sha256 "$FVOCI_WEB_BUILD_HANDOFF_SHA256"',
+      ) &&
+    pyEq(runtime.env, {
+      FVOCI_WEB_BUILD_HANDOFF_SHA256:
+        "${{ needs.workspace-browser-container-build.outputs.handoff_sha256 }}",
+    }) &&
+    !has(runtime, "continue-on-error"), "one complete image shard after packet admission required");
+  const first = cs.findIndex((step) => stepRun(step).startsWith("rustup toolchain install")),
+    last = cs.findIndex((step) => step.id === "browser");
+  require(first >= 0 && last > first, "host-only complete runtime must remain");
+  for (const step of cs.slice(first, last + 1))
+    if (step.id !== "sqlite_diagnostics")
+      require(step.if ===
+        HOST_BROWSER_IF, "host preparation and assertions restricted exactly to shards0/3/5");
+  require(cs.indexOf(admit as Mapping) < cs.indexOf(download[0] as Mapping) &&
+    cs.indexOf(download[0] as Mapping) <
+      cs.indexOf(runtime as Mapping), "admission/download/runtime ordering required");
+  return errors;
+}
 
 // The selected runner owns the existing main/lib/install/engine compiler stages
 // and qualifies their complete packet once in this job. No intermediate target
@@ -326,6 +437,7 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
     ...verifyWebHostInputsJobs(jobs),
+    ...verifyWebContainerHandoffJobs(jobs),
   ];
 }
 
@@ -424,7 +536,7 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
     if (
       sqlites.length !== 1 ||
       !sqlite ||
-      !pyEq(sqlite, {
+      !pyEq(hostBrowserStep(sqlite, name), {
         name: "Prepare pinned SQLite root build inputs",
         id: "sqlite",
         env: { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" },
@@ -489,8 +601,9 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
       errors.push(`web: ${name} requires exactly one Rustup metadata step`);
       continue;
     }
-    const step = list[index] as Mapping;
-    pinned.add(step);
+    const original = list[index] as Mapping;
+    const step = hostBrowserStep(original, name);
+    pinned.add(original);
     if (!pyEq(Object.keys(step).sort(), ["name", "run"]) || stepRun(step) !== RUSTUP_METADATA_RUN) {
       errors.push(
         `web: ${name} Rustup metadata must build and run the locked xtask helper without toolchain auto-install`,

@@ -836,6 +836,38 @@ const browserError = /browser (target|opt_level|debuginfo|test)/;
 describe.serial("browser build packet", () => {
   beforeEach(browserFixture);
 
+  test("isolated CI image producer and consumer bind the actual job and full packet identity", async () => {
+    Object.assign(process.env, {
+      GITHUB_JOB: "workspace-browser-container-build",
+      FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+      FVOCI_WEB_CONTAINER_IMAGE_SOURCE: SHA,
+    });
+    expect(context("workspace-browser-container-build", f.host).repository).not.toBe(
+      "local-container",
+    );
+    expect(() => context("workspace-browser-build", f.host)).toThrow(/wrong handoff job/);
+    exportPacket(f.host);
+    expect(
+      (JSON.parse(readFileSync(join(f.packet, "handoff.json"), "utf8")) as Manifest).producer_job,
+    ).toBe("workspace-browser-container-build");
+    for (const path of [f.target, f.dist, join(f.root, "crates/collab-engine/target")])
+      rmSync(path, { recursive: true, force: true });
+    Object.assign(process.env, {
+      GITHUB_JOB: "workspace-browser-shard",
+      FVOCI_WEB_BUILD_PHASE: "consume",
+      FVOCI_WEB_BUILD_HANDOFF_SHA256: sha(join(f.packet, "handoff.json")),
+    });
+    const image = process.env.FVOCI_WEB_CONTAINER_IMAGE;
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "c".repeat(64);
+    await assert.rejects(consume(f.host), /foreign\/stale producer/);
+    process.env.FVOCI_WEB_CONTAINER_IMAGE = image;
+    await consume(f.host);
+    expect((get("handoff-consumed.json") as Consumed).full_current_physical_inputs_equal).toBe(
+      true,
+    );
+  });
+
   test("a local job name cannot reassign the actual GitHub browser job", () => {
     process.env.FVOCI_WEB_CONTAINER_JOB = "workspace-browser-shard";
     expect(context("workspace-browser-build", f.host).source).toBe(SHA);

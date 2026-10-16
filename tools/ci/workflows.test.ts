@@ -52,6 +52,7 @@ const contracts = {
     "web-checks": "select_web_checks",
     "web-native-checks": "select_web_checks",
     "workspace-browser-build": "select_workspace_browser_shard",
+    "workspace-browser-container-build": "select_workspace_browser_shard",
     "workspace-browser-shard": "select_workspace_browser_shard",
     "collaboration-build": "select_collaboration_build",
     "collaboration-install-on": "select_collaboration_install_on",
@@ -248,6 +249,7 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
         ]
       : [
           ["workspace-browser-build", "workspace-browser-shard"],
+          ["workspace-browser-container-build", "workspace-browser-shard"],
           ["collaboration-build", "collaboration-install-on"],
           ["collaboration-build", "collaboration-postgres-on"],
           ["collaboration-build", "collaboration-sqlite-on"],
@@ -273,7 +275,13 @@ function artifactPolicy(workflow: Workflow, name: "rust" | "web"): void {
       assert.equal(producerDownloads.length, 1, "required step must occur exactly once");
     }
     required(download);
-    assert.equal(download.if, undefined);
+    assert.equal(
+      download.if,
+      name === "web" && producerId.startsWith("workspace-browser-")
+        ? (producerId === "workspace-browser-container-build" ? "!" : "") +
+            "contains(fromJSON('[0,3,5]'), matrix.shard)"
+        : undefined,
+    );
     assert.equal(download.with?.["run-id"], undefined, "handoff must stay in the current run");
     assert.equal(download.with?.repository, undefined);
     const uploads = actionSteps(producer, "actions/upload-artifact");

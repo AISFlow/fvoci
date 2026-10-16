@@ -102,11 +102,20 @@ const browserJob = () =>
     ? process.env.FVOCI_WEB_CONTAINER_JOB
     : process.env.GITHUB_JOB) ?? "";
 export const browser = () =>
-  ["workspace-browser-build", "workspace-browser-shard"].includes(browserJob());
+  [
+    "workspace-browser-build",
+    "workspace-browser-container-build",
+    "workspace-browser-shard",
+  ].includes(browserJob());
 const stages = (): readonly string[] => (browser() ? browserStages : collaborationStages);
 const jobs = (): readonly [string, string] =>
   browser()
-    ? ["workspace-browser-build", "workspace-browser-shard"]
+    ? [
+        process.env.FVOCI_WEB_CONTAINER_IMAGE && process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1"
+          ? "workspace-browser-container-build"
+          : "workspace-browser-build",
+        "workspace-browser-shard",
+      ]
     : ["collaboration-build", "collaboration-flow"];
 
 // An absolute lexical path whose existing part has no symlink. Missing parents
@@ -861,7 +870,7 @@ function osRelease(): Record<string, string> {
   );
 }
 export function browserBefore(h: HostFacts = host): void {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   assert.ok(browser() && !existsSync(distOf(h)), "producer must start without dist");
   const release = osRelease();
@@ -888,7 +897,7 @@ export function browserBefore(h: HostFacts = host): void {
   });
 }
 export async function browserStage(name: string | undefined, h: HostFacts = host): Promise<number> {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   assert.ok(name && (browserStages as readonly string[]).includes(name));
   const commands: Record<string, string[]> = {
@@ -930,7 +939,7 @@ export async function browserStage(name: string | undefined, h: HostFacts = host
   return await compilerStage(output, name, command, read(output, "before.json") as Inputs);
 }
 export function browserAfter(h: HostFacts = host): void {
-  context("workspace-browser-build", h);
+  context(jobs()[0], h);
   const { output } = paths();
   const before = read(output, "before.json") as Inputs,
     after = buildInputs(h);

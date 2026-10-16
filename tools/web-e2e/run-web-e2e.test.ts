@@ -20,6 +20,8 @@ import {
   CheckError,
   CI_WEB_IMAGE,
   containerImage,
+  containerRequest,
+  containerFailureArtifacts,
   webRequest,
   containerShard,
   qualifyCohortHostProgram,
@@ -362,6 +364,81 @@ test("sealed SDK selection distinguishes local engine IDs from registry and CI a
     ["latest", seal, false, {}],
   ] as const)
     expect(() => containerImage(pin, sdk, local, env)).toThrow(CheckError);
+});
+
+test("separate image phases require actual CI allocation and immutable packet admission", () => {
+  const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    seal = "b".repeat(64);
+  const prepare = [
+    "/checkout",
+    "--prepare",
+    "--handoff",
+    "/owned/packet",
+    "--image-pin",
+    pin,
+    "--sdk-sha256",
+    seal,
+  ];
+  const ci = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    GITHUB_JOB: "workspace-browser-container-build",
+    GITHUB_SHA: "c".repeat(40),
+    GITHUB_RUN_ID: "12",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_REPOSITORY: "owner/repo",
+  };
+  expect(containerRequest(prepare, ci).phase).toBe("prepare");
+  const consume = [
+    "/checkout",
+    "--consume",
+    "2",
+    ...prepare.slice(2),
+    "--handoff-sha256",
+    "d".repeat(64),
+  ];
+  expect(
+    containerRequest(consume, { ...ci, GITHUB_JOB: "workspace-browser-shard" }).shards,
+  ).toEqual(["2"]);
+  for (const changed of [
+    { GITHUB_JOB: "workspace-browser-build" },
+    { GITHUB_SHA: "main" },
+    { GITHUB_RUN_ATTEMPT: "0" },
+    { CI: "false" },
+    { GITHUB_ACTIONS: "false" },
+    { GITHUB_REPOSITORY: "foreign" },
+  ])
+    expect(() => containerRequest(prepare, { ...ci, ...changed })).toThrow(CheckError);
+  for (const args of [
+    consume.slice(0, -2),
+    consume.map((v) => (v === "2" ? "0" : v)),
+    [...prepare, "--local-image-sdk"],
+    prepare.filter((v) => v !== "--handoff" && v !== "/owned/packet"),
+  ])
+    expect(() => containerRequest(args, ci)).toThrow();
+  expect(() =>
+    containerRequest(["/checkout", "--ci-shard", "2", ...prepare.slice(4)], ci),
+  ).toThrow();
+});
+
+test("container diagnostics expose only the owned mapped failure directory", () => {
+  const run = tempDir();
+  mkdirSync(join(run, "tmp"));
+  const retained = join(run, "tmp/fvoci-collab-e2e-fail.Abc123");
+  mkdirSync(retained, { mode: 0o700 });
+  expect(
+    containerFailureArtifacts(
+      "failure-artifacts=/fvoci-run/tmp/fvoci-collab-e2e-fail.Abc123\n",
+      run,
+    ),
+  ).toBe(retained);
+  for (const output of [
+    "failure-artifacts=/foreign\n",
+    "failure-artifacts=/fvoci-run/tmp/../foreign\n",
+    "failure-artifacts=/fvoci-run/tmp/fvoci-collab-e2e-fail.Abc123\nfailure-artifacts=/foreign\n",
+    "x".repeat(16385),
+  ])
+    expect(() => containerFailureArtifacts(output, run)).toThrow(CheckError);
 });
 
 test("SQLite exports are four data fields, never shell evaluation", () => {

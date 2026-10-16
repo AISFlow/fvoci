@@ -14,6 +14,7 @@ export const WORKFLOW_JOBS = {
     "web-checks",
     "web-native-checks",
     "workspace-browser-build",
+    "workspace-browser-container-build",
     "workspace-browser-shard",
     "collaboration-build",
     "collaboration-install-on",
@@ -134,7 +135,8 @@ export function validatePlanSchema(plan: unknown, workflow: Workflow): string | 
   }
   if (
     workflow === "web" &&
-    selected("workspace-browser-build") !== selected("workspace-browser-shard")
+    (selected("workspace-browser-build") !== selected("workspace-browser-shard") ||
+      selected("workspace-browser-container-build") !== selected("workspace-browser-shard"))
   ) {
     return "PLAN_BROWSER_PRODUCER_SELECTION";
   }
