@@ -103,9 +103,9 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const prepare = ps.find((step) => step.id === "prepare");
   require(pyEq(prepare?.env, { TMPDIR: "${{ runner.temp }}" }) &&
     prepare?.run ===
-    command(
-      '--prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"',
-    ), "shared explicit prepare command required");
+      command(
+        '--prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"',
+      ), "shared explicit prepare command required");
   const publish = ps.find((step) => step.id === "publish");
   require(publish?.uses === UPLOAD_PIN &&
     pyEq(publish.with, {
