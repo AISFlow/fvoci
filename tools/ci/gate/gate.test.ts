@@ -25,6 +25,7 @@ import {
   WORKFLOWS,
   WORKFLOW_JOBS,
   gateJobId,
+  isRecord,
   type Plan,
   type Workflow,
   validatePlanSchema,
@@ -47,6 +48,7 @@ test("collaboration consumers require the single packet producer and closed inst
   }
   for (const name of ["collaboration-main-build", "collaboration-test-build"]) {
     const stale = plan("web", complete);
+    if (!isRecord(stale.jobs)) throw new Error("expected fixture jobs object");
     stale.jobs[name] = { selected: true };
     expect(validatePlanSchema(stale, "web")).toBe("PLAN_JOB_SET");
   }
