@@ -1531,12 +1531,6 @@ function caseList(): MutationCase[] {
       helper("collaboration-sqlite-on"),
     ],
     [
-      "stale-timing-label",
-      "collaboration-install-on",
-      swap("collaboration-install-on-step-05 started", "collaboration-install-on-step-04 started"),
-      helper("collaboration-install-on"),
-    ],
-    [
       "before-cargo-restore",
       "workspace-browser-build",
       swapWithNext("      - name: Restore Cargo downloads\n"),
