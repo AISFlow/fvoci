@@ -441,6 +441,144 @@ test("container diagnostics expose only the owned mapped failure directory", () 
     expect(() => containerFailureArtifacts(output, run)).toThrow(CheckError);
 });
 
+test("dependency phase refuses service credentials before any command or output", async () => {
+  const child = Bun.spawn(
+    [process.execPath, "--no-env-file", CLI, "browser-phase", "/unused", "inputs", "2"],
+    {
+      env: {
+        ...process.env,
+        FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+        TEST_DATABASE_URL: "PRIVATE_DEPENDENCY_CANARY",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  expect(code).toBe(1);
+  expect(stdout).toBe("");
+  expect(stderr).toContain("credential-free phase");
+  expect(stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+});
+
+for (const mode of ["normal", "inputs-fail"])
+  test("isolated CI Docker topology: " + mode, async () => {
+    const { root, sha } = committedCheckout(),
+      bin = tempDir(),
+      state = join(bin, "state.json"),
+      calls = join(bin, "calls");
+    const packet = join(bin, "packet"),
+      output = join(bin, "github-output");
+    mkdirSync(packet, { mode: 0o700 });
+    writeFileSync(join(packet, "handoff.json"), "{}");
+    writeFileSync(join(packet, "payload.tar"), "");
+    writeFileSync(state, "{}");
+    mkdirSync(join(bin, "tmp"), { mode: 0o711 });
+    const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
+    const docker = String.raw`
+const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STATE,s=JSON.parse(fs.readFileSync(file,"utf8"));
+const save=()=>fs.writeFileSync(file,JSON.stringify(s));
+const name=a[a.indexOf("--name")+1];
+const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
+if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");}
+fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
+if(a[0]==="pull"){}
+else if(a[0]==="info")console.log("linux x86_64");
+else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux amd64 "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_PIN]));
+else if(a[0]==="network"){}
+else if(a[0]==="run") {s[name]=a.includes("-d");save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);}
+else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
+else if(a[0]==="inspect")console.log((s[a.at(-1)]?"true":"false")+" 0 false");
+else if(a[0]==="stop"){s[a.at(-1)]=false;save();}
+else if(a[0]==="rm"){delete s[a.at(-1)];save();}
+else process.exit(42);
+`;
+    writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        CLI,
+        "container-browser",
+        root,
+        "--consume",
+        "2",
+        "--handoff",
+        packet,
+        "--handoff-sha256",
+        new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
+        "--image-pin",
+        pin,
+        "--sdk-sha256",
+        "c".repeat(64),
+      ],
+      {
+        env: {
+          ...process.env,
+          TMPDIR: join(bin, "tmp"),
+          PATH: bin + ":" + process.env.PATH,
+          CI: "true",
+          GITHUB_ACTIONS: "true",
+          GITHUB_JOB: "workspace-browser-shard",
+          GITHUB_SHA: sha,
+          GITHUB_REPOSITORY: "fixture/repo",
+          GITHUB_RUN_ID: "12",
+          GITHUB_RUN_ATTEMPT: "1",
+          GITHUB_OUTPUT: output,
+          FIXTURE_STATE: state,
+          FIXTURE_CALLS: calls,
+          FIXTURE_SHA: sha,
+          FIXTURE_PIN: pin,
+          FIXTURE_MODE: mode,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code, stderr).toBe(mode === "normal" ? 0 : 17);
+    expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+    const rows = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            op: string[];
+            phase?: string;
+            network?: string | null;
+            hasDatabase?: boolean;
+            hasMeili?: boolean;
+          },
+      );
+    expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(3);
+    const inputs = rows.findIndex((row) => row.phase === "inputs"),
+      consume = rows.findIndex((row) => row.phase === "consume"),
+      network = rows.findIndex((row) => row.op[0] === "network" && row.op[1] === "create");
+    expect(inputs).toBeGreaterThan(-1);
+    expect(rows[inputs]?.network).toBeNull();
+    expect(rows[inputs]?.hasDatabase).toBe(false);
+    expect(rows[inputs]?.hasMeili).toBe(false);
+    if (mode === "normal") {
+      expect(network).toBeGreaterThan(inputs);
+      expect(consume).toBeGreaterThan(network);
+      expect(rows[consume]?.network).toMatch(/^fvoci-browser-/);
+      expect(rows[consume]?.hasDatabase).toBe(true);
+    } else {
+      expect(network).toBe(-1);
+      expect(consume).toBe(-1);
+    }
+    expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+  });
+
 test("SQLite exports are four data fields, never shell evaluation", () => {
   const valid =
     "export SQLITE3_LIB_DIR=/owned/lib\nexport SQLITE3_INCLUDE_DIR=/owned/include\nexport SQLITE3_STATIC=1\nexport SQLITE3_NO_PKG_CONFIG=1\n";

@@ -35,6 +35,10 @@ import {
 
 export const CI_WEB_IMAGE =
   "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
+const BROWSER_SERVICE_IMAGES = [
+  "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
+  "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
+] as const;
 
 export function containerImage(
   image: string,
@@ -755,13 +759,13 @@ async function browserServices(
       [
         pg,
         "fvoci-pg",
-        "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
+        BROWSER_SERVICE_IMAGES[0],
         ["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
       ],
       [
         meili,
         "fvoci-meili",
-        "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
+        BROWSER_SERVICE_IMAGES[1],
         ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7700/health"],
       ],
     ] as const) {
@@ -891,23 +895,39 @@ export function sqliteEnvironment(text: string): Record<string, string> {
 }
 
 async function browserPhase(root: string, phase: string, shards: string[]): Promise<number> {
-  if (!process.env.FVOCI_WEB_CONTAINER_IMAGE || !["prepare", "consume"].includes(phase))
+  if (!process.env.FVOCI_WEB_CONTAINER_IMAGE || !["prepare", "inputs", "consume"].includes(phase))
     fail("ordinary container phase required");
+  if (
+    phase === "inputs" &&
+    [
+      "TEST_DATABASE_URL",
+      "FVOCI_E2E_ADMIN_DATABASE_URL",
+      "MEILI_MASTER_KEY",
+      "FVOCI_MEILI_KEY",
+    ].some((name) => process.env[name])
+  )
+    fail("browser dependency preparation requires a credential-free phase");
   process.env.ROOT = root;
   process.env.FVOCI_COLLAB_ENGINE = join(root, "crates/collab-engine/target/debug/collab-engine");
-  process.env.FVOCI_WEB_BUILD_PHASE = phase;
+  process.env.FVOCI_WEB_BUILD_PHASE = phase === "prepare" ? "prepare" : "consume";
+  process.env.CARGO_NET_OFFLINE = "true";
   try {
     qualifyCommittedApi(
       root,
-      { shard: shards[0] ?? "", selected: false, browserPhase: phase as "prepare" | "consume" },
+      {
+        shard: shards[0] ?? "",
+        selected: false,
+        browserPhase: phase === "prepare" ? "prepare" : "consume",
+      },
       process.env,
     );
     if (phase === "prepare" && (shards.length || existsSync(join(root, "apps/web/dist"))))
       fail("producer requires absent dist and no shard");
     // Isolated jobs reconstruct their locked inputs; only the qualified native
     // packet crosses jobs. Local cohorts already share these bytes read-only.
-    if (phase === "prepare" || process.env.FVOCI_WEB_CONTAINER_FRESH_INPUTS === "1") {
-      await stage("cargo-fetch", ["cargo", "fetch", "--locked"], root);
+    if (phase === "prepare" || phase === "inputs") {
+      const fetchEnv = { ...process.env, CARGO_NET_OFFLINE: "false" };
+      await stage("cargo-fetch", ["cargo", "fetch", "--locked"], root, fetchEnv);
       await stage(
         "engine-fetch",
         [
@@ -918,6 +938,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
           join(root, "crates/collab-engine/Cargo.toml"),
         ],
         root,
+        fetchEnv,
       );
       // Bun owns lifecycle scripts' node executable without a shell harness.
       await stage(
@@ -931,6 +952,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
         join(root, "apps/web"),
       );
     }
+    if (phase === "inputs") return 0;
     const sdk = containerImage(
       process.env.FVOCI_WEB_CONTAINER_IMAGE,
       process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
@@ -968,6 +990,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
     );
     const handoff = (args: string[]) => [
       process.execPath,
+      "--no-install",
       "--no-env-file",
       join(root, "tools/selected-backend-ci/handoff.ts"),
       ...args,
@@ -1771,12 +1794,19 @@ async function containerBrowser(argv: string[]): Promise<number> {
     for (const name of ["home", "tmp", "cargo", "sqlite", "handoff", "output", "vite-temp"])
       mkdirSync(join(runDirectory, name), { mode: name === "tmp" ? 0o711 : 0o700 });
   }
+  const consumerDeadlines = new Map<string, number>();
   async function runContainer(
-    phase: "prepare" | "consume",
+    phase: "prepare" | "inputs" | "consume",
     services: NodeJS.ProcessEnv = {},
     shard = "",
   ): Promise<number> {
     if (entryCancellation) return entryCancellation;
+    const now = performance.now();
+    if (phase !== "prepare" && !consumerDeadlines.has(shard))
+      consumerDeadlines.set(shard, now + 20 * 60_000);
+    const remaining =
+      phase === "prepare" ? 15 * 60_000 : (consumerDeadlines.get(shard) ?? now) - now;
+    if (remaining <= 0) return 1;
     const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
     const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
     const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
@@ -1808,7 +1838,6 @@ async function containerBrowser(argv: string[]): Promise<number> {
       FVOCI_WEB_CONTAINER_LOCAL_IMAGE: sdk.local ? "1" : "0",
       FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
       FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
-      FVOCI_WEB_CONTAINER_FRESH_INPUTS: requestedPhase === "all" ? "0" : "1",
       FVOCI_WEB_CONTAINER_RUN: run,
       FVOCI_WEB_CONTAINER_SOURCE: source,
       FVOCI_WEB_CONTAINER_JOB:
@@ -1901,6 +1930,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     args.push(
       image,
       "bun",
+      "--no-install",
       "--no-env-file",
       join(root, "tools/web-e2e/run-web-e2e.ts"),
       "browser-phase",
@@ -1910,14 +1940,20 @@ async function containerBrowser(argv: string[]): Promise<number> {
     );
     const started = performance.now();
     const logFd =
-      phase === "consume" ? openSync(join(runDirectory, "console.log"), "wx", 0o600) : undefined;
+      phase !== "prepare"
+        ? openSync(
+            join(runDirectory, phase === "consume" ? "console.log" : "inputs-console.log"),
+            "wx",
+            0o600,
+          )
+        : undefined;
     let child;
     try {
       child = Bun.spawn(args, {
         stdin: "ignore",
         stdout: logFd ?? "inherit",
         stderr: logFd ?? "inherit",
-        timeout: (phase === "prepare" ? 15 : 20) * 60_000,
+        timeout: Math.ceil(remaining),
       });
     } catch (error) {
       rmSync(envFile);
@@ -2017,11 +2053,21 @@ async function containerBrowser(argv: string[]): Promise<number> {
   // Only an empty mountpoint is added: no dependency file/input hash changes.
   if (requestedPhase === "all")
     mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
+  if (ci && requestedPhase === "consume")
+    for (const image of BROWSER_SERVICE_IMAGES)
+      await stage("service-image-fetch", ["docker", "pull", image], root);
   let firstFailure = 0;
   for (let at = 0; at < shards.length; at += 2) {
     if (entryCancellation) return firstFailure || entryCancellation;
     const settled = await Promise.allSettled(
       shards.slice(at, at + 2).map(async (shard) => {
+        if (requestedPhase !== "all") {
+          const prepared = await runContainer("inputs", {}, shard);
+          if (prepared !== 0 || entryCancellation) {
+            firstFailure ||= prepared || entryCancellation;
+            return;
+          }
+        }
         const status = await browserServices(
           root,
           batch,
