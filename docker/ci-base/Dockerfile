@@ -161,6 +161,8 @@ COPY --from=sqlite-tool-build /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci
 RUN mkdir -m 0755 /opt/fvoci-sqlite \
  && /usr/local/bin/fvoci-ci-tools sqlite-ci --seal-image-sdk --parent /opt/fvoci-sqlite \
  && chmod -R a-w /opt/fvoci-sqlite
+# Mutable build prefixes start private; the sealed public SDK is readable by any UID.
+RUN chmod -R a+rX,a-w /opt/fvoci-sqlite
 
 FROM ci-web-tools AS sqlite-web-build
 USER root
@@ -169,6 +171,7 @@ COPY --from=sqlite-tool-build /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci
 COPY --from=sqlite-base-build /opt/fvoci-sqlite/sqlite-amalgamation-3530400.zip /opt/fvoci-sqlite/sqlite-amalgamation-3530400.zip
 RUN /usr/local/bin/fvoci-ci-tools sqlite-ci --seal-image-sdk --parent /opt/fvoci-sqlite \
  && chmod -R a-w /opt/fvoci-sqlite
+RUN chmod -R a+rX,a-w /opt/fvoci-sqlite
 
 FROM ci-base-tools AS ci-base
 COPY --from=sqlite-tool-build --chown=0:0 /usr/local/bin/fvoci-ci-tools /usr/local/bin/fvoci-ci-tools
