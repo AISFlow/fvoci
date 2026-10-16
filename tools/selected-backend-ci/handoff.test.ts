@@ -604,7 +604,9 @@ describe.serial("collaboration build packet", () => {
     for (const name of collaborationStages) {
       const original = get(name + "-stage.json");
       unlinkSync(join(f.output, name + "-stage.json"));
-      expect(() => exportPacket(f.host)).toThrow();
+      expect(() => {
+        exportPacket(f.host);
+      }).toThrow();
       put(name + "-stage.json", original);
       expect(existsSync(f.packet)).toBe(false);
     }
@@ -673,7 +675,9 @@ describe.serial("collaboration build packet", () => {
         ...compile.stages,
       ],
     });
-    expect(() => exportPacket(f.host)).toThrow();
+    expect(() => {
+      exportPacket(f.host);
+    }).toThrow();
     put("compile-receipt.json", compile);
     const original = get("lib-stage.json") as Row;
     put("lib-stage.json", { ...original, exit_code: 7 });
