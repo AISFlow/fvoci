@@ -107,6 +107,9 @@ export interface CommandOptions {
   waitOnInterrupt?: boolean;
   // Milliseconds; defaults to wrapperInterruptGrace.
   interruptGrace?: number;
+  // A caller's existing operation deadline uses the same owned-child closure
+  // as SIGINT, including the waited fixture wrapper's cleanup and reaping.
+  signal?: AbortSignal;
 }
 
 // ESRCH and ENOENT: the process or thread has already gone.
@@ -367,14 +370,16 @@ export const command: Command = async (args, options = {}) => {
   // Descendants that outlive a waited wrapper are no longer its children; a
   // pipe they inherited would hold the wait open, so its output goes to a file.
   assert.ok(!options.waitOnInterrupt || options.log !== undefined, "waited wrapper log required");
+  options.signal?.throwIfAborted();
   checkInterrupt();
   const controller = new AbortController();
-  let forward = () => {
-    controller.abort(interruptError());
+  let forward = (reason: unknown) => {
+    controller.abort(reason);
   };
   const interrupt = () => {
-    forward();
+    forward(interruptError());
   };
+  const abort = () => forward(options.signal?.reason);
   inFlight.add(interrupt);
   const fd = options.log === undefined ? undefined : openSync(options.log, "w");
   let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -404,8 +409,9 @@ export const command: Command = async (args, options = {}) => {
     if (status) {
       closeSync(status[1]);
       status[1] = -1;
-      forward = () => {
-        controller.abort(interruptError());
+      forward = (reason: unknown) => {
+        if (controller.signal.aborted) return;
+        controller.abort(reason);
         child.kill("SIGINT");
         // The first SIGINT starts the bound; a later one does not extend it.
         deadline ??= setTimeout(() => {
@@ -422,6 +428,8 @@ export const command: Command = async (args, options = {}) => {
         }, options.interruptGrace ?? wrapperInterruptGrace);
       };
     }
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
     const [stdout, stderr] = await Promise.all([
       child.stdout instanceof ReadableStream ? new Response(child.stdout).bytes() : null,
       child.stderr instanceof ReadableStream ? new Response(child.stderr).bytes() : null,
@@ -450,6 +458,7 @@ export const command: Command = async (args, options = {}) => {
       stderr: stderr ? decode(stderr) : "",
     };
   } finally {
+    options.signal?.removeEventListener("abort", abort);
     clearTimeout(deadline);
     inFlight.delete(interrupt);
     if (fd !== undefined) closeSync(fd);

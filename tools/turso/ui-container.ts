@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { root as checkout, sha, uid, gid, write, jsonText } from "../selected-backend-ci/io.ts";
 import { image as finalFixtureImage } from "../selected-backend-ci/drivers/sqlite.ts";
 import {
+  FIXTURE_BUDGET,
   fixtureInput,
   cleanEnv,
   decodeUtf8,
@@ -141,7 +142,7 @@ export const BINARY_DST = "/fvoci-current/bin";
 export const DIST_DST = "/fvoci-current/dist";
 export const ONE_SHOT_LIVE = "unsupported-before-execution";
 export const BLOCKED = "BLOCKED";
-export const FIXTURE_BUDGET = 120;
+export { FIXTURE_BUDGET } from "./ui-common.ts";
 export const STAT_READ_BOUND = 512;
 export const STAT_BODY_MAX = 511;
 export const STAT_FIFO_NAME = "stat.ready";

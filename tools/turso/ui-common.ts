@@ -5,6 +5,8 @@ import process from "node:process";
 import { digest, env, parseJson, root as checkout, uid } from "../selected-backend-ci/io.ts";
 import { pyJsonDumps } from "../web-e2e/compat.ts";
 
+export const FIXTURE_BUDGET = 120;
+
 /** Fixed codes only; no SDK, URL, token, actor password or raw trace. */
 export class UiError extends Error {
   constructor(code: string) {

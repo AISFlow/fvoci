@@ -82,6 +82,7 @@ import {
 import { AUTH_SPEC, authEventRows } from "../../turso/ui-auth-session.ts";
 import * as auditModule from "../../turso/ui-audit.ts";
 import {
+  FIXTURE_BUDGET,
   get,
   list,
   record,
@@ -1518,7 +1519,12 @@ export async function productCallbacks(
     if (value !== undefined) nativeEnvironment[key] = value;
   }
   assert.ok(sha(process.execPath) === state.browserInputs?.bun.sha256);
-  const native = async (mode: string, input: Record<string, unknown>, label: string) => {
+  const native = async (
+    mode: string,
+    input: Record<string, unknown>,
+    label: string,
+    signal?: AbortSignal,
+  ) => {
     assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
     const nativeLog = join(directory, label + ".native.private.log");
     const packetPath = join(directory, label + ".native.private.json");
@@ -1539,6 +1545,7 @@ export async function productCallbacks(
         cwd: root,
         log: nativeLog,
         waitOnInterrupt: true,
+        signal,
       },
     );
     assert.ok(result.returncode === 0 && result.stdout === "" && result.stderr === "");
@@ -1551,9 +1558,9 @@ export async function productCallbacks(
     assert.ok(deepEquals(inodeOf(state.db), state.databaseInode));
     return parsed;
   };
-  const serial = async (label: string, validate: boolean) => {
+  const serial = async (label: string, validate: boolean, signal?: AbortSignal) => {
     const start = BigInt(Date.now()) * 1000n;
-    const observation = await native("serial-observe", policy, label);
+    const observation = await native("serial-observe", policy, label, signal);
     const end = BigInt(Date.now()) * 1000n;
     if (validate) {
       const checked = auditModule.validateSerialObservation(observation, policy, false, "sqlite");
@@ -1884,6 +1891,39 @@ export async function productCallbacks(
         report_sha256: sha(reportPath),
         binding_sha256: bindingHash,
       };
+    },
+    async beforeRestartStop() {
+      // Browser actors have closed; let the live dispatcher finish their
+      // committed tail before cancellation deliberately leaves queued work.
+      const signal = AbortSignal.timeout(FIXTURE_BUDGET * 1000);
+      for (let sample = 0; ; sample++) {
+        signal.throwIfAborted();
+        const observation = await serial("settlement-" + String(sample), false, signal);
+        const checks = observation.checks;
+        const head = get(checks, "eventHead");
+        const relays = list(checks, "outbox");
+        assert.ok(typeof head === "string" && /^(0|[1-9][0-9]*)$/.test(head));
+        assert.ok(
+          deepEquals(relays.map((relay) => get(relay, "consumer")).sort(), [
+            "github",
+            "mail",
+            "notifications",
+            "push",
+            "webhooks",
+          ]),
+          "SQLite relay settlement requires the exact current registry",
+        );
+        if (
+          relays.every((relay) => {
+            const seq = get(relay, "lastSeq");
+            assert.ok(typeof seq === "string" && /^(0|[1-9][0-9]*)$/.test(seq));
+            return BigInt(seq) === BigInt(head);
+          })
+        ) {
+          signal.throwIfAborted();
+          return;
+        }
+      }
     },
     async afterRestartStopped(rows) {
       assert.ok(

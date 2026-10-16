@@ -207,6 +207,7 @@ interface Probe {
   beforeBrowser?: boolean;
   cleanupFailure?: boolean;
   cliMissing?: boolean;
+  beforeStop?: (commands: string[][]) => Promise<void>;
 }
 // A one-test passing Playwright JSON report carrying one JSON attachment.
 const passedReport = (name: string, body: unknown) => ({
@@ -511,6 +512,17 @@ async function failureProbe(options: Probe = {}) {
     role: "owned_app",
     masterKey: "different synthetic owner key",
   };
+  if (options.beforeStop)
+    context.sqliteProducts = {
+      afterSeedStopped: () => Promise.resolve(),
+      afterReadback: () => Promise.resolve(),
+      beforeRestartStop: () => options.beforeStop?.(observed) ?? Promise.resolve(),
+      afterRestartStopped: () => {
+        expect(observed.some((args) => args.includes("-TERM"))).toBe(true);
+        observed.push(["POST-STOP-FULL-GUARD"]);
+        return Promise.resolve();
+      },
+    };
   if (options.cliMissing) unlinkSync(cli);
   const saved = { ...process.env };
   Object.assign(process.env, {
@@ -548,10 +560,44 @@ async function failureProbe(options: Probe = {}) {
     if (options.cleanupFailure) expect("restartServerExit" in receipt).toBe(false);
     else expect(receipt.restartServerExit).toBe(0);
   }
-  return { safe, receipt, laneReceipt };
+  return { safe, receipt, laneReceipt, observed };
 }
 
 describe("restart failure and cleanup", () => {
+  test("live settlement completes before normal stop even after a browser failure", async () => {
+    const entered = Promise.withResolvers<void>();
+    const settled = Promise.withResolvers<void>();
+    const result = failureProbe({
+      async beforeStop(commands) {
+        expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
+        entered.resolve();
+        await settled.promise;
+        expect(commands.some((args) => args.includes("-TERM"))).toBe(false);
+      },
+    });
+    try {
+      await entered.promise;
+    } finally {
+      settled.resolve();
+    }
+    const { receipt, observed } = await result;
+    expect(receipt.cleanupErrors).toEqual([]);
+    expect(observed.at(-1)).toEqual(["POST-STOP-FULL-GUARD"]);
+    expect((receipt.originalFailure as { message: string }).message).toBe(
+      "preserve original restart browser failure",
+    );
+  });
+  test("settlement failure retains browser failure and still stops and validates", async () => {
+    const { receipt, observed } = await failureProbe({
+      beforeStop: () => Promise.reject(new Error("owned relay deadline")),
+    });
+    expect(receipt.cleanupErrors).toEqual([{ type: "Error", message: "owned relay deadline" }]);
+    expect(receipt.restartServerExit).toBe(0);
+    expect(observed.at(-1)).toEqual(["POST-STOP-FULL-GUARD"]);
+    expect((receipt.originalFailure as { message: string }).message).toBe(
+      "preserve original restart browser failure",
+    );
+  });
   test("browser first failure keeps the structured checkpoint and cleans up normally", async () => {
     const { safe, receipt, laneReceipt } = await failureProbe();
     expect(safe.restart_browser_exit).toBe(7);
