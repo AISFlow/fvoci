@@ -425,19 +425,25 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         join(root, "tools/selected-backend-ci/drivers", lane + ".ts"),
       ]);
     expect<readonly string[]>(registeredModules).toEqual(leaseModules);
-    const caller = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
-    // The build-side modes go through one `selected` array; the rest are spelled out.
-    expect(caller).toContain('selected=(bun "$ROOT/scripts/run-selected-backend-e2e.ts")');
-    for (const mode of ["record-before", "record-after"])
-      expect(caller).toContain('"${selected[@]}" ' + mode + " ");
-    for (const mode of modes.filter(
-      (value) => !["record-before", "stage", "record-after"].includes(value),
-    ))
-      expect(caller).toContain('bun "$ROOT/scripts/run-selected-backend-e2e.ts" ' + mode);
-    expect(caller).toContain(
-      'for stage in main lib install engine; do\n      run_native_stage "selected-${stage}" selected "$stage" \\\n        "${selected[@]}" stage ',
+    const entry = readFileSync(join(root, "scripts/run-web-e2e.sh"), "utf8");
+    expect(entry).toContain(
+      'exec bun --no-env-file "$ROOT/tools/web-e2e/run-web-e2e.ts" entry "$ROOT" "$@"',
     );
-    expect(caller.match(/"\$\{selected\[@\]\}" stage /g)).toHaveLength(1);
+    const caller = readFileSync(join(root, "tools/web-e2e/run-web-e2e.ts"), "utf8");
+    // Build-side modes share the existing Bun command; runtime modes retain
+    // the selected actor and ownership boundary in the maintained TS entry.
+    expect(caller).toContain("const bun = (...args: string[]) => [process.execPath, ...args]");
+    expect(caller).toContain('bun(join(root, "scripts/run-selected-backend-e2e.ts"), ...args)');
+    for (const mode of ["record-before", "record-after"])
+      expect(caller).toContain(`selectedCli("${mode}",`);
+    for (const mode of ["run", "owner-return", "config-list"])
+      expect(caller).toContain(`runtime("${mode}"`);
+    expect(caller).toContain('cli = join(root, "scripts/run-selected-backend-e2e.ts")');
+    expect(caller).toContain('"permissions",');
+    expect(caller).toContain(
+      'for (const name of ["main", "lib", "install", "engine"]) await native(name, "selected")',
+    );
+    expect(caller.match(/selectedCli\("stage",/g)).toHaveLength(1);
     expect(caller).not.toContain("run-selected-backend-e2e.py");
     expect(requestedRuns(undefined)).toEqual(selectedRuns);
     expect(requestedRuns("sqlite/off")).toEqual([["sqlite", "off"]]);
