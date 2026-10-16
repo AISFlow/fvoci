@@ -600,7 +600,7 @@ fn contract(root: &Path) -> Check {
             for preparation in [prepare, ready] {
                 let preparation = text_of(preparation);
                 let unguarded = preparation;
-                ensure(!masked(&unguarded), || {
+                ensure(!masked(unguarded), || {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
             }
