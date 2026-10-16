@@ -520,7 +520,7 @@ else process.exit(42);
         env: {
           ...process.env,
           TMPDIR: join(bin, "tmp"),
-          PATH: bin + ":" + process.env.PATH,
+          PATH: bin + ":" + (process.env.PATH ?? ""),
           CI: "true",
           GITHUB_ACTIONS: "true",
           GITHUB_JOB: "workspace-browser-shard",
