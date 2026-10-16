@@ -474,6 +474,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
+      - name: Prepare disk for ordinary browser containers
+        if: contains(fromJSON('[1,2,4,6,7]'), matrix.shard)
+        run: |
+          set -euo pipefail
+          df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1
+          sudo rm -rf -- /usr/local/lib/android
+          df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1
       - if: contains(fromJSON('[0,3,5]'), matrix.shard)
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
