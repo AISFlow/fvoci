@@ -477,9 +477,9 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
           bun ci
-      - name: Prepare Chromium and system libraries
+      - name: Prepare Chromium system libraries for matching native inputs
         working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+        run: bun --bun x --no-install playwright install-deps chromium
       - name: Qualify current selected native outputs (no browser or DB)
         id: prepare
         env:
