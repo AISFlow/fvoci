@@ -40,7 +40,6 @@ import {
 type Schema = components["schemas"];
 const { binding, sha256 } = readFinalBinding();
 let actors: SelectedActors;
-test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({ browser, baseURL }, info) => {
   assertFinalMetadata(info.config.metadata, sha256, binding);
