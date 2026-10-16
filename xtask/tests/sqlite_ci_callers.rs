@@ -173,6 +173,13 @@ fn web_build_stops_on_preflight_failure() {
         };
         fs::write(tools.join(name), source).unwrap();
     }
+    let selected = r.root.join("tools/selected-backend-ci");
+    fs::create_dir_all(&selected).unwrap();
+    fs::copy(
+        repo().join("tools/selected-backend-ci/types.ts"),
+        selected.join("types.ts"),
+    )
+    .unwrap();
     write_exec(
         &r.bin.join("bun"),
         &format!(
@@ -444,7 +451,11 @@ fn contract(root: &Path) -> Check {
                 less(download, unpack, what)?;
             } else if workflow == "web" && *name == "workspace-browser-shard" {
                 excludes(body, "path: target", what)?;
-                contains(body, "needs: [ci-plan, workspace-browser-build]", what)?;
+                contains(
+                    body,
+                    "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
+                    what,
+                )?;
                 contains(
                     body,
                     "artifact-ids: ${{ needs.workspace-browser-build.outputs.artifact_id }}",
@@ -1015,6 +1026,16 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
     let original = fs::read_to_string(&path).unwrap();
     contract(&root).unwrap();
     for (name, old, new) in [
+        (
+            "workspace-browser-shard",
+            "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
+            "needs: [ci-plan, workspace-browser-build]",
+        ),
+        (
+            "workspace-browser-shard",
+            "needs: [ci-plan, workspace-browser-build, workspace-browser-container-build]",
+            "needs: [ci-plan, workspace-browser-container-build]",
+        ),
         ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
         (
             "collaboration-build",
