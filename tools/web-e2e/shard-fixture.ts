@@ -15,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import {
@@ -40,6 +40,12 @@ function fixtureRuntime(source: string, destination: string, executable: string)
       statSync(destination).uid === process.getuid?.() &&
       realpathSync(executable) === executable,
     "fixture-owned runtime copy required",
+  );
+  const shared = join(dirname(dirname(destination)), "selected-backend-ci");
+  mkdirSync(shared, { recursive: true });
+  writeFileSync(
+    join(shared, "types.ts"),
+    readFileSync(join(dirname(source), "../selected-backend-ci/types.ts")),
   );
   const text = readFileSync(source, "utf8"),
     start = text.indexOf("async function groupRuntime("),
@@ -181,10 +187,17 @@ function ciShardFixture(source: string): void {
     bin = join(directory, "bin");
   const previousPath = process.env.PATH;
   try {
-    for (const path of ["scripts", "apps/web/src/generated", "tools/web-e2e", "bin"])
+    for (const path of [
+      "scripts",
+      "apps/web/src/generated",
+      "tools/web-e2e",
+      "tools/selected-backend-ci",
+      "bin",
+    ])
       mkdirSync(path === "bin" ? bin : join(checkout, path), { recursive: true });
     for (const file of [
       "scripts/run-web-e2e.sh",
+      "tools/selected-backend-ci/types.ts",
       ...["groups.ts", "compat.ts", "run-web-e2e.ts"].map((name) => "tools/web-e2e/" + name),
     ]) {
       const text = readFileSync(join(source, file), "utf8");
