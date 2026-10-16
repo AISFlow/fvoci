@@ -843,14 +843,18 @@ for (const event of ["push", "pull_request"] as const) {
   ])(`reject ${event} missing image input: %s`, (path) => {
     const data = structuredClone(workflow);
     data.on[event].paths = data.on[event].paths.filter((input) => input !== path);
-    expect(() => verifyWorkflow(data)).toThrow("image edits must trigger builds");
+    expect(() => {
+      verifyWorkflow(data);
+    }).toThrow("image edits must trigger builds");
   });
   test.each(["tools/ci/**", "xtask/**", "!xtask/src/sqlite_ci.rs"])(
     `reject ${event} broad or excluding image filter: %s`,
     (path) => {
       const data = structuredClone(workflow);
-      data.on[event].paths.push(path);
-      expect(() => verifyWorkflow(data)).toThrow("image edits must trigger builds");
+      data.on[event].paths = [...data.on[event].paths, path];
+      expect(() => {
+        verifyWorkflow(data);
+      }).toThrow("image edits must trigger builds");
     },
   );
 }
