@@ -22,6 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # The web workspace's install (bun ci at the repository root).
 WORKSPACE_MODULES="$ROOT/node_modules"
 REAL_BUN="$(command -v bun)"
+export FVOCI_FIXTURE_REAL_BUN="$REAL_BUN"
 REAL_SLEEP="$(command -v sleep)"
 REAL_SEQ="$(command -v seq)"
 if ! (cd "$ROOT/apps/web" && bun --bun x --no-install playwright --version) >/dev/null 2>&1; then
