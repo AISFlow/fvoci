@@ -100,8 +100,7 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
     pyEq(Object.keys(prepare).sort(), ["env", "id", "name", "run"]) &&
     pyEq(safeGet(prepare, "env"), { FVOCI_E2E_PENDING: "1" }) &&
     safeGet(prepare, "run") ===
-      timingPreamble("collaboration-build", at + 1) +
-        "set -euo pipefail\n" +
+      "set -euo pipefail\n" +
         'export FVOCI_SELECTED_CI_OUTPUT="$RUNNER_TEMP/fvoci-selected-current"\n' +
         'export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"\n' +
         'export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"\n' +
@@ -362,15 +361,14 @@ export const RUSTUP_METADATA_RUN =
   'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
 const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
 const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
-const UNTIMED_RUSTUP_JOBS = ["workspace-browser-build", "workspace-browser-shard"];
-const TIMED_RUSTUP_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
-
-export const WEB_SQLITE_JOBS = [
-  "web-checks",
-  "web-native-checks",
-  ...UNTIMED_RUSTUP_JOBS,
-  ...TIMED_RUSTUP_JOBS,
+const WEB_NATIVE_JOBS = [
+  "workspace-browser-build",
+  "workspace-browser-shard",
+  "collaboration-build",
+  ...WEB_COLLAB_LANES.map((lane) => lane.name),
 ];
+
+export const WEB_SQLITE_JOBS = ["web-checks", "web-native-checks", ...WEB_NATIVE_JOBS];
 // The same complete host preparation precedes every Web SQLite/cache identity.
 const WEB_SQLITE_RUN = String.raw`set -euo pipefail
 # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
@@ -420,7 +418,6 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
     const sqlites = steps.filter((step) => get(step, "id") === "sqlite");
     const sqlite = sqlites[0];
     const at = sqlite ? steps.indexOf(sqlite) : -1;
-    const preamble = TIMED_RUSTUP_JOBS.includes(name) ? timingPreamble(name, at + 1) : "";
     if (
       sqlites.length !== 1 ||
       !sqlite ||
@@ -428,7 +425,7 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
         name: "Prepare pinned SQLite root build inputs",
         id: "sqlite",
         env: { LIBCLANG_PATH: "/usr/lib/llvm-18/lib" },
-        run: preamble + WEB_SQLITE_RUN,
+        run: WEB_SQLITE_RUN,
       })
     )
       errors.push(
@@ -460,16 +457,6 @@ export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
   return errors;
 }
 
-// The collaboration jobs wrap each run in a ci-step timer named by position.
-function timingPreamble(job: string, position: number): string {
-  const stage = `${job}-step-${String(position).padStart(2, "0")}`;
-  return (
-    "fvoci_timing_started=$SECONDS\n" +
-    `printf 'ci-step stage=${stage} started at=%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"\n` +
-    `trap 'fvoci_timing_exit=$?; printf "ci-step stage=${stage} finished at=%s elapsed_seconds=%s exit=%s\\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$((SECONDS - \${fvoci_timing_started}))" "$fvoci_timing_exit"; exit "$fvoci_timing_exit"' EXIT\n`
-  );
-}
-
 // No web.yml job installs or runs python.
 const PYTHON = /python/i;
 
@@ -487,7 +474,7 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
     errors.push("web: workflow-level settings may not configure python");
   }
   const pinned = new Set<unknown>();
-  for (const name of [...UNTIMED_RUSTUP_JOBS, ...TIMED_RUSTUP_JOBS]) {
+  for (const name of WEB_NATIVE_JOBS) {
     const job = get(jobs, name);
     const steps = isMapping(job) ? get(job, "steps") : undefined;
     const list: unknown[] = Array.isArray(steps) ? steps : [];
@@ -501,11 +488,7 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
     }
     const step = list[index] as Mapping;
     pinned.add(step);
-    const preamble = TIMED_RUSTUP_JOBS.includes(name) ? timingPreamble(name, index + 1) : "";
-    if (
-      !pyEq(Object.keys(step).sort(), ["name", "run"]) ||
-      stepRun(step) !== preamble + RUSTUP_METADATA_RUN
-    ) {
+    if (!pyEq(Object.keys(step).sort(), ["name", "run"]) || stepRun(step) !== RUSTUP_METADATA_RUN) {
       errors.push(
         `web: ${name} Rustup metadata must build and run the locked xtask helper without toolchain auto-install`,
       );
