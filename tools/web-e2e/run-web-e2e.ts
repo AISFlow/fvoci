@@ -831,9 +831,44 @@ function checkedOutput(argv: string[], cwd: string): string {
   return result.stdout.toString().trim();
 }
 
+// Reuse never relabels a packet: the image still runs the original exact
+// checkout and native qualifier. Only these host Docker functions may differ.
+export async function qualifyCohortHostProgram(
+  before: string,
+  current: string,
+  changed: string[],
+): Promise<void> {
+  if (
+    changed.some(
+      (path) =>
+        ![
+          "tools/web-e2e/run-web-e2e.ts",
+          "tools/web-e2e/run-web-e2e.test.ts",
+          "RUNNING.md",
+        ].includes(path),
+    )
+  )
+    fail("cohort reuse requires unchanged product and in-container sources");
+  const ts = await import("typescript");
+  const host = new Set(["containerBrowser", "browserServices", "qualifyCohortHostProgram"]);
+  const program = (text: string) =>
+    ts
+      .createSourceFile("run-web-e2e.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+      .statements.filter(
+        (node) => !ts.isFunctionDeclaration(node) || !host.has(node.name?.text ?? ""),
+      )
+      .map((node) => node.getText())
+      .join("\n");
+  if (program(before) !== program(current))
+    fail("cohort reuse cannot replace any in-container program");
+}
+
 /** One pinned image, existing producer packet, then one real isolated shard. */
 async function containerBrowser(argv: string[]): Promise<number> {
-  if (argv.length !== 3 || !["--ci-shard", "--ci-shards"].includes(argv[1] ?? ""))
+  if (
+    (argv.length !== 3 && !(argv.length === 5 && argv[3] === "--reuse-cohort")) ||
+    !["--ci-shard", "--ci-shards"].includes(argv[1] ?? "")
+  )
     throw new UsageError("container-browser ROOT {--ci-shard N|--ci-shards N,N,...}");
   const root = realpathSync(argv[0] ?? "");
   if (process.platform !== "linux") fail("local browser containers currently require a Linux host");
@@ -868,7 +903,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
   );
   if (!metadata.startsWith("linux amd64 ") || !metadata.includes(JSON.stringify(image)))
     fail("the locally available pinned native amd64 ci-web image is required (no automatic pull)");
-  const source = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  const orchestratorSource = checkedOutput(["git", "rev-parse", "HEAD"], root);
+  let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(
     resolve(root, checkedOutput(["git", "rev-parse", "--git-common-dir"], root)),
@@ -877,18 +913,49 @@ async function containerBrowser(argv: string[]): Promise<number> {
   if (statSync(batch).uid !== uid || (statSync(batch).mode & 0o777) !== 0o700)
     fail("the owned private browser batch is required");
   chmodSync(batch, 0o700);
-  const run = randomBytes(16).toString("hex");
+  const cohort = argv[4] === undefined ? batch : realpathSync(argv[4]);
+  let run = randomBytes(16).toString("hex");
+  const resources = randomBytes(16).toString("hex");
+  if (cohort !== batch) {
+    if (statSync(cohort).uid !== uid || (statSync(cohort).mode & 0o777) !== 0o700)
+      fail("owned private producer cohort required");
+    const value: unknown = JSON.parse(readFileSync(join(cohort, "handoff/handoff.json"), "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      fail("invalid producer cohort");
+    const manifest = value as Record<string, unknown>;
+    if (
+      typeof manifest.source !== "string" ||
+      !/^[a-f0-9]{40}$/.test(manifest.source) ||
+      typeof manifest.run !== "string" ||
+      manifest.container_image !== image ||
+      manifest.root !== root ||
+      manifest.repository !== "local-container"
+    )
+      fail("producer cohort source/image/path mismatch");
+    source = manifest.source;
+    run = manifest.run;
+    checkedOutput(["git", "merge-base", "--is-ancestor", source, orchestratorSource], root);
+    const changed = checkedOutput(
+      ["git", "diff", "--name-only", source, orchestratorSource, "--"],
+      root,
+    )
+      .split("\n")
+      .filter(Boolean);
+    await qualifyCohortHostProgram(
+      checkedOutput(["git", "show", source + ":tools/web-e2e/run-web-e2e.ts"], root),
+      readFileSync(join(root, "tools/web-e2e/run-web-e2e.ts"), "utf8"),
+      changed,
+    );
+  }
+  process.stderr.write(
+    `container-browser orchestrator_source=${orchestratorSource} build_source=${source} consumer_source=${source} reuse=${String(cohort !== batch)}\n`,
+  );
   if (!/^[a-f0-9]{32}$/.test(run)) fail("invalid browser batch identity");
-  const producer = join(batch, "producer");
+  const producer = join(cohort, "producer");
   {
     for (const directory of [
-      producer,
+      ...(cohort === batch ? [producer, "cargo", "home", "tmp", "sqlite", "producer-output"] : []),
       ...shards.map((shard) => join(batch, "consumer-" + shard)),
-      "cargo",
-      "home",
-      "tmp",
-      "sqlite",
-      "producer-output",
       ...shards.map((shard) => "consumer-output-" + shard),
     ].map((p) => (p.startsWith(batch) ? p : join(batch, p))))
       mkdirSync(directory, { mode: directory.endsWith("/tmp") ? 0o711 : 0o700 });
@@ -896,7 +963,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     // copies occupy the same physical path inside the image, preserving the
     // existing packet's no-relocation and full-current-input checks.
     for (const directory of [
-      producer,
+      ...(cohort === batch ? [producer] : []),
       ...shards.map((shard) => join(batch, "consumer-" + shard)),
     ]) {
       checkedOutput(
@@ -906,13 +973,19 @@ async function containerBrowser(argv: string[]): Promise<number> {
       checkedOutput(["git", "checkout", "--quiet", "--detach", source], directory);
     }
   }
-  const network = "fvoci-browser-" + run;
+  for (const shard of shards) {
+    const runDirectory = join(batch, "run-" + shard);
+    mkdirSync(runDirectory, { mode: 0o700 });
+    for (const name of ["home", "tmp", "cargo", "sqlite", "handoff", "output", "vite-temp"])
+      mkdirSync(join(runDirectory, name), { mode: name === "tmp" ? 0o711 : 0o700 });
+  }
   async function runContainer(
     phase: "prepare" | "consume",
     services: NodeJS.ProcessEnv = {},
     shard = "",
   ): Promise<number> {
     const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
+    const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
     const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
     const variables: Record<string, string> = {
       HOME: "/fvoci-run/home",
@@ -951,7 +1024,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
         variables[name] = services[name] ?? "";
       variables.FVOCI_MEILI_URL = "http://fvoci-meili:7700";
       variables.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
-        .update(readFileSync(join(batch, "handoff/handoff.json")))
+        .update(readFileSync(join(cohort, "handoff/handoff.json")))
         .digest("hex");
     }
     const envFile = join(batch, phase + shard + ".env");
@@ -962,7 +1035,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
         .join(""),
       { mode: 0o600, flag: "wx" },
     );
-    const name = "fvoci-browser-" + run + "-" + phase + shard;
+    const name = "fvoci-browser-" + resources + "-" + phase + shard;
     const args = [
       "docker",
       "run",
@@ -985,10 +1058,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
     for (const [from, to, readonly] of [
       [directory, root, false],
       [join(common, "objects"), join(common, "objects"), true],
-      [batch, "/fvoci-run", false],
+      [runDirectory, "/fvoci-run", false],
       // Bun's node shim uses /tmp, independently of TMPDIR. Hide the image
       // build's root-owned shim with the same owned ordinary-disk temp dir.
-      [join(batch, "tmp"), "/tmp", false],
+      [join(runDirectory, "tmp"), "/tmp", false],
       [join(batch, output), "/fvoci-run/output", false],
     ] as const) {
       if (from.includes(",") || to.includes(",")) fail("Docker bind paths cannot contain commas");
@@ -997,9 +1070,24 @@ async function containerBrowser(argv: string[]): Promise<number> {
     if (phase === "consume") {
       args.push(
         "--network",
-        network,
+        "fvoci-browser-" + resources + "-" + shard,
         "--mount",
         `type=bind,source=${producer}/node_modules,target=${root}/node_modules,readonly`,
+      );
+      for (const [from, to] of [
+        [join(cohort, "sqlite"), "/fvoci-run/sqlite"],
+        [join(cohort, "sqlite.env"), "/fvoci-run/sqlite.env"],
+        [join(cohort, "handoff"), "/fvoci-run/handoff"],
+        ...["registry", "git", "config", "config.toml"]
+          .filter((name) => existsSync(join(cohort, "cargo", name)))
+          .map((name) => [join(cohort, "cargo", name), "/fvoci-run/cargo/" + name]),
+      ]) {
+        if (!from || !to || from.includes(",")) fail("invalid shared native input mount");
+        args.push("--mount", `type=bind,source=${from},target=${to},readonly`);
+      }
+      args.push(
+        "--mount",
+        `type=bind,source=${runDirectory}/vite-temp,target=${root}/node_modules/.vite-temp`,
       );
     }
     args.push(
@@ -1013,17 +1101,21 @@ async function containerBrowser(argv: string[]): Promise<number> {
       ...(phase === "consume" ? [shard] : []),
     );
     const started = performance.now();
+    const logFd =
+      phase === "consume" ? openSync(join(runDirectory, "console.log"), "wx", 0o600) : undefined;
     let child;
     try {
       child = Bun.spawn(args, {
         stdin: "ignore",
-        stdout: "inherit",
-        stderr: "inherit",
+        stdout: logFd ?? "inherit",
+        stderr: logFd ?? "inherit",
         timeout: 20 * 60_000,
       });
     } catch (error) {
       rmSync(envFile);
       throw error;
+    } finally {
+      if (logFd !== undefined) closeSync(logFd);
     }
     const interrupt = () => {
         child.kill("SIGINT");
@@ -1066,17 +1158,40 @@ async function containerBrowser(argv: string[]): Promise<number> {
       if (removed.exitCode !== 0 && result === 0) result = 1;
     } else if (result === 0) result = 1;
     process.stderr.write(
-      `container-browser phase=${phase} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(result)}\n`,
+      `container-browser phase=${phase} shard=${shard || "producer"} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(result)}${phase === "consume" ? " log=" + join(runDirectory, "console.log") : ""}\n`,
     );
     return result;
   }
-  const prepared = await runContainer("prepare");
-  if (prepared !== 0) return prepared;
-  for (const shard of shards) {
-    const status = await browserServices(root, batch, network, (services) =>
-      runContainer("consume", services, shard),
+  if (cohort === batch) {
+    const prepared = await runContainer("prepare");
+    if (prepared !== 0) return prepared;
+  }
+  // Only an empty mountpoint is added: no dependency file/input hash changes.
+  mkdirSync(join(producer, "node_modules/.vite-temp"), { recursive: true });
+  let firstFailure = 0;
+  for (let at = 0; at < shards.length; at += 2) {
+    const settled = await Promise.allSettled(
+      shards.slice(at, at + 2).map(async (shard) => {
+        const status = await browserServices(
+          root,
+          batch,
+          "fvoci-browser-" + resources + "-" + shard,
+          async (services) => {
+            const result = await runContainer("consume", services, shard);
+            if (result !== 0 && firstFailure === 0) firstFailure = result;
+            return result;
+          },
+        );
+        if (status !== 0 && firstFailure === 0) firstFailure = status;
+      }),
     );
-    if (status !== 0) return status;
+    for (const result of settled)
+      if (result.status === "rejected") {
+        if (firstFailure === 0)
+          firstFailure = result.reason instanceof RuntimeExit ? result.reason.status : 1;
+        process.stderr.write("container-browser consumer setup failed\n");
+      }
+    if (firstFailure) return firstFailure;
   }
   return 0;
 }

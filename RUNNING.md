@@ -737,6 +737,14 @@ and native restart lifecycle, and shard 5 its actual Docker service-ledger witne
 These complete shards still require the existing host command. An individual
 supported shard can be selected with `--ci-shard N`.
 
+At most two complete consumers run together, with separate databases, networks,
+home/temp/Cargo lock directories, output and Vite config caches. SDK and dependency
+bytes are shared read-only at the producer's original physical paths. A retained
+owned cohort can be selected with `--reuse-cohort /path/to/cohort`; this retains its
+exact build and in-container source and native qualification. Reuse refuses any
+product or in-container program change; the host orchestrator source is reported
+separately. It does not qualify a new image or a different product source.
+
 The UI reuses source auth/workspace/settings styling for setup, login, workspace
 list, rename, and logout. Magic link, OIDC/MFA/consent, member list, invites,
 import/export, and deletion surfaces are shown as unavailable rather than faked.

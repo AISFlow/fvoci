@@ -20,6 +20,7 @@ import {
   CheckError,
   CI_WEB_IMAGE,
   containerShard,
+  qualifyCohortHostProgram,
   sqliteEnvironment,
   committedApiJobs,
   createSafeDiagnostics,
@@ -236,6 +237,36 @@ test("SQLite exports are four data fields, never shell evaluation", () => {
     valid.replace("export SQLITE3_STATIC=1\n", ""),
   ])
     expect(() => sqliteEnvironment(text)).toThrow(CheckError);
+});
+
+test("cohort reuse retains the complete in-container program and rejects product source changes", async () => {
+  const before =
+    "const IMAGE='fixed'; async function browserPhase(){return 7;} async function containerBrowser(){return 0;}";
+  const hostChange = before.replace(
+    "containerBrowser(){return 0;}",
+    "containerBrowser(){return 1;}",
+  );
+  await qualifyCohortHostProgram(before, hostChange, ["tools/web-e2e/run-web-e2e.ts"]);
+  const rejected = async (promise: Promise<void>) => {
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CheckError);
+  };
+  await rejected(qualifyCohortHostProgram(before, hostChange, ["src/main.rs"]));
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("return 7", "return 8"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
+  await rejected(
+    qualifyCohortHostProgram(before, hostChange.replace("'fixed'", "'foreign'"), [
+      "tools/web-e2e/run-web-e2e.ts",
+    ]),
+  );
 });
 
 describe("planSpecs", () => {
