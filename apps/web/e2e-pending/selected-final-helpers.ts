@@ -222,7 +222,7 @@ export async function freshReadback(
 ): Promise<void> {
   const reader = await actors.open(who);
   await mount(reader, target, actors.binding.flow);
-  expect(await editorShape(reader.page)).toEqual(expected);
+  await expect.poll(() => editorShape(reader.page)).toEqual(expected);
   const current = await body(reader.page, target);
   if (!isTiptapDoc(expected.document)) throw new Error("SELECTED_FINAL_EXPECTED_DOCUMENT_INVALID");
   const expectedNative = tiptapJsonToYDoc(expected.document);
