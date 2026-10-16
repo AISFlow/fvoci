@@ -380,6 +380,7 @@ export const command: Command = async (args, options = {}) => {
     forward(interruptError());
   };
   const abort = () => {
+    if (controller.signal.aborted) return;
     forward(options.signal?.reason);
   };
   inFlight.add(interrupt);
@@ -412,7 +413,6 @@ export const command: Command = async (args, options = {}) => {
       closeSync(status[1]);
       status[1] = -1;
       forward = (reason: unknown) => {
-        if (options.signal !== undefined && controller.signal.aborted) return;
         controller.abort(reason);
         child.kill("SIGINT");
         // The first SIGINT starts the bound; a later one does not extend it.
