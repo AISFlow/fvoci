@@ -320,8 +320,9 @@ export function verifyMetadata(info: unknown, architecture: string) {
 export async function scanImage(path: string, inspection: string, arch: string) {
   const operation = imageInterrupts();
   try {
-    await scanSavedImage(path, inspection, arch, operation);
+    const configDigest = await scanSavedImage(path, inspection, arch, operation);
     operation.check();
+    return configDigest;
   } finally {
     operation.close();
   }
@@ -485,6 +486,7 @@ async function scanSavedImage(
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
+  return "sha256:" + descriptorName(at(manifest, "config")).slice("blobs/sha256/".length);
 }
 
 export function buildSummary(log: string, info?: unknown) {
@@ -955,11 +957,11 @@ async function nativeImageBuild() {
       await run(["docker", "image", "inspect", plan.ref, "--format", "{{json .}}"]),
     );
     await Bun.write(inspection, JSON.stringify(metadata));
-    await run(["docker", "image", "save", plan.ref, "--output", join(work, "image.tar")]);
-    await scanImage(join(work, "image.tar"), inspection, plan.arch);
-    operation.check();
     const id = at(metadata, "Id");
     check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
+    await run(["docker", "image", "save", id, "--output", join(work, "image.tar")]);
+    const configDigest = await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    operation.check();
     const sdkSeal = await smokeImage(id, plan.target, plan.builder + "-smoke");
     operation.check();
     summary(imageSdkSummary(plan, id, sdkSeal));
@@ -1011,7 +1013,7 @@ async function nativeImageBuild() {
       archDigest(config, manifest, plan.arch);
       check(
         at(config, "config", "Labels", "org.opencontainers.image.revision") === plan.source &&
-          at(raw, "config", "digest") === id,
+          at(raw, "config", "digest") === configDigest,
         "published image differs from verified SDK smoke",
       );
       summary(imageSdkSummary(plan, published, sdkSeal));

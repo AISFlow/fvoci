@@ -1079,6 +1079,7 @@ async function dockerChildFixture(mode: string) {
   const bin = join(root, "bin");
   await mkdir(bin);
   const state = join(root, "state.json");
+  const metadata = info(process.arch === "arm64" ? "arm64" : "amd64");
   await writeFile(
     state,
     JSON.stringify({
@@ -1086,8 +1087,16 @@ async function dockerChildFixture(mode: string) {
       builder: mode === "collision",
       worker: mode === "collision",
       smoke: null,
+      configDigest: "sha256:" + new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
       metadata: {
-        ...info(process.arch === "arm64" ? "arm64" : "amd64"),
+        ...metadata,
+        Config: {
+          ...metadata.Config,
+          Labels: {
+            ...metadata.Config.Labels,
+            "org.opencontainers.image.revision": "b".repeat(40),
+          },
+        },
         Id: "sha256:" + "a".repeat(64),
       },
     }),
@@ -1101,7 +1110,7 @@ if(a[0]==="buildx" && a[1]==="ls") console.log(state.builder?state.name:"");
 else if(a[0]==="buildx" && a[1]==="create") {state.name=a[a.indexOf("--name")+1];state.builder=true;state.worker=true;save();if(mode==="create-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(17);}}
 else if(a[0]==="buildx" && a[1]==="rm") {state.builder=false;state.worker=false;save();}
 else if(a[0]==="buildx" && ["version","inspect","build"].includes(a[1])) {}
-else if(a[0]==="buildx" && a[1]==="imagetools" && a[2]==="inspect") {if(a.includes("--raw"))console.log(JSON.stringify({config:{digest:mode==="published-mismatch"?"sha256:"+"f".repeat(64):state.metadata.Id}}));else if(a.at(-1)==="{{json .Image}}")console.log(JSON.stringify({architecture:state.metadata.Architecture,os:"linux",config:state.metadata.Config}));else console.log(JSON.stringify({digest:"sha256:"+"c".repeat(64)}));}
+else if(a[0]==="buildx" && a[1]==="imagetools" && a[2]==="inspect") {if(a.includes("--raw"))console.log(JSON.stringify({config:{digest:mode==="published-mismatch"?"sha256:"+"f".repeat(64):state.configDigest}}));else if(a.at(-1)==="{{json .Image}}")console.log(JSON.stringify({architecture:state.metadata.Architecture,os:"linux",config:state.metadata.Config}));else console.log(JSON.stringify({digest:"sha256:"+"c".repeat(64)}));}
 else if(a[0]==="push") {}
 else if(a[0]==="image" && a[1]==="inspect") console.log(JSON.stringify(state.metadata));
 else if(a[0]==="image" && a[1]==="save") fs.copyFileSync(path.join(dir,"image.tar"),a[a.indexOf("--output")+1]);
@@ -1307,9 +1316,6 @@ for (const mode of ["published-ok", "published-mismatch"])
           join(checkout, "tools/ci/ci-base-image.test.ts"),
           'import {test,expect} from "bun:test";test("fixture prerequisite",()=>expect(true).toBe(true));',
         );
-        const state = JSON.parse(await readFile(fixture.state, "utf8"));
-        state.metadata.Config.Labels["org.opencontainers.image.revision"] = "b".repeat(40);
-        await writeFile(fixture.state, JSON.stringify(state));
         const child = Bun.spawn([process.execPath, "tools/ci/ci-base-image.ts", "native-build"], {
           cwd: checkout,
           env: {
