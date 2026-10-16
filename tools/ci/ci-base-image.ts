@@ -651,9 +651,15 @@ async function imageCommand(
   const interrupt = () => child.kill("SIGTERM");
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", interrupt);
-  if (options.input !== undefined && child.stdin !== null && typeof child.stdin !== "number") {
-    child.stdin.write(options.input);
-    child.stdin.end();
+  const input = child.stdin;
+  if (
+    options.input !== undefined &&
+    input !== undefined &&
+    input !== null &&
+    typeof input !== "number"
+  ) {
+    input.write(options.input);
+    input.end();
   }
   let output = "",
     bytes = 0;
