@@ -9,7 +9,9 @@ cd "$ROOT"
 cargo fetch --locked
 cargo fetch --locked --manifest-path "$ROOT/crates/collab-engine/Cargo.toml"
 
-bun ci
+# Trusted dependency lifecycle scripts may invoke `node`; Bun owns that
+# executable name for this command as well as the later web tools.
+bun --bun run bun ci
 cd "$ROOT/apps/web"
 if [[ -n "${FVOCI_WEB_CONTAINER_IMAGE:-}" ]]; then
   # The digest-pinned ci-web image already owns Chromium and its system tools.
