@@ -814,3 +814,29 @@ fn image_adoption_refuses_unpinned_or_mutable_inputs_before_any_helper_or_export
         );
     }
 }
+
+#[test]
+fn local_image_config_ids_cannot_replace_registry_pins_in_ci() {
+    let _serial = serial();
+    let mut fixture = Fixture::new();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let seal = "b".repeat(64);
+    let args = [
+        "--image-sdk",
+        "/opt/fvoci-sqlite",
+        "--image-ref",
+        &image,
+        "--expected-sdk-sha256",
+        &seal,
+    ];
+    let result = fixture.invoke(&args);
+    fixture.rejected(&result);
+    assert!(result.stderr.contains("explicit local-only mode"));
+    fixture.set("CI", "true");
+    let mut local = args.to_vec();
+    local.push("--local-image-sdk");
+    let result = fixture.invoke(&local);
+    fixture.rejected(&result);
+    assert!(result.stderr.contains("CI requires registry digest"));
+    assert!(fixture.trace().is_empty());
+}
