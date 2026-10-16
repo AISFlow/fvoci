@@ -24,8 +24,13 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
-import { validateSpecRelpath, discoverGroups, assignShards, verifyPlan } from "./groups.ts";
-import { databaseUrls } from "./database-urls.ts";
+import {
+  validateSpecRelpath,
+  discoverGroups,
+  assignShards,
+  verifyPlan,
+  DEFAULT_SHARD_COUNT,
+} from "./groups.ts";
 
 export const CI_WEB_IMAGE =
   "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
@@ -370,8 +375,8 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
       if (shards.length !== 1) fail("consumer requires exactly one complete shard");
       const shard = containerShard(shards[0]);
       const groups = discoverGroups(),
-        plan = assignShards(groups, 8);
-      verifyPlan(undefined, 8);
+        plan = assignShards(groups, DEFAULT_SHARD_COUNT);
+      verifyPlan(undefined, DEFAULT_SHARD_COUNT);
       await stage("browser-handoff-consume", handoff(["consume"]), root);
       for (const specs of plan[Number(shard)] ?? [])
         await stage(
@@ -390,6 +395,7 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
 
 /** The existing group runtime, shared by ordinary host and image consumers. */
 async function groupRuntime(argv: string[]): Promise<number> {
+  const { databaseUrls } = await import("./database-urls.ts");
   const root = process.env.ROOT,
     run = process.env.RUN_DIR,
     log = process.env.SERVER_LOG,
@@ -457,7 +463,7 @@ async function groupRuntime(argv: string[]): Promise<number> {
       [
         "timeout",
         "60",
-        "bun",
+        process.execPath,
         "--no-env-file",
         join(root, "tools/web-e2e/database-urls.ts"),
         action,
@@ -617,7 +623,7 @@ async function groupRuntime(argv: string[]): Promise<number> {
     step = "smtp-sink";
     smtp = spawnGroup(
       [
-        "bun",
+        process.execPath,
         join(root, "tools/web-e2e/smtp-sink.ts"),
         "--capture",
         capture,
@@ -701,7 +707,7 @@ async function groupRuntime(argv: string[]): Promise<number> {
     }
     step = "network-settle";
     const settled = Bun.spawn(
-      ["bun", "--no-env-file", join(root, "tools/web-e2e/network-settle.ts")],
+      [process.execPath, "--no-env-file", join(root, "tools/web-e2e/network-settle.ts")],
       { env, stdout: "inherit", stderr: "pipe" },
     );
     const warning = await new Response(settled.stderr).text();
@@ -721,7 +727,7 @@ async function groupRuntime(argv: string[]): Promise<number> {
     playwright = Bun.spawn(
       [
         "setsid",
-        "bun",
+        process.execPath,
         "--bun",
         "x",
         "--no-install",

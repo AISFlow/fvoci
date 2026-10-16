@@ -332,6 +332,8 @@ cat >"$FAKE_BIN/bun" <<'STUB'
 exec "$FVOCI_FIXTURE_REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fake-bun "$@"
 STUB
 chmod +x "$FIXTURE_ROOT"/scripts/*.sh "$FIXTURE_ROOT/target/debug/"* "$FAKE_BIN/"*
+"$REAL_BUN" --no-env-file "$ROOT/tools/web-e2e/shard-fixture.ts" fixture-runtime \
+  "$ROOT/tools/web-e2e/run-web-e2e.ts" "$FIXTURE_ROOT/tools/web-e2e/run-web-e2e.ts" "$FAKE_BIN/bun"
 
 # run_group <pending:0|1> <outcome:pass|fail> <net-mode> <log> <github-output>
 run_group() {

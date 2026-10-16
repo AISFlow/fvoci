@@ -2,11 +2,47 @@
 // `bun tools/web-e2e/shard-fixture.ts <command> ...`. Each command runs real
 // shell fragments of the web e2e scripts with their runtime stubbed and exits
 // 1 with one stderr line on the first broken expectation.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 import { TIMER_FILTERS } from "./groups.ts";
 import { groupDatabaseStatement } from "./database-urls.ts";
+
+// Substitute only the Bun child executable in this fixture's private copied
+// runtime. Production always uses process.execPath; native binaries stay real
+// paths (the existing controlled migrate/server fixtures provide those files).
+function fixtureRuntime(source: string, destination: string, executable: string): void {
+  check(
+    source !== destination &&
+      realpathSync(destination) === destination &&
+      /\/fvoci-web-e2e-failure-output\.[^/]+\/root\/tools\/web-e2e\/run-web-e2e\.ts$/.test(
+        destination,
+      ) &&
+      statSync(destination).uid === process.getuid?.() &&
+      realpathSync(executable) === executable,
+    "fixture-owned runtime copy required",
+  );
+  const text = readFileSync(source, "utf8"),
+    start = text.indexOf("async function groupRuntime("),
+    end = text.indexOf("\nfunction checkedOutput(", start);
+  check(start >= 0 && end > start, "group runtime boundary missing");
+  const body = text.slice(start, end);
+  check(body.split("process.execPath").length === 5, "four native Bun child boundaries required");
+  writeFileSync(
+    destination,
+    text.slice(0, start) +
+      body.replaceAll("process.execPath", JSON.stringify(executable)) +
+      text.slice(end),
+  );
+}
 
 async function fakeBun(args: string[]): Promise<void> {
   const state = process.env.FVOCI_FIXTURE_NET_STATE;
@@ -272,6 +308,12 @@ function retention(fn: string, root: string): void {
 }
 
 const COMMANDS: Record<string, { arity: number; run: (...args: string[]) => unknown }> = {
+  "fixture-runtime": {
+    arity: 3,
+    run: (source = "", destination = "", executable = "") => {
+      fixtureRuntime(source, destination, executable);
+    },
+  },
   "fake-bun": { arity: -1, run: (...args) => fakeBun(args) },
   "record-args": { arity: -1, run: (...args) => process.stdout.write(`${JSON.stringify(args)}\n`) },
   "timer-rows": {
