@@ -1,3 +1,4 @@
+import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
@@ -330,37 +331,14 @@ test("source tag:name search filters documents and leaves task hits in the real 
   expect(tag).toBeTruthy();
   // Complete only the already committed setup prefix through the actual
   // search worker before starting the fresh task's unchanged recall window.
-  const container = process.env.FVOCI_TEST_PG_CONTAINER;
-  const adminUrl = process.env.FVOCI_E2E_ADMIN_DATABASE_URL;
-  if (!container || !adminUrl) {
-    throw new Error("isolated PostgreSQL fixture context is required");
-  }
-  const fixtureContainer = container;
-  const fixtureDatabase = new URL(adminUrl).pathname.slice(1);
   expect(workspaceId).toMatch(/^[0-9a-f-]{36}$/i);
   function fixtureJson<T>(sql: string, schema: z.ZodType<T>): T {
-    const output = execFileSync(
-      "docker",
-      [
-        "exec",
-        "-i",
-        fixtureContainer,
-        "psql",
-        "-U",
-        "postgres",
-        "-d",
-        fixtureDatabase,
-        "-qAt",
-        "-v",
-        "ON_ERROR_STOP=1",
-      ],
-      {
-        input: `BEGIN READ ONLY;\n${sql}\nCOMMIT;\n`,
-        encoding: "utf8",
-        timeout: 5000,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
+    const output = execFileSync(process.execPath, fixtureQueryArgs("admin"), {
+      input: `BEGIN READ ONLY;\n${sql}\nCOMMIT;\n`,
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     return schema.parse(JSON.parse(output.trim()));
   }
   const watermark = fixtureJson(
