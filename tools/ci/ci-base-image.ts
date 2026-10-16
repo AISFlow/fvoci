@@ -926,8 +926,9 @@ async function nativeImageBuild() {
   let builderOwned = false,
     failure: unknown;
   const cleanupErrors: unknown[] = [];
-  const summary = (line: string) => {
+  const summary = (line: string, log = true) => {
     appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+    if (log) console.log(line);
   };
   try {
     await run([process.execPath, "tools/ci/ci-base-image.ts", "inputs"]);
@@ -1040,6 +1041,7 @@ async function nativeImageBuild() {
             readFileSync(log, "utf8"),
             existsSync(inspection) ? JSON.parse(readFileSync(inspection, "utf8")) : undefined,
           ),
+          false, // Build descriptions are not restricted to safe summary fields.
         );
     } catch (error) {
       cleanupErrors.push(error);
@@ -1073,6 +1075,7 @@ async function publishImageManifest() {
   const cleanupErrors: unknown[] = [];
   const summary = (line: string) => {
     appendFileSync(imageEnv("GITHUB_STEP_SUMMARY"), line + "\n");
+    console.log(line);
   };
   try {
     await imageLogin();

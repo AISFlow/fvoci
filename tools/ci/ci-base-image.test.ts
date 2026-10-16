@@ -1367,26 +1367,32 @@ for (const mode of [
         expect(code).toBe(mode.endsWith("mismatch") ? 1 : 0);
         const summary = await readFile(join(root, "summary"), "utf8");
         const calls = await readFile(join(root, "calls"), "utf8");
+        expect(stdout).not.toContain("| Build step | Seconds |");
         if (mode === "inspected-mismatch") {
           expect(summary).not.toContain("sdk_sha256=");
+          expect(stdout).not.toContain("sdk_sha256=");
           expect(stderr).toContain("saved image differs from inspected image identity");
           expect(calls).not.toContain('"run"');
           expect(calls).not.toContain('"push"');
         } else {
-          expect(summary).toContain(
+          const local =
             "image=" +
               (mode === "published-classic" ? identity.configDigest : identity.manifestDigest) +
               " sdk_sha256=" +
-              "e".repeat(64),
-          );
+              "e".repeat(64);
+          expect(summary).toContain(local);
+          expect(stdout).toContain(local);
           const published =
             "image=ghcr.io/aisflow/fvoci-ci-base@sha256:" +
             "c".repeat(64) +
             " sdk_sha256=" +
             "e".repeat(64);
-          if (mode !== "published-mismatch") expect(summary).toContain(published);
-          else {
+          if (mode !== "published-mismatch") {
+            expect(summary).toContain(published);
+            expect(stdout).toContain(published);
+          } else {
             expect(summary).not.toContain(published);
+            expect(stdout).not.toContain(published);
             expect(stderr).toContain("published image differs from verified SDK smoke");
           }
           expect(stdout + stderr + summary).not.toContain("PRIVATE_");
