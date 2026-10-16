@@ -212,6 +212,7 @@ export interface RestartContext {
   receipt: Receipt;
   // Postgres projects the restart browser report through its known spec map.
   projectBrowser: boolean;
+  beforeRestartStop?: () => Promise<void>;
   /** Ordinary SQLite ON only; the existing restart remains the sole owner
    * of both server processes, stop/port checks and the open producer logs. */
   sqliteProducts?: {
@@ -225,7 +226,6 @@ export interface RestartContext {
       seed: Json;
       readback: Json;
     }) => Promise<void>;
-    beforeRestartStop?: () => Promise<void>;
     afterRestartStopped: (rows: Row[]) => Promise<void>;
   };
   role?: string;
@@ -688,7 +688,7 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
             restartServer = live[0] as Row;
             assert.ok(restartServer.uid === 1000 && restartServer.gid === 1000);
             try {
-              await g.sqliteProducts?.beforeRestartStop?.();
+              await g.beforeRestartStop?.();
             } catch (error) {
               cleanupErrors.push(errorFacts(error));
               productFinish.error ??=

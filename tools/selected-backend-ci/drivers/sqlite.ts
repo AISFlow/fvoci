@@ -448,6 +448,8 @@ const checkpointKeys = [
 ] as const;
 
 // The I/O this driver owns, replaceable as one boundary in tests.
+type ProductCallbacks = NonNullable<RestartContext["sqliteProducts"]> &
+  Pick<RestartContext, "beforeRestartStop">;
 export interface Seam extends RestartSeam {
   trap: () => void;
   loadCurrent: (lane: "sqlite", driver: string) => Promise<Current>;
@@ -456,7 +458,7 @@ export interface Seam extends RestartSeam {
   migrationRows: (db: string) => unknown[][];
   validateOffReport: (report: unknown, backend: "sqlite") => string[];
   restart: (context: RestartContext, seam: RestartSeam) => Promise<Receipt>;
-  products: (state: State, seam: Seam) => Promise<RestartContext["sqliteProducts"]>;
+  products: (state: State, seam: Seam) => Promise<ProductCallbacks>;
 }
 export interface State {
   current: Current;
@@ -1038,7 +1040,9 @@ async function runBrowser(state: State, seam: Seam): Promise<void> {
     receipt.sqlite_restore_report_sha256 = sha(restoreReport);
     receipt.phase = "restart";
     const context = restartContext(state, browserInputs, seam);
-    context.sqliteProducts = await seam.products(state, seam);
+    const { beforeRestartStop, ...products } = await seam.products(state, seam);
+    context.beforeRestartStop = beforeRestartStop;
+    context.sqliteProducts = products;
     receipt.current_schema_server_restart = await seam.restart(context, seam);
   }
 }
@@ -1413,10 +1417,7 @@ export function authEvents(path: string): unknown[][] {
 }
 /** Source-bound adapter for the existing restart owner, with separate exact
  * PRODUCT4 browser/report/native receipts and no second normal server manager. */
-export async function productCallbacks(
-  state: State,
-  seam: Seam,
-): Promise<NonNullable<RestartContext["sqliteProducts"]>> {
+export async function productCallbacks(state: State, seam: Seam): Promise<ProductCallbacks> {
   assert.ok(
     state.flow === "on" &&
       state.current.manifest.purpose === undefined &&
