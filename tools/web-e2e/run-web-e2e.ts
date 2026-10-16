@@ -397,37 +397,27 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
                 "selected_install_lifetime",
                 "--no-run",
               ]
-            : name === "main"
+            : name === "fixture"
               ? [
                   "cargo",
                   "build",
                   "--locked",
                   "--offline",
+                  "--bin",
+                  "fvoci-e2e-fixture",
                   "--features",
-                  "db-tests,api-schema",
-                  "--lib",
+                  "db-tests",
                 ]
-              : name === "fixture"
-                ? [
-                    "cargo",
-                    "build",
-                    "--locked",
-                    "--offline",
-                    "--bin",
-                    "fvoci-e2e-fixture",
-                    "--features",
-                    "db-tests",
-                  ]
-                : [
-                    "cargo",
-                    "build",
-                    "--locked",
-                    "--offline",
-                    "--bin",
-                    "fvoci-server",
-                    "--bin",
-                    "fvoci-migrate",
-                  ];
+              : [
+                  "cargo",
+                  "build",
+                  "--locked",
+                  "--offline",
+                  "--bin",
+                  "fvoci-server",
+                  "--bin",
+                  "fvoci-migrate",
+                ];
     const output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? "";
     const target = name === "engine" ? engineTarget : required("CARGO_TARGET_DIR");
     if (profile === "selected") args.push("--message-format=json-render-diagnostics");
@@ -486,7 +476,7 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
         selectedCli("record-before", "--output", required("FVOCI_SELECTED_CI_OUTPUT")),
         root,
       );
-      for (const name of ["main", "lib", "install", "engine"]) await native(name, "selected");
+      for (const name of ["lib", "install", "engine"]) await native(name, "selected");
       await stage(
         "selected-input-after",
         selectedCli("record-after", "--output", required("FVOCI_SELECTED_CI_OUTPUT")),

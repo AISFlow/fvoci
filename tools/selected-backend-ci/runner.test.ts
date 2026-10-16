@@ -442,7 +442,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     expect(caller).toContain('cli = join(root, "scripts/run-selected-backend-e2e.ts")');
     expect(caller).toContain('"permissions",');
     expect(caller).toContain(
-      'for (const name of ["main", "lib", "install", "engine"]) await native(name, "selected")',
+      'for (const name of ["lib", "install", "engine"]) await native(name, "selected")',
     );
     expect(caller.match(/selectedCli\("stage",/g)).toHaveLength(1);
     expect(caller).not.toContain("run-selected-backend-e2e.py");
@@ -460,7 +460,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
           : mode === "stage"
             ? [
                 "--stage-name",
-                "main",
+                "lib",
                 "--",
                 "cargo",
                 "build",
@@ -476,7 +476,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
   test("compiler argv keeps spaces, empty args, equals, switch order and trailing LF", () => {
     const args = ["cargo", "--features", "api-schema,db-tests", "", "a b", "--flag=x", "line\n"];
     expect(
-      parseCLI(["stage", "--output=/fixture/output", "--stage-name=main", "--", ...args])?.command,
+      parseCLI(["stage", "--output=/fixture/output", "--stage-name=lib", "--", ...args])?.command,
     ).toEqual(args);
   });
   for (const args of [
@@ -1566,7 +1566,7 @@ try {
       binaries,
       compiler_artifacts: [...artifacts, core],
     };
-    expect(expectedFiles(bundle, output)).toHaveLength(24);
+    expect(expectedFiles(bundle, output)).toHaveLength(22);
     for (const index of [0, 1, 2, 3, 4, 5]) {
       const changed = structuredClone(artifacts);
       (changed[index] as Artifact).features.push("unqualified");
@@ -1645,6 +1645,23 @@ try {
         expect(() => buildEnv()).toThrow();
       });
   });
+  test("obsolete main stage refuses before spawning or writing compiler evidence", async () => {
+    const output = directory();
+    const marker = join(output, "unexpected-compiler");
+    write(join(output, "before.json"), { head: source, tree });
+    await withEnvironment(ci, async () => {
+      await assert.rejects(
+        stage(output, "main", [
+          process.execPath,
+          "--eval",
+          "require('node:fs').writeFileSync(process.argv[1], 'unexpected');",
+          marker,
+        ]),
+      );
+    });
+    expect(existsSync(marker)).toBe(false);
+    expect(readdirSync(output)).toEqual(["before.json"]);
+  });
   for (const exit of [0, 7])
     test(
       "actual TS stage invokes harmless Bun command and preserves exit " + String(exit),
@@ -1657,14 +1674,14 @@ try {
             "--eval",
             `console.log('compiler-fixture'); process.exit(${String(exit)});`,
           ];
-          expect(await stage(output, "main", command)).toBe(exit);
-          expect(read(join(output, "main-stage.json"))).toMatchObject({
+          expect(await stage(output, "lib", command)).toBe(exit);
+          expect(read(join(output, "lib-stage.json"))).toMatchObject({
             source,
             tree,
             command,
             exit_code: exit,
           });
-          expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe(
+          expect(readFileSync(join(output, "lib-compiler.jsonl"), "utf8")).toBe(
             "compiler-fixture\n",
           );
         });
@@ -1687,7 +1704,7 @@ try {
           "--output",
           output,
           "--stage-name",
-          "main",
+          "lib",
           "--",
           ...command,
         ],
@@ -1699,7 +1716,7 @@ try {
         },
       );
       expect(result.exitCode).toBe(exit);
-      const receipt = read(join(output, "main-stage.json")) as {
+      const receipt = read(join(output, "lib-stage.json")) as {
         source: string;
         tree: string;
         command: string[];
@@ -1711,7 +1728,7 @@ try {
       expect(Object.keys(receipt)).toEqual(["source", "tree", "command", "exit_code", "seconds"]);
       expect(seconds).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(seconds)).toBe(true);
-      expect(readFileSync(join(output, "main-compiler.jsonl"), "utf8")).toBe("compiler-fixture\n");
+      expect(readFileSync(join(output, "lib-compiler.jsonl"), "utf8")).toBe("compiler-fixture\n");
     });
   test("main rejects broad permission arguments and nonphysical config output", async () => {
     const output = directory();
@@ -2014,7 +2031,7 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
         "--output",
         output,
         "--stage-name",
-        "main",
+        "lib",
         "--",
         process.execPath,
         childFixture,
@@ -2024,8 +2041,8 @@ describe.serial("task4 counterexamples and real child cancellation", () => {
     );
     try {
       expect(await child.exited).toBe(130);
-      expect(read(join(output, "main-stage.json"))).toMatchObject({ exit_code: 130 });
-      const compilerPid = Number(readFileSync(join(output, "main-compiler.jsonl"), "utf8").trim());
+      expect(read(join(output, "lib-stage.json"))).toMatchObject({ exit_code: 130 });
+      const compilerPid = Number(readFileSync(join(output, "lib-compiler.jsonl"), "utf8").trim());
       expect(Number.isSafeInteger(compilerPid) && compilerPid > 0).toBe(true);
       expect(() => process.kill(compilerPid, 0)).toThrow();
     } finally {

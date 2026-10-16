@@ -474,7 +474,7 @@ describe.serial("collaboration build packet", () => {
     rmSync(f.target, { recursive: true, force: true });
     rmSync(join(f.root, "crates/collab-engine/target"), { recursive: true, force: true });
     await consume(f.host);
-    expect(Object.keys((get("handoff-consumed.json") as Consumed).received)).toHaveLength(23);
+    expect(Object.keys((get("handoff-consumed.json") as Consumed).received)).toHaveLength(21);
   });
   test("a symlinked missing destination parent is refused", async () => {
     transfer();
@@ -511,7 +511,7 @@ describe.serial("collaboration build packet", () => {
     const receipt = get("handoff-consumed.json") as Consumed;
     expect(receipt.full_current_physical_inputs_equal).toBe(true);
     expect(receipt.fresh_dist_equal).toBe(true);
-    expect(Object.keys(receipt.received)).toHaveLength(23);
+    expect(Object.keys(receipt.received)).toHaveLength(21);
     for (const record of Object.values((get("bundle.json") as BundleRecord).binaries))
       expect(record.sha256).toBeString();
     for (const path of Object.keys((get("bundle.json") as BundleRecord).binaries))
@@ -600,7 +600,14 @@ describe.serial("collaboration build packet", () => {
       exportPacket(f.host);
     }).toThrow("compiler environment differs");
   });
-  test("missing receipt refused", () => {
+  test("missing remaining stage or receipt refused", () => {
+    for (const name of collaborationStages) {
+      const original = get(name + "-stage.json");
+      unlinkSync(join(f.output, name + "-stage.json"));
+      expect(() => exportPacket(f.host)).toThrow();
+      put(name + "-stage.json", original);
+      expect(existsSync(f.packet)).toBe(false);
+    }
     unlinkSync(join(f.output, "before.json"));
     expect(() => {
       exportPacket(f.host);
@@ -658,12 +665,22 @@ describe.serial("collaboration build packet", () => {
     expect(existsSync(join(f.output, "before.json"))).toBe(false);
   });
   test("changed stage receipt or native bytes refused", () => {
-    const original = get("main-stage.json") as Row;
-    put("main-stage.json", { ...original, exit_code: 7 });
+    const compile = get("compile-receipt.json") as Row & { stages: Row[] };
+    put("compile-receipt.json", {
+      ...compile,
+      stages: [
+        { ...first(compile.stages), command: ["actual-fixed-fixture", "main"] },
+        ...compile.stages,
+      ],
+    });
+    expect(() => exportPacket(f.host)).toThrow();
+    put("compile-receipt.json", compile);
+    const original = get("lib-stage.json") as Row;
+    put("lib-stage.json", { ...original, exit_code: 7 });
     expect(() => {
       exportPacket(f.host);
     }).toThrow();
-    put("main-stage.json", original);
+    put("lib-stage.json", original);
     writeFileSync(
       Object.keys((get("bundle.json") as BundleRecord).binaries)[0] as string,
       "changed physical ELF",
