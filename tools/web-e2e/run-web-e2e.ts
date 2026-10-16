@@ -128,6 +128,8 @@ async function containerBrowser(argv: string[], consumeOnly = false): Promise<nu
       HOME: "/fvoci-run/home",
       CARGO_HOME: "/fvoci-run/cargo",
       TMPDIR: "/fvoci-run/tmp",
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8",
       CARGO_TARGET_DIR: root + "/target",
       CARGO_BUILD_JOBS: "2",
       CARGO_INCREMENTAL: "0",
