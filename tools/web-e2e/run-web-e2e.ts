@@ -216,12 +216,18 @@ async function containerBrowser(argv: string[], consumeOnly = false): Promise<nu
         : "source /fvoci-run/sqlite.env\nexec bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-browser --ci-shard 6";
     args.push(image, "bash", "-euo", "pipefail", "-c", setup);
     const started = performance.now();
-    const child = Bun.spawn(args, {
-      stdin: "ignore",
-      stdout: "inherit",
-      stderr: "inherit",
-      timeout: 20 * 60_000,
-    });
+    let child;
+    try {
+      child = Bun.spawn(args, {
+        stdin: "ignore",
+        stdout: "inherit",
+        stderr: "inherit",
+        timeout: 20 * 60_000,
+      });
+    } catch (error) {
+      rmSync(envFile);
+      throw error;
+    }
     const interrupt = () => {
         child.kill("SIGINT");
       },
@@ -265,6 +271,7 @@ async function containerBrowser(argv: string[], consumeOnly = false): Promise<nu
   // only their owned ephemeral connection exports in the environment.
   const prepared = await runContainer("prepare");
   if (prepared !== 0) return prepared;
+  let verdict = 1;
   try {
     checkedOutput(["docker", "network", "create", "--internal", network], root);
     networkCreated = true;
@@ -291,10 +298,18 @@ async function containerBrowser(argv: string[], consumeOnly = false): Promise<nu
         stderr: "inherit",
       },
     );
-    return await child.exited;
+    verdict = await child.exited;
   } finally {
-    if (networkCreated) checkedOutput(["docker", "network", "rm", network], root);
+    if (networkCreated) {
+      try {
+        checkedOutput(["docker", "network", "rm", network], root);
+      } catch {
+        process.stderr.write("container-browser owned network cleanup failed\n");
+        if (verdict === 0) verdict = 1;
+      }
+    }
   }
+  return verdict;
 }
 
 /** A refusal: the CLI prints the message to stderr and exits 1. */

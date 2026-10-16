@@ -21,7 +21,9 @@ fvoci_test_meili_stop() {
     if docker inspect "$container" >/dev/null 2>&1; then
       local retired=0
       docker stop --time 10 "$container" >/dev/null || retired=1
-      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$container")" == 'false 0' ]] || retired=1
+      # This pinned Meili process uses SIGTERM's native 128+15 exit status;
+      # require that real stop, never a timeout's SIGKILL (137) or OOM.
+      [[ "$(docker inspect --format '{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$container")" == 'false 143 false' ]] || retired=1
       docker rm -v "$container" >/dev/null || retired=1
       return "$retired"
     fi
