@@ -1916,7 +1916,14 @@ export async function productCallbacks(state: State, seam: Seam): Promise<Produc
           ]),
           "SQLite relay settlement requires the exact current registry",
         );
+        const uploads = list(checks, "background").filter(
+          (fact) => get(fact, "kind") === "unfinished-uploads",
+        );
+        assert.ok(uploads.length === 1, "SQLite upload settlement requires its current fact");
         if (
+          get(uploads[0], "eligibility") === "clear" &&
+          get(uploads[0], "now") === 0 &&
+          get(uploads[0], "throughHorizon") === 0 &&
           relays.every((relay) => {
             const seq = get(relay, "lastSeq");
             assert.ok(typeof seq === "string" && /^(0|[1-9][0-9]*)$/.test(seq));
