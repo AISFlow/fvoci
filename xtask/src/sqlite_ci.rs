@@ -35,6 +35,10 @@ options:
   --identity-only       authenticate inputs before cache restore; export no build paths
   --cache-fallback      preserve rejected restored prefix and log a source build
   --expected-cache-identity EXPECTED_CACHE_IDENTITY
+  --seal-image-sdk      root builder finalization with immutable toolchain inputs
+  --image-sdk SDK       verify/adopt an immutable root-owned image SDK; never build
+  --expected-sdk-sha256 SHA256
+  --image-ref DIGEST_PIN
 ";
 /// 2 heavy steps x180 + 5 inspections/link/smoke x30; finite total helper budget.
 const HELPER_BUDGET: Duration = Duration::from_secs(510);
@@ -218,6 +222,11 @@ pub fn run(
             args::flag("identity-only"),
             args::flag("cache-fallback"),
             args::value("expected-cache-identity"),
+            args::value("image-sdk"),
+            args::value("expected-sdk-sha256"),
+            args::value("image-ref"),
+            args::flag("seal-image-sdk"),
+            args::flag("local-image-sdk"),
         ],
         true,
     ) {
@@ -252,6 +261,25 @@ fn prepare(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<i32, Failure> {
+    if parsed.get("image-sdk").is_some() {
+        return adopt_image(parsed, context, out);
+    }
+    if parsed.get("expected-sdk-sha256").is_some()
+        || parsed.get("image-ref").is_some()
+        || parsed.has("local-image-sdk")
+    {
+        return Err("image SDK arguments require --image-sdk".into());
+    }
+    if parsed.has("seal-image-sdk")
+        && (host::getuid() != 0
+            || !parsed.command.is_empty()
+            || parsed.has("identity-only")
+            || parsed.has("cache-fallback"))
+    {
+        return Err(
+            "image SDK finalization requires the root builder and no consumer/fallback".into(),
+        );
+    }
     let mut command = parsed.command.clone();
     if command.first().map(OsString::as_os_str) == Some(OsStr::new("--")) {
         command.remove(0);
@@ -455,38 +483,10 @@ fn prepare(
     if !rustc.lines().any(|line| line == format!("host: {target}")) {
         return Err("rustc host must match the native SQLite GNU target".into());
     }
-    let build_env: BTreeMap<String, String> = context
-        .env
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
-        })
-        .filter(|(k, _)| {
-            [
-                "LIBCLANG_PATH",
-                "RUSTFLAGS",
-                "CARGO_ENCODED_RUSTFLAGS",
-                "RUSTC",
-                "RUSTC_WRAPPER",
-                "RUSTC_WORKSPACE_WRAPPER",
-                "CARGO_BUILD_TARGET",
-            ]
-            .contains(&k.as_str())
-                || [
-                    "BINDGEN_EXTRA_CLANG_ARGS",
-                    "CARGO_PROFILE_",
-                    "CARGO_TARGET_",
-                ]
-                .iter()
-                .any(|p| k.starts_with(p))
-        })
-        .collect();
+    let build_env = build_environment(context);
     // The full host package inventory remains build-packages.txt diagnostics.
     // Actual native bytes, not unrelated package text, bind cache admission.
-    let identity = json!({
+    let mut identity = json!({
         "inputs": inputs,
         "exports": env,
         "wrapper_sha256": wrapper_sha256(),
@@ -499,6 +499,23 @@ fn prepare(
         "build_environment_sha256": sha256_hex(json!(build_env).to_string().as_bytes()),
         "rustc": rustc,
     });
+    if parsed.has("seal-image-sdk") {
+        let rustc_path = host::which("rustc", context.var("PATH")).ok_or("rustc unavailable")?;
+        let sysroot = utf8(
+            steps
+                .measured(
+                    "rust_sysroot",
+                    &["rustc".into(), "--print".into(), "sysroot".into()],
+                    RUSTC_BUDGET,
+                    true,
+                    Some(&context.env),
+                )?
+                .stdout,
+        )?;
+        identity["rustc_path"] = json!(fs::canonicalize(rustc_path)?);
+        identity["rust_sysroot"] = json!(fs::canonicalize(sysroot.trim())?);
+        identity["image_sdk"] = json!(true);
+    }
     // Only immutable inputs enter the key; output hashes and timings remain verified provenance.
     let cache_identity = sha256_hex(identity.to_string().as_bytes());
     if let Some(expected) = parsed.get("expected-cache-identity") {
@@ -624,6 +641,422 @@ fn prepare(
         return Ok(process::returncode(status) as i32);
     }
     if env_file.is_none() && github_env.is_none() {
+        out.write_all(exports.as_bytes())?;
+    }
+    Ok(0)
+}
+
+fn build_environment(context: &Context) -> BTreeMap<String, String> {
+    context
+        .env
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .filter(|(k, _)| {
+            [
+                "LIBCLANG_PATH",
+                "RUSTFLAGS",
+                "CARGO_ENCODED_RUSTFLAGS",
+                "RUSTC",
+                "RUSTC_WRAPPER",
+                "RUSTC_WORKSPACE_WRAPPER",
+                "CARGO_BUILD_TARGET",
+            ]
+            .contains(&k.as_str())
+                || [
+                    "BINDGEN_EXTRA_CLANG_ARGS",
+                    "CARGO_PROFILE_",
+                    "CARGO_TARGET_",
+                ]
+                .iter()
+                .any(|p| k.starts_with(p))
+        })
+        .collect()
+}
+
+/// Root image layers are a different authority from a mutable task-owned cache.
+/// Every ancestor and SDK member must be immutable to the non-root caller.
+fn immutable_image_path(path: &Path) -> Result<(), Failure> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(
+            "image SDK must be root-owned, non-symlink and not group/world writable".into(),
+        );
+    }
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err("image SDK member must be a regular file/directory".into());
+    }
+    Ok(())
+}
+
+fn immutable_image_tree(path: &Path) -> Result<(), Failure> {
+    immutable_image_path(path)?;
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            immutable_image_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn revalidate_native_files(value: &Value) -> Result<(), Failure> {
+    let entries = value
+        .as_object()
+        .filter(|entries| !entries.is_empty())
+        .ok_or("missing image native file inventory")?;
+    // Refuse changed bytes/resolution before asking ldd to inspect any ELF.
+    for (path, expected) in entries {
+        let path = Path::new(path);
+        let resolved = fs::canonicalize(path)?;
+        if expected.get("resolved") != Some(&json!(resolved))
+            || (resolved.is_dir() && expected.get("kind") != Some(&json!("directory")))
+            || (!resolved.is_dir()
+                && (!resolved.is_file()
+                    || expected.get("sha256") != Some(&json!(sha256_hex(&fs::read(&resolved)?)))))
+        {
+            return Err("image SDK native file hash/resolution differs".into());
+        }
+    }
+    let paths: Vec<_> = entries.keys().map(Path::new).collect();
+    if paths.iter().any(|path| !path.is_absolute())
+        || crate::sqlite::native_files(&paths)? != *value
+    {
+        return Err("image SDK actual native file resolution/hash differs".into());
+    }
+    Ok(())
+}
+
+fn digest_pin(value: &str) -> bool {
+    let digest = value.strip_prefix("sha256:").or_else(|| {
+        [
+            "ghcr.io/aisflow/fvoci-ci-base@sha256:",
+            "ghcr.io/aisflow/fvoci-ci-web@sha256:",
+        ]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix))
+    });
+    digest.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+fn adopt_image(
+    parsed: &args::Parsed,
+    context: &Context,
+    out: &mut dyn Write,
+) -> Result<i32, Failure> {
+    if host::getuid() == 0
+        || parsed.has("identity-only")
+        || parsed.has("cache-fallback")
+        || parsed.has("seal-image-sdk")
+    {
+        return Err(
+            "image SDK adoption requires a non-root consumer without build/fallback modes".into(),
+        );
+    }
+    let image = parsed
+        .get("image-ref")
+        .filter(|value| digest_pin(value))
+        .ok_or("image SDK adoption requires an immutable image digest pin")?;
+    let local = parsed.has("local-image-sdk");
+    if image.starts_with("sha256:") != local
+        || (local
+            && (context.var("CI").is_some()
+                || context
+                    .env
+                    .keys()
+                    .any(|key| key.to_string_lossy().starts_with("GITHUB_"))))
+    {
+        return Err(
+            "local config image ID requires explicit local-only mode; CI requires registry digest"
+                .into(),
+        );
+    }
+    let expected = parsed
+        .get("expected-sdk-sha256")
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .ok_or("image SDK expected identity SHA-256 required")?;
+    let sdk = host::abspath(Path::new(
+        parsed.get("image-sdk").ok_or("image SDK missing")?,
+    ))?;
+    if sdk != Path::new("/opt/fvoci-sqlite") {
+        return Err("image SDK canonical prefix required".into());
+    }
+    for ancestor in sdk.ancestors() {
+        immutable_image_path(ancestor)?;
+    }
+    immutable_image_tree(&sdk)?;
+    let parent = host::abspath(Path::new(
+        parsed
+            .get("parent")
+            .ok_or("image SDK adoption requires owned --parent")?,
+    ))?;
+    if host::first_symlink(&parent).is_some()
+        || !parent.is_dir()
+        || host::owner(&parent)? != host::getuid()
+        || parent.starts_with(&sdk)
+    {
+        return Err(
+            "image SDK consumer parent must be a separate existing current-user-owned directory"
+                .into(),
+        );
+    }
+    let inherited = ENV_NAMES
+        .iter()
+        .filter(|name| context.var(name).is_some())
+        .count();
+    if inherited != 0 && inherited != ENV_NAMES.len() {
+        return Err("partial SQLite image SDK environment refused".into());
+    }
+    let source = sdk.join("consumer-inputs.json");
+    if fs::metadata(&source)?.len() > 32 * 1024 * 1024 {
+        return Err("image SDK identity exceeds size bound".into());
+    }
+    let bytes = fs::read(source)?;
+    if sha256_hex(&bytes) != expected {
+        return Err("image SDK expected identity SHA-256 mismatch".into());
+    }
+    let sealed: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid image SDK identity")?;
+    let inputs = sealed.get("inputs").ok_or("image SDK inputs missing")?;
+    let (system, machine) = host::uname()?;
+    let target = match (system.as_str(), machine.as_str()) {
+        ("Linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("Linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        _ => return Err("image SDK requires matching native Linux GNU architecture".into()),
+    };
+    let mut command = parsed.command.clone();
+    if command.first().map(OsString::as_os_str) == Some(OsStr::new("--")) {
+        command.remove(0);
+    }
+    let requested = context
+        .var_text("CARGO_BUILD_TARGET")
+        .unwrap_or_else(|| target.into());
+    if requested != target
+        || command.iter().enumerate().any(|(i, arg)| {
+            let arg = arg.to_string_lossy();
+            (arg == "--target" && command.get(i + 1).is_none_or(|value| value != target))
+                || arg
+                    .strip_prefix("--target=")
+                    .is_some_and(|value| value != target)
+        })
+        || inputs.get("target").and_then(Value::as_str) != Some(target)
+        || inputs.get("host_arch").and_then(Value::as_str) != Some(machine.as_str())
+    {
+        return Err("image SDK native architecture/target mismatch".into());
+    }
+    if inputs.get("schema") != Some(&json!(2))
+        || inputs.get("archive_sha256") != Some(&json!(crate::sqlite::ARCHIVE_HASH))
+        || inputs.get("header_sha256") != Some(&json!(crate::sqlite::HEADER_HASH))
+        || inputs.get("sqlite3_c_sha3_256") != Some(&json!(crate::sqlite::C_HASH))
+        || inputs.get("source_id") != Some(&json!(crate::sqlite::SOURCE_ID))
+        || inputs.get("version") != Some(&json!(crate::sqlite::VERSION))
+        || inputs.get("helper_sha256") != Some(&json!(crate::sqlite::helper_sha256()))
+        || inputs.get("flags") != Some(&json!(crate::sqlite_build::FLAGS))
+        || inputs.get("link_flags") != Some(&json!(crate::sqlite_build::LINK_FLAGS))
+        || inputs.get("environment")
+            != Some(&json!(crate::sqlite_build::ENV
+                .iter()
+                .copied()
+                .collect::<BTreeMap<_, _>>()))
+        || sealed.get("image_sdk") != Some(&json!(true))
+        || sealed.get("wrapper_sha256") != Some(&json!(wrapper_sha256()))
+        || sealed.get("os_release") != Some(&json!(fs::read_to_string("/etc/os-release")?))
+    {
+        return Err("image SDK pinned recipe/profile/OS differs".into());
+    }
+    for name in [
+        "CC",
+        "CXX",
+        "AR",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+    ] {
+        if context.var(name).is_some_and(|value| !value.is_empty()) {
+            return Err("image SDK native compiler/flags override refused".into());
+        }
+    }
+    for (tool, field) in [("cc", "compiler"), ("ar", "archiver")] {
+        let path = host::which(tool, context.var("PATH"))
+            .ok_or("image native compiler tool unavailable")?;
+        if inputs.get(field).and_then(|value| value.get("path"))
+            != Some(&json!(fs::canonicalize(path)?))
+        {
+            return Err("image SDK actual compiler path differs".into());
+        }
+    }
+    let rustc = host::which(
+        context.var_text("RUSTC").as_deref().unwrap_or("rustc"),
+        context.var("PATH"),
+    )
+    .ok_or("image rustc unavailable")?;
+    if sealed.get("rustc_path") != Some(&json!(fs::canonicalize(rustc)?)) {
+        return Err("image SDK actual Rust compiler path differs".into());
+    }
+    let clang = context
+        .var_text("LIBCLANG_PATH")
+        .ok_or("image SDK requires LIBCLANG_PATH")?;
+    if sealed.get("libclang_path")
+        != Some(&json!(fs::canonicalize(
+            Path::new(&clang).join("libclang.so")
+        )?))
+    {
+        return Err("image SDK actual libclang path differs".into());
+    }
+    revalidate_native_files(
+        inputs
+            .get("native_files")
+            .ok_or("image SDK native files missing")?,
+    )?;
+    revalidate_native_files(
+        sealed
+            .get("libclang_files")
+            .ok_or("image SDK LLVM files missing")?,
+    )?;
+    for (arguments, field) in [
+        (&["-vV"][..], "rustc"),
+        (&["--print", "sysroot"][..], "rust_sysroot"),
+    ] {
+        let mut inspection =
+            Command::new(context.var_text("RUSTC").unwrap_or_else(|| "rustc".into()));
+        inspection
+            .args(arguments)
+            .env_clear()
+            .envs(&context.env)
+            .env("RUSTUP_AUTO_INSTALL", "0");
+        let result = process::run(&mut inspection, RUSTC_BUDGET, true)
+            .map_err(|_| "image SDK Rust inspection failed")?;
+        let actual = utf8(result.stdout)?;
+        let actual = if field == "rust_sysroot" {
+            json!(fs::canonicalize(actual.trim())?)
+        } else {
+            json!(actual)
+        };
+        if !result.status.success() || sealed.get(field) != Some(&actual) {
+            return Err("image SDK effective Rust compiler/sysroot differs".into());
+        }
+    }
+    let prefix = sdk.join(target);
+    let manifest: Value = serde_json::from_slice(&fs::read(prefix.join("manifest.json"))?)
+        .map_err(|_| "invalid image SDK manifest")?;
+    if sealed.get("manifest") != Some(&manifest) {
+        return Err("image SDK sealed manifest differs".into());
+    }
+    crate::sqlite_build::verify_image_outputs(&prefix, &parent, inputs)?;
+    let exports = crate::sqlite_build::image_exports(&prefix);
+    for name in ENV_NAMES {
+        if let Some(value) = context.var_text(name) {
+            let expected = match name {
+                "SQLITE3_LIB_DIR" => prefix.join("lib").to_string_lossy().into_owned(),
+                "SQLITE3_INCLUDE_DIR" => prefix.join("include").to_string_lossy().into_owned(),
+                _ => "1".into(),
+            };
+            if value != expected {
+                return Err("image SDK inherited exports differ".into());
+            }
+        }
+    }
+    let mut identity = sealed
+        .as_object()
+        .cloned()
+        .ok_or("invalid image SDK identity object")?;
+    for key in ["manifest", "timings", "helper_timings", "cache_identity"] {
+        identity.remove(key);
+    }
+    // Rust consumer profiles/flags enter the consumer cache identity; they do
+    // not change the SDK's fixed C profile or permit a different toolchain.
+    identity.insert(
+        "build_environment_sha256".into(),
+        json!(sha256_hex(
+            json!(build_environment(context)).to_string().as_bytes()
+        )),
+    );
+    identity.insert("image_reference".into(), json!(image));
+    identity.insert(
+        "image_reference_kind".into(),
+        json!(if local {
+            "local-config"
+        } else {
+            "registry-manifest"
+        }),
+    );
+    identity.insert("image_sdk_sha256".into(), json!(expected));
+    let cache_identity = sha256_hex(json!(identity).to_string().as_bytes());
+    if parsed
+        .get("expected-cache-identity")
+        .is_some_and(|expected| expected != cache_identity)
+    {
+        return Err("image SDK consumer cache identity differs".into());
+    }
+    identity.insert("cache_identity".into(), json!(cache_identity));
+    identity.insert(
+        "manifest".into(),
+        serde_json::from_slice::<Value>(&fs::read(prefix.join("manifest.json"))?)
+            .map_err(|_| "invalid image SDK manifest")?,
+    );
+    fs::write(
+        parent.join("consumer-inputs.json"),
+        pretty(&json!(identity)),
+    )?;
+    if let Some(path) = parsed.get("env-file") {
+        fs::write(path, &exports)?;
+    }
+    if let Some(path) = parsed.get("github-env") {
+        let lines: String = exports
+            .lines()
+            .filter_map(|line| shell::split_quoted(line).and_then(|parts| parts.get(1).cloned()))
+            .map(|line| line + "\n")
+            .collect();
+        host::append(Path::new(path), &lines)?;
+    }
+    if let Some(path) = parsed.get("github-output") {
+        host::append(
+            Path::new(path),
+            &format!("target={target}\ncache_identity={cache_identity}\n"),
+        )?;
+    }
+    if let Some((program, rest)) = command.split_first() {
+        let mut environment = context.env.clone();
+        environment.extend(
+            [
+                ("SQLITE3_LIB_DIR", prefix.join("lib").into_os_string()),
+                (
+                    "SQLITE3_INCLUDE_DIR",
+                    prefix.join("include").into_os_string(),
+                ),
+                ("SQLITE3_STATIC", "1".into()),
+                ("SQLITE3_NO_PKG_CONFIG", "1".into()),
+            ]
+            .map(|(key, value)| (key.into(), value)),
+        );
+        return Ok(process::returncode(
+            Command::new(program)
+                .args(rest)
+                .env_clear()
+                .envs(environment)
+                .status()?,
+        ) as i32);
+    }
+    if parsed.get("env-file").is_none() && parsed.get("github-env").is_none() {
         out.write_all(exports.as_bytes())?;
     }
     Ok(0)

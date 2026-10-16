@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, rm, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, symlink, writeFile, chmod, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { watch } from "node:fs";
 import {
   archDigest,
   buildSummary,
+  imageBuildPlan,
+  allocateImageBuilder,
+  retireImageBuilder,
+  imageCommand,
+  smokeImage,
   scanImage,
   verifyManifest,
   verifyMetadata,
@@ -988,4 +994,234 @@ test("per-arch digest rejects wrong image architecture", () => {
       "arm64",
     ),
   ).toThrow("mismatch");
+});
+
+test("native image execution binds source, attempt, architecture and publication authority before Docker", () => {
+  const good = {
+    ARCH: "amd64",
+    TARGET: "ci-web",
+    GITHUB_SHA: "a".repeat(40),
+    GITHUB_RUN_ID: "123",
+    GITHUB_RUN_ATTEMPT: "2",
+    GITHUB_REF: "refs/pull/1/merge",
+    PUBLISH: "false",
+  };
+  const plan = imageBuildPlan(good, "x64");
+  expect(plan.args.at(-1)).toBe("--progress=plain");
+  expect(plan.ref).toEndWith("-123-2-amd64");
+  for (const change of [
+    { ARCH: "arm64" },
+    { TARGET: "foreign" },
+    { GITHUB_SHA: "main" },
+    { GITHUB_RUN_ID: "0" },
+    { GITHUB_RUN_ATTEMPT: "0" },
+    { PUBLISH: "true" },
+    { PUBLISH: "" },
+  ])
+    expect(() => imageBuildPlan({ ...good, ...change }, "x64")).toThrow();
+  expect(imageBuildPlan({ ...good, ARCH: "arm64" }, "arm64").arch).toBe("arm64");
+  expect(
+    imageBuildPlan({ ...good, PUBLISH: "true", GITHUB_REF: "refs/heads/main" }, "x64").ref,
+  ).toBe(plan.ref);
+});
+
+test.each([
+  "opt/fvoci-sqlite/consumer-inputs.json",
+  "opt/fvoci-sqlite/x86_64-unknown-linux-gnu/proof.txt",
+  "usr/local/bin/fvoci-ci-tools",
+])("new SDK/tool path cannot bypass the full saved-layer credential scan: %s", async (path) => {
+  expect((await rejection(saved([{ [path]: "ghp_" + "X".repeat(36) }]))).message).toContain(
+    "credential/DB URL pattern found",
+  );
+});
+
+// Real Bun children simulate only the Docker CLI allocation boundary. No
+// daemon, image, credential or application runtime is touched by these cases.
+async function dockerChildFixture(mode: string) {
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  const state = join(root, "state.json");
+  await writeFile(
+    state,
+    JSON.stringify({
+      name: "fixture-builder",
+      builder: mode === "collision",
+      worker: mode === "collision",
+      smoke: null,
+    }),
+  );
+  const code = String.raw`
+const fs=require("node:fs"),path=require("node:path"),dir=process.env.FVOCI_IMAGE_FIXTURE;
+const file=path.join(dir,"state.json"),state=JSON.parse(fs.readFileSync(file,"utf8")),a=process.argv.slice(2),mode=process.env.FVOCI_IMAGE_FIXTURE_MODE;
+const save=()=>fs.writeFileSync(file,JSON.stringify(state));
+fs.appendFileSync(path.join(dir,"calls"),JSON.stringify(a)+"\n");
+if(a[0]==="buildx" && a[1]==="ls") console.log(state.builder?state.name:"");
+else if(a[0]==="buildx" && a[1]==="create") {state.builder=true;state.worker=true;save();if(mode==="create-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(17);}}
+else if(a[0]==="buildx" && a[1]==="rm") {state.builder=false;state.worker=false;save();}
+else if(a[0]==="container" && a[1]==="ls") {const filter=a[a.indexOf("--filter")+1];if(filter.includes("buildx_buildkit_")?state.worker:state.smoke!==null)console.log("abcdefabcdef");}
+else if(a[0]==="container" && a[1]==="inspect") {const worker=a[2].startsWith("buildx_buildkit_");console.log(JSON.stringify(worker?{Name:"/buildx_buildkit_"+state.name+"0",Config:{Env:["FVOCI_CI_BUILDER_OWNER="+state.name]}}:{Name:"/"+state.smoke.name,Image:state.smoke.ref,Config:{Labels:{"org.fvoci.ci.smoke-owner":state.smoke.name}}}));}
+else if(a[0]==="container" && a[1]==="rm") {if(a.at(-1).startsWith("buildx_buildkit_"))state.worker=false;else state.smoke=null;save();}
+else if(a[0]==="run") {state.smoke={name:a[a.indexOf("--name")+1],ref:a.find(v=>/^sha256:/.test(v))};save();if(mode==="smoke-fail"){console.error("PRIVATE_STDERR_CANARY");process.exit(9);}if(mode==="interrupt"){process.on("SIGTERM",()=>process.exit(0));fs.writeFileSync(path.join(dir,"ready"),"ready");setInterval(()=>{},1000);}else if(mode!=="smoke-lie"){state.smoke=null;save();}}
+else process.exit(42);
+`;
+  await writeFile(join(bin, "docker"), "#!" + process.execPath + "\n" + code);
+  await chmod(join(bin, "docker"), 0o755);
+  const saved = {
+    PATH: process.env.PATH,
+    FVOCI_IMAGE_FIXTURE: process.env.FVOCI_IMAGE_FIXTURE,
+    FVOCI_IMAGE_FIXTURE_MODE: process.env.FVOCI_IMAGE_FIXTURE_MODE,
+  };
+  Object.assign(process.env, {
+    PATH: bin + ":" + (saved.PATH ?? ""),
+    FVOCI_IMAGE_FIXTURE: root,
+    FVOCI_IMAGE_FIXTURE_MODE: mode,
+  });
+  return {
+    state,
+    restore: () => {
+      for (const [key, value] of Object.entries(saved))
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+    },
+  };
+}
+test("partial builder create retires its claimed allocation and retains safe first failure", async () => {
+  const fixture = await dockerChildFixture("create-fail");
+  try {
+    const error = await rejection(allocateImageBuilder("fixture-builder"));
+    expect(error.message).toContain("docker-buildx-create exit=17");
+    expect(error.message).not.toContain("PRIVATE_STDERR_CANARY");
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
+      builder: false,
+      worker: false,
+    });
+  } finally {
+    fixture.restore();
+  }
+});
+test("production CLI retains safe first failure and cleanup outcome without private stderr", async () => {
+  const fixture = await dockerChildFixture("smoke-fail");
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        new URL("./ci-base-image.ts", import.meta.url).pathname,
+        "smoke",
+        "sha256:" + "a".repeat(64),
+        "ci-web",
+        "fixture-smoke",
+      ],
+      { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("image smoke first=");
+    expect(stderr).toContain("docker-run exit=9");
+    expect(stderr).toContain("cleanup=none");
+    expect(stderr).not.toContain("PRIVATE_STDERR_CANARY");
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({ smoke: null });
+  } finally {
+    fixture.restore();
+  }
+});
+test("builder collision never adopts or retires a preexisting resource", async () => {
+  const fixture = await dockerChildFixture("collision");
+  try {
+    expect((await rejection(allocateImageBuilder("fixture-builder"))).message).toContain(
+      "already exists",
+    );
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
+      builder: true,
+      worker: true,
+    });
+    expect(await readFile(join(root, "calls"), "utf8")).not.toContain('"rm"');
+  } finally {
+    fixture.restore();
+  }
+});
+test("successful builder allocation has positive normal retirement", async () => {
+  const fixture = await dockerChildFixture("normal");
+  try {
+    await allocateImageBuilder("fixture-builder");
+    await retireImageBuilder("fixture-builder");
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
+      builder: false,
+      worker: false,
+    });
+  } finally {
+    fixture.restore();
+  }
+});
+for (const mode of ["smoke-normal", "smoke-fail", "smoke-lie"])
+  test("named image smoke confirms closure after " + mode, async () => {
+    const fixture = await dockerChildFixture(mode);
+    try {
+      const run = smokeImage("sha256:" + "a".repeat(64), "ci-web", "fixture-smoke");
+      if (mode === "smoke-normal") await run;
+      else {
+        const error = await rejection(run);
+        expect(error.message).toContain(
+          mode === "smoke-fail" ? "docker-run exit=9" : "outlived successful CLI",
+        );
+        expect(error.message).not.toContain("PRIVATE_STDERR_CANARY");
+      }
+      expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({ smoke: null });
+    } finally {
+      fixture.restore();
+    }
+  });
+test("a parent interrupt remains failure when the real CLI child handles SIGTERM with exit0", async () => {
+  const fixture = await dockerChildFixture("interrupt");
+  const module = new URL("./ci-base-image.ts", import.meta.url).pathname;
+  let watcher: ReturnType<typeof watch> | undefined;
+  const ready = new Promise<void>((resolve) => {
+    watcher = watch(root, (_event, name) => {
+      if (name?.toString() === "ready") {
+        watcher?.close();
+        resolve();
+      }
+    });
+  });
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import {smokeImage} from ${JSON.stringify(module)};try{await smokeImage("sha256:"+"a".repeat(64),"ci-web","fixture-smoke");throw new Error("interrupt was lost");}catch(error){console.error(error.message);process.exitCode ||= 1;}`,
+    ],
+    { env: { ...process.env }, stdout: "pipe", stderr: "pipe" },
+  );
+  try {
+    await Promise.race([
+      ready,
+      child.exited.then(async (code) => {
+        throw new Error(
+          `owned fixture exited before readiness: ${String(code)} ${await new Response(child.stderr).text()}`,
+        );
+      }),
+    ]);
+    child.kill("SIGTERM");
+    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(code).toBe(143);
+    expect(stderr).toContain("interrupted=true");
+    expect(stderr).toContain("exit=0");
+    expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({ smoke: null });
+  } finally {
+    watcher?.close();
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await child.exited;
+    fixture.restore();
+  }
+});
+test("image command waits for normal real-child stdin/stdout completion", async () => {
+  expect(
+    await imageCommand(
+      [process.execPath, "-e", "console.log(await new Response(Bun.stdin.stream()).text())"],
+      { input: "fixture-input" },
+    ),
+  ).toBe("fixture-input");
 });
