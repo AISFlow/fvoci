@@ -1075,7 +1075,10 @@ test.each([
 
 // Real Bun children simulate only the Docker CLI allocation boundary. No
 // daemon, image, credential or application runtime is touched by these cases.
-async function dockerChildFixture(mode: string) {
+async function dockerChildFixture(
+  mode: string,
+  identity?: { configDigest: string; manifestDigest: string },
+) {
   const bin = join(root, "bin");
   await mkdir(bin);
   const state = join(root, "state.json");
@@ -1087,7 +1090,9 @@ async function dockerChildFixture(mode: string) {
       builder: mode === "collision",
       worker: mode === "collision",
       smoke: null,
-      configDigest: "sha256:" + new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
+      configDigest:
+        identity?.configDigest ??
+        "sha256:" + new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
       metadata: {
         ...metadata,
         Config: {
@@ -1097,7 +1102,21 @@ async function dockerChildFixture(mode: string) {
             "org.opencontainers.image.revision": "b".repeat(40),
           },
         },
-        Id: "sha256:" + "a".repeat(64),
+        Id: identity
+          ? mode === "published-classic"
+            ? identity.configDigest
+            : identity.manifestDigest
+          : "sha256:" + "a".repeat(64),
+        Descriptor:
+          identity && mode !== "published-classic"
+            ? {
+                mediaType: "application/vnd.oci.image.manifest.v1+json",
+                digest:
+                  mode === "inspected-mismatch"
+                    ? "sha256:" + "f".repeat(64)
+                    : identity.manifestDigest,
+              }
+            : undefined,
       },
     }),
   );
@@ -1288,12 +1307,18 @@ test("image command waits for normal real-child stdin/stdout completion", async 
   ).toBe("fixture-input");
 });
 
-for (const mode of ["published-ok", "published-mismatch"])
+for (const mode of [
+  "published-ok",
+  "published-classic",
+  "published-mismatch",
+  "inspected-mismatch",
+])
   test(
     "native publisher binds its smoke seal to the actual published config: " + mode,
     async () => {
-      await saved([{ "safe.txt": "safe" }]);
-      const fixture = await dockerChildFixture(mode);
+      const identity = await saved([{ "safe.txt": "safe" }]);
+      expect(identity.configDigest).not.toBe(identity.manifestDigest);
+      const fixture = await dockerChildFixture(mode, identity);
       const checkout = join(root, "checkout"),
         runnerTemp = join(root, "runner");
       try {
@@ -1339,28 +1364,38 @@ for (const mode of ["published-ok", "published-mismatch"])
           new Response(child.stdout).text(),
           new Response(child.stderr).text(),
         ]);
-        expect(code).toBe(mode === "published-ok" ? 0 : 1);
+        expect(code).toBe(mode.endsWith("mismatch") ? 1 : 0);
         const summary = await readFile(join(root, "summary"), "utf8");
-        expect(summary).toContain(
-          "image=sha256:" + "a".repeat(64) + " sdk_sha256=" + "e".repeat(64),
-        );
-        const published =
-          "image=ghcr.io/aisflow/fvoci-ci-base@sha256:" +
-          "c".repeat(64) +
-          " sdk_sha256=" +
-          "e".repeat(64);
-        if (mode === "published-ok") expect(summary).toContain(published);
-        else {
-          expect(summary).not.toContain(published);
-          expect(stderr).toContain("published image differs from verified SDK smoke");
-        }
-        expect(stdout + stderr + summary).not.toContain("PRIVATE_");
         const calls = await readFile(join(root, "calls"), "utf8");
-        expect(calls).toContain(
-          '"imagetools","inspect","ghcr.io/aisflow/fvoci-ci-base@sha256:' +
+        if (mode === "inspected-mismatch") {
+          expect(summary).not.toContain("sdk_sha256=");
+          expect(stderr).toContain("saved image differs from inspected image identity");
+          expect(calls).not.toContain('"run"');
+          expect(calls).not.toContain('"push"');
+        } else {
+          expect(summary).toContain(
+            "image=" +
+              (mode === "published-classic" ? identity.configDigest : identity.manifestDigest) +
+              " sdk_sha256=" +
+              "e".repeat(64),
+          );
+          const published =
+            "image=ghcr.io/aisflow/fvoci-ci-base@sha256:" +
             "c".repeat(64) +
-            '","--raw"',
-        );
+            " sdk_sha256=" +
+            "e".repeat(64);
+          if (mode !== "published-mismatch") expect(summary).toContain(published);
+          else {
+            expect(summary).not.toContain(published);
+            expect(stderr).toContain("published image differs from verified SDK smoke");
+          }
+          expect(stdout + stderr + summary).not.toContain("PRIVATE_");
+          expect(calls).toContain(
+            '"imagetools","inspect","ghcr.io/aisflow/fvoci-ci-base@sha256:' +
+              "c".repeat(64) +
+              '","--raw"',
+          );
+        }
         expect(JSON.parse(await readFile(fixture.state, "utf8"))).toMatchObject({
           builder: false,
           worker: false,

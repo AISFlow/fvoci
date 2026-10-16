@@ -320,9 +320,9 @@ export function verifyMetadata(info: unknown, architecture: string) {
 export async function scanImage(path: string, inspection: string, arch: string) {
   const operation = imageInterrupts();
   try {
-    const configDigest = await scanSavedImage(path, inspection, arch, operation);
+    const descriptors = await scanSavedImage(path, inspection, arch, operation);
     operation.check();
-    return configDigest;
+    return descriptors;
   } finally {
     operation.close();
   }
@@ -486,7 +486,10 @@ async function scanSavedImage(
     }
   }
   console.log("Image metadata and all saved layers: credential/env/DB URL checks passed");
-  return "sha256:" + descriptorName(at(manifest, "config")).slice("blobs/sha256/".length);
+  return {
+    manifestDigest: "sha256:" + descriptorName(manifestDescriptor).slice("blobs/sha256/".length),
+    configDigest: "sha256:" + descriptorName(at(manifest, "config")).slice("blobs/sha256/".length),
+  };
 }
 
 export function buildSummary(log: string, info?: unknown) {
@@ -960,7 +963,16 @@ async function nativeImageBuild() {
     const id = at(metadata, "Id");
     check(typeof id === "string" && sha256Digest.test(id), "exact inspected image ID required");
     await run(["docker", "image", "save", id, "--output", join(work, "image.tar")]);
-    const configDigest = await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    const saved = await scanImage(join(work, "image.tar"), inspection, plan.arch);
+    const descriptor = at(metadata, "Descriptor");
+    check(
+      descriptor === undefined
+        ? id === saved.configDigest
+        : manifestMediaTypes.includes(at(descriptor, "mediaType")) &&
+            at(descriptor, "digest") === id &&
+            id === saved.manifestDigest,
+      "saved image differs from inspected image identity",
+    );
     operation.check();
     const sdkSeal = await smokeImage(id, plan.target, plan.builder + "-smoke");
     operation.check();
@@ -1013,7 +1025,7 @@ async function nativeImageBuild() {
       archDigest(config, manifest, plan.arch);
       check(
         at(config, "config", "Labels", "org.opencontainers.image.revision") === plan.source &&
-          at(raw, "config", "digest") === configDigest,
+          at(raw, "config", "digest") === saved.configDigest,
         "published image differs from verified SDK smoke",
       );
       summary(imageSdkSummary(plan, published, sdkSeal));
