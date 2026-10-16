@@ -18,6 +18,7 @@ import { privateRead, UiError, valueDigest, type Record_ } from "./ui-common.ts"
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { AUTH_CASES, AUTH_SPEC } from "./ui-auth-session.ts";
 import {
+  admitSerialBaseline,
   consumeIn,
   executeAuth,
   executeUi,
@@ -419,12 +420,68 @@ describe("consumer flow", () => {
         valueDigest(baseline) +
         " target_sha256=" +
         digest("libsql://pure.invalid") +
-        " rows=3 setup_needed=true startup_admissible=true",
+        " rows=3 setup_needed=true startup_admissible=true startup_blockers=none",
     ]);
     expect(output.all).not.toContain("PRIVATE_TOKEN");
     expect(output.all).not.toContain(encryptionKeys);
     expect(output.all).not.toContain(digest(encryptionKeys));
     expect(privateRead(join(directory, "baseline.private.json"))).toEqual(baseline);
+  });
+
+  test("baseline blocker diagnostics reveal only fixed categories and preserve refusal", async () => {
+    Object.assign(process.env, {
+      FVOCI_LIBSQL_URL: "libsql://private-target.invalid",
+      FVOCI_LIBSQL_AUTH_TOKEN: "PRIVATE_TOKEN_CANARY",
+    });
+    for (const blocker of ["none", ...BACKGROUND_TABLES, "startupHazards", "liveOutboxLeases"]) {
+      const fingerprints: Record<string, unknown> = Object.fromEntries(
+        BACKGROUND_TABLES.map((table) => [table, {}]),
+      );
+      fingerprints.PRIVATE_TABLE_CANARY = { PRIVATE_ROW_CANARY: 1 };
+      if (BACKGROUND_TABLES.some((table) => table === blocker))
+        fingerprints[blocker] = { PRIVATE_ROW_CANARY: 1 };
+      const baseline = {
+        ...before(),
+        rows: 27,
+        setupNeeded: true,
+        fingerprints,
+        startupHazards: blocker === "startupHazards" ? 1 : 0,
+        liveOutboxLeases: blocker === "liveOutboxLeases" ? 1 : 0,
+        privateError: "PRIVATE_ERROR_CANARY",
+        privateId: "PRIVATE_ID_CANARY",
+      };
+      const output = new Captured();
+      const { scope } = fakeScope();
+      await consumeIn(
+        scope,
+        "ui-baseline",
+        { ui_source_sha: "a".repeat(40) },
+        {
+          currentBuild: () => ({ sourceInputs: { source: "a".repeat(40) } }) as unknown as Manifest,
+          fixture: () => Promise.resolve(baseline),
+          executeUi: () => Promise.reject(new Error("baseline must not start a mutation")),
+          write,
+          root: () => directory,
+          output,
+        },
+      );
+      const expected =
+        blocker === "startupHazards" || blocker === "liveOutboxLeases"
+          ? "existing-owner-or-deletion"
+          : blocker;
+      expect(output.stdout).toHaveLength(1);
+      expect(output.stdout[0]).toStartWith("TURSO_UI_BASELINE_PASS ");
+      expect(output.stdout[0]).toEndWith(
+        ` rows=27 setup_needed=true startup_admissible=${String(blocker === "none")} startup_blockers=${expected}`,
+      );
+      for (const canary of ["PRIVATE_", "private-target.invalid"])
+        expect(output.all).not.toContain(canary);
+      if (blocker === "none") expect(() => admitSerialBaseline(baseline)).not.toThrow();
+      else
+        expect(() => admitSerialBaseline(baseline)).toThrow("UI_EXISTING_BACKGROUND_WORK_REFUSED");
+      expect(privateRead(join(directory, "baseline.private.json"))).toEqual(baseline);
+      rmSync(join(directory, "baseline.private.json"));
+    }
   });
 
   test("a physical file mutation refuses even when metadata is identical", () => {
