@@ -194,6 +194,9 @@ async function containerBrowser(argv: string[], consumeOnly = false): Promise<nu
       [directory, root, false],
       [join(common, "objects"), join(common, "objects"), true],
       [batch, "/fvoci-run", false],
+      // Bun's node shim uses /tmp, independently of TMPDIR. Hide the image
+      // build's root-owned shim with the same owned ordinary-disk temp dir.
+      [join(batch, "tmp"), "/tmp", false],
       [join(batch, output), "/fvoci-run/output", false],
     ] as const) {
       if (from.includes(",") || to.includes(",")) fail("Docker bind paths cannot contain commas");
