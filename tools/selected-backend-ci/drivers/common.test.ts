@@ -126,6 +126,8 @@ describe("known browser checkpoint", () => {
       { file: specFile, line: 10001 },
       { file: specFile, line: 4.5 },
       { file: specFile, line: "413" },
+      secret,
+      [],
     ]) {
       const found = project({
         status: "failed",
