@@ -15,8 +15,6 @@ concurrency:
 
 env:
   LIBCLANG_PATH: /usr/lib/llvm-18/lib
-  FVOCI_CI_WEB_IMAGE: ""
-  FVOCI_CI_WEB_SDK_SHA256: ""
   CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -446,7 +444,6 @@ jobs:
         run: >-
           bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE"
           --prepare --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"
-          --image-pin "$FVOCI_CI_WEB_IMAGE" --sdk-sha256 "$FVOCI_CI_WEB_SDK_SHA256"
       - name: Publish the exact successful container browser packet
         id: publish
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -584,7 +581,6 @@ jobs:
           bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE"
           --consume ${{ matrix.shard }} --handoff "$RUNNER_TEMP/fvoci-browser-container-packet"
           --handoff-sha256 "$FVOCI_WEB_BUILD_HANDOFF_SHA256"
-          --image-pin "$FVOCI_CI_WEB_IMAGE" --sdk-sha256 "$FVOCI_CI_WEB_SDK_SHA256"
 
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && (steps.browser.outputs.failure-artifacts || steps.container_browser.outputs.failure-artifacts) != ''

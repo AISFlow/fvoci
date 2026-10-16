@@ -89,9 +89,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   const ps = steps(producer),
     cs = steps(consumer);
   const command = (phase: string) =>
-    'bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" ' +
-    phase +
-    ' --image-pin "$FVOCI_CI_WEB_IMAGE" --sdk-sha256 "$FVOCI_CI_WEB_SDK_SHA256"';
+    'bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" ' + phase;
   require(isMapping(producer) &&
     producer.needs === "ci-plan" &&
     producer.if === "needs.ci-plan.outputs.select_workspace_browser_shard == 'true'" &&

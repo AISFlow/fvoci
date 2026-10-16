@@ -35,7 +35,11 @@ import {
 } from "./groups.ts";
 
 export const CI_WEB_IMAGE =
-  "ghcr.io/aisflow/fvoci-ci-web@sha256:036797cb3fb3d3ae06e0d19de6451f0dda20a704ef0c1d98688c7f7d63de0c15";
+  "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c";
+const CI_WEB_SDK_SHA256 = {
+  x86_64: "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+  aarch64: "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+} as const;
 const BROWSER_SERVICE_IMAGES = [
   "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
   "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
@@ -1618,7 +1622,11 @@ export function containerFailureArtifacts(
   return directory;
 }
 
-export function containerRequest(argv: string[], env: NodeJS.ProcessEnv) {
+export function containerRequest(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  architecture: string = process.arch,
+) {
   const mode = argv[1];
   if (!argv[0] || !["--prepare", "--consume", "--ci-shard", "--ci-shards"].includes(mode ?? ""))
     throw new UsageError(
@@ -1640,9 +1648,13 @@ export function containerRequest(argv: string[], env: NodeJS.ProcessEnv) {
       at++;
     } else throw new UsageError("unknown or incomplete container option");
   }
+  const imageOverride = options.get("--image-pin"),
+    sdkOverride = options.get("--sdk-sha256");
+  if ((imageOverride === undefined) !== (sdkOverride === undefined))
+    fail("image and sealed SDK overrides must be supplied together");
   const sdk = containerImage(
-    options.get("--image-pin") ?? CI_WEB_IMAGE,
-    options.get("--sdk-sha256") ?? "",
+    imageOverride ?? CI_WEB_IMAGE,
+    sdkOverride ?? CI_WEB_SDK_SHA256[nativeArchitecture(architecture)],
     options.has("--local-image-sdk"),
     env,
   );

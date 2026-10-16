@@ -371,6 +371,62 @@ test("sealed SDK selection distinguishes local engine IDs from registry and CI a
     expect(() => containerImage(pin, sdk, local, env)).toThrow(CheckError);
 });
 
+test("published defaults bind native SDK seals in both local and actual CI requests", () => {
+  const ci = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    GITHUB_JOB: "workspace-browser-container-build",
+    GITHUB_SHA: "c".repeat(40),
+    GITHUB_RUN_ID: "12",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_REPOSITORY: "owner/repo",
+  };
+  expect(CI_WEB_IMAGE).toBe(
+    "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c",
+  );
+  for (const [aliases, sdk] of [
+    [
+      ["x64", "x86_64", "amd64"],
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+    ],
+    [["arm64", "aarch64"], "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca"],
+  ] as const) {
+    for (const architecture of aliases) {
+      const local = containerRequest(["/checkout", "--ci-shard", "2"], {}, architecture);
+      const producer = containerRequest(
+        ["/checkout", "--prepare", "--handoff", "/owned/packet"],
+        ci,
+        architecture,
+      );
+      const consumer = containerRequest(
+        [
+          "/checkout",
+          "--consume",
+          "2",
+          "--handoff",
+          "/owned/packet",
+          "--handoff-sha256",
+          "d".repeat(64),
+        ],
+        { ...ci, GITHUB_JOB: "workspace-browser-shard" },
+        architecture,
+      );
+      expect(local.sdk).toEqual({ image: CI_WEB_IMAGE, sdk, local: false });
+      expect(producer.sdk).toEqual(local.sdk);
+      expect(consumer.sdk).toEqual(local.sdk);
+    }
+  }
+  for (const args of [
+    ["--image-pin", CI_WEB_IMAGE],
+    ["--sdk-sha256", "b".repeat(64)],
+    ["--local-image-sdk"],
+  ])
+    expect(() => containerRequest(["/checkout", "--ci-shard", "2", ...args], {})).toThrow(
+      CheckError,
+    );
+  expect(() => containerRequest(["/checkout", "--ci-shard", "2"], {}, "riscv64")).toThrow();
+});
+
 test("separate image phases require actual CI allocation and immutable packet admission", () => {
   const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
     seal = "b".repeat(64);
@@ -547,6 +603,7 @@ test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure
 
 for (const mode of [
   "normal",
+  "published-default",
   ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
   "inputs-fail",
   "daemon-mismatch",
@@ -566,13 +623,16 @@ for (const mode of [
     writeFileSync(join(packet, "payload.tar"), "");
     writeFileSync(state, "{}");
     mkdirSync(join(bin, "tmp"), { mode: 0o711 });
-    const pin = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
+    const pin =
+      mode === "published-default"
+        ? CI_WEB_IMAGE
+        : "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
     const docker = String.raw`
 const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STATE,s=JSON.parse(fs.readFileSync(file,"utf8"));
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");}
+if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
 if(a[0]==="pull"){}
@@ -601,10 +661,9 @@ else process.exit(42);
         packet,
         "--handoff-sha256",
         new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
-        "--image-pin",
-        pin,
-        "--sdk-sha256",
-        "c".repeat(64),
+        ...(mode === "published-default"
+          ? []
+          : ["--image-pin", pin, "--sdk-sha256", "c".repeat(64)]),
       ],
       {
         env: {
@@ -661,6 +720,8 @@ else process.exit(42);
             hasDatabase?: boolean;
             hasMeili?: boolean;
             platform?: string;
+            sdk?: string;
+            imagePinned?: boolean;
           },
       );
     expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(
@@ -675,6 +736,15 @@ else process.exit(42);
       expect(row.platform).toBe(
         "linux/" + (nativeArchitecture(process.arch) === "x86_64" ? "amd64" : "arm64"),
       );
+    if (mode === "published-default")
+      for (const row of rows.filter((row) => row.phase === "inputs" || row.phase === "consume")) {
+        expect(row.imagePinned).toBe(true);
+        expect(row.sdk).toBe(
+          nativeArchitecture(process.arch) === "x86_64"
+            ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
+            : "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+        );
+      }
     const inputs = rows.findIndex((row) => row.phase === "inputs"),
       consume = rows.findIndex((row) => row.phase === "consume"),
       network = rows.findIndex((row) => row.op[0] === "network" && row.op[1] === "create");

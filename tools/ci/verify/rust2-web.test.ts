@@ -443,6 +443,16 @@ test("ordinary image route preserves every host shard and qualified current-run 
     (bad) => {
       stepWith(bad, "workspace-browser-shard", byId("container_browser"))["run"] = "true";
     },
+    ...["workspace-browser-container-build", "workspace-browser-shard"].map(
+      (job) => (bad: Mapping) => {
+        const step = stepWith(
+          bad,
+          job,
+          byId(job === "workspace-browser-shard" ? "container_browser" : "prepare"),
+        );
+        step.run = runOf(step) + ' --image-pin "latest" --sdk-sha256 ""';
+      },
+    ),
     (bad) => {
       stepWith(bad, "workspace-browser-shard", byId("browser"))["if"] = "false";
     },
