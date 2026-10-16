@@ -534,7 +534,9 @@ test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure
     "unix://foreign/socket",
     "unix:///socket\n",
   ])
-    expect(() => qualifyContainerDaemon(endpoint, "linux amd64", "x86_64")).toThrow();
+    expect(() => {
+      qualifyContainerDaemon(endpoint, "linux amd64", "x86_64");
+    }).toThrow();
   expect(commandProcess(["docker", "pull", pin], "darwin")).toEqual({
     argv: ["docker", "pull", pin],
     group: false,

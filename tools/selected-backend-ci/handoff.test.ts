@@ -1043,7 +1043,9 @@ describe.serial("browser build packet", () => {
     environment.rustc = "release: 1.99.0\nhost: aarch64-unknown-linux-gnu";
     put("build-environment.json", environment);
     f.host.toolchain = () => ({ ...toolchain(), rustc: environment.rustc });
-    expect(() => exportPacket(f.host)).toThrow();
+    expect(() => {
+      exportPacket(f.host);
+    }).toThrow();
     process.env.CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
     expect(() => context("workspace-browser-build", f.host)).toThrow(/native Linux/);
     expect(existsSync(f.packet)).toBe(false);
