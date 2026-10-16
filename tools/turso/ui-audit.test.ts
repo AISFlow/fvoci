@@ -1117,6 +1117,7 @@ function sqlitePreparedRecords() {
     users: { [userHashes[0] as string]: 1, [userHashes[1] as string]: 1 },
     documents: { [h("original-unrelated-document")]: 1 },
     tasks: {},
+    attachments: {},
     workspaces: { [h("original-workspace")]: 1 },
     sessions: {},
     events: {},
