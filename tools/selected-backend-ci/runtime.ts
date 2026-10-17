@@ -1439,8 +1439,8 @@ export async function selectedImageResult(
         };
         if (result.returncode !== 0) break;
         if (materialize && at === 1) {
+          retirementPending = false;
           const closed = finishToolImage(invocation.name, 0);
-          retirementPending = closed.removeExit !== 0;
           if (closed.code !== 0) throw new RuntimeExit(closed.code);
           let bytes = 0;
           for (const path of [browserSource, ...files(browserSource, true)]) {

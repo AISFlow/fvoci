@@ -1179,6 +1179,8 @@ else process.exit(42);
         expect(row.wholeTemp).toBe(false);
       }
       expect(rows.some((row) => row.op[0] === "rm")).toBe(true);
+      if (mode === "selected-copy-remove-fail")
+        expect(rows.filter((row) => row.op[0] === "rm")).toHaveLength(1);
       expect(
         readdirSync(join(selectedOutput, "tmp")).filter((name) => name.endsWith(".env")),
       ).toEqual([]);
