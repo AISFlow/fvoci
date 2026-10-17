@@ -22,6 +22,7 @@ import { join } from "node:path";
 import {
   CheckError,
   CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
   containerImage,
   containerRequest,
   containerFailureArtifacts,
@@ -222,6 +223,19 @@ function committedCheckout(): { root: string; sha: string } {
     "outputs",
   );
   return { root, sha: git(root, "rev-parse", "HEAD") };
+}
+
+// Model only the historical publication's baseline at the existing Git child
+// boundary. Real Git still compares every input; fixtures need no old objects.
+function publicationGit(source: string): string {
+  const executable = Bun.which("git");
+  if (!executable) throw new Error("Git fixture executable missing");
+  return (
+    "#!" +
+    process.execPath +
+    "\n" +
+    `const a=process.argv.slice(2);if(a[0]==="diff"&&a[1]==="--quiet"&&a[2]===${JSON.stringify(CI_WEB_IMAGE_SOURCE)}&&a[4]==="--")a[2]=${JSON.stringify(source)};const r=Bun.spawnSync([${JSON.stringify(executable)},...a],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(r.exitCode || (r.signalCode?1:0));\n`
+  );
 }
 
 describe("qualifyCommittedApi", () => {
@@ -456,9 +470,13 @@ try {
 
 test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
   const { root } = committedCheckout();
-  for (const directory of ["xtask/tests", "tests/support"])
+  for (const directory of ["xtask/tests", "tests/support", "docker/ci-base"])
     mkdirSync(join(root, directory), { recursive: true });
-  for (const file of ["xtask/catalog.tsv", "tests/support/official_sqld.rs"])
+  for (const file of [
+    "xtask/catalog.tsv",
+    "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
+  ])
     writeFileSync(join(root, file), "original input\n");
   const commit = () => {
     git(root, "add", ".");
@@ -477,23 +495,122 @@ test("image source qualification covers copied helper support and catalogs witho
     return git(root, "rev-parse", "HEAD");
   };
   const image = commit();
+  const sdk = {
+    image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    sdk: "b".repeat(64),
+    local: false,
+  };
+  const metadata =
+    "sha256:" + "c".repeat(64) + " linux amd64 " + image + " " + JSON.stringify([sdk.image]);
   writeFileSync(join(root, "xtask/tests/caller.rs"), "unrelated test\n");
   expect(() => {
-    qualifyImageSource(root, image, commit());
+    qualifyImageSource(root, metadata, sdk, "x86_64", commit());
   }).not.toThrow();
   for (const file of [
     "xtask/catalog.tsv",
     "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
     "xtask/new-catalog.tsv",
   ]) {
     writeFileSync(join(root, file), "changed copied input\n");
     expect(() => {
-      qualifyImageSource(root, image, commit());
+      qualifyImageSource(root, metadata, sdk, "x86_64", commit());
     }).toThrow(CheckError);
     if (file === "xtask/new-catalog.tsv") rmSync(join(root, file));
     else writeFileSync(join(root, file), "original input\n");
     commit();
   }
+});
+
+test("only the exact published tuple admits future recipe drift, keeping compiled input refusal", () => {
+  const { root, sha } = committedCheckout();
+  const bin = tempDir();
+  writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
+  for (const directory of ["docker/ci-base", "tests/support"])
+    mkdirSync(join(root, directory), { recursive: true });
+  const commit = () => {
+    git(root, "add", ".");
+    git(
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "future image input",
+    );
+    return git(root, "rev-parse", "HEAD");
+  };
+  writeFileSync(join(root, "docker/ci-base/Dockerfile"), "future recipe\n");
+  const current = commit();
+  writeFileSync(join(root, "tests/support/official_sqld.rs"), "changed compiled helper\n");
+  const changed = commit();
+  const image = "sha256:" + "b".repeat(64),
+    accepted: Parameters<typeof qualifyImageSource>[] = [],
+    rejected: Parameters<typeof qualifyImageSource>[] = [];
+  for (const [arch, dockerArch, seal, otherSeal] of [
+    [
+      "x86_64",
+      "amd64",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+    ],
+    [
+      "aarch64",
+      "arm64",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+    ],
+  ] as const) {
+    const sdk = { image: CI_WEB_IMAGE, sdk: seal, local: false };
+    const metadata =
+      image +
+      " linux " +
+      dockerArch +
+      " " +
+      CI_WEB_IMAGE_SOURCE +
+      " " +
+      JSON.stringify([CI_WEB_IMAGE]);
+    accepted.push([root, metadata, sdk, arch, current]);
+    for (const [inspection, selection] of [
+      [metadata.replace(CI_WEB_IMAGE_SOURCE, current), sdk],
+      [metadata.replace(CI_WEB_IMAGE, "foreign"), sdk],
+      [metadata, { ...sdk, sdk: "0".repeat(64) }],
+      [metadata, { ...sdk, sdk: otherSeal }],
+      [metadata, { ...sdk, image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64) }],
+    ] as const)
+      rejected.push([root, inspection, selection, arch, current]);
+    const override = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      inspection =
+        image +
+        " linux " +
+        dockerArch +
+        " " +
+        CI_WEB_IMAGE_SOURCE +
+        " " +
+        JSON.stringify([override]);
+    // Overrides accept equal inputs but must refuse the future recipe.
+    for (const selection of [
+      { image: override, sdk: seal, local: false },
+      { image, sdk: seal, local: true },
+    ]) {
+      accepted.push([root, inspection, selection, arch, sha]);
+      rejected.push([root, inspection, selection, arch, current]);
+    }
+    rejected.push([root, metadata, sdk, arch, changed]);
+  }
+  // Set the fixture child PATH at launch, without changing the test process's
+  // command resolution or requiring any publication history in its checkout.
+  const source = `import assert from "node:assert/strict";import {qualifyImageSource,CheckError} from ${JSON.stringify(CLI)};for(const args of ${JSON.stringify(accepted)})assert.equal(qualifyImageSource(...args),${JSON.stringify(CI_WEB_IMAGE_SOURCE)});for(const args of ${JSON.stringify(rejected)})assert.throws(()=>qualifyImageSource(...args),CheckError);`;
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+    env: { ...process.env, PATH: bin + ":" + (process.env.PATH ?? "") },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
 });
 
 test("real commands preserve normal and nonzero exits", () => {
@@ -957,6 +1074,8 @@ for (const mode of [
     writeFileSync(join(packet, "payload.tar"), "");
     writeFileSync(state, "{}");
     mkdirSync(join(bin, "tmp"), { mode: 0o711 });
+    if (mode === "published-default")
+      writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
     const pin =
       mode === "published-default" || native || selected
         ? CI_WEB_IMAGE
@@ -1093,7 +1212,7 @@ else process.exit(42);
           FIXTURE_READY: join(bin, "ready"),
           FIXTURE_STATE: state,
           FIXTURE_CALLS: calls,
-          FIXTURE_SHA: sha,
+          FIXTURE_SHA: mode === "published-default" ? CI_WEB_IMAGE_SOURCE : sha,
           FIXTURE_PIN: pin,
           FIXTURE_MODE: mode,
           FIXTURE_ARCH: nativeArchitecture(process.arch),

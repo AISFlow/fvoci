@@ -19,6 +19,7 @@ import {
 import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
 export {
   CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
   containerImage,
   selectedImageHost,
   selectedImageBudget,
@@ -2697,8 +2698,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     ],
     root,
   );
-  const imageSource = containerImageSource(metadata, sdk, architecture);
-  qualifyImageSource(root, imageSource, orchestratorSource);
+  const imageSource = qualifyImageSource(root, metadata, sdk, architecture, orchestratorSource);
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(

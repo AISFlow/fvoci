@@ -1061,6 +1061,7 @@ export function ownershipReturn(
 export const CI_WEB_IMAGE =
   "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c";
 
+export const CI_WEB_IMAGE_SOURCE = "a1d59f717dd522fd5ca5a63aff83118f84889ad6";
 export const CI_WEB_SDK_SHA256 = {
   x86_64: "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
   aarch64: "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
@@ -1676,9 +1677,19 @@ export function containerImageSource(
   return match[3] as string;
 }
 
-export function qualifyImageSource(root: string, imageSource: string, current: string): void {
+export function qualifyImageSource(
+  root: string,
+  metadata: string,
+  sdk: { image: string; sdk: string; local: boolean },
+  arch: NativeArchitecture,
+  current: string,
+): string {
+  const imageSource = containerImageSource(metadata, sdk, arch);
   if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
     fail("exact image and consumer source revisions required");
+  const published = !sdk.local && sdk.image === CI_WEB_IMAGE;
+  if (published && (imageSource !== CI_WEB_IMAGE_SOURCE || sdk.sdk !== CI_WEB_SDK_SHA256[arch]))
+    fail("the selected publication source and native SDK seal must match its pinned image");
   checkedOutput(
     [
       "git",
@@ -1687,7 +1698,10 @@ export function qualifyImageSource(root: string, imageSource: string, current: s
       imageSource,
       current,
       "--",
-      "docker/ci-base/Dockerfile",
+      // The selected immutable publication contains its own qualified recipe.
+      // Future recipe edits cannot change it; all copied/compiler inputs below
+      // must still match. Overrides retain full current-recipe qualification.
+      ...(published ? [] : ["docker/ci-base/Dockerfile"]),
       "xtask/src",
       "xtask/Cargo.toml",
       "xtask/Cargo.lock",
@@ -1698,7 +1712,9 @@ export function qualifyImageSource(root: string, imageSource: string, current: s
     ],
     root,
   );
+  return imageSource;
 }
+
 
 /** A refusal: the CLI prints the message to stderr and exits 1. */
 export class CheckError extends Error {}

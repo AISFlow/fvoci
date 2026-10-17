@@ -733,9 +733,10 @@ reference. A locally verified Docker engine ID can
 be selected with `--image-pin sha256:… --sdk-sha256 … --local-image-sdk`.
 Local engine IDs are refused in CI and are never treated as registry digests.
 Partial overrides and mismatched seals fail rather than compiling/downloading
-SQLite. Promotion or rollback changes the image digest and both native seals
-together in that existing entrypoint after publication verification; CI does
-not maintain a second pin list. An image without the sealed SDK cannot be used.
+SQLite. Promotion or rollback changes the image digest, publication source
+revision and both native seals together in that existing entrypoint after
+publication verification; CI does not maintain a second pin list. An image without
+the sealed SDK cannot be used.
 The client must be a native Linux or macOS process with a local Linux Docker
 daemon and image of the same physical architecture; translated clients and
 cross-architecture execution are refused.
