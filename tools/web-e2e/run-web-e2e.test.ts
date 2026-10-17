@@ -1036,6 +1036,7 @@ for (const mode of [
   ...(process.platform === "linux" && nativeArchitecture(process.arch) === "x86_64"
     ? [
         "selected-pending",
+        "selected-source-mismatch",
         "selected-fail",
         "selected-cancel",
         "selected-remove-fail",
@@ -1074,7 +1075,7 @@ for (const mode of [
     writeFileSync(join(packet, "payload.tar"), "");
     writeFileSync(state, "{}");
     mkdirSync(join(bin, "tmp"), { mode: 0o711 });
-    if (mode === "published-default")
+    if (mode === "published-default" || native || selected)
       writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
     const pin =
       mode === "published-default" || native || selected
@@ -1202,7 +1203,11 @@ else process.exit(42);
           FVOCI_WEB_CONTAINER_SDK_SHA256: selected
             ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
             : undefined,
-          FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected ? sha : undefined,
+          FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected
+            ? mode === "selected-source-mismatch"
+              ? "0".repeat(40)
+              : CI_WEB_IMAGE_SOURCE
+            : undefined,
           FVOCI_WEB_BUILD_HANDOFF: selectedPrepare
             ? join(bin, "fvoci-web-build-handoff")
             : undefined,
@@ -1212,7 +1217,8 @@ else process.exit(42);
           FIXTURE_READY: join(bin, "ready"),
           FIXTURE_STATE: state,
           FIXTURE_CALLS: calls,
-          FIXTURE_SHA: mode === "published-default" ? CI_WEB_IMAGE_SOURCE : sha,
+          FIXTURE_SHA:
+            mode === "published-default" || native || selected ? CI_WEB_IMAGE_SOURCE : sha,
           FIXTURE_PIN: pin,
           FIXTURE_MODE: mode,
           FIXTURE_ARCH: nativeArchitecture(process.arch),
@@ -1295,6 +1301,7 @@ else process.exit(42);
       "image-mismatch",
       "foreign-digest",
       "remote-endpoint",
+      "selected-source-mismatch",
     ].includes(mode);
     expect(code, stderr).toBe(
       mode === "native-cancel" || mode === "selected-cancel" || mode === "selected-copy-cancel"
@@ -1331,6 +1338,14 @@ else process.exit(42);
       if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
     }
     if (selected) {
+      if (mode === "selected-source-mismatch") {
+        expect(stderr).toContain("selected image source changed");
+        expect(rows.some((row) => ["run", "create", "network"].includes(row.op[0] ?? ""))).toBe(
+          false,
+        );
+        expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+        return;
+      }
       if (mode === "selected-prepare-fail") {
         expect(stderr).toContain(
           "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",

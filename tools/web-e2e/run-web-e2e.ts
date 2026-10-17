@@ -8,7 +8,6 @@ import {
   containerImage,
   containerArchitecture,
   qualifyContainerDaemon,
-  containerImageSource,
   qualifyImageSource,
   CheckError,
   RuntimeExit,
@@ -317,7 +316,8 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     root,
   );
   const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
-  const imageSource = containerImageSource(
+  const imageSource = qualifyImageSource(
+    root,
     checkedOutput(
       [
         "docker",
@@ -331,8 +331,8 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     ),
     sdk,
     architecture,
+    process.env.GITHUB_SHA ?? "",
   );
-  qualifyImageSource(root, imageSource, process.env.GITHUB_SHA ?? "");
   const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
     output = join(temp, "fvoci-selected-current"),
     sqlite = join(temp, "fvoci-sqlite"),

@@ -1172,10 +1172,15 @@ function selectedImageInvocation(
     ],
     root,
   );
-  const imageSource = containerImageSource(metadata, sdk, "x86_64");
+  const imageSource = qualifyImageSource(
+    root,
+    metadata,
+    sdk,
+    architecture,
+    checkedOutput(["git", "rev-parse", "HEAD"], root),
+  );
   if (imageSource !== process.env.FVOCI_WEB_CONTAINER_IMAGE_SOURCE)
     fail("selected image source changed");
-  qualifyImageSource(root, imageSource, checkedOutput(["git", "rev-parse", "HEAD"], root));
   if (statfsSync(output).bavail * statfsSync(output).bsize < 20_000_000_000)
     fail("selected image requires the existing 20GB disk floor");
   const privateDir = join(output, "tmp");
@@ -1714,7 +1719,6 @@ export function qualifyImageSource(
   );
   return imageSource;
 }
-
 
 /** A refusal: the CLI prints the message to stderr and exits 1. */
 export class CheckError extends Error {}
