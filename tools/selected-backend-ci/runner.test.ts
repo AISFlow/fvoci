@@ -75,6 +75,7 @@ import type {
   DriverReceipt,
   Flow,
   Inputs,
+  Inputs,
   Lane,
   LocalGrant,
   Reference,
@@ -116,6 +117,61 @@ function directory(): string {
 }
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true });
+});
+
+test("selected image Inputs stdout completes before forced child exit", async () => {
+  const { CI_WEB_IMAGE, CI_WEB_SDK_SHA256 } = await import("./runtime.ts");
+  for (const count of [1, 50000]) {
+    const before: Inputs = {
+      head: "a".repeat(40),
+      tree: "b".repeat(40),
+      status: "",
+      tracked: { "fixture.ts": "c".repeat(64) },
+      external: Object.fromEntries(
+        Array.from({ length: count }, (_, i) => ["/fixture/input-" + String(i), "d".repeat(64)]),
+      ),
+      untracked: {},
+    };
+    const expected = JSON.stringify(before),
+      child = spawnSelectedCommand(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--eval",
+          `import {mock} from "bun:test";
+mock.module(${JSON.stringify(join(root, "tools/selected-backend-ci/drivers/common.ts"))}, () => ({
+  async inputCheck(before, head, tree) {
+    if (before.head !== head || before.tree !== tree) throw new Error("fixture identity mismatch");
+    return before;
+  },
+}));
+const {selectedImagePhase} = await import(${JSON.stringify(join(root, "tools/web-e2e/run-web-e2e.ts"))});
+process.exit(await selectedImagePhase(${JSON.stringify(root)}, "inputs"));`,
+        ],
+        {
+          FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+          FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+          FVOCI_WEB_CONTAINER_SDK_SHA256: CI_WEB_SDK_SHA256.x86_64,
+          FVOCI_SELECTED_CI_OUTPUT: directory(),
+          FVOCI_SELECTED_CI_SQLITE_PARENT: directory(),
+        },
+        "pipe",
+        "pipe",
+        new AbortController().signal,
+        expected,
+      );
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).arrayBuffer(),
+      new Response(child.stderr).arrayBuffer(),
+      child.exited,
+    ]);
+    expect(exit).toBe(0);
+    expect(stderr.byteLength).toBe(0);
+    expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
+    expect(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(stdout)),
+    ).toEqual(before);
+  }
 });
 
 describe("private driver failure visibility", () => {

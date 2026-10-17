@@ -142,7 +142,7 @@ function containerStageDiagnostics(path: string, selected = false): string[] {
     );
 }
 
-async function selectedImagePhase(root: string, operation: string): Promise<number> {
+export async function selectedImagePhase(root: string, operation: string): Promise<number> {
   if (
     process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1" ||
     process.env.FVOCI_WEB_CONTAINER_IMAGE !== CI_WEB_IMAGE ||
