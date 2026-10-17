@@ -130,7 +130,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       return stage(output, args.stageName, args.command);
     case "permissions":
       assert.ok(args.sqliteParent && args.dockerGid !== undefined);
-      runtimePermissions(output, args.sqliteParent, args.dockerGid);
+      await runtimePermissions(output, args.sqliteParent, args.dockerGid);
       break;
     case "owner-return":
       ownershipReturn(output, undefined, args.lane);

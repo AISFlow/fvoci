@@ -940,10 +940,14 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         expect(() => identity("run")).toThrow();
       });
   });
-  test("permissions never grant group 0 as the docker group", () => {
-    expect(() => {
-      runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
-    }).toThrow("root group is never granted as the docker group");
+  test("permissions never grant group 0 as the docker group", async () => {
+    let message = "";
+    try {
+      await runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("root group is never granted as the docker group");
   });
   test("lane argument is parsed and allowed only for run and owner-return", async () => {
     expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({

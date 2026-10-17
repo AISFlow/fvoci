@@ -468,6 +468,37 @@ describe.serial("collaboration build packet", () => {
     expect(existsSync(f.packet)).toBe(false);
   });
 
+  test("an image-mounted packet destination must be empty, private and physically owned", () => {
+    const previous = { ...process.env };
+    try {
+      Object.assign(process.env, {
+        FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+        FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+        FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+        FVOCI_WEB_CONTAINER_IMAGE_SOURCE: SHA,
+      });
+      mkdirSync(f.packet, { mode: 0o755 });
+      expect(() => {
+        exportPacket(f.host);
+      }).toThrow();
+      chmodSync(f.packet, 0o700);
+      writeFileSync(join(f.packet, "occupied"), "original");
+      expect(() => {
+        exportPacket(f.host);
+      }).toThrow();
+      expect(readFileSync(join(f.packet, "occupied"), "utf8")).toBe("original");
+      unlinkSync(join(f.packet, "occupied"));
+      exportPacket(f.host);
+      expect(existsSync(join(f.packet, "handoff.json"))).toBe(true);
+      expect(() => {
+        exportPacket(f.host);
+      }).toThrow();
+    } finally {
+      for (const key of Object.keys(process.env))
+        if (!(key in previous)) Reflect.deleteProperty(process.env, key);
+      Object.assign(process.env, previous);
+    }
+  });
   test("a fresh consumer without target directories installs the packet", async () => {
     transfer();
     // A fresh checkout restores only Cargo downloads: no target/ yet.

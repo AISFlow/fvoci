@@ -202,7 +202,7 @@ test("SQLite diagnostics publish only the exact hash file after original mandato
 
 test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replace the original producer refusal", () => {
   const jobs = realJobs("web.yml");
-  const run = runOf(stepWith(jobs, "collaboration-build", byId("sqlite_diagnostics")));
+  const run = runOf(stepWith(jobs, "web-checks", byId("sqlite_diagnostics")));
   const match =
     /^bun --no-env-file - <<'SQLITE_INPUT_HASHES'\n([\s\S]+)SQLITE_INPUT_HASHES\n$/.exec(run);
   expect(match).not.toBeNull();
@@ -838,10 +838,14 @@ test("single collaboration producer keeps seed source times and rejects helper f
   }
   for (const field of ["key", "restore-keys"]) {
     const bad = clone(jobs);
-    const seed = stepWith(bad, "collaboration-build", byId("cache_collaboration_main_seed"));
+    const seed = stepWith(
+      bad,
+      "collaboration-build",
+      (step) => step["name"] === "Restore Cargo downloads",
+    );
     (seed["with"] as Mapping)[field] = "foreign";
     expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-      "only identity-bound root seed",
+      "source downloads only; no helper fallback cache",
     );
   }
 });

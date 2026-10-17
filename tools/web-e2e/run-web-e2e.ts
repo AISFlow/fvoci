@@ -29,6 +29,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
+import type { Inputs } from "../selected-backend-ci/types.ts";
+import type { CommandOptions, Completed } from "../selected-backend-ci/drivers/common.ts";
 import {
   nativeArchitecture,
   nativeLinux,
@@ -53,6 +55,707 @@ const BROWSER_SERVICE_IMAGES = [
   "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
   "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
 ] as const;
+
+// The host keeps the selected drivers and their Docker/UID/process controls.
+// Only these fixed preparation, admission and browser operations enter the
+// existing tool image. There is deliberately no arbitrary command operation.
+export const SELECTED_IMAGE_ENV = [
+  "FVOCI_WEB_CONTAINER_IMAGE",
+  "FVOCI_WEB_CONTAINER_SDK_SHA256",
+  "FVOCI_WEB_CONTAINER_IMAGE_SOURCE",
+  "FVOCI_SELECTED_CI_OUTPUT",
+  "FVOCI_SELECTED_CI_SQLITE_PARENT",
+  "FVOCI_WEB_BUILD_HANDOFF",
+  "FVOCI_WEB_BUILD_HANDOFF_SHA256",
+  "FVOCI_WEB_BUILD_PHASE",
+  "FVOCI_SELECTED_IMAGE_DEADLINE",
+  "RUNNER_TEMP",
+  "CARGO_HOME",
+  "CARGO_TARGET_DIR",
+  "CARGO_BUILD_JOBS",
+  "CARGO_INCREMENTAL",
+  "CARGO_PROFILE_DEV_DEBUG",
+  "CARGO_PROFILE_TEST_DEBUG",
+  "LIBCLANG_PATH",
+  "SQLITE3_LIB_DIR",
+  "SQLITE3_INCLUDE_DIR",
+  "SQLITE3_STATIC",
+  "SQLITE3_NO_PKG_CONFIG",
+] as const;
+
+export function selectedImageHost(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    env.FVOCI_WEB_CONTAINER_IMAGE !== undefined &&
+    env.FVOCI_SELECTED_CI_SQLITE_PARENT !== undefined &&
+    env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
+  );
+}
+
+export function selectedImageBudget(value: string | undefined, now: number): number {
+  const deadline = Number(value),
+    remaining = deadline - now;
+  if (!Number.isSafeInteger(deadline) || remaining <= 0 || remaining > 900_000)
+    fail("original selected entry budget exhausted or invalid");
+  return remaining;
+}
+
+type SelectedImageOperation =
+  "prepare" | "consume" | "pending" | "inputs" | "access" | "config-list" | "browser";
+
+function selectedImageInvocation(
+  operation: SelectedImageOperation,
+  root: string,
+  environment: NodeJS.ProcessEnv,
+  browserArgs: string[] = [],
+  actor?: { groups: number[] },
+): { args: string[]; name: string; envFile: string } {
+  if (!selectedImageHost() || process.platform !== "linux" || process.arch !== "x64")
+    fail("selected image operations require the native Linux x64 host controller");
+  const architecture = containerArchitecture(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+  );
+  if (
+    architecture !== "x86_64" ||
+    (process.env.DOCKER_DEFAULT_PLATFORM !== undefined &&
+      process.env.DOCKER_DEFAULT_PLATFORM !== "linux/amd64")
+  )
+    fail("selected image requires the physical native x64 daemon");
+  qualifyContainerDaemon(
+    dockerEndpoint(root),
+    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    architecture,
+  );
+  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
+  const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
+    output = join(temp, "fvoci-selected-current"),
+    owner = process.getuid?.(),
+    uid = actor ? 1000 : owner,
+    gid = actor ? 1000 : process.getgid?.();
+  if (
+    !uid ||
+    !gid ||
+    process.env.FVOCI_SELECTED_CI_OUTPUT !== output ||
+    realpathSync(root) !== root
+  )
+    fail("selected image requires the exact owned output and source paths");
+  if (statSync(output).uid !== owner || lstatSync(output).isSymbolicLink())
+    fail("selected image output owner changed");
+  const sdk = containerImage(
+    process.env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
+    false,
+    process.env,
+  );
+  if (sdk.image !== CI_WEB_IMAGE || sdk.sdk !== CI_WEB_SDK_SHA256.x86_64)
+    fail("selected image differs from the published native SDK");
+  const metadata = checkedOutput(
+    [
+      "docker",
+      "image",
+      "inspect",
+      "--format",
+      '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
+      sdk.image,
+    ],
+    root,
+  );
+  const imageSource = containerImageSource(metadata, sdk, "x86_64");
+  if (imageSource !== process.env.FVOCI_WEB_CONTAINER_IMAGE_SOURCE)
+    fail("selected image source changed");
+  qualifyImageSource(root, imageSource, checkedOutput(["git", "rev-parse", "HEAD"], root));
+  if (statfsSync(output).bavail * statfsSync(output).bsize < 20_000_000_000)
+    fail("selected image requires the existing 20GB disk floor");
+  const privateDir = join(output, "tmp");
+  const privateFacts = statSync(privateDir);
+  if (
+    lstatSync(privateDir).isSymbolicLink() ||
+    privateFacts.uid !== owner ||
+    (privateFacts.mode & 0o777) !== 0o700
+  )
+    fail("selected image private temporary directory required");
+  const name = "fvoci-selected-tool-" + randomBytes(16).toString("hex"),
+    envFile = join(privateDir, name + ".env");
+  const variables: NodeJS.ProcessEnv = {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(
+        ([key]) =>
+          /^(?:CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_E2E_PROFILE)$/.test(
+            key,
+          ) ||
+          (["pending", "browser"].includes(operation) &&
+            /^(?:FVOCI_(?!TEST_TURSO|LIBSQL)[A-Z0-9_]+|BUN_RUNTIME_TRANSPILER_CACHE_PATH|PLAYWRIGHT_[A-Z0-9_]+|TEST_DATABASE_URL|DATABASE_[A-Z0-9_]+|MEILI_[A-Z0-9_]+|PASSWORD_PEPPER_[A-Z0-9_]+|ENCRYPTION_[A-Z0-9_]+|SMTP_[A-Z0-9_]+|GROUP_LABEL|NET_[A-Z0-9_]+|RUST_LOG)$/.test(
+              key,
+            )),
+      ),
+    ),
+    ...Object.fromEntries(SELECTED_IMAGE_ENV.map((key) => [key, process.env[key]])),
+    FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+    ROOT: root,
+    HOME: join(output, "home"),
+    TMPDIR: actor ? "/tmp" : privateDir,
+    CARGO_HOME: join(temp, "fvoci-image-cargo"),
+    PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
+  };
+  // Compiler PATH comes from the admitted image, not the host environment.
+  const imageEnvironment: unknown = JSON.parse(
+    checkedOutput(
+      ["docker", "image", "inspect", "--format", "{{json .Config.Env}}", sdk.image],
+      root,
+    ),
+  );
+  if (!Array.isArray(imageEnvironment)) fail("selected image environment missing");
+  const imageEntries: unknown[] = imageEnvironment;
+  const imagePath = imageEntries.find(
+    (value: unknown) => typeof value === "string" && value.startsWith("PATH="),
+  );
+  if (typeof imagePath !== "string") fail("selected image PATH missing");
+  variables.PATH = join(output, "tools") + ":" + imagePath.slice(5);
+  if (!["prepare", "consume", "pending"].includes(operation)) delete variables.GITHUB_OUTPUT;
+  delete variables.JEST_WORKER_ID;
+  const withheld = new Set([
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "FVOCI_WEB_CONTAINER_LOCAL_IMAGE",
+    "FVOCI_WEB_CONTAINER_LOCAL",
+  ]);
+  const entries = Object.entries(variables).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined && !withheld.has(entry[0]),
+  );
+  if (
+    entries.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\r\n\0]/.test(value))
+  )
+    fail("selected image environment cannot be encoded privately");
+  if (operation === "browser") {
+    const cli = join(root, "node_modules/playwright/cli.js");
+    if (
+      browserArgs[0] !== join(output, "tools/bun") ||
+      browserArgs[1] !== "--no-install" ||
+      browserArgs[2] !== cli ||
+      browserArgs[3] !== "test"
+    )
+      fail("selected image accepts only the admitted Playwright entrypoint");
+  } else if (browserArgs.length) fail("selected operation does not accept commands");
+  const args = [
+    "docker",
+    "run",
+    "--pull=never",
+    "--platform",
+    "linux/amd64",
+    "--init",
+    "--name",
+    name,
+    "--user",
+    `${String(uid)}:${String(gid)}`,
+    "--cpus=2",
+    "--memory=16g",
+    "--memory-swap=16g",
+    "--pids-limit=1024",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--network=host",
+    "--env-file",
+    envFile,
+    "--workdir",
+    operation === "browser" ? join(root, "apps/web") : root,
+    "--interactive",
+  ];
+  for (const group of actor?.groups ?? (uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
+    if (group === 0) fail("selected image refuses privileged supplementary groups");
+    args.push("--group-add", String(group));
+  }
+  const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
+  if (["prepare", "consume"].includes(operation)) {
+    if (process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff"))
+      fail("selected packet canonical path required");
+    mounts.push(process.env.FVOCI_WEB_BUILD_HANDOFF);
+  }
+  if (variables.GITHUB_OUTPUT) {
+    const path = realpathSync(variables.GITHUB_OUTPUT);
+    requirePathWithin(path, temp);
+    if (!lstatSync(path).isFile() || statSync(path).uid !== owner)
+      fail("owned CI output file required");
+    mounts.push(path);
+  }
+  for (const path of mounts) {
+    if (path.includes(",") || path === "/" || path === "/var/run")
+      fail("selected bind path refused");
+    if (realpathSync(path) !== path || lstatSync(path).isSymbolicLink())
+      fail("selected bind must be physical");
+    const readonly =
+      (path === root && !["prepare", "consume"].includes(operation)) ||
+      (path === process.env.FVOCI_WEB_BUILD_HANDOFF && operation === "consume") ||
+      (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
+    args.push("--mount", `type=bind,source=${path},target=${path}${readonly ? ",readonly" : ""}`);
+  }
+  if (actor) args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
+  else args.push("--mount", `type=bind,source=${privateDir},target=/tmp`);
+  args.push(
+    sdk.image,
+    ...(operation === "browser"
+      ? browserArgs
+      : [
+          "bun",
+          "--no-env-file",
+          join(root, "tools/web-e2e/run-web-e2e.ts"),
+          "selected-image-phase",
+          root,
+          operation,
+        ]),
+  );
+  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
+  try {
+    writeFileSync(envFile, entries.map(([key, value]) => `${key}=${value}\n`).join(""), {
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    rmSync(envFile, { force: true });
+    throw error;
+  }
+  return { args, name, envFile };
+}
+
+function finishToolImage(name: string, code: number) {
+  const inspected = Bun.spawnSync(
+    [
+      "docker",
+      "inspect",
+      "--format",
+      "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+      name,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (inspected.exitCode !== 0) return { code: code || 1, inspected, removeExit: -1 };
+  const state = inspected.stdout.toString().trim();
+  if (state !== `false ${String(code)} false`) code ||= 1;
+  if (!state.startsWith("false ")) {
+    Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
+    code ||= 1;
+  }
+  const removed = Bun.spawnSync(["docker", "rm", "-v", name], { stdout: "pipe", stderr: "pipe" });
+  if (removed.exitCode !== 0) code ||= 1;
+  return { code, inspected, removeExit: removed.exitCode };
+}
+
+async function selectedImageResult(
+  operation: SelectedImageOperation,
+  root: string,
+  options: CommandOptions = {},
+  browserArgs: string[] = [],
+  actor?: { groups: number[] },
+): Promise<Completed> {
+  const { command: execute, runtimeError } =
+    await import("../selected-backend-ci/drivers/common.ts");
+  const cancellation = new AbortController();
+  let cancelled = 0;
+  const interrupt = () => {
+    cancelled ||= 130;
+    cancellation.abort(new RuntimeExit(cancelled));
+  };
+  const terminate = () => {
+    cancelled ||= 143;
+    cancellation.abort(new RuntimeExit(cancelled));
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  let result: Completed | undefined,
+    failure: unknown,
+    retirementCode = 1;
+  let invocation: ReturnType<typeof selectedImageInvocation> | undefined;
+  try {
+    invocation = selectedImageInvocation(
+      operation,
+      root,
+      options.env ?? process.env,
+      browserArgs,
+      actor,
+    );
+    if (options.log && !existsSync(options.log)) closeSync(openSync(options.log, "wx", 0o600));
+    const deadline = AbortSignal.timeout(
+      selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now()),
+    );
+    result = await execute(invocation.args, {
+      ...options,
+      env: process.env,
+      required: false,
+      signal: AbortSignal.any([
+        cancellation.signal,
+        deadline,
+        ...(options.signal ? [options.signal] : []),
+      ]),
+    });
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (invocation) {
+      if (result?.returncode && !options.log) {
+        try {
+          writeFileSync(
+            join(dirname(invocation.envFile), invocation.name + ".private.log"),
+            result.stderr,
+            { flag: "wx", mode: 0o600 },
+          );
+        } catch {
+          process.stderr.write("selected image private failure capture failed\n");
+        }
+      }
+      retirementCode = result?.returncode ?? (cancelled || 1);
+      try {
+        retirementCode = finishToolImage(invocation.name, retirementCode).code;
+      } catch {
+        retirementCode ||= 1;
+        process.stderr.write("selected image retirement unconfirmed\n");
+      }
+      try {
+        rmSync(invocation.envFile, { force: true });
+      } catch {
+        retirementCode ||= 1;
+        process.stderr.write("selected image private environment removal failed\n");
+      }
+    }
+    try {
+      if (options.log && existsSync(options.log)) chmodSync(options.log, 0o600);
+    } catch {
+      retirementCode ||= 1;
+      process.stderr.write("selected image private log mode unconfirmed\n");
+    }
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
+  }
+  if (cancelled && result === undefined) throw new RuntimeExit(cancelled);
+  if (failure instanceof Error) throw failure;
+  if (failure !== undefined) fail("selected image operation threw an unsupported failure");
+  if (!result) fail("selected image child exit missing");
+  if (retirementCode && options.required !== false)
+    throw runtimeError(
+      `owned command failed exit=${String(retirementCode)}; executable=docker; selected=${operation}`,
+    );
+  return { ...result, returncode: retirementCode };
+}
+
+// Existing full Inputs shape, checked by the same inputCheck in the actual
+// compiler namespace. No compile receipt is regenerated.
+export async function selectedImageInputs(before: Inputs, root: string): Promise<Inputs> {
+  const result = await selectedImageResult("inputs", root, { input: JSON.stringify(before) });
+  return JSON.parse(result.stdout) as Inputs;
+}
+export async function selectedImageAccess(
+  request: { groups: number[]; files: Record<string, number> },
+  root: string,
+  actor = false,
+) {
+  return selectedImageResult(
+    "access",
+    root,
+    { input: JSON.stringify(request) },
+    [],
+    actor ? { groups: request.groups } : undefined,
+  );
+}
+export async function selectedImageConfigList(root: string): Promise<number> {
+  return (await selectedImageResult("config-list", root, { required: false })).returncode;
+}
+export async function selectedImageBrowser(
+  args: string[],
+  options: CommandOptions,
+  root: string,
+): Promise<Completed> {
+  return selectedImageResult("browser", root, options, args);
+}
+async function selectedImageOperation(
+  operation: SelectedImageOperation,
+  root: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  const started = performance.now();
+  const result = await selectedImageResult(operation, root, {
+    env: environment,
+    required: false,
+    log: join(
+      process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+      operation + ".private.log",
+    ),
+  });
+  process.stderr.write(
+    "selected-image phase=" +
+      operation +
+      " elapsed_seconds=" +
+      ((performance.now() - started) / 1000).toFixed(3) +
+      " exit=" +
+      String(result.returncode) +
+      "\n",
+  );
+  return result.returncode;
+}
+
+async function selectedImagePhase(root: string, operation: string): Promise<number> {
+  if (
+    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1" ||
+    process.env.FVOCI_WEB_CONTAINER_IMAGE !== CI_WEB_IMAGE ||
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 !== CI_WEB_SDK_SHA256.x86_64
+  )
+    fail("fixed selected tool image required");
+  const output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+    sqlite = process.env.FVOCI_SELECTED_CI_SQLITE_PARENT ?? fail("selected SQLite parent required");
+  if (operation === "inputs") {
+    const before = JSON.parse(readFileSync(0, "utf8")) as Inputs;
+    const { inputCheck } = await import("../selected-backend-ci/drivers/common.ts");
+    const checked = await inputCheck(before, before.head, before.tree);
+    process.stdout.write(JSON.stringify(checked));
+    return 0;
+  }
+  if (operation === "access") {
+    const { preflight } = await import("../selected-backend-ci/runtime-access-check.ts");
+    const request = JSON.parse(readFileSync(0, "utf8")) as Parameters<typeof preflight>[0];
+    const receipt = preflight(request);
+    process.stdout.write(JSON.stringify(receipt));
+    return receipt.missing ? 1 : 0;
+  }
+  if (operation === "config-list") {
+    const { configList } = await import("../selected-backend-ci/config-list.ts");
+    return configList(output);
+  }
+  if (operation === "pending") {
+    process.env.FVOCI_COLLAB_ENGINE = join(root, "crates/collab-engine/target/debug/collab-engine");
+    return groupWrapper([]);
+  }
+  if (!["prepare", "consume"].includes(operation)) fail("unknown selected image operation");
+  const target = nativeLinux(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+    process.env.CARGO_BUILD_TARGET,
+  ).target;
+  if (target !== "x86_64-unknown-linux-gnu") fail("selected targets remain native x64");
+  await stage(
+    "selected-dependencies",
+    [process.execPath, "--bun", "install", "--frozen-lockfile"],
+    root,
+  );
+  if (operation === "consume")
+    await stage(
+      "selected-handoff-admit",
+      [
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/selected-backend-ci/handoff.ts"),
+        "admit",
+      ],
+      root,
+    );
+  for (const manifest of [join(root, "Cargo.toml"), join(root, "crates/collab-engine/Cargo.toml")])
+    await stage(
+      "selected-cargo-fetch",
+      ["cargo", "fetch", "--locked", "--target", target, "--manifest-path", manifest],
+      root,
+      { ...process.env, CARGO_NET_OFFLINE: "false" },
+    );
+  if (operation === "consume") {
+    await stage(
+      "collaboration-wire-restart-fixtures",
+      [
+        process.execPath,
+        "test",
+        "--isolate",
+        "--timeout=60000",
+        "./apps/web/e2e-pending/collab-wire.test.ts",
+        "./apps/web/e2e-pending/collab-restart.test.ts",
+      ],
+      root,
+    );
+    await stage(
+      "collaboration-helper-fixtures",
+      [
+        process.execPath,
+        "test",
+        "--isolate",
+        "--timeout=60000",
+        "./apps/web/e2e-pending/collab-helpers.test.ts",
+      ],
+      root,
+    );
+    await stage(
+      "collaboration-types",
+      [
+        process.execPath,
+        "--bun",
+        "x",
+        "--no-install",
+        "tsc",
+        "-p",
+        "e2e-pending/collab-tsconfig.json",
+      ],
+      join(root, "apps/web"),
+    );
+  }
+  const tools = join(output, "tools");
+  mkdirSync(tools, { mode: 0o755 });
+  copyFileSync(process.execPath, join(tools, "bun"));
+  chmodSync(join(tools, "bun"), 0o755);
+  await stage(
+    "selected-sqlite-sdk",
+    [
+      "/usr/local/bin/fvoci-ci-tools",
+      "sqlite-ci",
+      "--image-sdk",
+      "/opt/fvoci-sqlite",
+      "--expected-sdk-sha256",
+      CI_WEB_SDK_SHA256.x86_64,
+      "--image-ref",
+      CI_WEB_IMAGE,
+      "--parent",
+      sqlite,
+      "--env-file",
+      join(sqlite, "environment"),
+    ],
+    root,
+  );
+  Object.assign(process.env, sqliteEnvironment(readFileSync(join(sqlite, "environment"), "utf8")));
+  const { prepareBrowser } = await import("../selected-backend-ci/runtime.ts");
+  process.env.PLAYWRIGHT_BROWSERS_PATH = "/opt/playwright";
+  const chromium = checkedOutput(
+    [
+      process.execPath,
+      "--eval",
+      "console.log(require('@playwright/test').chromium.executablePath())",
+    ],
+    root,
+  );
+  prepareBrowser(output, chromium);
+  process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
+  process.env.CARGO_NET_OFFLINE = "true";
+  return webEntry(root, [
+    "--ci-use-committed-api",
+    operation === "prepare" ? "--ci-prepare-selected" : "--ci-consume-selected",
+  ]);
+}
+
+async function selectedContainerEntry(root: string, argv: string[]): Promise<number> {
+  root = realpathSync(root);
+  process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Date.now() + 900_000);
+  const request = webRequest(argv, process.env);
+  if (
+    !request.selected ||
+    !request.committed ||
+    !["prepare", "consume"].includes(request.selectedPhase) ||
+    process.env.CI !== "true" ||
+    process.env.GITHUB_ACTIONS !== "true"
+  )
+    fail("selected images require the existing explicit committed CI phases");
+  qualifyCommittedApi(root, request, process.env);
+  const architecture = containerArchitecture(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+  );
+  if (architecture !== "x86_64") fail("selected collaboration remains native x64");
+  qualifyContainerDaemon(
+    dockerEndpoint(root),
+    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    architecture,
+  );
+  await stage(
+    "selected-image-fetch",
+    ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
+    root,
+  );
+  const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
+  const imageSource = containerImageSource(
+    checkedOutput(
+      [
+        "docker",
+        "image",
+        "inspect",
+        "--format",
+        '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
+        CI_WEB_IMAGE,
+      ],
+      root,
+    ),
+    sdk,
+    architecture,
+  );
+  qualifyImageSource(root, imageSource, process.env.GITHUB_SHA ?? "");
+  const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
+    output = join(temp, "fvoci-selected-current"),
+    sqlite = join(temp, "fvoci-sqlite"),
+    cargo = join(temp, "fvoci-image-cargo");
+  if (
+    process.env.FVOCI_SELECTED_CI_OUTPUT !== output ||
+    process.env.FVOCI_SELECTED_CI_SQLITE_PARENT !== sqlite ||
+    process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff")
+  )
+    fail("selected canonical paths required");
+  for (const path of [sqlite, cargo, join(output, "tmp"), join(output, "home")])
+    mkdirSync(path, { mode: path === cargo ? 0o750 : 0o700 });
+  if (request.selectedPhase === "prepare")
+    mkdirSync(process.env.FVOCI_WEB_BUILD_HANDOFF, {
+      mode: 0o700,
+    });
+  // Download cache only. Installed dependencies and native outputs are always
+  // materialized and checked inside the admitted image.
+  for (const name of ["registry", "git"])
+    if (process.env.HOME && existsSync(join(process.env.HOME, ".cargo", name)))
+      cpSync(join(process.env.HOME, ".cargo", name), join(cargo, name), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+  Object.assign(process.env, {
+    FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+    FVOCI_WEB_CONTAINER_SDK_SHA256: CI_WEB_SDK_SHA256.x86_64,
+    FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
+    FVOCI_WEB_BUILD_PHASE: request.selectedPhase,
+    CARGO_HOME: cargo,
+    CARGO_TARGET_DIR: join(root, "target"),
+    CARGO_BUILD_JOBS: "2",
+    LIBCLANG_PATH: "/usr/lib/llvm-18/lib",
+    SQLITE3_LIB_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib",
+    SQLITE3_INCLUDE_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/include",
+    SQLITE3_STATIC: "1",
+    SQLITE3_NO_PKG_CONFIG: "1",
+    PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
+  });
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) =>
+      /^(CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_WEB_BUILD_HANDOFF(?:_SHA256)?)$/.test(
+        key,
+      ),
+    ),
+  );
+  const prepared = await selectedImageOperation(
+    request.selectedPhase as "prepare" | "consume",
+    root,
+    environment,
+  );
+  if (prepared === 0 && request.selectedPhase === "prepare" && process.env.HOME)
+    for (const name of ["registry", "git"])
+      if (existsSync(join(cargo, name)))
+        cpSync(join(cargo, name), join(process.env.HOME, ".cargo", name), { recursive: true });
+  if (prepared || request.selectedPhase === "prepare") return prepared;
+  // Existing host wrappers own PG/Meili. The inner group sees their real
+  // loopback bindings through Linux host networking, never their Docker socket.
+  const pending = await command(
+    [
+      "bash",
+      join(root, "scripts/start-test-postgres.sh"),
+      "bash",
+      join(root, "scripts/start-test-meili.sh"),
+      process.execPath,
+      "--no-env-file",
+      import.meta.path,
+      "selected-image-pending",
+      root,
+    ],
+    root,
+  );
+  process.env.PATH = join(output, "tools") + ":" + (process.env.PATH ?? "");
+  return selectedHost(root, pending, true);
+}
 
 export function containerImage(
   image: string,
@@ -258,6 +961,13 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
 }
 
 async function webEntry(root: string, argv: string[]): Promise<number> {
+  const request = webRequest(argv, process.env);
+  if (
+    request.selected &&
+    request.selectedPhase !== "whole" &&
+    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
+  )
+    return selectedContainerEntry(root, argv);
   entryCancellation = 0;
   const interrupt = () => {
       entryCancellation ||= 130;
@@ -351,7 +1061,8 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     }
   }
   if (committed) api();
-  if (selectedPhase === "consume") await stage("selected-handoff-admit", handoff("admit"), root);
+  if (selectedPhase === "consume" && process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1")
+    await stage("selected-handoff-admit", handoff("admit"), root);
   if (
     Bun.spawnSync(bun("--bun", "x", "--no-install", "playwright", "--version"), {
       cwd: join(root, "apps/web"),
@@ -446,6 +1157,18 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
         process.env.SQLITE3_NO_PKG_CONFIG !== "1"
       )
         fail("selected consumer requires the workflow-prepared SQLite environment");
+    } else if (process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") {
+      const sqlite =
+        process.env.FVOCI_SELECTED_CI_SQLITE_PARENT ?? fail("selected SDK parent required");
+      Object.assign(
+        process.env,
+        sqliteEnvironment(readFileSync(join(sqlite, "environment"), "utf8")),
+      );
+      if (
+        process.env.SQLITE3_LIB_DIR !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib" ||
+        process.env.SQLITE3_INCLUDE_DIR !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/include"
+      )
+        fail("selected workload requires the admitted immutable image SDK");
     } else {
       const temporary = mkdtempSync(join(tmpdir(), "fvoci-sqlite-env.")),
         file = join(temporary, "env");
@@ -527,6 +1250,7 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     await stage("selected-handoff-export", handoff("export"), root);
     return 0;
   }
+  if (selected && process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") return 0;
   const pending = await group(specs);
   if (!selected || entryCancellation) return pending || entryCancellation;
   try {
@@ -550,7 +1274,10 @@ export async function selectedHost(
   };
   const output = required("FVOCI_SELECTED_CI_OUTPUT"),
     sqlite = required("FVOCI_SELECTED_CI_SQLITE_PARENT");
-  requirePathWithin(required("SQLITE3_LIB_DIR"), sqlite);
+  if (selectedImageHost()) {
+    if (required("SQLITE3_LIB_DIR") !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib")
+      fail("selected image SDK path changed");
+  } else requirePathWithin(required("SQLITE3_LIB_DIR"), sqlite);
   const diagnostics = join(required("RUNNER_TEMP"), "fvoci-selected-diagnostics");
   createSafeDiagnostics(diagnostics, process.env);
   const uid = String(process.getuid?.()),
@@ -588,7 +1315,8 @@ export async function selectedHost(
     }
   }
   const preserved =
-    "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB";
+    "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB" +
+    (selectedImageHost() ? "," + SELECTED_IMAGE_ENV.join(",") : "");
   const runtime = (mode: string, browser = false) => [
     "sudo",
     "--preserve-env=" +
@@ -2040,6 +2768,30 @@ async function groupRuntime(argv: string[]): Promise<number> {
   return status;
 }
 
+function dockerEndpoint(root: string): string {
+  let endpoint: unknown = process.env.DOCKER_HOST;
+  if (process.env.DOCKER_CONTEXT || !endpoint) {
+    const json = checkedOutput(
+      [
+        "docker",
+        "context",
+        "inspect",
+        "--format",
+        "{{json .Endpoints.docker.Host}}",
+        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
+      ],
+      root,
+    );
+    try {
+      endpoint = JSON.parse(json);
+    } catch {
+      fail("invalid Docker endpoint metadata");
+    }
+  }
+  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
+  return endpoint;
+}
+
 function checkedOutput(argv: string[], cwd: string): string {
   const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
   if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
@@ -2327,28 +3079,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
   if (ci && orchestratorSource !== process.env.GITHUB_SHA)
     fail("container checkout differs from tested SHA");
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
-  let endpoint: unknown = process.env.DOCKER_HOST;
-  if (process.env.DOCKER_CONTEXT || !endpoint) {
-    const json = checkedOutput(
-      [
-        "docker",
-        "context",
-        "inspect",
-        "--format",
-        "{{json .Endpoints.docker.Host}}",
-        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
-      ],
-      root,
-    );
-    try {
-      endpoint = JSON.parse(json);
-    } catch {
-      fail("invalid Docker endpoint metadata");
-    }
-  }
-  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
   qualifyContainerDaemon(
-    endpoint,
+    dockerEndpoint(root),
     checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
     architecture,
   );
@@ -2711,32 +3443,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
       process.removeListener("SIGTERM", terminate);
       rmSync(envFile);
     }
-    const inspect = Bun.spawnSync(
-      [
-        "docker",
-        "inspect",
-        "--format",
-        "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
-        name,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    let removeExit = -1;
-    if (inspect.exitCode === 0) {
-      if (result === 0 && inspect.stdout.toString().trim() !== "false 0 false") result = 1;
-      if (!inspect.stdout.toString().startsWith("false ")) {
-        // A stopped/lost Docker client is not proof its container retired.
-        // Attempt bounded stop, keep the first failure, and never rm --force.
-        Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
-        if (result === 0) result = 1;
-      }
-      const removed = Bun.spawnSync(["docker", "rm", "-v", name], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      removeExit = removed.exitCode;
-      if (removed.exitCode !== 0 && result === 0) result = 1;
-    } else if (result === 0) result = 1;
+    const retired = finishToolImage(name, result);
+    result = retired.code;
+    const inspect = retired.inspected,
+      removeExit = retired.removeExit;
     if (ci && phase === "consume") {
       try {
         const output = process.env.GITHUB_OUTPUT;
@@ -3295,6 +4005,19 @@ if (import.meta.main) {
     if (argv[0] === "container-browser") process.exit(await containerBrowser(argv.slice(1)));
     if (argv[0] === "browser-phase")
       process.exit(await browserPhase(argv[1] ?? "", argv[2] ?? "", argv.slice(3)));
+    if (argv[0] === "selected-image-phase") {
+      arity(argv.slice(1), 2);
+      process.exit(await selectedImagePhase(argv[1] ?? "", argv[2] ?? ""));
+    }
+    if (argv[0] === "selected-image-pending") {
+      arity(argv.slice(1), 1);
+      process.exit(
+        await selectedImageOperation("pending", realpathSync(argv[1] ?? ""), {
+          ...process.env,
+          FVOCI_E2E_SHARED_SERVICES: "1",
+        }),
+      );
+    }
     if (argv[0] === "group-runtime") process.exit(await groupRuntime(argv.slice(1)));
     if (argv[0] === "group-wrapper") process.exit(await groupWrapper(argv.slice(1)));
     process.stdout.write(run(argv));

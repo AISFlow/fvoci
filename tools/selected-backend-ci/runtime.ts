@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import process from "node:process";
+import { selectedImageAccess, selectedImageHost } from "../web-e2e/run-web-e2e.ts";
 import {
   admittedBrowser,
   assertRuntimeJob,
@@ -40,6 +41,7 @@ import {
   failureDigest,
   files,
   gid,
+  groups,
   inventory,
   jsonInteger,
   observedExit,
@@ -274,16 +276,23 @@ export function prepareBrowser(output: string, chromium: string): string {
   const component = dirname(dirname(chromium)),
     cache = dirname(component);
   assert.match(basename(component), /^chromium-[0-9]+$/);
-  assert.ok(
-    !lstatSync(cache).isSymbolicLink() &&
-      statSync(cache).uid === runner &&
-      statSync(cache).gid === gid(),
-  );
+  const imageCache =
+    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1" && cache === "/opt/playwright";
+  assert.ok(!lstatSync(cache).isSymbolicLink());
+  if (imageCache) {
+    // Only the admitted immutable image cache may be root-owned. The copied
+    // browser remains private to the actual preparation user and later actor.
+    assert.ok(process.env.FVOCI_WEB_CONTAINER_IMAGE && process.env.FVOCI_WEB_CONTAINER_SDK_SHA256);
+    for (const path of [cache, ...files(cache, true)]) {
+      const facts = lstatSync(path);
+      assert.ok(facts.uid === 0 && !facts.isSymbolicLink() && (facts.mode & 0o022) === 0);
+    }
+  } else assert.ok(statSync(cache).uid === runner && statSync(cache).gid === gid());
   const components = readdirSync(cache)
     .filter((name) => /^(chromium|chromium_headless_shell|ffmpeg)-[0-9]+$/.test(name))
     .sort();
   assert.ok(components.includes(basename(component)));
-  const owner = [runner, gid()] as const;
+  const owner = imageCache ? undefined : ([runner, gid()] as const);
   const before = Object.fromEntries(
     components.map((name) => [name, browserInventory(join(cache, name), owner)]),
   );
@@ -345,17 +354,23 @@ export interface PermissionBoundary {
 const permissionBoundary: PermissionBoundary = {
   identity,
   browser: (output, bun) =>
-    prepareBrowser(
-      output,
-      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
-    ),
+    selectedImageHost()
+      ? admittedBrowser(output, [uid(), gid()])
+      : prepareBrowser(
+          output,
+          call([
+            bun,
+            "--eval",
+            "console.log(require('@playwright/test').chromium.executablePath())",
+          ]),
+        ),
 };
-export function runtimePermissions(
+export async function runtimePermissions(
   output: string,
   sqliteParent: string,
   dockerGid: number,
   boundary: PermissionBoundary = permissionBoundary,
-): void {
+): Promise<void> {
   // The docker socket group joins the actor's groups; group 0 is never granted.
   assert.ok(dockerGid > 0, "root group is never granted as the docker group");
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
@@ -383,7 +398,9 @@ export function runtimePermissions(
     }
     check(prefix);
   }
-  assert.ok(below(realpathSync(env("SQLITE3_LIB_DIR")), sqliteParent));
+  if (selectedImageHost())
+    assert.equal(env("SQLITE3_LIB_DIR"), "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib");
+  else assert.ok(below(realpathSync(env("SQLITE3_LIB_DIR")), sqliteParent));
   const before = read(join(output, "before.json")) as Inputs;
   assert.equal(before.head, env("GITHUB_SHA"));
   assert.ok(deepEquals(read(join(output, "after.json")), before));
@@ -404,9 +421,27 @@ export function runtimePermissions(
     ),
   );
   accessiblePaths[dirname(output)] = accessiblePaths[dirname(sqliteParent)] = constants.X_OK;
-  const allowedGroups = new Set([dockerGid]),
+  const hostPath = (path: string) =>
+    path === root || path === temp || below(path, root) || below(path, temp);
+  const hostPaths = selectedImageHost()
+    ? Object.fromEntries(Object.entries(accessiblePaths).filter(([path]) => hostPath(path)))
+    : accessiblePaths;
+  if (selectedImageHost()) {
+    assert.equal(
+      sha(process.execPath),
+      before.external[bun],
+      "host controller Bun differs from the admitted Bun",
+    );
+    hostPaths[process.execPath] = constants.R_OK | constants.X_OK;
+  }
+  // Docker includes the existing primary GID in getgroups(); setpriv does
+  // not unless requested. Keep both actual actors and the strict preflight
+  // on the same set without granting any access beyond primary GID 1000.
+  const allowedGroups = new Set([dockerGid, ...(selectedImageHost() ? [1000] : [])]),
     needed: Record<string, unknown> = {};
-  for (const [path, mask] of Object.entries(accessiblePaths)) {
+  for (const [path, mask] of Object.entries(hostPaths)) {
+    // The same complete set is checked in the image below. Host group grants
+    // apply only to actual bind-mounted source and private preparation files.
     for (const [entry, required] of [
       [path, mask],
       ...ancestors(path).map((p) => [p, constants.X_OK] as const),
@@ -437,6 +472,10 @@ export function runtimePermissions(
     }
   }
   const groupList = [...allowedGroups].sort((a, b) => a - b);
+  if (selectedImageHost())
+    await selectedImageAccess({ groups: groupList, files: accessiblePaths }, root, true);
+  // Retain the original host preflight for source ancestry and the actual
+  // controller executable; image mount ancestry cannot prove host traversal.
   const result = spawnSync(
     [
       "sudo",
@@ -444,11 +483,11 @@ export function runtimePermissions(
       "--reuid=1000",
       "--regid=1000",
       "--groups=" + groupList.join(","),
-      bun,
+      selectedImageHost() ? process.execPath : bun,
       join(import.meta.dir, "runtime-access-check.ts"),
     ],
     {
-      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: accessiblePaths })),
+      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: hostPaths })),
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -586,7 +625,18 @@ export async function run(
   const runtime = join(output, "runtime");
   mkdirSync(runtime, { mode: 0o700 });
   const browser = boundary.browser(output);
-  boundary.access(Object.keys(before.external), browser);
+  if (selectedImageHost()) {
+    const files = Object.fromEntries(
+      Object.keys(before.external).map((path) => [path, constants.R_OK]),
+    );
+    for (const path of [browser.bun.path, browser.chromium.path])
+      files[path] = constants.R_OK | constants.X_OK;
+    await selectedImageAccess({ groups: groups(), files }, root);
+    boundary.access(
+      Object.keys(before.external).filter((path) => below(path, root) || below(path, output)),
+      browser,
+    );
+  } else boundary.access(Object.keys(before.external), browser);
   const bundle = read(join(output, "bundle.json")) as Bundle,
     web = read(join(output, "web-receipt.json")) as Web,
     abi = read(join(output, "abi-receipt.json")) as Abi;

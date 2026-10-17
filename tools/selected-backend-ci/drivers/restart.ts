@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import process from "node:process";
+import { selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
 import { localAllocation } from "../admission.ts";
 import { env, jsonInteger, read, root, sha } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
@@ -327,10 +328,12 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
   const productFinish: { error?: Error } = {};
   const inputs = async () => {
     restartBrowserArgs(g);
-    assert.ok(deepEquals(await g.inputCheck(), g.sourceBefore, true));
+    const checked = await g.inputCheck();
+    assert.ok(deepEquals(checked, g.sourceBefore, true));
     for (const [path, record] of Object.entries(g.binaries)) assert.ok(sha(path) === record.sha256);
     assert.ok(deepEquals(g.treeHashes(g.dist), g.distFiles));
-    for (const [path, expected] of Object.entries(g.abiFiles)) assert.ok(sha(path) === expected);
+    for (const [path, expected] of Object.entries(g.abiFiles))
+      assert.ok((selectedImageHost() ? checked.external[path] : sha(path)) === expected);
     const browser = g.browserInputs;
     assert.ok(sha(browser.bun.path) === browser.bun.sha256);
     assert.ok(sha(browser.chromium.path) === browser.chromium.sha256);

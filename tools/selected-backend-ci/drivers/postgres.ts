@@ -24,6 +24,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { SELECTED_IMAGE_ENV, selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
 import {
   bunDriver,
   env,
@@ -362,7 +363,7 @@ export async function postInputs(lane: Lane): Promise<Inputs> {
   for (const [path, record] of Object.entries(lane.binaries))
     assert.ok(sha(path) === record.sha256);
   for (const [path, expected] of Object.entries(lane.current.abi.host_runtime_files))
-    assert.ok(sha(path) === expected);
+    assert.ok((selectedImageHost() ? checked.external[path] : sha(path)) === expected);
   assert.ok(sha(reporterSource) === lane.reporterSha);
   return checked;
 }
@@ -447,6 +448,7 @@ export interface Seam extends RestartSeam {
 }
 
 const environmentNames = [
+  ...SELECTED_IMAGE_ENV,
   "FVOCI_ROOT_CURRENT_BINDING",
   "FVOCI_ROOT_CURRENT_ALLOCATION",
   "FVOCI_ROOT_RESTART_GRANT",

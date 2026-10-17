@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
+import { SELECTED_IMAGE_ENV, selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
 import {
   checkpointPrefix,
   env,
@@ -1193,7 +1194,7 @@ export function finalize(state: State, seam: Seam): Promise<number> {
       for (const path of [state.server, state.migrate, state.fixture, state.engine])
         assert.ok(sha(path) === binaries[path]?.sha256);
       for (const [path, expected] of Object.entries(state.current.abi.host_runtime_files))
-        assert.ok(sha(path) === expected);
+        assert.ok((selectedImageHost() ? after.external[path] : sha(path)) === expected);
       const inputs = state.browserInputs;
       if (inputs !== null) {
         assert.ok(sha(state.bun) === inputs.bun.sha256);
@@ -1489,6 +1490,7 @@ export async function productCallbacks(state: State, seam: Seam): Promise<Produc
   };
   const nativeEnvironment: Record<string, string> = {};
   for (const key of [
+    ...SELECTED_IMAGE_ENV,
     "PATH",
     "LANG",
     "LD_LIBRARY_PATH",

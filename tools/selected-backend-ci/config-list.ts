@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import { chmodSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
+import { selectedImageConfigList, selectedImageHost } from "../web-e2e/run-web-e2e.ts";
 import { configListInputs } from "./admission.ts";
 import { env, gid, groups, observedExit, read, root, sha, uid, write } from "./io.ts";
 import { knownOnBrowserTest } from "./runtime.ts";
@@ -36,7 +37,8 @@ export function qualifyListing(listed: Listing): void {
       deepEquals(spec.tests[0]?.results, []),
   );
 }
-export function configList(output: string): number {
+export async function configList(output: string): Promise<number> {
+  if (selectedImageHost()) return selectedImageConfigList(root);
   const { before, browser, modules } = configListInputs(output),
     directory = join(output, "config-list");
   mkdirSync(directory, { mode: 0o700 });

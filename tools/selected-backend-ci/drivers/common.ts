@@ -33,6 +33,11 @@ import {
 } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
+import {
+  selectedImageBrowser,
+  selectedImageHost,
+  selectedImageInputs,
+} from "../../web-e2e/run-web-e2e.ts";
 
 export type Receipt = Record<string, unknown>;
 export type Json = Record<string, unknown>;
@@ -367,6 +372,13 @@ function readStatus(fd: number): string {
 export type Command = (args: string[], options?: CommandOptions) => Promise<Completed>;
 // stdout and stderr go to one truncated log, or are captured as strict UTF-8.
 export const command: Command = async (args, options = {}) => {
+  if (
+    selectedImageHost() &&
+    args[1] === "--no-install" &&
+    args[2] === join(root, "node_modules/playwright/cli.js") &&
+    args[3] === "test"
+  )
+    return selectedImageBrowser(args, options, root);
   // Descendants that outlive a waited wrapper are no longer its children; a
   // pipe they inherited would hold the wait open, so its output goes to a file.
   assert.ok(!options.waitOnInterrupt || options.log !== undefined, "waited wrapper log required");
@@ -590,6 +602,12 @@ export async function inputCheck(
   tree: string,
   run: Command = command,
 ): Promise<Inputs> {
+  if (selectedImageHost()) {
+    assert.ok(before.head === head && before.tree === tree);
+    const current = await selectedImageInputs(before, root);
+    assert.ok(deepEquals(current, before), "image compiler inputs changed");
+    return current;
+  }
   const git = (...args: string[]) =>
     run(["git", "-c", "safe.directory=" + root, "-C", root, ...args]);
   const actualHead = (await git("rev-parse", "HEAD")).stdout.trim(),

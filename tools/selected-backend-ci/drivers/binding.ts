@@ -8,6 +8,7 @@ import { lstatSync, statfsSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { localAllocation } from "../admission.ts";
+import { selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
 import { digest, env, jsonInteger, read, root, sha, sourceInputText } from "../io.ts";
 import type {
   Abi,
@@ -461,7 +462,11 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
       deepEquals(q.originalAbiInputs, q.currentAbiInputs) &&
         Object.keys(q.currentAbiInputs).length > 0,
     );
-    assert.ok(Object.entries(q.currentAbiInputs).every(([n, h]) => sha(n) === h));
+    assert.ok(
+      Object.entries(q.currentAbiInputs).every(
+        ([n, h]) => (selectedImageHost() ? sourceBefore.external[n] : sha(n)) === h,
+      ),
+    );
   } else {
     assert.ok(engineFeaturesMatch(engineRecord.features), "engine features");
     assert.ok(artifacts.some((a) => a.executable === engine && engineFeaturesMatch(a.features)));
@@ -482,7 +487,8 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
       abi.currentServerSha256 === binaries[server]?.sha256,
   );
   assert.ok(isTrue(abi.currentELFDependenciesVerified));
-  for (const [path, hash] of Object.entries(abi.host_runtime_files)) assert.ok(sha(path) === hash);
+  for (const [path, hash] of Object.entries(abi.host_runtime_files))
+    assert.ok((selectedImageHost() ? sourceBefore.external[path] : sha(path)) === hash);
   if (lane !== "install") {
     assert.ok(m.closedInstallReceipt !== null);
     const closed = referenced(m.closedInstallReceipt) as ClosedInstall;
