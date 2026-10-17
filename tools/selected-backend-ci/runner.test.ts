@@ -75,7 +75,6 @@ import type {
   DriverReceipt,
   Flow,
   Inputs,
-  Inputs,
   Lane,
   LocalGrant,
   Reference,
@@ -121,7 +120,11 @@ afterEach(() => {
 
 test("selected image Inputs stdout completes before forced child exit", async () => {
   const { CI_WEB_IMAGE, CI_WEB_SDK_SHA256 } = await import("./runtime.ts");
-  for (const count of [1, 50000]) {
+  for (const [count, closed] of [
+    [1, false],
+    [50000, false],
+    [50000, true],
+  ] as const) {
     const before: Inputs = {
       head: "a".repeat(40),
       tree: "b".repeat(40),
@@ -160,11 +163,19 @@ process.exit(await selectedImagePhase(${JSON.stringify(root)}, "inputs"));`,
         new AbortController().signal,
         expected,
       );
+    assert.ok(child.stdout instanceof ReadableStream);
+    assert.ok(child.stderr instanceof ReadableStream);
+    if (closed) await child.stdout.cancel();
     const [stdout, stderr, exit] = await Promise.all([
-      new Response(child.stdout).arrayBuffer(),
+      closed ? Promise.resolve(new ArrayBuffer(0)) : new Response(child.stdout).arrayBuffer(),
       new Response(child.stderr).arrayBuffer(),
       child.exited,
     ]);
+    if (closed) {
+      expect(exit).not.toBe(0);
+      expect(new TextDecoder().decode(stderr)).toContain("EPIPE");
+      continue;
+    }
     expect(exit).toBe(0);
     expect(stderr.byteLength).toBe(0);
     expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
