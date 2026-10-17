@@ -22,7 +22,11 @@ import {
   type RoomLogOrigin,
 } from "./ui-audit.ts";
 import { AUTH_SPEC } from "./ui-auth-session.ts";
-import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
+import {
+  browserDiagnosticHelpers,
+  browserFailureDiagnostic,
+  type BrowserDiagnosticSources,
+} from "./ui-browser-diagnostic.ts";
 import {
   fixtureInput,
   cleanEnv,
@@ -55,7 +59,7 @@ import {
   type Manifest,
 } from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
-import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
+import { SERVER_BUDGET, type StartAllocation } from "./ui-start-diagnostic.ts";
 
 const FIXTURE_KEYS = [
   "FVOCI_LIBSQL_URL",
@@ -241,6 +245,7 @@ export async function start(
   directory: string,
   expectedSetup = false,
   clock: () => number = now,
+  allocation: StartAllocation = "unknown",
 ): Promise<Started> {
   if (executionMode() === "orca-local")
     return localServerStart(scope, manifest, environment, directory, expectedSetup);
@@ -291,7 +296,7 @@ export async function start(
       child !== undefined &&
       started !== undefined &&
       deadline !== undefined
-        ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock)
+        ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock, allocation)
         : null;
     const cleanup: string[] = [];
     try {
@@ -435,7 +440,8 @@ export async function browser(
   // The official CLI from the already admitted physical input closure.
   const physical = manifest.physicalInputs;
   require(sha(physical.path) === physical.sha256, "UI_PHYSICAL_RECEIPT_CHANGED");
-  const admitted = get(privateRead(physical.path, 64 * 1024 * 1024), "files", "external");
+  const physicalInputs = privateRead(physical.path, 64 * 1024 * 1024);
+  const admitted = get(physicalInputs, "files", "external");
   require(isRecord(admitted), "UI_PLAYWRIGHT_CLI_REFUSED");
   const cli = join(workspace, "node_modules/playwright/cli.js");
   const packagePath = join(workspace, "node_modules/playwright/package.json");
@@ -488,17 +494,29 @@ export async function browser(
       // report is complete after wait observes exit; a missing/invalid report
       // still produces a fixed diagnostic without replacing the failure.
       let failedReport: unknown = null;
-      let source = "";
+      const sources: Record<string, BrowserDiagnosticSources[string]> = {};
       try {
         if (regularReadable(report)) {
           chmodSync(report, 0o600);
           failedReport = privateRead(report, 64 * 1024 * 1024);
         }
-        if ([ON, OFF, AUTH_SPEC].includes(spec))
-          source = readFileSync(join(workspace, "apps/web/e2e-pending", spec), "utf8");
       } catch {
         // Malformed private input never supplies invented details.
       }
+      if ([ON, OFF, AUTH_SPEC].includes(spec))
+        for (const name of [spec, ...browserDiagnosticHelpers]) {
+          const relative = "apps/web/e2e-pending/" + name;
+          const path = join(workspace, relative);
+          try {
+            if (
+              regularReadable(path) &&
+              get(physicalInputs, "files", "tracked", relative) === sha(path)
+            )
+              sources[name] = { path, source: readFileSync(path, "utf8") };
+          } catch {
+            // Only fixed, unchanged admitted sources can qualify a location.
+          }
+        }
       try {
         scope.io.output.err(
           diagnosticJson(
@@ -510,7 +528,7 @@ export async function browser(
                 : grep === "selected normal main restart:"
                   ? "restart"
                   : "on",
-              source,
+              sources,
             ),
           ),
         );

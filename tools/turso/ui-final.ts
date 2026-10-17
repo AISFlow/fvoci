@@ -701,7 +701,15 @@ export async function executeSelectedStage(
       member = await fixture(scope, manifest, "member", env);
     rememberActor(audit, owner, namespace);
     rememberActor(audit, member, namespace);
-    const running = await start(scope, manifest, env, directory, false);
+    const running = await start(
+      scope,
+      manifest,
+      env,
+      directory,
+      false,
+      undefined,
+      `${suite}-${engine}-${flow}`,
+    );
     let serverIdentity: ReturnType<typeof allocationIdentity> | undefined;
     let original: unknown = null;
     const cleanup: string[] = [];
@@ -950,7 +958,15 @@ export async function prepareKeycloakOwners(
       require(deepEquals(fresh.dataset, before.dataset, true), "UI_FINAL_PREDECESSOR_CHANGED");
       const bootstrap = await fixture(scope, manifest, "owner", env);
       rememberActor(phaseAudit, bootstrap, namespace);
-      const running = await start(scope, manifest, env, directory, false);
+      const running = await start(
+        scope,
+        manifest,
+        env,
+        directory,
+        false,
+        undefined,
+        `keycloak-prepare-${mode}`,
+      );
       let serverIdentity: ReturnType<typeof allocationIdentity> | undefined;
       let actors: PreparedActors | undefined;
       let original: unknown = null;

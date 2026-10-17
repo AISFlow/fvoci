@@ -84,7 +84,8 @@ describe("consumer flow", () => {
           modes.push(mode);
           return Promise.resolve(mode === "owner" ? owner : before());
         },
-        start: (_scope, _manifest, environment) => {
+        start: (_scope, _manifest, environment, _path, _setup, _clock, allocation) => {
+          expect(allocation).toBe("on");
           expect(environment.ENCRYPTION_KEYS).toBe(encryptionKeys);
           expect(environment.ENCRYPTION_ACTIVE_KEY_ID).toBe("turso-test");
           return Promise.resolve({

@@ -8,7 +8,6 @@ import {
   containerImage,
   containerArchitecture,
   qualifyContainerDaemon,
-  containerImageSource,
   qualifyImageSource,
   CheckError,
   RuntimeExit,
@@ -20,6 +19,7 @@ import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
 import { localAllocation } from "../selected-backend-ci/admission.ts";
 export {
   CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
   containerImage,
   selectedImageHost,
   selectedImageBudget,
@@ -325,7 +325,8 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     root,
   );
   const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
-  const imageSource = containerImageSource(
+  const imageSource = qualifyImageSource(
+    root,
     checkedOutput(
       [
         "docker",
@@ -339,8 +340,8 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     ),
     sdk,
     architecture,
+    local?.source ?? process.env.GITHUB_SHA ?? "",
   );
-  qualifyImageSource(root, imageSource, local?.source ?? process.env.GITHUB_SHA ?? "");
   if (local) {
     process.env.RUNNER_TEMP = dirname(local.outputRoot);
     process.env.FVOCI_SELECTED_CI_OUTPUT = local.outputRoot;
@@ -2812,8 +2813,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     ],
     root,
   );
-  const imageSource = containerImageSource(metadata, sdk, architecture);
-  qualifyImageSource(root, imageSource, orchestratorSource);
+  const imageSource = qualifyImageSource(root, metadata, sdk, architecture, orchestratorSource);
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(

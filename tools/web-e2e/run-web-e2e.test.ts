@@ -22,6 +22,7 @@ import { join } from "node:path";
 import {
   CheckError,
   CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
   containerImage,
   containerRequest,
   containerFailureArtifacts,
@@ -493,6 +494,19 @@ function committedCheckout(): { root: string; sha: string } {
   return { root, sha: git(root, "rev-parse", "HEAD") };
 }
 
+// Model only the historical publication's baseline at the existing Git child
+// boundary. Real Git still compares every input; fixtures need no old objects.
+function publicationGit(source: string): string {
+  const executable = Bun.which("git");
+  if (!executable) throw new Error("Git fixture executable missing");
+  return (
+    "#!" +
+    process.execPath +
+    "\n" +
+    `const a=process.argv.slice(2);if(a[0]==="diff"&&a[1]==="--quiet"&&a[2]===${JSON.stringify(CI_WEB_IMAGE_SOURCE)}&&a[4]==="--")a[2]=${JSON.stringify(source)};const r=Bun.spawnSync([${JSON.stringify(executable)},...a],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(r.exitCode || (r.signalCode?1:0));\n`
+  );
+}
+
 describe("qualifyCommittedApi", () => {
   const request: CommittedApiRequest = { shard: "0", selected: false, browserPhase: "consume" };
   const ciEnv = (sha: string) => ({
@@ -725,9 +739,13 @@ try {
 
 test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
   const { root } = committedCheckout();
-  for (const directory of ["xtask/tests", "tests/support"])
+  for (const directory of ["xtask/tests", "tests/support", "docker/ci-base"])
     mkdirSync(join(root, directory), { recursive: true });
-  for (const file of ["xtask/catalog.tsv", "tests/support/official_sqld.rs"])
+  for (const file of [
+    "xtask/catalog.tsv",
+    "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
+  ])
     writeFileSync(join(root, file), "original input\n");
   const commit = () => {
     git(root, "add", ".");
@@ -746,23 +764,122 @@ test("image source qualification covers copied helper support and catalogs witho
     return git(root, "rev-parse", "HEAD");
   };
   const image = commit();
+  const sdk = {
+    image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    sdk: "b".repeat(64),
+    local: false,
+  };
+  const metadata =
+    "sha256:" + "c".repeat(64) + " linux amd64 " + image + " " + JSON.stringify([sdk.image]);
   writeFileSync(join(root, "xtask/tests/caller.rs"), "unrelated test\n");
   expect(() => {
-    qualifyImageSource(root, image, commit());
+    qualifyImageSource(root, metadata, sdk, "x86_64", commit());
   }).not.toThrow();
   for (const file of [
     "xtask/catalog.tsv",
     "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
     "xtask/new-catalog.tsv",
   ]) {
     writeFileSync(join(root, file), "changed copied input\n");
     expect(() => {
-      qualifyImageSource(root, image, commit());
+      qualifyImageSource(root, metadata, sdk, "x86_64", commit());
     }).toThrow(CheckError);
     if (file === "xtask/new-catalog.tsv") rmSync(join(root, file));
     else writeFileSync(join(root, file), "original input\n");
     commit();
   }
+});
+
+test("only the exact published tuple admits future recipe drift, keeping compiled input refusal", () => {
+  const { root, sha } = committedCheckout();
+  const bin = tempDir();
+  writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
+  for (const directory of ["docker/ci-base", "tests/support"])
+    mkdirSync(join(root, directory), { recursive: true });
+  const commit = () => {
+    git(root, "add", ".");
+    git(
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "future image input",
+    );
+    return git(root, "rev-parse", "HEAD");
+  };
+  writeFileSync(join(root, "docker/ci-base/Dockerfile"), "future recipe\n");
+  const current = commit();
+  writeFileSync(join(root, "tests/support/official_sqld.rs"), "changed compiled helper\n");
+  const changed = commit();
+  const image = "sha256:" + "b".repeat(64),
+    accepted: Parameters<typeof qualifyImageSource>[] = [],
+    rejected: Parameters<typeof qualifyImageSource>[] = [];
+  for (const [arch, dockerArch, seal, otherSeal] of [
+    [
+      "x86_64",
+      "amd64",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+    ],
+    [
+      "aarch64",
+      "arm64",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+    ],
+  ] as const) {
+    const sdk = { image: CI_WEB_IMAGE, sdk: seal, local: false };
+    const metadata =
+      image +
+      " linux " +
+      dockerArch +
+      " " +
+      CI_WEB_IMAGE_SOURCE +
+      " " +
+      JSON.stringify([CI_WEB_IMAGE]);
+    accepted.push([root, metadata, sdk, arch, current]);
+    for (const [inspection, selection] of [
+      [metadata.replace(CI_WEB_IMAGE_SOURCE, current), sdk],
+      [metadata.replace(CI_WEB_IMAGE, "foreign"), sdk],
+      [metadata, { ...sdk, sdk: "0".repeat(64) }],
+      [metadata, { ...sdk, sdk: otherSeal }],
+      [metadata, { ...sdk, image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64) }],
+    ] as const)
+      rejected.push([root, inspection, selection, arch, current]);
+    const override = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      inspection =
+        image +
+        " linux " +
+        dockerArch +
+        " " +
+        CI_WEB_IMAGE_SOURCE +
+        " " +
+        JSON.stringify([override]);
+    // Overrides accept equal inputs but must refuse the future recipe.
+    for (const selection of [
+      { image: override, sdk: seal, local: false },
+      { image, sdk: seal, local: true },
+    ]) {
+      accepted.push([root, inspection, selection, arch, sha]);
+      rejected.push([root, inspection, selection, arch, current]);
+    }
+    rejected.push([root, metadata, sdk, arch, changed]);
+  }
+  // Set the fixture child PATH at launch, without changing the test process's
+  // command resolution or requiring any publication history in its checkout.
+  const source = `import assert from "node:assert/strict";import {qualifyImageSource,CheckError} from ${JSON.stringify(CLI)};for(const args of ${JSON.stringify(accepted)})assert.equal(qualifyImageSource(...args),${JSON.stringify(CI_WEB_IMAGE_SOURCE)});for(const args of ${JSON.stringify(rejected)})assert.throws(()=>qualifyImageSource(...args),CheckError);`;
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+    env: { ...process.env, PATH: bin + ":" + (process.env.PATH ?? "") },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
 });
 
 test("real commands preserve normal and nonzero exits", () => {
@@ -1188,6 +1305,7 @@ for (const mode of [
   ...(process.platform === "linux" && nativeArchitecture(process.arch) === "x86_64"
     ? [
         "selected-pending",
+        "selected-source-mismatch",
         "selected-fail",
         "selected-cancel",
         "selected-remove-fail",
@@ -1226,6 +1344,8 @@ for (const mode of [
     writeFileSync(join(packet, "payload.tar"), "");
     writeFileSync(state, "{}");
     mkdirSync(join(bin, "tmp"), { mode: 0o711 });
+    if (mode === "published-default" || native || selected)
+      writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
     const pin =
       mode === "published-default" || native || selected
         ? CI_WEB_IMAGE
@@ -1235,7 +1355,7 @@ const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STA
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.supplementary=a.flatMap((arg,index)=>arg==="--group-add"?[a[index+1]]:[]);row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
 if((a[0]==="run"||a[0]==="create")&&name.startsWith("fvoci-selected-tool-")){const mount=a.find(x=>x.startsWith("type=bind,source=")&&x.endsWith(",target=/tmp"));row.nodeTemp=mount?.slice("type=bind,source=".length).split(",target=")[0];const facts=fs.lstatSync(row.nodeTemp);row.privateNodeTemp=row.nodeTemp.startsWith("/var/tmp/fvoci-selected-tool.")&&!facts.isSymbolicLink()&&facts.uid===process.getuid()&&(facts.mode&0o777)===0o700;row.privateBunCache=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8").split("\n").includes("BUN_INSTALL_CACHE_DIR=/tmp/fvoci-bun-install-cache");if(a[0]==="run"){const shim=row.nodeTemp+"/bun-node-fixture";fs.mkdirSync(shim);for(const executable of["node","bun"])fs.symlinkSync(process.execPath,shim+"/"+executable);const cache=row.nodeTemp+"/fvoci-bun-install-cache";fs.mkdirSync(cache);fs.mkdirSync(cache+"/package-bytes");fs.symlinkSync("package-bytes",cache+"/1.0.0@@@1");}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
@@ -1352,7 +1472,11 @@ else process.exit(42);
           FVOCI_WEB_CONTAINER_SDK_SHA256: selected
             ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
             : undefined,
-          FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected ? sha : undefined,
+          FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected
+            ? mode === "selected-source-mismatch"
+              ? "0".repeat(40)
+              : CI_WEB_IMAGE_SOURCE
+            : undefined,
           FVOCI_WEB_BUILD_HANDOFF: selectedPrepare
             ? join(bin, "fvoci-web-build-handoff")
             : undefined,
@@ -1362,7 +1486,8 @@ else process.exit(42);
           FIXTURE_READY: join(bin, "ready"),
           FIXTURE_STATE: state,
           FIXTURE_CALLS: calls,
-          FIXTURE_SHA: sha,
+          FIXTURE_SHA:
+            mode === "published-default" || native || selected ? CI_WEB_IMAGE_SOURCE : sha,
           FIXTURE_PIN: pin,
           FIXTURE_MODE: mode,
           FIXTURE_ARCH: nativeArchitecture(process.arch),
@@ -1436,6 +1561,7 @@ else process.exit(42);
             privateBunCache?: boolean;
             nodeTemp?: string;
             user?: string;
+            supplementary?: string[];
           },
       );
     if (selected)
@@ -1445,6 +1571,7 @@ else process.exit(42);
       "image-mismatch",
       "foreign-digest",
       "remote-endpoint",
+      "selected-source-mismatch",
     ].includes(mode);
     expect(code, stderr).toBe(
       mode === "native-cancel" || mode === "selected-cancel" || mode === "selected-copy-cancel"
@@ -1481,6 +1608,14 @@ else process.exit(42);
       if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
     }
     if (selected) {
+      if (mode === "selected-source-mismatch") {
+        expect(stderr).toContain("selected image source changed");
+        expect(rows.some((row) => ["run", "create", "network"].includes(row.op[0] ?? ""))).toBe(
+          false,
+        );
+        expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+        return;
+      }
       if (mode === "selected-prepare-fail") {
         expect(stderr).toContain(
           "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",
@@ -1500,6 +1635,12 @@ else process.exit(42);
       expect(runs).toHaveLength(copyFailure ? 0 : 1);
       for (const row of rows.filter((row) => row.op[0] === "create" || row.op[0] === "run")) {
         expect(row.safe).toBe(true);
+        expect(row.supplementary).not.toContain(String(process.getgid?.()));
+        expect(row.supplementary).toEqual(
+          (process.getuid?.() === 1000 ? (process.getgroups?.() ?? []) : [])
+            .filter((group) => group !== process.getgid?.())
+            .map(String),
+        );
         expect(row.hasActionToken).toBe(false);
         expect(row.wholeTemp).toBe(false);
         expect(row.privateNodeTemp).toBe(true);

@@ -302,8 +302,14 @@ test.each([false, true])(
         modes.push(mode);
         return Promise.resolve(baseline);
       },
-      start: () =>
-        Promise.resolve({ server: { child: exitedChild(0) }, base: "http://127.0.0.1:12345", log }),
+      start: (_scope, _manifest, _env, _path, _setup, _clock, allocation) => {
+        expect(allocation).toBe("restore-source");
+        return Promise.resolve({
+          server: { child: exitedChild(0) },
+          base: "http://127.0.0.1:12345",
+          log,
+        });
+      },
       stop: () =>
         cleanupFailure
           ? Promise.reject(new UiError("UI_SERVER_CLOSURE_FAILED"))
