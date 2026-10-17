@@ -20,7 +20,10 @@ import process from "node:process";
 import { sha, write } from "../selected-backend-ci/io.ts";
 import { OFF, ON } from "./ui-audit.ts";
 import { AUTH_SPEC } from "./ui-auth-session.ts";
-import { browserFailureDiagnostic } from "./ui-browser-diagnostic.ts";
+import {
+  browserFailureDiagnostic,
+  type BrowserDiagnosticSources,
+} from "./ui-browser-diagnostic.ts";
 import { failureCode, UiError, valueDigest, type Record_ } from "./ui-common.ts";
 import { Captured, exitedChild, failureOf, fakeScope, must } from "./ui-fakes.ts";
 import { browser, fixture, start, stop } from "./ui-native.ts";
@@ -408,6 +411,10 @@ const rewrite = (inputs: BrowserInputs, change: (external: Record<string, string
 };
 
 describe("browser", () => {
+  const diagnosticSources = (source: string): BrowserDiagnosticSources => ({
+    [ON]: { path: "/admitted/apps/web/e2e-pending/" + ON, source },
+  });
+
   test("canonical reporter error locations survive without a stack and remain source qualified", () => {
     const source = 'test("registered", async () => {\n  expect(response.status()).toBe(200);\n});';
     const diagnostic = (location: unknown, errorLocation?: unknown) =>
@@ -444,7 +451,7 @@ describe("browser", () => {
         },
         ON,
         "on",
-        source,
+        diagnosticSources(source),
       );
     const location = { file: ON, line: 2, column: 3 };
     for (const errorLocation of [undefined, { file: ON, line: 1 }]) {
@@ -453,6 +460,10 @@ describe("browser", () => {
       });
     }
     for (const refused of [
+      null,
+      undefined,
+      [],
+      "PRIVATE_LOCATION",
       { file: "PRIVATE_HELPER.ts", line: 2 },
       { file: "PRIVATE_URL", line: 2 },
       ...[0, -1, 1.5, 4, Number.NaN, Number.POSITIVE_INFINITY, "2"].map((line) => ({
@@ -469,6 +480,93 @@ describe("browser", () => {
     expect(JSON.stringify(diagnostic(location))).not.toContain("PRIVATE_");
   });
 
+  test("helper locations use only fixed admitted sources and their own bounds", () => {
+    const sources = {
+      ...diagnosticSources('test("registered", async () => {});'),
+      "collab-helpers.ts": {
+        path: "/admitted/apps/web/e2e-pending/collab-helpers.ts",
+        source:
+          'test("PRIVATE_HELPER_TITLE", async () => {});\nexpect(body.secret).toBe(200);\nexpect(response.status()).toBe(200);',
+      },
+      "selected-final-native.ts": {
+        path: "/admitted/apps/web/e2e-pending/selected-final-native.ts",
+        source: "// fixed native helper\nexpect(ack.version).toBe(200);",
+      },
+      "PRIVATE_FOREIGN.ts": {
+        path: "/PRIVATE_FOREIGN.ts",
+        source: "expect(response.status()).toBe(200);",
+      },
+    };
+    const diagnostic = (error: Record_, errorLocation?: unknown, title = "registered") =>
+      browserFailureDiagnostic(
+        {
+          suites: [
+            {
+              specs: [
+                {
+                  title,
+                  tests: [
+                    {
+                      results: [
+                        {
+                          status: "failed",
+                          error: {
+                            message:
+                              "Error: expect(received).toBe(expected)\nReceived: 503\nPRIVATE_BODY",
+                            stack:
+                              "PRIVATE_STACK at /admitted/apps/web/e2e-pending/collab-helpers.ts:3:1",
+                            ...error,
+                          },
+                          errorLocation,
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        ON,
+        "on",
+        sources,
+      );
+    const first = (value: Record_) => (value.browserFailure as Record_).failures as Record_[];
+    for (const name of ["collab-helpers.ts", "selected-final-native.ts"] as const)
+      for (const file of [name, "apps/web/e2e-pending/" + name, sources[name].path])
+        expect(first(diagnostic({ location: { file, line: 2 } }))[0]).toMatchObject({
+          title: "registered",
+          file: "apps/web/e2e-pending/" + name,
+          line: 2,
+          httpStatus: null,
+        });
+    const fallback = { file: sources["collab-helpers.ts"].path, line: 3 };
+    expect(first(diagnostic({}, fallback))[0]).toMatchObject({
+      file: "apps/web/e2e-pending/collab-helpers.ts",
+      line: 3,
+      httpStatus: 503,
+    });
+    for (const location of [
+      null,
+      undefined,
+      [],
+      "PRIVATE_LOCATION",
+      { file: "/foreign/e2e-pending/collab-helpers.ts", line: 3 },
+      { file: "/PRIVATE_FOREIGN.ts", line: 1 },
+      ...[0, -1, 1.5, 4, "3", Number.NaN, Number.POSITIVE_INFINITY].map((line) => ({
+        file: fallback.file,
+        line,
+      })),
+    ]) {
+      const result = diagnostic({ location }, fallback);
+      expect(first(result)[0]).toMatchObject({ file: null, line: null, httpStatus: null });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    }
+    expect(
+      first(diagnostic({ location: fallback }, undefined, "PRIVATE_HELPER_TITLE"))[0]?.title,
+    ).toBe("unregistered");
+  });
+
   test("diagnostics bound hostile reports and never treat body numbers as HTTP status", () => {
     const source = 'test("registered", async () => {\n  expect(body.secret).toBe(200);\n});';
     const result = {
@@ -479,7 +577,7 @@ describe("browser", () => {
     const report = {
       suites: [{ specs: [{ title: "registered", tests: [{ results: Array(100).fill(result) }] }] }],
     };
-    const diagnostic = browserFailureDiagnostic(report, ON, "restart", source);
+    const diagnostic = browserFailureDiagnostic(report, ON, "restart", diagnosticSources(source));
     expect(diagnostic.browserFailure).toMatchObject({
       stage: "restart",
       failures: Array(16).fill({
@@ -491,7 +589,9 @@ describe("browser", () => {
       }),
     });
     expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE_");
-    expect(browserFailureDiagnostic(null, ON, "off", source).browserFailure).toEqual({
+    expect(
+      browserFailureDiagnostic(null, ON, "off", diagnosticSources(source)).browserFailure,
+    ).toEqual({
       stage: "off",
       report: "unavailable",
       failures: [],
@@ -505,7 +605,7 @@ describe("browser", () => {
       },
       ON,
       "on",
-      source,
+      diagnosticSources(source),
     );
     expect(noTests.browserFailure).toMatchObject({ globalErrorCategories: ["no-tests"] });
     expect(JSON.stringify(noTests)).not.toContain("PRIVATE_");
@@ -517,6 +617,14 @@ describe("browser", () => {
     const source = `test("${title}", async () => {\n  expect(response.status()).toBe(200);\n});\n`;
     mkdirSync(join(inputs.workspace, "apps/web/e2e-pending"), { recursive: true });
     writeFileSync(join(inputs.workspace, "apps/web/e2e-pending", ON), source);
+    const physical = JSON.parse(readFileSync(inputs.physical, "utf8")) as {
+      files: { tracked?: Record<string, string> };
+    };
+    physical.files.tracked = {
+      ["apps/web/e2e-pending/" + ON]: sha(join(inputs.workspace, "apps/web/e2e-pending", ON)),
+    };
+    writeFileSync(inputs.physical, JSON.stringify(physical));
+    inputs.manifest.physicalInputs.sha256 = sha(inputs.physical);
     writeFileSync(
       join(inputs.run, "playwright.private.json"),
       JSON.stringify({
@@ -586,6 +694,83 @@ describe("browser", () => {
       },
     });
     expect(output.all).not.toContain("PRIVATE_");
+  });
+
+  test("failed browser helper diagnostics require unchanged source-admitted files and retain closure", async () => {
+    for (const changed of [false, true]) {
+      const inputs = browserInputs();
+      const title = "selected normal main: fixed helper failure";
+      const relative = "apps/web/e2e-pending/";
+      const spec = join(inputs.workspace, relative, ON);
+      const helper = join(inputs.workspace, relative, "collab-helpers.ts");
+      mkdirSync(join(inputs.workspace, relative), { recursive: true });
+      writeFileSync(spec, `test("${title}", async () => {});`);
+      writeFileSync(helper, "// admitted helper\nexpect(response.status()).toBe(200);");
+      const physical = JSON.parse(readFileSync(inputs.physical, "utf8")) as {
+        files: { tracked?: Record<string, string> };
+      };
+      physical.files.tracked = {
+        [relative + ON]: sha(spec),
+        [relative + "collab-helpers.ts"]: sha(helper),
+      };
+      writeFileSync(inputs.physical, JSON.stringify(physical));
+      inputs.manifest.physicalInputs.sha256 = sha(inputs.physical);
+      if (changed)
+        writeFileSync(helper, "// changed private input\nexpect(response.status()).toBe(200);");
+      writeFileSync(
+        join(inputs.run, "playwright.private.json"),
+        JSON.stringify({
+          suites: [
+            {
+              specs: [
+                {
+                  title,
+                  tests: [
+                    {
+                      results: [
+                        {
+                          status: "failed",
+                          error: {
+                            location: { file: helper, line: 2 },
+                            message:
+                              "Error: expect(received).toBe(expected)\nReceived: 503\nPRIVATE_BODY",
+                            stack: "PRIVATE_STACK",
+                          },
+                          errorLocation: { file: spec, line: 1 },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      const output = new Captured();
+      const { scope, calls } = fakeScope({ spawn: () => exitedChild(1), output });
+      expect(
+        await failureOf(
+          browser(scope, inputs.manifest, inputs.run, {}, ON, undefined, inputs.workspace),
+        ),
+      ).toBe("UI_ACTUAL_BROWSER_FAILED");
+      expect(calls.finish).toHaveLength(1);
+      expect(JSON.parse(output.stderr[0] as string)).toMatchObject({
+        originalFailure: "UI_ACTUAL_BROWSER_FAILED",
+        browserFailure: {
+          failures: [
+            {
+              title,
+              file: changed ? null : relative + "collab-helpers.ts",
+              line: changed ? null : 2,
+              httpStatus: changed ? null : 503,
+            },
+          ],
+        },
+      });
+      expect(output.all).not.toContain("PRIVATE_");
+      expect(output.all).not.toContain(inputs.workspace);
+    }
   });
 
   test("the direct CLI keeps arguments, environment, wait and ownership", async () => {
