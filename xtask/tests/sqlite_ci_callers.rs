@@ -871,35 +871,35 @@ fn assert_mutations_fail(
 fn new_producer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
-    for (workflow, name) in [("rust", "postgres-build")] {
-        let path = root.join(format!(".github/workflows/{workflow}.yml"));
-        let original = fs::read_to_string(&path).unwrap();
-        let span = job_span(&original, name);
-        let body = &original[span.0..span.1];
-        let steps = blocks(body);
-        let text_of = |(s, e): (usize, usize)| &body[s..e];
-        let prep = *steps
-            .iter()
-            .find(|b| has_line(text_of(**b), "        id: sqlite"))
-            .unwrap();
-        let cache = *steps
-            .iter()
-            .find(|b| text_of(**b).lines().any(is_target_path_line))
-            .unwrap();
-        let helper = steps
-            .iter()
-            .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
-            .copied();
-        let cache_text = text_of(cache);
-        let move_cache_before = |anchor: (usize, usize)| {
-            format!(
-                "{}{cache_text}{}{}",
-                &body[..anchor.0],
-                &body[anchor.0..cache.0],
-                &body[cache.1..]
-            )
-        };
-        let mut changes: Vec<(String, String, Option<&str>)> = vec![
+    let (workflow, name) = ("rust", "postgres-build");
+    let path = root.join(format!(".github/workflows/{workflow}.yml"));
+    let original = fs::read_to_string(&path).unwrap();
+    let span = job_span(&original, name);
+    let body = &original[span.0..span.1];
+    let steps = blocks(body);
+    let text_of = |(s, e): (usize, usize)| &body[s..e];
+    let prep = *steps
+        .iter()
+        .find(|b| has_line(text_of(**b), "        id: sqlite"))
+        .unwrap();
+    let cache = *steps
+        .iter()
+        .find(|b| text_of(**b).lines().any(is_target_path_line))
+        .unwrap();
+    let helper = steps
+        .iter()
+        .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
+        .copied();
+    let cache_text = text_of(cache);
+    let move_cache_before = |anchor: (usize, usize)| {
+        format!(
+            "{}{cache_text}{}{}",
+            &body[..anchor.0],
+            &body[anchor.0..cache.0],
+            &body[cache.1..]
+        )
+    };
+    let mut changes: Vec<(String, String, Option<&str>)> = vec![
             (
                 "missing producer preparation".into(),
                 replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"),
@@ -963,36 +963,35 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 None,
             ),
         ];
-        if let Some(helper) = helper {
-            changes.push((
-                "helper borrows SQLite inputs".into(),
-                replace_once(
-                    body,
-                    text_of(helper),
-                    &format!(
-                        "{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n",
-                        text_of(helper)
-                    ),
+    if let Some(helper) = helper {
+        changes.push((
+            "helper borrows SQLite inputs".into(),
+            replace_once(
+                body,
+                text_of(helper),
+                &format!(
+                    "{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n",
+                    text_of(helper)
                 ),
-                None,
-            ));
-        }
-        let verify = *steps
-            .iter()
-            .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
-            .unwrap();
-        changes.push((
-            "missing producer verification".into(),
-            format!("{}{}", &body[..verify.0], &body[verify.1..]),
+            ),
             None,
         ));
-        changes.push((
-            "output cache before verification".into(),
-            move_cache_before(verify),
-            None,
-        ));
-        assert_mutations_fail(&path, &root, &original, span, changes);
     }
+    let verify = *steps
+        .iter()
+        .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
+        .unwrap();
+    changes.push((
+        "missing producer verification".into(),
+        format!("{}{}", &body[..verify.0], &body[verify.1..]),
+        None,
+    ));
+    changes.push((
+        "output cache before verification".into(),
+        move_cache_before(verify),
+        None,
+    ));
+    assert_mutations_fail(&path, &root, &original, span, changes);
 }
 
 #[test]
