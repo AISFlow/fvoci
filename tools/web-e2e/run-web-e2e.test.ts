@@ -1365,6 +1365,15 @@ else process.exit(42);
       expect(runs).toHaveLength(copyFailure ? 0 : 1);
       for (const row of rows.filter((row) => row.op[0] === "create" || row.op[0] === "run")) {
         expect(row.safe).toBe(true);
+        const supplementary = row.op.flatMap((arg, index) =>
+          arg === "--group-add" ? [row.op[index + 1]] : [],
+        );
+        expect(supplementary).not.toContain(String(process.getgid?.()));
+        expect(supplementary).toEqual(
+          (process.getuid?.() === 1000 ? (process.getgroups?.() ?? []) : [])
+            .filter((group) => group !== process.getgid?.())
+            .map(String),
+        );
         expect(row.hasActionToken).toBe(false);
         expect(row.wholeTemp).toBe(false);
         expect(row.privateNodeTemp).toBe(true);

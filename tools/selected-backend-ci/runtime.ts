@@ -1281,7 +1281,7 @@ function selectedImageInvocation(
   ];
   for (const group of actor?.groups ?? (uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
     if (group === 0) fail("selected image refuses privileged supplementary groups");
-    args.push("--group-add", String(group));
+    if (group !== gid) args.push("--group-add", String(group));
   }
   const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
   if (["prepare", "consume"].includes(operation)) {
