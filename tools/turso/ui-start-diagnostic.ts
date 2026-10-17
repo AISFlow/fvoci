@@ -159,12 +159,91 @@ export function startupRemoteCause(line: string): [string, string] | null {
   return null;
 }
 
+export type StartAllocation =
+  | "unknown"
+  | "on"
+  | "off"
+  | "restart"
+  | `auth-${"on" | "off"}`
+  | `restore-${"source" | "source-restart" | "destination" | "destination-restart"}`
+  | `${"products" | "boundary"}-${"chromium" | "firefox" | "webkit"}-${"on" | "off"}`
+  | `keycloak-prepare-${"flows" | "failures" | "wrong-secret"}`;
+
+const allocationPattern =
+  /^(?:on|off|restart|auth-(?:on|off)|restore-(?:source|source-restart|destination|destination-restart)|(?:products|boundary)-(?:chromium|firefox|webkit)-(?:on|off)|keycloak-prepare-(?:flows|failures|wrong-secret))$/;
+const milestones = [
+  "prepared",
+  "main-gate-complete",
+  "attachment-transfer-loaded",
+  "identity-settings-loaded",
+] as const;
+const prepared = "fvoci: prepared; starting the server";
+const messages = [
+  prepared,
+  "meilisearch disabled (FVOCI_MEILI_URL unset)",
+  "attachment transfer mode",
+  "identity settings loaded",
+] as const;
+
+function startupMilestone(line: string): number {
+  // src/main.rs uses tracing-subscriber 0.3's default full formatter. Admit
+  // only its exact decoration, not general ANSI stripping or substring matches.
+  const timestamp =
+    "[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{6}Z";
+  if (line === prepared) return 0;
+  for (const ansi of [false, true]) {
+    const dim = (value: string) => (ansi ? "\x1b[2m" + value + "\x1b[0m" : value);
+    const field = (name: string) => (ansi ? "\x1b[3m" + name + "\x1b[0m" : name) + dim("=");
+    const prefix =
+      dim(timestamp) +
+      " " +
+      (ansi ? "\x1b[32m INFO\x1b[0m" : " INFO") +
+      " " +
+      dim("fvoci_server") +
+      dim(":") +
+      " ";
+    const bodies = [
+      escape(messages[1]),
+      escape(messages[2] + " " + field("mode")) + '"(?:proxy|presigned)"',
+      escape(messages[3] + " " + field("encryption_keys")) +
+        "(?:true|false) " +
+        escape(field("oidc_providers")) +
+        "(0|[1-9][0-9]{0,19})",
+    ];
+    for (const [index, body] of bodies.entries()) {
+      // Escape formatter literals separately from the timestamp grammar.
+      const pattern = escape(prefix).replace(escape(timestamp), timestamp) + body;
+      const match = new RegExp("^" + pattern + "$").exec(line);
+      if (match !== null && (index !== 2 || BigInt(match[1] as string) < 2n ** 64n))
+        return index + 1;
+    }
+  }
+  return -1;
+}
+
+function startupProgress(lines: readonly string[]): (typeof milestones)[number] | null {
+  let last = -1;
+  for (const line of lines) {
+    const observed = startupMilestone(line);
+    if (observed !== -1) {
+      if (observed <= last) return null;
+      last = observed;
+    } else if (messages.some((message) => line.includes(message))) {
+      // A malformed marker cannot extend or corroborate an earlier interval.
+      return null;
+    }
+    // Unrelated lines never qualify a cause or contribute progress.
+  }
+  return milestones[last] ?? null;
+}
+
 export interface StartDiagnostic {
   originalFailure: "UI_SERVER_START_FAILED";
   diagnosticStatus: "unqualified" | "qualified";
   processState: "unclassified" | "exited" | "deadline";
   exitCode: number | null;
   elapsedMs: number | null;
+  allocation: StartAllocation;
   phase: string | null;
   category: string | null;
 }
@@ -176,6 +255,7 @@ export function serverStartDiagnostic(
   started: number | null,
   deadline: number | null,
   now: () => number = () => performance.now() / 1000,
+  allocation: StartAllocation = "unknown",
 ): StartDiagnostic {
   const result: StartDiagnostic = {
     originalFailure: "UI_SERVER_START_FAILED",
@@ -183,6 +263,12 @@ export function serverStartDiagnostic(
     processState: "unclassified",
     exitCode: null,
     elapsedMs: null,
+    allocation:
+      typeof allocation === "string" &&
+      !allocation.includes("\n") &&
+      allocationPattern.test(allocation)
+        ? allocation
+        : "unknown",
     phase: null,
     category: null,
   };
@@ -216,18 +302,22 @@ export function serverStartDiagnostic(
     const raw = buffer.subarray(0, size);
     if (size > START_DIAGNOSTIC_INPUT_CAP || !size || raw[size - 1] !== 0x0a) return result;
     if (raw.some((byte) => byte > 0x7f)) return result;
-    const lines = Buffer.from(raw).toString("latin1").split("\n").slice(0, -1);
+    const lines = Buffer.from(raw)
+      .toString("latin1")
+      .split("\n")
+      .slice(0, -1)
+      .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+    result.phase = startupProgress(lines);
     const causes: [string, string][] = [];
     const missing = new Set([
       "fvoci: ENCRYPTION_KEYS is not set (see the env example)",
       "fvoci: ENCRYPTION_ACTIVE_KEY_ID is not set (see the env example)",
     ]);
-    for (let line of lines) {
-      if (line.endsWith("\r")) line = line.slice(0, -1);
+    for (const line of lines) {
       if (missing.has(line)) causes.push(["prepare-config", "missing-encryption-keyring"]);
       else if (
         line !== "fvoci: not starting; fix .env and run docker compose up -d again" &&
-        line !== "fvoci: prepared; starting the server"
+        startupMilestone(line) === -1
       ) {
         const cause = startupRemoteCause(line);
         if (cause === null) return result;
