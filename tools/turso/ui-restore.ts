@@ -253,14 +253,22 @@ export async function executeRestore(
     identity?: { pid: number; startTicks: string };
   }[] = [];
   const begin = async (
-    name: string,
+    name: "source" | "source-restart" | "destination" | "destination-restart",
     env: Record<string, string>,
     source: boolean,
     setup = false,
   ) => {
     const path = join(directory, name);
     mkdirSync(path, 0o700);
-    const started = await steps.start(scope, manifest, env, path, setup);
+    const started = await steps.start(
+      scope,
+      manifest,
+      env,
+      path,
+      setup,
+      undefined,
+      `restore-${name}`,
+    );
     const allocation: (typeof running)[number] = {
       started,
       directory: path,

@@ -15,6 +15,7 @@ import {
   START_DIAGNOSTIC_INPUT_CAP,
   START_GATE_TEXTS,
   serverStartDiagnostic,
+  type StartAllocation,
 } from "./ui-start-diagnostic.ts";
 
 const START_MISSING =
@@ -37,6 +38,7 @@ function record(
   now = 102,
   started = 100,
   deadline = 110,
+  allocation: StartAllocation = "unknown",
 ) {
   const log = join(directory, "server.private.log");
   writeFileSync(log, raw);
@@ -46,6 +48,7 @@ function record(
     started,
     deadline,
     () => now,
+    allocation,
   );
 }
 
@@ -58,6 +61,7 @@ describe("start diagnostic", () => {
       processState: "exited",
       exitCode: 2,
       elapsedMs: 2000,
+      allocation: "unknown",
       phase: "prepare-config",
       category: "missing-encryption-keyring",
     });
@@ -244,7 +248,155 @@ describe("start diagnostic", () => {
       "fvoci: preparation failed; the server does not start: remote preparation refused (REMOTE_MIGRATION_CANCELLED, gate none, settlement cancel-checkpoint-settled): remote migration cancelled after 18446744073709551616 settled step(s)\n";
     expect(record(cancelled).diagnosticStatus).toBe("unqualified");
   });
+
+  test("real full formatter milestones identify only a completed interval at a live deadline", () => {
+    for (const ansi of [false, true]) {
+      const lines = progressLines(ansi);
+      for (const [index, phase] of [
+        "prepared",
+        "main-gate-complete",
+        "attachment-transfer-loaded",
+        "identity-settings-loaded",
+      ].entries()) {
+        // Other ordinary startup messages do not manufacture progress or a cause.
+        const result = record(
+          lines.slice(0, index + 1).join("\n") + "\nunrelated startup observation\n",
+          null,
+          110,
+          100,
+          110,
+          "on",
+        );
+        expect(result).toEqual({
+          originalFailure: "UI_SERVER_START_FAILED",
+          diagnosticStatus: "unqualified",
+          processState: "deadline",
+          exitCode: null,
+          elapsedMs: 10000,
+          allocation: "on",
+          phase,
+          category: null,
+        });
+      }
+      expect(record(lines.join("\r\n") + "\r\n").phase).toBe("identity-settings-loaded");
+    }
+  });
+
+  test("closed transfer and identity fields accept actual producer values only", () => {
+    const lines = progressLines();
+    const transfer = must(lines[2]),
+      identity = must(lines[3]);
+    expect(record(transfer.replace('"proxy"', '"presigned"') + "\n").phase).toBe(
+      "attachment-transfer-loaded",
+    );
+    expect(
+      record(identity.replace("true", "false").replace("=2", "=18446744073709551615") + "\n").phase,
+    ).toBe("identity-settings-loaded");
+    for (const wrong of [
+      transfer.replace('"proxy"', '"PRIVATE_TOKEN"'),
+      transfer.replace('"proxy"', "proxy"),
+      transfer.replace("mode=", "unknown="),
+      identity.replace("true", "1"),
+      identity.replace("=2", "=02"),
+      identity.replace("=2", "=-1"),
+      identity.replace("=2", "=18446744073709551616"),
+      identity + " unknown=PRIVATE_TOKEN",
+    ]) {
+      const result = record(must(lines[0]) + "\n" + wrong + "\n");
+      expect(result.phase).toBeNull();
+      expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    }
+  });
+
+  test("foreign prefixes, controls, truncation, cap and inconsistent order stay unknown", () => {
+    const lines = progressLines(),
+      marker = must(lines[1]);
+    for (const raw of [
+      "no marker\n",
+      marker.replace("fvoci_server", "foreign_server") + "\n",
+      marker.replace(" INFO", " WARN") + "\n",
+      marker.replace("2026-10-17T", "PRIVATE_TOKEN ") + "\n",
+      marker.replace("T00:", "T99:") + "\n",
+      "PRIVATE_TOKEN " + marker + "\n",
+      marker + " PRIVATE_TOKEN\n",
+      "\x1b[2J" + marker + "\n",
+      marker.replace(" INFO", "\x1b[32m INFO\x1b[0m") + "\n",
+      marker.replace("disabled", "dis\tabled") + "\n",
+      marker + "\x7f\n",
+      marker + "\x00\n",
+      lines.join("\n"),
+      lines.join("\n") + "\nx".repeat(START_DIAGNOSTIC_INPUT_CAP),
+      [lines[1], lines[0]].join("\n") + "\n",
+      [lines[0], lines[0]].join("\n") + "\n",
+    ]) {
+      const result = record(raw, null, 110);
+      expect(result.phase).toBeNull();
+      expect(result.category).toBeNull();
+      expect(result.diagnosticStatus).toBe("unqualified");
+      expect(JSON.stringify(result)).not.toContain("PRIVATE");
+      expect(JSON.stringify(result)).not.toContain("\x1b");
+    }
+    expect(
+      record("x".repeat(START_DIAGNOSTIC_INPUT_CAP - marker.length - 2) + "\n" + marker + "\n")
+        .phase,
+    ).toBe("main-gate-complete");
+  });
+
+  test("a completed closed error takes precedence over a progress interval", () => {
+    const error =
+      'Error: "remote normal startup refused (REMOTE_DRAIN_FAILED, gate none, settlement drain-failed): remote stream drain failed at close"\n';
+    const result = record(must(progressLines()[0]) + "\n" + error);
+    expect([result.diagnosticStatus, result.phase, result.category]).toEqual([
+      "qualified",
+      "server-remote",
+      "remote-drain-failed",
+    ]);
+    expect(
+      record(must(progressLines()[0]) + "\n" + error + "PRIVATE_TOKEN\n").diagnosticStatus,
+    ).toBe("unqualified");
+  });
+
+  test("allocation is source-owned and never inferred from log or arbitrary caller text", () => {
+    for (const allocation of [
+      "off",
+      "restart",
+      "auth-on",
+      "restore-destination-restart",
+      "products-firefox-off",
+      "boundary-webkit-on",
+      "keycloak-prepare-wrong-secret",
+    ] as const)
+      expect(record("", null, 110, 100, 110, allocation).allocation).toBe(allocation);
+    for (const invalid of [
+      "PRIVATE_TOKEN",
+      "on\n",
+      { toString: () => "on", token: "PRIVATE_TOKEN" },
+    ]) {
+      const result = record("", null, 110, 100, 110, invalid as StartAllocation);
+      expect(result.allocation).toBe("unknown");
+      expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    }
+  });
 });
+
+// tracing-subscriber full format: fixed source target, message and ordered fields.
+function progressLines(ansi = false): string[] {
+  const prefix = ansi
+    ? "\x1b[2m2026-10-17T00:00:00.123456Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mfvoci_server\x1b[0m\x1b[2m:\x1b[0m "
+    : "2026-10-17T00:00:00.123456Z  INFO fvoci_server: ";
+  const field = (name: string) => (ansi ? "\x1b[3m" + name + "\x1b[0m\x1b[2m=\x1b[0m" : name + "=");
+  return [
+    "fvoci: prepared; starting the server",
+    prefix + "meilisearch disabled (FVOCI_MEILI_URL unset)",
+    prefix + "attachment transfer mode " + field("mode") + '"proxy"',
+    prefix +
+      "identity settings loaded " +
+      field("encryption_keys") +
+      "true " +
+      field("oidc_providers") +
+      "2",
+  ];
+}
 
 // The scope's spawn writes the producer's lines into the child's log fd.
 const writingSpawn =
@@ -255,6 +407,64 @@ const writingSpawn =
   };
 
 describe("start failure ordering", () => {
+  test("a live deadline publishes its completed interval before a failing cleanup writes more", async () => {
+    const manifest = {
+      binaries: { "fvoci-migrate": { path: "/never-executed" } },
+    } as unknown as Manifest;
+    const events: string[] = [],
+      output = new Captured();
+    let fd = -1;
+    const child = exitedChild(0);
+    Object.assign(child, { exitCode: null });
+    const { scope } = fakeScope({
+      spawn: (_args, _label, options) => {
+        fd = options.stdout as number;
+        writeSync(fd, progressLines().slice(0, 2).join("\n") + "\n");
+        return child;
+      },
+      output: {
+        out: (line) => {
+          events.push("diagnostic");
+          output.out(line);
+        },
+        err: (line) => {
+          output.err(line);
+        },
+      },
+      finish: () => {
+        events.push("cleanup");
+        writeSync(fd, must(progressLines()[3]) + "\n");
+        throw new UiError("UI_PROCESS_CLOSURE_FAILED");
+      },
+    });
+    let ticks = 0;
+    let caught: unknown;
+    try {
+      await start(scope, manifest, {}, directory, false, () => (ticks++ === 0 ? 100 : 110), "off");
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as Error).message).toBe("UI_SERVER_START_FAILED");
+    expect(events).toEqual(["diagnostic", "cleanup"]);
+    const published = JSON.parse(must(output.stdout[0])) as Record<string, unknown>;
+    expect([
+      published.allocation,
+      published.processState,
+      published.phase,
+      published.diagnosticStatus,
+      published.category,
+      published.elapsedMs,
+    ]).toEqual(["off", "deadline", "main-gate-complete", "unqualified", null, 10000]);
+    const receipt = JSON.parse(
+      readFileSync(join(directory, "start-failure.private.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(receipt.startDiagnostic).toEqual(published);
+    expect(receipt.cleanupErrors).toEqual(["UI_PROCESS_CLOSURE_FAILED"]);
+    expect(readFileSync(join(directory, "server.private.log"), "utf8")).toContain(
+      "identity settings loaded",
+    );
+  });
+
   test("hosted: the diagnostic precedes cleanup and survives cleanup, receipt and stdout faults", async () => {
     const manifest = {
       binaries: { "fvoci-migrate": { path: "/never-executed" } },
@@ -288,7 +498,7 @@ describe("start failure ordering", () => {
       });
       let caught: unknown;
       try {
-        await start(scope, manifest, {}, run, false, () => 100);
+        await start(scope, manifest, {}, run, false, () => 100, "restore-source");
       } catch (error) {
         caught = error;
       }
@@ -297,6 +507,7 @@ describe("start failure ordering", () => {
       if (!output.failOut) {
         const published = JSON.parse(output.stdout[0] as string) as Record<string, unknown>;
         expect([published.exitCode, published.category]).toEqual([2, "missing-encryption-keyring"]);
+        expect(published.allocation).toBe("restore-source");
         expect(Buffer.byteLength(output.stdout.join("\n"))).toBeLessThanOrEqual(2048);
       }
       if (fault !== "receipt" && fault !== "all") {
