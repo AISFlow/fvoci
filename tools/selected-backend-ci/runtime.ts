@@ -1236,7 +1236,10 @@ function selectedImageInvocation(
     metadata,
     sdk,
     architecture,
-    checkedOutput(["git", "rev-parse", "HEAD"], root),
+    checkedOutput(
+      ["git", ...(local ? ["-c", "safe.directory=" + root] : []), "rev-parse", "HEAD"],
+      root,
+    ),
   );
   if (imageSource !== process.env.FVOCI_WEB_CONTAINER_IMAGE_SOURCE)
     fail("selected image source changed");
@@ -1350,7 +1353,13 @@ function selectedImageInvocation(
   if (local?.runtimeAllocation) mounts.push(local.runtimeAllocation.path);
   if (local) {
     const common = realpathSync(
-      resolve(root, checkedOutput(["git", "rev-parse", "--git-common-dir"], root)),
+      resolve(
+        root,
+        checkedOutput(
+          ["git", "-c", "safe.directory=" + root, "rev-parse", "--git-common-dir"],
+          root,
+        ),
+      ),
     );
     if (!below(common, root)) fail("local selected requires the granted ordinary execution clone");
     const alternates = join(common, "objects/info/alternates");
@@ -1790,6 +1799,9 @@ export function qualifyImageSource(
   checkedOutput(
     [
       "git",
+      ...(process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+        ? ["-c", "safe.directory=" + root]
+        : []),
       "diff",
       "--quiet",
       imageSource,

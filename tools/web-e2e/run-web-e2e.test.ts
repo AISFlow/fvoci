@@ -287,11 +287,11 @@ if(a[0]==="run"){
     // comparison is modeled, while grant HEAD/tree/dirty checks use real Git.
     writeFileSync(
       join(bin, "git"),
-      '#!/bin/bash\nif [[ "$1" == diff && "$2" == --quiet && "$3" == "' +
+      '#!/bin/bash\noriginal=("$@")\nif [[ "$1" == -c && "$2" == safe.directory=* ]]; then shift 2; fi\nif [[ "$1" == diff && "$2" == --quiet && "$3" == "' +
         CI_WEB_IMAGE_SOURCE +
         '" && "$4" == "' +
         source +
-        '" && "$5" == -- ]]; then exit 0; fi\nexec /usr/bin/git "$@"\n',
+        '" && "$5" == -- ]]; then exit 0; fi\nexec /usr/bin/git "${original[@]}"\n',
       { mode: 0o755 },
     );
     const preload = join(base, "disk.ts");
