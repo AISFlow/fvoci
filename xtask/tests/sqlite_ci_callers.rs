@@ -175,11 +175,19 @@ fn web_build_stops_on_preflight_failure() {
     }
     let selected = r.root.join("tools/selected-backend-ci");
     fs::create_dir_all(&selected).unwrap();
-    fs::copy(
-        repo().join("tools/selected-backend-ci/types.ts"),
-        selected.join("types.ts"),
-    )
-    .unwrap();
+    for name in [
+        "types.ts",
+        "runtime.ts",
+        "build.ts",
+        "admission.ts",
+        "io.ts",
+    ] {
+        fs::copy(
+            repo().join("tools/selected-backend-ci").join(name),
+            selected.join(name),
+        )
+        .unwrap();
+    }
     write_exec(
         &r.bin.join("bun"),
         &format!(
@@ -514,6 +522,7 @@ fn contract(root: &Path) -> Check {
                     "rustup toolchain install",
                     "prepare-rustup-ci-metadata",
                     "playwright install",
+                    "cargo ",
                     "path: target",
                     "path: crates/collab-engine/target",
                 ] {
@@ -862,7 +871,7 @@ fn assert_mutations_fail(
 fn new_producer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
-    for (workflow, name) in [("rust", "postgres-build"), ("web", "collaboration-build")] {
+    for (workflow, name) in [("rust", "postgres-build")] {
         let path = root.join(format!(".github/workflows/{workflow}.yml"));
         let original = fs::read_to_string(&path).unwrap();
         let span = job_span(&original, name);
@@ -968,39 +977,20 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 None,
             ));
         }
-        if workflow == "rust" {
-            let verify = *steps
-                .iter()
-                .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
-                .unwrap();
-            changes.push((
-                "missing producer verification".into(),
-                format!("{}{}", &body[..verify.0], &body[verify.1..]),
-                None,
-            ));
-            changes.push((
-                "output cache before verification".into(),
-                move_cache_before(verify),
-                None,
-            ));
-        } else {
-            let save = *steps
-                .iter()
-                .find(|b| {
-                    text_of(**b).contains("actions/cache/save@")
-                        && has_line(text_of(**b), "          path: target")
-                })
-                .unwrap();
-            changes.push((
-                "save key drifts from its restore".into(),
-                replace_once(
-                    body,
-                    text_of(save),
-                    &text_of(save).replacen("v2-web-", "v2-drifted-", 1),
-                ),
-                None,
-            ));
-        }
+        let verify = *steps
+            .iter()
+            .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
+            .unwrap();
+        changes.push((
+            "missing producer verification".into(),
+            format!("{}{}", &body[..verify.0], &body[verify.1..]),
+            None,
+        ));
+        changes.push((
+            "output cache before verification".into(),
+            move_cache_before(verify),
+            None,
+        ));
         assert_mutations_fail(&path, &root, &original, span, changes);
     }
 }
@@ -1130,6 +1120,26 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
         ("collaboration-build", "fetch-depth: 0", "fetch-depth: 1"),
         (
             "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - id: sqlite\n        run: fixture\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - run: cargo build --locked\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - uses: actions/cache@fixture\n        with:\n          path: target\n          key: unqualified\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - uses: actions/cache@fixture\n        with:\n          path: crates/collab-engine/target\n          key: unqualified\n",
+        ),
+        (
+            "collaboration-build",
             "    needs: ci-plan\n",
             "    needs: foreign\n",
         ),
@@ -1143,6 +1153,11 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             "collaboration-build",
             "        id: prepare\n",
             "        id: prepare\n        if: false\n",
+        ),
+        (
+            "collaboration-build",
+            "        id: prepare\n",
+            "        id: prepare\n        continue-on-error: true\n",
         ),
         (
             "collaboration-build",
@@ -1171,8 +1186,8 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
         ),
         (
             "collaboration-install-on",
-            "id: sqlite",
-            "id: missing-sqlite",
+            "id: browser",
+            "id: missing-browser",
         ),
         (
             "collaboration-install-on",
