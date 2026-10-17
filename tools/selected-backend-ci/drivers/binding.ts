@@ -312,9 +312,7 @@ export async function loadCurrent(lane: Lane, driver: string): Promise<Current> 
     assert.ok(env("GITHUB_ACTIONS") === "true" && env("CI") === "true");
     assert.ok(m.source === env("GITHUB_SHA"));
   }
-  assert.ok(
-    process.getuid?.() === (local?.uid ?? 1000) && process.getgid?.() === (local?.gid ?? 1000),
-  );
+  assert.ok(process.getuid?.() === 1000 && process.getgid?.() === 1000);
   assert.ok(process.env.FVOCI_ROOT_RUN_OWNER === owner);
   const grantPath = env("FVOCI_ROOT_CURRENT_ALLOCATION");
   assert.ok(isAbsolute(grantPath) && !lstatSync(grantPath).isSymbolicLink());

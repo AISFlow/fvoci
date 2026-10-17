@@ -122,7 +122,7 @@ export async function configList(output: string): Promise<number> {
   if (code) return code;
   const report = join(directory, "listing.json"),
     facts = lstatSync(report);
-  assert.ok(facts.isFile() && !facts.isSymbolicLink() && facts.uid === uid());
+  assert.ok(facts.isFile() && !facts.isSymbolicLink() && facts.uid === 1000);
   chmodSync(report, 0o600);
   qualifyListing(read(report) as Listing);
   configListInputs(output);

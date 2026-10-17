@@ -178,7 +178,7 @@ for (const mode of [
     writeFileSync(
       join(root, "scripts/run-selected-backend-e2e.ts"),
       `import fs from "node:fs";
-const mode=process.argv[2];fs.appendFileSync(process.env.FIXTURE_CALLS!,JSON.stringify({host:mode,uid:process.getuid?.(),gid:process.getgid?.(),lane:process.argv.includes("--lane")})+"\\n");
+const mode=process.argv[2];fs.appendFileSync(process.env.FIXTURE_CALLS!,JSON.stringify({host:mode,uid:process.getuid?.(),gid:process.getgid?.(),lane:process.argv.includes("--lane"),requested:process.env.FIXTURE_RUNTIME_REQUESTED})+"\\n");
 if(mode==="permissions")console.log("1000,"+process.getgid?.());`,
     );
     writeFileSync(join(bin, "stat"), '#!/bin/sh\nprintf "986\\n"\n', { mode: 0o755 });
@@ -312,10 +312,11 @@ if(a[0]==="run"){
         ).exitCode,
       ).toBe(0);
     };
-    // Model only sudo dispatch, but retain real setpriv for the different actor.
+    // This UID has no passwd/sudo account. Model only controller dispatch;
+    // the separate allocation fixture checks actual actor UID/groups/privacy.
     writeFileSync(
       join(bin, "sudo"),
-      '#!/bin/bash\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nexec /usr/bin/sudo -n --preserve-env=FIXTURE_CALLS,PATH "$@"\n',
+      '#!/bin/bash\nif [[ "$1" == chown || "$1" == install ]]; then exit 0; fi\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nif [[ "$1" == setpriv ]]; then shift; while [[ "$1" == --* ]]; do shift; done; export FIXTURE_RUNTIME_REQUESTED=1000:1000; fi\nexec "$@"\n',
       { mode: 0o755 },
     );
     expect(
@@ -427,8 +428,9 @@ if(a[0]==="run"){
     );
     for (const row of host)
       expect(row).toMatchObject({
-        uid: row.host === "permissions" ? actorUid : 1000,
-        gid: row.host === "permissions" ? actorGid : 1000,
+        uid: actorUid,
+        gid: actorGid,
+        ...(row.host === "permissions" ? {} : { requested: "1000:1000" }),
         lane: false,
       });
     if (mode === "preexisting")
