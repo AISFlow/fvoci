@@ -15,8 +15,12 @@ const nameId = useId();
 const error = ref<string | null>(null);
 const milestones = useQuery(() => projectMilestonesQuery(props.workspaceId, props.projectId));
 const path = () => ({ workspace_id: props.workspaceId, project_id: props.projectId });
-const refresh = () =>
-  client.invalidateQueries({ queryKey: ["milestones", props.workspaceId, props.projectId] });
+const refresh = async () => {
+  const queryKey = projectMilestonesQuery(props.workspaceId, props.projectId).queryKey;
+  // Invalidation alone reuses an in-flight first fetch that has no cached data.
+  await client.cancelQueries({ queryKey, exact: true });
+  await client.invalidateQueries({ queryKey, exact: true });
+};
 const onError = (err: unknown) => {
   error.value = err instanceof ProblemError ? err.title : t("error.network");
 };
