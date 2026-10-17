@@ -921,9 +921,44 @@ export async function selectedHost(
   createSafeDiagnostics(diagnostics, process.env);
   const uid = String(process.getuid?.()),
     gid = String(process.getgid?.());
+  const capture = async (
+    args: string[],
+    stdout: string,
+    stderr?: string,
+    cleanup = false,
+    directory = diagnostics,
+  ) => {
+    let out: number | undefined, err: number | undefined;
+    try {
+      out = openSync(join(directory, stdout), "wx", 0o600);
+      if (stderr) err = openSync(join(directory, stderr), "wx", 0o600);
+      return await command(
+        args,
+        root,
+        process.env,
+        { stdout: out, stderr: err ?? "inherit" },
+        cleanup,
+      );
+    } catch {
+      process.stderr.write("selected private capture failed\n");
+      return 1;
+    } finally {
+      if (out !== undefined) closeSync(out);
+      if (err !== undefined) closeSync(err);
+    }
+  };
   const dockerGid = checkedOutput(["stat", "-c", "%g", "/var/run/docker.sock"], root);
   const cli = join(root, "scripts/run-selected-backend-e2e.ts");
-  const groups = checkedOutput(
+  for (const file of ["permissions.stdout.private.log", "permissions.stderr.private.log"]) {
+    try {
+      lstatSync(join(output, file));
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      fail("selected private permissions capture unavailable");
+    }
+    fail("selected private permissions capture already exists");
+  }
+  const permissions = await capture(
     [
       process.execPath,
       cli,
@@ -935,8 +970,36 @@ export async function selectedHost(
       "--docker-gid",
       dockerGid,
     ],
-    root,
+    "permissions.stdout.private.log",
+    "permissions.stderr.private.log",
+    false,
+    output,
   );
+  if (entryCancellation) return pending || entryCancellation;
+  if (permissions !== 0) {
+    try {
+      const path = join(output, "permissions.stderr.private.log");
+      const lines =
+        statSync(path).size <= 16384
+          ? readFileSync(path, "utf8")
+              .split("\n")
+              .filter((line) => line.startsWith("selected permissions failure at "))
+          : [];
+      const line = lines[0];
+      if (
+        lines.length === 1 &&
+        line &&
+        /^selected permissions failure at (?:tools\/selected-backend-ci\/(?:runtime|admission|io)|scripts\/run-selected-backend-e2e)\.ts:[1-9][0-9]{0,3}$/.test(
+          line,
+        )
+      )
+        process.stderr.write(line + "\n");
+    } catch {
+      // Evidence capture cannot replace the original permission refusal.
+    }
+    fail("container browser prerequisite failed");
+  }
+  const groups = readFileSync(join(output, "permissions.stdout.private.log"), "utf8").trim();
   process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
   const lane = process.env.FVOCI_COLLAB_LANE,
     laneArgs: string[] = [];
@@ -974,26 +1037,7 @@ export async function selectedHost(
     output,
     ...(mode === "config-list" ? [] : laneArgs),
   ];
-  const capture = async (args: string[], stdout: string, stderr?: string, cleanup = false) => {
-    let out: number | undefined, err: number | undefined;
-    try {
-      out = openSync(join(diagnostics, stdout), "wx", 0o600);
-      if (stderr) err = openSync(join(diagnostics, stderr), "wx", 0o600);
-      return await command(
-        args,
-        root,
-        process.env,
-        { stdout: out, stderr: err ?? "inherit" },
-        cleanup,
-      );
-    } catch {
-      process.stderr.write("selected private capture failed\n");
-      return 1;
-    } finally {
-      if (out !== undefined) closeSync(out);
-      if (err !== undefined) closeSync(err);
-    }
-  };
+
   let config = "not-run",
     launcher = "not-run",
     selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);

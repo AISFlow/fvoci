@@ -949,6 +949,157 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     }
     expect(message).toContain("root group is never granted as the docker group");
   });
+  test("real permission refusal reaches the parent as source-only evidence", () => {
+    const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-location-"));
+    try {
+      const output = join(base, "fvoci-selected-current"),
+        sqlite = join(base, "fvoci-sqlite"),
+        bin = join(base, "bin");
+      mkdirSync(output, { mode: 0o700 });
+      mkdirSync(join(sqlite, "lib"), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(join(bin, "stat"), "#!" + process.execPath + '\nconsole.log("0");\n');
+      chmodSync(join(bin, "stat"), 0o755);
+      const result = spawnSync(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--eval",
+          `import {selectedHost} from ${JSON.stringify(join(root, "tools/web-e2e/run-web-e2e.ts"))};try{await selectedHost(${JSON.stringify(root)},0,true)}catch{process.exitCode=1}`,
+        ],
+        {
+          cwd: root,
+          env: {
+            PATH: bin + ":" + (process.env.PATH ?? ""),
+            RUNNER_TEMP: base,
+            FVOCI_SELECTED_CI_OUTPUT: output,
+            FVOCI_SELECTED_CI_SQLITE_PARENT: sqlite,
+            SQLITE3_LIB_DIR: join(sqlite, "lib"),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).toBe(1);
+      const line = result.stderr.toString().trim();
+      expect(line).toMatch(
+        /^selected permissions failure at tools\/selected-backend-ci\/runtime\.ts:[1-9][0-9]{0,3}$/,
+      );
+      const number = Number(line.split(":").at(-1));
+      expect(
+        readFileSync(join(root, "tools/selected-backend-ci/runtime.ts"), "utf8").split("\n")[
+          number - 1
+        ],
+      ).toContain("assert.ok(dockerGid > 0");
+      expect(result.stderr.toString()).toBe(line + "\n");
+      for (const name of ["permissions.stdout.private.log", "permissions.stderr.private.log"])
+        expect(statSync(join(output, name)).mode & 0o777).toBe(0o600);
+      expect(readdirSync(join(base, "fvoci-selected-diagnostics"))).toEqual([]);
+      expect(readdirSync(output).sort()).toEqual([
+        "permissions.stderr.private.log",
+        "permissions.stdout.private.log",
+      ]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test("permissions CLI withholds a private multiline message with a forged source frame", () => {
+    const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-canary-"));
+    try {
+      const preload = join(base, "preload.ts"),
+        message =
+          "PRIVATE_PERMISSION_CANARY\n    at " +
+          join(root, "tools/selected-backend-ci/runtime.ts") +
+          ":369:2";
+      writeFileSync(
+        preload,
+        `import {mock} from 'bun:test';import {strict as original} from 'node:assert';mock.module('node:assert',()=>({strict:{...original,ok(){throw new Error(${JSON.stringify(message)})}}}));`,
+      );
+      const result = spawnSync(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--preload",
+          preload,
+          join(root, "scripts/run-selected-backend-e2e.ts"),
+          "permissions",
+          "--output",
+          base,
+          "--sqlite-parent",
+          base,
+          "--docker-gid",
+          "0",
+        ],
+        { cwd: root, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toBe(
+        "selected backend admission failed; private inputs withheld\n",
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test("parent permissions capture rejects ambiguous, foreign and malformed child evidence", () => {
+    const safe = "selected permissions failure at tools/selected-backend-ci/runtime.ts:369";
+    for (const evidence of [
+      safe + "\n" + safe,
+      safe + " PRIVATE_PERMISSION_CANARY",
+      safe.replace("runtime.ts", "foreign.ts"),
+      safe.replace(":369", ":0"),
+    ]) {
+      const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-parent-"));
+      try {
+        const repo = join(base, "repo"),
+          web = join(repo, "tools/web-e2e"),
+          output = join(base, "fvoci-selected-current"),
+          sqlite = join(base, "fvoci-sqlite"),
+          bin = join(base, "bin");
+        mkdirSync(web, { recursive: true });
+        copyRunnerModules(join(repo, "tools/selected-backend-ci"));
+        for (const name of ["run-web-e2e.ts", "groups.ts", "compat.ts"])
+          copyFileSync(join(root, "tools/web-e2e", name), join(web, name));
+        mkdirSync(join(repo, "scripts"));
+        writeFileSync(
+          join(repo, "scripts/run-selected-backend-e2e.ts"),
+          `console.error(${JSON.stringify("PRIVATE_PERMISSION_CANARY\n" + evidence)});process.exit(1);`,
+        );
+        mkdirSync(output, { mode: 0o700 });
+        mkdirSync(join(sqlite, "lib"), { recursive: true });
+        mkdirSync(bin);
+        writeFileSync(join(bin, "stat"), "#!" + process.execPath + '\nconsole.log("0");\n');
+        chmodSync(join(bin, "stat"), 0o755);
+        const result = spawnSync(
+          [
+            process.execPath,
+            "--no-env-file",
+            "--eval",
+            `import {selectedHost} from ${JSON.stringify(join(web, "run-web-e2e.ts"))};try{await selectedHost(${JSON.stringify(repo)},0,true)}catch{process.exitCode=1}`,
+          ],
+          {
+            cwd: repo,
+            env: {
+              PATH: bin + ":" + (process.env.PATH ?? ""),
+              RUNNER_TEMP: base,
+              FVOCI_SELECTED_CI_OUTPUT: output,
+              FVOCI_SELECTED_CI_SQLITE_PARENT: sqlite,
+              SQLITE3_LIB_DIR: join(sqlite, "lib"),
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr.toString()).toBe("");
+        const privateLog = join(output, "permissions.stderr.private.log");
+        expect(statSync(privateLog).mode & 0o777).toBe(0o600);
+        expect(readFileSync(privateLog, "utf8")).toContain("PRIVATE_PERMISSION_CANARY");
+        expect(readdirSync(join(base, "fvoci-selected-diagnostics"))).toEqual([]);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+  });
   test("lane argument is parsed and allowed only for run and owner-return", async () => {
     expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({
       mode: "run",
