@@ -79,19 +79,26 @@ async function inviteAccount(page: Page, email: string): Promise<string> {
   } catch (original) {
     try {
       if (!page.isClosed()) {
-        const linkCount = Math.min(255, await link.count());
-        await page.evaluate(
-          ({ expected, requestCount, responseSeen, status, finished, failed, linkCount }) => {
-            const input = document.getElementById("workspace-invite-email");
-            const field = input instanceof HTMLInputElement ? input : null;
-            const submit = field?.closest("form")?.querySelector('button[type="submit"]');
-            // Only this closed string reaches the existing retained trace summary.
-            console.warn(
-              `fvoci-invite-observation request_count=${requestCount} response_seen=${Number(responseSeen)} status=${status} request_finished=${Number(finished)} request_failed=${Number(failed)} field_present=${Number(field !== null)} field_matches=${Number(field?.value === expected)} field_invalid=${Number(field?.getAttribute("aria-invalid") === "true")} submit_disabled=${Number(submit instanceof HTMLButtonElement && submit.disabled)} link_count=${linkCount}`,
-            );
-          },
-          { expected: email, requestCount, responseSeen, status, finished, failed, linkCount },
-        );
+        void page
+          .evaluate(
+            ({ expected, requestCount, responseSeen, status, finished, failed }) => {
+              const input = document.getElementById("workspace-invite-email");
+              const field = input instanceof HTMLInputElement ? input : null;
+              const submit = field?.closest("form")?.querySelector('button[type="submit"]');
+              const anchors = Math.min(
+                255,
+                document.querySelectorAll('a[href*="/invite/"]').length,
+              );
+              // Only this closed string reaches the existing retained trace summary.
+              console.warn(
+                `fvoci-invite-observation request_count=${String(requestCount)} response_seen=${String(Number(responseSeen))} status=${String(status)} request_finished=${String(Number(finished))} request_failed=${String(Number(failed))} field_present=${String(Number(field !== null))} field_matches=${String(Number(field?.value === expected))} field_invalid=${String(Number(field?.getAttribute("aria-invalid") === "true"))} submit_disabled=${String(Number(submit instanceof HTMLButtonElement && submit.disabled))} invite_anchor_count=${String(anchors)}`,
+              );
+            },
+            { expected: email, requestCount, responseSeen, status, finished, failed },
+          )
+          .catch(() => {
+            /* A pending/rejected observation never delays the original failure. */
+          });
       }
     } catch {
       /* A closed page or diagnostic failure keeps the original failure. */
