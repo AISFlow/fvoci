@@ -26,14 +26,30 @@ const categoryOf = (message: string, status?: unknown): string =>
               ? "interrupted"
               : "other";
 
+export const browserDiagnosticHelpers = ["collab-helpers.ts", "selected-final-native.ts"] as const;
+export type BrowserDiagnosticSources = Readonly<Record<string, { path: string; source: string }>>;
+
 export function browserFailureDiagnostic(
   report: unknown,
   spec: string,
   stage: "on" | "restart" | "off",
-  source: string,
+  sources: BrowserDiagnosticSources,
 ): Record_ {
+  const source = sources[spec]?.source ?? "";
   const titles = new Set([...source.matchAll(/^(?: {2})?test\("([^"\n]+)"/gm)].map((m) => m[1]));
-  const lines = source.split("\n");
+  const admitted = [spec, ...browserDiagnosticHelpers].flatMap((name) => {
+    const item = sources[name];
+    return item
+      ? [
+          {
+            name,
+            path: item.path,
+            file: "apps/web/e2e-pending/" + name,
+            lines: item.source.split("\n"),
+          },
+        ]
+      : [];
+  });
   const failures: Record_[] = [];
   const pending = [...array(plain(report).suites)];
   let visited = 0;
@@ -52,14 +68,21 @@ export function browserFailureDiagnostic(
           // Playwright preserves TestError.location; errorLocation is only a
           // stack-derived fallback. An unqualified canonical location must not
           // be replaced by a different, apparently admitted stack location.
-          const location = plain(error.location ?? result.errorLocation);
+          const location = plain(
+            Object.hasOwn(error, "location") ? error.location : result.errorLocation,
+          );
+          const located = admitted.find(
+            (item) =>
+              location.file === item.name ||
+              location.file === item.file ||
+              location.file === item.path,
+          );
           const line =
             typeof location.line === "number" &&
             Number.isInteger(location.line) &&
             location.line > 0 &&
-            location.line <= lines.length &&
-            typeof location.file === "string" &&
-            (location.file === spec || location.file.endsWith("/e2e-pending/" + spec))
+            located !== undefined &&
+            location.line <= located.lines.length
               ? location.line
               : null;
           // A numeric Received value is an HTTP status only at a real status()
@@ -67,7 +90,7 @@ export function browserFailureDiagnostic(
           const received = /^Received:\s+([1-5][0-9]{2})\s*$/m.exec(message);
           const httpStatus =
             line !== null &&
-            /\.status\(\)\)\.toBe\([1-5][0-9]{2}\)/.test(lines[line - 1] ?? "") &&
+            /\.status\(\)\)\.toBe\([1-5][0-9]{2}\)/.test(located?.lines[line - 1] ?? "") &&
             received
               ? Number(received[1])
               : null;
@@ -83,6 +106,7 @@ export function browserFailureDiagnostic(
                 ? "http-status"
                 : (apiStep(message) ?? (category === "assertion" ? "expect" : "test-body")),
             httpStatus,
+            file: line !== null && located ? located.file : null,
             line,
           });
         }
