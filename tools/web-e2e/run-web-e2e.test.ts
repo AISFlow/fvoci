@@ -1117,6 +1117,31 @@ else process.exit(42);
       new Response(child.stderr).text(),
     ]);
     watcher?.close();
+    const rows = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            op: string[];
+            phase?: string;
+            network?: string | null;
+            hasDatabase?: boolean;
+            hasMeili?: boolean;
+            platform?: string;
+            sdk?: string;
+            imagePinned?: boolean;
+            serviceWitness?: boolean;
+            safe?: boolean;
+            hasActionToken?: boolean;
+            wholeTemp?: boolean;
+            privateNodeTemp?: boolean;
+            nodeTemp?: string;
+            user?: string;
+          },
+      );
+    if (selected)
+      for (const row of rows) if (row.privateNodeTemp && row.nodeTemp) scratch.push(row.nodeTemp);
     const refused = [
       "daemon-mismatch",
       "image-mismatch",
@@ -1157,31 +1182,7 @@ else process.exit(42);
       );
       if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
     }
-    const rows = readFileSync(calls, "utf8")
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            op: string[];
-            phase?: string;
-            network?: string | null;
-            hasDatabase?: boolean;
-            hasMeili?: boolean;
-            platform?: string;
-            sdk?: string;
-            imagePinned?: boolean;
-            serviceWitness?: boolean;
-            safe?: boolean;
-            hasActionToken?: boolean;
-            wholeTemp?: boolean;
-            privateNodeTemp?: boolean;
-            nodeTemp?: string;
-            user?: string;
-          },
-      );
     if (selected) {
-      for (const row of rows) if (row.privateNodeTemp && row.nodeTemp) scratch.push(row.nodeTemp);
       if (mode === "selected-prepare-fail") {
         expect(stderr).toContain(
           "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",
