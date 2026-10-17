@@ -1131,7 +1131,7 @@ describe("config-list launcher gate", () => {
     mkdirSync(web, { recursive: true });
     const shared = join(base, "tools/selected-backend-ci");
     mkdirSync(shared, { recursive: true });
-    copyFileSync(join(root, "tools/selected-backend-ci/types.ts"), join(shared, "types.ts"));
+    copyRunnerModules(shared);
     mkdirSync(join(base, "sqlite/lib"), { recursive: true });
     mkdirSync(join(base, "output"));
     for (const name of ["run-web-e2e.ts", "groups.ts", "compat.ts"]) {
