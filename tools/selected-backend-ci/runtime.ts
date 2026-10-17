@@ -387,6 +387,14 @@ export async function runtimePermissions(
       for (const name of readdirSync(directory)) {
         const path = join(directory, name),
           facts = lstatSync(path);
+        if (facts.isSymbolicLink() || facts.uid !== runnerUid)
+          try {
+            process.stderr.write(
+              `selected permissions descendant prefix=${prefix === output ? "output" : "sqlite"} symlink=${Number(facts.isSymbolicLink())} owner_match=${Number(facts.uid === runnerUid)}\n`,
+            );
+          } catch {
+            // Diagnostic output cannot replace the original permission refusal.
+          }
         assert.ok(!facts.isSymbolicLink() && facts.uid === runnerUid);
         if (facts.isDirectory()) check(path);
       }

@@ -43,6 +43,7 @@ import {
   qualifyNativeChecks,
   selectedImageBudget,
   selectedAfterPending,
+  selectedPermissionDiagnostics,
   requirePathWithin,
   resolvePath,
   writeLauncherReceipt,
@@ -53,6 +54,32 @@ import { checkedOutput } from "../selected-backend-ci/runtime.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
+
+test("selected permission projection withholds private entries and admits only unique fixed failures", () => {
+  const location = "selected permissions failure at tools/selected-backend-ci/runtime.ts:390",
+    descendant = "selected permissions descendant prefix=output symlink=1 owner_match=1";
+  expect(
+    selectedPermissionDiagnostics(`PRIVATE_CREDENTIAL_CANARY\n${descendant}\n${location}\n`),
+  ).toEqual([descendant, location]);
+  expect(
+    selectedPermissionDiagnostics(
+      "selected permissions descendant prefix=sqlite symlink=0 owner_match=0\n",
+    ),
+  ).toEqual(["selected permissions descendant prefix=sqlite symlink=0 owner_match=0"]);
+  for (const text of [
+    descendant + " PRIVATE_CREDENTIAL_CANARY",
+    descendant.replace("output", "/private/PRIVATE_CREDENTIAL_CANARY"),
+    descendant.replace("symlink=1", "symlink=0"),
+    descendant.replace("owner_match=1", "owner_match=2"),
+    descendant + "\r",
+    "\u001b[31m" + descendant,
+    descendant + "\n" + descendant,
+    descendant + "\n" + "x".repeat(16384),
+    location.replace("tools/selected-backend-ci/runtime", "/private/runtime"),
+    location + "\n" + location,
+  ])
+    expect(selectedPermissionDiagnostics(text)).toEqual([]);
+});
 
 test("checked child receives the current environment after browser cache selection", () => {
   const key = "FVOCI_CHILD_ENV_FIXTURE",

@@ -422,6 +422,26 @@ export async function selectedAfterPending(
   }
 }
 
+export function selectedPermissionDiagnostics(text: string): string[] {
+  if (Buffer.byteLength(text) > 16384) return [];
+  const lines = text.split("\n"),
+    result: string[] = [];
+  for (const [prefix, pattern] of [
+    [
+      "selected permissions descendant ",
+      /^selected permissions descendant prefix=(?:output|sqlite) (?:symlink=1 owner_match=[01]|symlink=0 owner_match=0)$/,
+    ],
+    [
+      "selected permissions failure at ",
+      /^selected permissions failure at (?:tools\/selected-backend-ci\/(?:runtime|admission|io)|scripts\/run-selected-backend-e2e)\.ts:[1-9][0-9]{0,3}$/,
+    ],
+  ] as const) {
+    const matches = lines.filter((line) => line.startsWith(prefix));
+    if (matches.length === 1 && matches[0] && pattern.test(matches[0])) result.push(matches[0]);
+  }
+  return result;
+}
+
 // Each admitted ordinary-browser shard retains every registered group.
 // Host-owned service inspection is relayed and revalidated without a socket.
 export function containerShard(value: string | undefined): string {
@@ -979,21 +999,9 @@ export async function selectedHost(
   if (permissions !== 0) {
     try {
       const path = join(output, "permissions.stderr.private.log");
-      const lines =
-        statSync(path).size <= 16384
-          ? readFileSync(path, "utf8")
-              .split("\n")
-              .filter((line) => line.startsWith("selected permissions failure at "))
-          : [];
-      const line = lines[0];
-      if (
-        lines.length === 1 &&
-        line &&
-        /^selected permissions failure at (?:tools\/selected-backend-ci\/(?:runtime|admission|io)|scripts\/run-selected-backend-e2e)\.ts:[1-9][0-9]{0,3}$/.test(
-          line,
-        )
-      )
-        process.stderr.write(line + "\n");
+      if (statSync(path).size <= 16384)
+        for (const line of selectedPermissionDiagnostics(readFileSync(path, "utf8")))
+          process.stderr.write(line + "\n");
     } catch {
       // Evidence capture cannot replace the original permission refusal.
     }

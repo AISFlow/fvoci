@@ -311,8 +311,12 @@ describe.skipIf(!linux).serial("selected footer with the Bun runner under real s
   });
   for (const fault of ["foreign", "symlink"])
     test(fault + " native input refused before any transfer", () => {
-      const { status, facts } = footerCase(fault);
+      const { status, stderr, facts } = footerCase(fault);
       expect(status).not.toBe(0);
+      expect(stderr).toContain(
+        `selected permissions descendant prefix=sqlite symlink=${fault === "symlink" ? 1 : 0} owner_match=${fault === "foreign" ? 0 : 1}\n`,
+      );
+      expect(stderr).not.toContain("foreign-link");
       expect(facts.marker).toBeNull();
       expect(facts.stage).toBeNull();
       expect(facts.output).toEqual(transferred);
