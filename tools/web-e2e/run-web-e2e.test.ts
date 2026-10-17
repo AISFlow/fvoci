@@ -41,6 +41,7 @@ import {
   qualifyCommittedApi,
   qualifyNativeChecks,
   selectedImageBudget,
+  selectedAfterPending,
   requirePathWithin,
   resolvePath,
   writeLauncherReceipt,
@@ -66,6 +67,25 @@ test("selected image operations consume one original entry deadline", () => {
   expect(selectedImageBudget("901000", 900999)).toBe(1);
   for (const deadline of [undefined, "NaN", "901000.5", "1000", "999", "901001"])
     expect(() => selectedImageBudget(deadline, 1000)).toThrow(/budget/);
+});
+
+test("pending failure survives a later selected admission exception while retirement is still attempted", async () => {
+  const failure = new Error("modeled selected admission failure");
+  let attempts = 0;
+  const admission = () => {
+    attempts++;
+    return Promise.reject(failure);
+  };
+  expect(await selectedAfterPending(19, admission)).toBe(19);
+  expect(attempts).toBe(1);
+  let original: unknown;
+  try {
+    await selectedAfterPending(0, admission);
+  } catch (error) {
+    original = error;
+  }
+  expect(original).toBe(failure);
+  expect(attempts).toBe(2);
 });
 
 function refused(body: () => unknown, message: string | RegExp): void {

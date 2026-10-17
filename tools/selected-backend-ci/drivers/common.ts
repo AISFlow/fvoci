@@ -33,11 +33,7 @@ import {
 } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
-import {
-  selectedImageBrowser,
-  selectedImageHost,
-  selectedImageInputs,
-} from "../../web-e2e/run-web-e2e.ts";
+import { selectedImageBrowser, selectedImageHost, selectedImageInputs } from "../runtime.ts";
 
 export type Receipt = Record<string, unknown>;
 export type Json = Record<string, unknown>;

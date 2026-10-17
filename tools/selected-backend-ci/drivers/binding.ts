@@ -8,7 +8,7 @@ import { lstatSync, statfsSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { localAllocation } from "../admission.ts";
-import { selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
+import { selectedImageHost } from "../runtime.ts";
 import { digest, env, jsonInteger, read, root, sha, sourceInputText } from "../io.ts";
 import type {
   Abi,

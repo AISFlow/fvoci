@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
+import { selectedImageHost } from "../runtime.ts";
 import { env, failureDigest, read, root, sha } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";

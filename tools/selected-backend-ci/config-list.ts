@@ -3,10 +3,9 @@ import { strict as assert } from "node:assert";
 import { chmodSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
-import { selectedImageConfigList, selectedImageHost } from "../web-e2e/run-web-e2e.ts";
+import { knownOnBrowserTest, selectedImageConfigList, selectedImageHost } from "./runtime.ts";
 import { configListInputs } from "./admission.ts";
 import { env, gid, groups, observedExit, read, root, sha, uid, write } from "./io.ts";
-import { knownOnBrowserTest } from "./runtime.ts";
 
 export interface Listing {
   config: { workers: number; metadata: unknown };

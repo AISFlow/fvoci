@@ -1,3 +1,38 @@
+import {
+  CI_WEB_IMAGE,
+  CI_WEB_SDK_SHA256,
+  SELECTED_IMAGE_ENV,
+  selectedImageHost,
+  selectedImageResult,
+  finishToolImage,
+  containerImage,
+  containerArchitecture,
+  qualifyContainerDaemon,
+  containerImageSource,
+  qualifyImageSource,
+  CheckError,
+  RuntimeExit,
+  dockerEndpoint,
+  checkedOutput,
+  fail,
+} from "../selected-backend-ci/runtime.ts";
+import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
+export {
+  CI_WEB_IMAGE,
+  containerImage,
+  selectedImageHost,
+  selectedImageBudget,
+  SELECTED_IMAGE_ENV,
+  selectedImageInputs,
+  selectedImageAccess,
+  selectedImageConfigList,
+  selectedImageBrowser,
+  containerArchitecture,
+  qualifyContainerDaemon,
+  containerImageSource,
+  qualifyImageSource,
+  CheckError,
+} from "../selected-backend-ci/runtime.ts";
 // Checks scripts/run-web-e2e.sh runs as `bun tools/web-e2e/run-web-e2e.ts
 // <command> ...`: committed API qualification, shard plan line parsing, and
 // the selected companion's SQLite prefix containment, private diagnostics
@@ -30,12 +65,7 @@ import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
 import type { Inputs } from "../selected-backend-ci/types.ts";
-import type { CommandOptions, Completed } from "../selected-backend-ci/drivers/common.ts";
-import {
-  nativeArchitecture,
-  nativeLinux,
-  type NativeArchitecture,
-} from "../selected-backend-ci/types.ts";
+import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
 import {
   validateSpecRelpath,
   discoverGroups,
@@ -44,428 +74,10 @@ import {
   DEFAULT_SHARD_COUNT,
   TIMER_FILTERS,
 } from "./groups.ts";
-
-export const CI_WEB_IMAGE =
-  "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c";
-const CI_WEB_SDK_SHA256 = {
-  x86_64: "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
-  aarch64: "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
-} as const;
 const BROWSER_SERVICE_IMAGES = [
   "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
   "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
 ] as const;
-
-// The host keeps the selected drivers and their Docker/UID/process controls.
-// Only these fixed preparation, admission and browser operations enter the
-// existing tool image. There is deliberately no arbitrary command operation.
-export const SELECTED_IMAGE_ENV = [
-  "FVOCI_WEB_CONTAINER_IMAGE",
-  "FVOCI_WEB_CONTAINER_SDK_SHA256",
-  "FVOCI_WEB_CONTAINER_IMAGE_SOURCE",
-  "FVOCI_SELECTED_CI_OUTPUT",
-  "FVOCI_SELECTED_CI_SQLITE_PARENT",
-  "FVOCI_WEB_BUILD_HANDOFF",
-  "FVOCI_WEB_BUILD_HANDOFF_SHA256",
-  "FVOCI_WEB_BUILD_PHASE",
-  "FVOCI_SELECTED_IMAGE_DEADLINE",
-  "RUNNER_TEMP",
-  "CARGO_HOME",
-  "CARGO_TARGET_DIR",
-  "CARGO_BUILD_JOBS",
-  "CARGO_INCREMENTAL",
-  "CARGO_PROFILE_DEV_DEBUG",
-  "CARGO_PROFILE_TEST_DEBUG",
-  "LIBCLANG_PATH",
-  "SQLITE3_LIB_DIR",
-  "SQLITE3_INCLUDE_DIR",
-  "SQLITE3_STATIC",
-  "SQLITE3_NO_PKG_CONFIG",
-] as const;
-
-export function selectedImageHost(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (
-    env.FVOCI_WEB_CONTAINER_IMAGE !== undefined &&
-    env.FVOCI_SELECTED_CI_SQLITE_PARENT !== undefined &&
-    env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
-  );
-}
-
-export function selectedImageBudget(value: string | undefined, now: number): number {
-  const deadline = Number(value),
-    remaining = deadline - now;
-  if (!Number.isSafeInteger(deadline) || remaining <= 0 || remaining > 900_000)
-    fail("original selected entry budget exhausted or invalid");
-  return remaining;
-}
-
-type SelectedImageOperation =
-  "prepare" | "consume" | "pending" | "inputs" | "access" | "config-list" | "browser";
-
-function selectedImageInvocation(
-  operation: SelectedImageOperation,
-  root: string,
-  environment: NodeJS.ProcessEnv,
-  browserArgs: string[] = [],
-  actor?: { groups: number[] },
-): { args: string[]; name: string; envFile: string } {
-  if (!selectedImageHost() || process.platform !== "linux" || process.arch !== "x64")
-    fail("selected image operations require the native Linux x64 host controller");
-  const architecture = containerArchitecture(
-    process.platform,
-    process.arch,
-    checkedOutput(["uname", "-m"], root),
-  );
-  if (
-    architecture !== "x86_64" ||
-    (process.env.DOCKER_DEFAULT_PLATFORM !== undefined &&
-      process.env.DOCKER_DEFAULT_PLATFORM !== "linux/amd64")
-  )
-    fail("selected image requires the physical native x64 daemon");
-  qualifyContainerDaemon(
-    dockerEndpoint(root),
-    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
-    architecture,
-  );
-  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
-  const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
-    output = join(temp, "fvoci-selected-current"),
-    owner = process.getuid?.(),
-    uid = actor ? 1000 : owner,
-    gid = actor ? 1000 : process.getgid?.();
-  if (
-    !uid ||
-    !gid ||
-    process.env.FVOCI_SELECTED_CI_OUTPUT !== output ||
-    realpathSync(root) !== root
-  )
-    fail("selected image requires the exact owned output and source paths");
-  if (statSync(output).uid !== owner || lstatSync(output).isSymbolicLink())
-    fail("selected image output owner changed");
-  const sdk = containerImage(
-    process.env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
-    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
-    false,
-    process.env,
-  );
-  if (sdk.image !== CI_WEB_IMAGE || sdk.sdk !== CI_WEB_SDK_SHA256.x86_64)
-    fail("selected image differs from the published native SDK");
-  const metadata = checkedOutput(
-    [
-      "docker",
-      "image",
-      "inspect",
-      "--format",
-      '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
-      sdk.image,
-    ],
-    root,
-  );
-  const imageSource = containerImageSource(metadata, sdk, "x86_64");
-  if (imageSource !== process.env.FVOCI_WEB_CONTAINER_IMAGE_SOURCE)
-    fail("selected image source changed");
-  qualifyImageSource(root, imageSource, checkedOutput(["git", "rev-parse", "HEAD"], root));
-  if (statfsSync(output).bavail * statfsSync(output).bsize < 20_000_000_000)
-    fail("selected image requires the existing 20GB disk floor");
-  const privateDir = join(output, "tmp");
-  const privateFacts = statSync(privateDir);
-  if (
-    lstatSync(privateDir).isSymbolicLink() ||
-    privateFacts.uid !== owner ||
-    (privateFacts.mode & 0o777) !== 0o700
-  )
-    fail("selected image private temporary directory required");
-  const name = "fvoci-selected-tool-" + randomBytes(16).toString("hex"),
-    envFile = join(privateDir, name + ".env");
-  const variables: NodeJS.ProcessEnv = {
-    ...Object.fromEntries(
-      Object.entries(environment).filter(
-        ([key]) =>
-          /^(?:CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_E2E_PROFILE)$/.test(
-            key,
-          ) ||
-          (["pending", "browser"].includes(operation) &&
-            /^(?:FVOCI_(?!TEST_TURSO|LIBSQL)[A-Z0-9_]+|BUN_RUNTIME_TRANSPILER_CACHE_PATH|PLAYWRIGHT_[A-Z0-9_]+|TEST_DATABASE_URL|DATABASE_[A-Z0-9_]+|MEILI_[A-Z0-9_]+|PASSWORD_PEPPER_[A-Z0-9_]+|ENCRYPTION_[A-Z0-9_]+|SMTP_[A-Z0-9_]+|GROUP_LABEL|NET_[A-Z0-9_]+|RUST_LOG)$/.test(
-              key,
-            )),
-      ),
-    ),
-    ...Object.fromEntries(SELECTED_IMAGE_ENV.map((key) => [key, process.env[key]])),
-    FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
-    ROOT: root,
-    HOME: join(output, "home"),
-    TMPDIR: actor ? "/tmp" : privateDir,
-    CARGO_HOME: join(temp, "fvoci-image-cargo"),
-    PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
-  };
-  // Compiler PATH comes from the admitted image, not the host environment.
-  const imageEnvironment: unknown = JSON.parse(
-    checkedOutput(
-      ["docker", "image", "inspect", "--format", "{{json .Config.Env}}", sdk.image],
-      root,
-    ),
-  );
-  if (!Array.isArray(imageEnvironment)) fail("selected image environment missing");
-  const imageEntries: unknown[] = imageEnvironment;
-  const imagePath = imageEntries.find(
-    (value: unknown) => typeof value === "string" && value.startsWith("PATH="),
-  );
-  if (typeof imagePath !== "string") fail("selected image PATH missing");
-  variables.PATH = join(output, "tools") + ":" + imagePath.slice(5);
-  if (!["prepare", "consume", "pending"].includes(operation)) delete variables.GITHUB_OUTPUT;
-  delete variables.JEST_WORKER_ID;
-  const withheld = new Set([
-    "DOCKER_HOST",
-    "DOCKER_CONTEXT",
-    "DOCKER_CONFIG",
-    "FVOCI_WEB_CONTAINER_LOCAL_IMAGE",
-    "FVOCI_WEB_CONTAINER_LOCAL",
-  ]);
-  const entries = Object.entries(variables).filter(
-    (entry): entry is [string, string] => entry[1] !== undefined && !withheld.has(entry[0]),
-  );
-  if (
-    entries.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\r\n\0]/.test(value))
-  )
-    fail("selected image environment cannot be encoded privately");
-  if (operation === "browser") {
-    const cli = join(root, "node_modules/playwright/cli.js");
-    if (
-      browserArgs[0] !== join(output, "tools/bun") ||
-      browserArgs[1] !== "--no-install" ||
-      browserArgs[2] !== cli ||
-      browserArgs[3] !== "test"
-    )
-      fail("selected image accepts only the admitted Playwright entrypoint");
-  } else if (browserArgs.length) fail("selected operation does not accept commands");
-  const args = [
-    "docker",
-    "run",
-    "--pull=never",
-    "--platform",
-    "linux/amd64",
-    "--init",
-    "--name",
-    name,
-    "--user",
-    `${String(uid)}:${String(gid)}`,
-    "--cpus=2",
-    "--memory=16g",
-    "--memory-swap=16g",
-    "--pids-limit=1024",
-    "--cap-drop=ALL",
-    "--security-opt=no-new-privileges",
-    "--network=host",
-    "--env-file",
-    envFile,
-    "--workdir",
-    operation === "browser" ? join(root, "apps/web") : root,
-    "--interactive",
-  ];
-  for (const group of actor?.groups ?? (uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
-    if (group === 0) fail("selected image refuses privileged supplementary groups");
-    args.push("--group-add", String(group));
-  }
-  const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
-  if (["prepare", "consume"].includes(operation)) {
-    if (process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff"))
-      fail("selected packet canonical path required");
-    mounts.push(process.env.FVOCI_WEB_BUILD_HANDOFF);
-  }
-  if (variables.GITHUB_OUTPUT) {
-    const path = realpathSync(variables.GITHUB_OUTPUT);
-    requirePathWithin(path, temp);
-    if (!lstatSync(path).isFile() || statSync(path).uid !== owner)
-      fail("owned CI output file required");
-    mounts.push(path);
-  }
-  for (const path of mounts) {
-    if (path.includes(",") || path === "/" || path === "/var/run")
-      fail("selected bind path refused");
-    if (realpathSync(path) !== path || lstatSync(path).isSymbolicLink())
-      fail("selected bind must be physical");
-    const readonly =
-      (path === root && !["prepare", "consume"].includes(operation)) ||
-      (path === process.env.FVOCI_WEB_BUILD_HANDOFF && operation === "consume") ||
-      (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
-    args.push("--mount", `type=bind,source=${path},target=${path}${readonly ? ",readonly" : ""}`);
-  }
-  if (actor) args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
-  else args.push("--mount", `type=bind,source=${privateDir},target=/tmp`);
-  args.push(
-    sdk.image,
-    ...(operation === "browser"
-      ? browserArgs
-      : [
-          "bun",
-          "--no-env-file",
-          join(root, "tools/web-e2e/run-web-e2e.ts"),
-          "selected-image-phase",
-          root,
-          operation,
-        ]),
-  );
-  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
-  try {
-    writeFileSync(envFile, entries.map(([key, value]) => `${key}=${value}\n`).join(""), {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    rmSync(envFile, { force: true });
-    throw error;
-  }
-  return { args, name, envFile };
-}
-
-function finishToolImage(name: string, code: number) {
-  const inspected = Bun.spawnSync(
-    [
-      "docker",
-      "inspect",
-      "--format",
-      "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
-      name,
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  if (inspected.exitCode !== 0) return { code: code || 1, inspected, removeExit: -1 };
-  const state = inspected.stdout.toString().trim();
-  if (state !== `false ${String(code)} false`) code ||= 1;
-  if (!state.startsWith("false ")) {
-    Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
-    code ||= 1;
-  }
-  const removed = Bun.spawnSync(["docker", "rm", "-v", name], { stdout: "pipe", stderr: "pipe" });
-  if (removed.exitCode !== 0) code ||= 1;
-  return { code, inspected, removeExit: removed.exitCode };
-}
-
-async function selectedImageResult(
-  operation: SelectedImageOperation,
-  root: string,
-  options: CommandOptions = {},
-  browserArgs: string[] = [],
-  actor?: { groups: number[] },
-): Promise<Completed> {
-  const { command: execute, runtimeError } =
-    await import("../selected-backend-ci/drivers/common.ts");
-  const cancellation = new AbortController();
-  let cancelled = 0;
-  const interrupt = () => {
-    cancelled ||= 130;
-    cancellation.abort(new RuntimeExit(cancelled));
-  };
-  const terminate = () => {
-    cancelled ||= 143;
-    cancellation.abort(new RuntimeExit(cancelled));
-  };
-  process.once("SIGINT", interrupt);
-  process.once("SIGTERM", terminate);
-  let result: Completed | undefined,
-    failure: unknown,
-    retirementCode = 1;
-  let invocation: ReturnType<typeof selectedImageInvocation> | undefined;
-  try {
-    invocation = selectedImageInvocation(
-      operation,
-      root,
-      options.env ?? process.env,
-      browserArgs,
-      actor,
-    );
-    if (options.log && !existsSync(options.log)) closeSync(openSync(options.log, "wx", 0o600));
-    const deadline = AbortSignal.timeout(
-      selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now()),
-    );
-    result = await execute(invocation.args, {
-      ...options,
-      env: process.env,
-      required: false,
-      signal: AbortSignal.any([
-        cancellation.signal,
-        deadline,
-        ...(options.signal ? [options.signal] : []),
-      ]),
-    });
-  } catch (error) {
-    failure = error;
-  } finally {
-    if (invocation) {
-      if (result?.returncode && !options.log) {
-        try {
-          writeFileSync(
-            join(dirname(invocation.envFile), invocation.name + ".private.log"),
-            result.stderr,
-            { flag: "wx", mode: 0o600 },
-          );
-        } catch {
-          process.stderr.write("selected image private failure capture failed\n");
-        }
-      }
-      retirementCode = result?.returncode ?? (cancelled || 1);
-      try {
-        retirementCode = finishToolImage(invocation.name, retirementCode).code;
-      } catch {
-        retirementCode ||= 1;
-        process.stderr.write("selected image retirement unconfirmed\n");
-      }
-      try {
-        rmSync(invocation.envFile, { force: true });
-      } catch {
-        retirementCode ||= 1;
-        process.stderr.write("selected image private environment removal failed\n");
-      }
-    }
-    try {
-      if (options.log && existsSync(options.log)) chmodSync(options.log, 0o600);
-    } catch {
-      retirementCode ||= 1;
-      process.stderr.write("selected image private log mode unconfirmed\n");
-    }
-    process.off("SIGINT", interrupt);
-    process.off("SIGTERM", terminate);
-  }
-  if (cancelled && result === undefined) throw new RuntimeExit(cancelled);
-  if (failure instanceof Error) throw failure;
-  if (failure !== undefined) fail("selected image operation threw an unsupported failure");
-  if (!result) fail("selected image child exit missing");
-  if (retirementCode && options.required !== false)
-    throw runtimeError(
-      `owned command failed exit=${String(retirementCode)}; executable=docker; selected=${operation}`,
-    );
-  return { ...result, returncode: retirementCode };
-}
-
-// Existing full Inputs shape, checked by the same inputCheck in the actual
-// compiler namespace. No compile receipt is regenerated.
-export async function selectedImageInputs(before: Inputs, root: string): Promise<Inputs> {
-  const result = await selectedImageResult("inputs", root, { input: JSON.stringify(before) });
-  return JSON.parse(result.stdout) as Inputs;
-}
-export async function selectedImageAccess(
-  request: { groups: number[]; files: Record<string, number> },
-  root: string,
-  actor = false,
-) {
-  return selectedImageResult(
-    "access",
-    root,
-    { input: JSON.stringify(request) },
-    [],
-    actor ? { groups: request.groups } : undefined,
-  );
-}
-export async function selectedImageConfigList(root: string): Promise<number> {
-  return (await selectedImageResult("config-list", root, { required: false })).returncode;
-}
-export async function selectedImageBrowser(
-  args: string[],
-  options: CommandOptions,
-  root: string,
-): Promise<Completed> {
-  return selectedImageResult("browser", root, options, args);
-}
 async function selectedImageOperation(
   operation: SelectedImageOperation,
   root: string,
@@ -754,24 +366,20 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     root,
   );
   process.env.PATH = join(output, "tools") + ":" + (process.env.PATH ?? "");
-  return selectedHost(root, pending, true);
+  return selectedAfterPending(pending, () => selectedHost(root, pending, true));
 }
 
-export function containerImage(
-  image: string,
-  sdk: string,
-  local: boolean,
-  env: NodeJS.ProcessEnv,
-): { image: string; sdk: string; local: boolean } {
-  if (!/^[a-f0-9]{64}$/.test(sdk)) fail("an explicit sealed SQLite SDK SHA-256 is required");
-  if (
-    !(
-      local ? /^sha256:[a-f0-9]{64}$/ : /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/
-    ).test(image) ||
-    (local && (env.CI !== undefined || Object.keys(env).some((key) => key.startsWith("GITHUB_"))))
-  )
-    fail("registry image digest required; local engine IDs require explicit non-CI local SDK mode");
-  return { image, sdk, local };
+export async function selectedAfterPending(
+  pending: number,
+  body: () => Promise<number>,
+): Promise<number> {
+  try {
+    const status = await body();
+    return pending || status;
+  } catch (error) {
+    if (pending) return pending;
+    throw error;
+  }
 }
 
 // Each admitted ordinary-browser shard retains every registered group.
@@ -844,12 +452,6 @@ async function stage(name: string, argv: string[], root: string, env = process.e
     `web-e2e stage=${name}${dated ? " finished at=" + timestamp() : ""} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(status)}\n`,
   );
   if (status !== 0) throw new RuntimeExit(status);
-}
-
-class RuntimeExit extends Error {
-  constructor(readonly status: number) {
-    super("web e2e command failed");
-  }
 }
 
 export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
@@ -1253,12 +855,9 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
   if (selected && process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") return 0;
   const pending = await group(specs);
   if (!selected || entryCancellation) return pending || entryCancellation;
-  try {
-    return await selectedHost(root, pending, selectedPhase === "consume");
-  } catch (error) {
-    if (pending) return pending;
-    throw error;
-  }
+  return selectedAfterPending(pending, () =>
+    selectedHost(root, pending, selectedPhase === "consume"),
+  );
 }
 
 export async function selectedHost(
@@ -2768,108 +2367,6 @@ async function groupRuntime(argv: string[]): Promise<number> {
   return status;
 }
 
-function dockerEndpoint(root: string): string {
-  let endpoint: unknown = process.env.DOCKER_HOST;
-  if (process.env.DOCKER_CONTEXT || !endpoint) {
-    const json = checkedOutput(
-      [
-        "docker",
-        "context",
-        "inspect",
-        "--format",
-        "{{json .Endpoints.docker.Host}}",
-        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
-      ],
-      root,
-    );
-    try {
-      endpoint = JSON.parse(json);
-    } catch {
-      fail("invalid Docker endpoint metadata");
-    }
-  }
-  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
-  return endpoint;
-}
-
-function checkedOutput(argv: string[], cwd: string): string {
-  const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
-  return result.stdout.toString().trim();
-}
-
-export function containerArchitecture(
-  system: string,
-  runtime: string,
-  kernel: string,
-  darwinArm?: string,
-): NativeArchitecture {
-  if (system !== "linux" && system !== "darwin")
-    fail("a Linux or Darwin Docker client is required");
-  if (system === "darwin" && darwinArm !== "0" && darwinArm !== "1")
-    fail("physical Darwin architecture is required");
-  const physical = nativeArchitecture(
-    system === "darwin" ? (darwinArm === "1" ? "arm64" : "x64") : kernel,
-  );
-  if (nativeArchitecture(runtime) !== physical || nativeArchitecture(kernel) !== physical)
-    fail("translated Docker clients are unsupported");
-  return physical;
-}
-
-export function qualifyContainerDaemon(
-  endpoint: string,
-  info: string,
-  arch: NativeArchitecture,
-): void {
-  if (!/^unix:\/\/\/[^\s?#\0]+$/.test(endpoint)) fail("a local Unix Docker endpoint is required");
-  const match = /^linux (\S+)$/.exec(info);
-  if (!match || nativeArchitecture(match[1] as string) !== arch)
-    fail("Docker requires a native Linux daemon matching the physical client architecture");
-}
-
-export function containerImageSource(
-  metadata: string,
-  sdk: { image: string; local: boolean },
-  arch: NativeArchitecture,
-): string {
-  const match = /^(sha256:[a-f0-9]{64}) linux (\S+) ([a-f0-9]{40}) (.+)$/.exec(metadata);
-  if (!match || nativeArchitecture(match[2] as string) !== arch)
-    fail("the pinned native ci-web image must match the client and daemon");
-  let digests: unknown;
-  try {
-    digests = JSON.parse(match[4] as string);
-  } catch {
-    fail("invalid image digest metadata");
-  }
-  if (sdk.local ? match[1] !== sdk.image : !Array.isArray(digests) || !digests.includes(sdk.image))
-    fail("the actual immutable image identity is required");
-  return match[3] as string;
-}
-
-export function qualifyImageSource(root: string, imageSource: string, current: string): void {
-  if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
-    fail("exact image and consumer source revisions required");
-  checkedOutput(
-    [
-      "git",
-      "diff",
-      "--quiet",
-      imageSource,
-      current,
-      "--",
-      "docker/ci-base/Dockerfile",
-      "xtask/src",
-      "xtask/Cargo.toml",
-      "xtask/Cargo.lock",
-      ":(glob)xtask/*.tsv",
-      "tests/support/official_sqld.rs",
-      "rust-toolchain.toml",
-      ".bun-version",
-    ],
-    root,
-  );
-}
-
 // Reuse never relabels a packet: the image still runs the original exact
 // checkout and native qualifier. Only these host Docker functions may differ.
 export async function qualifyCohortHostProgram(
@@ -3574,14 +3071,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
   }
   return 0;
 }
-
-/** A refusal: the CLI prints the message to stderr and exits 1. */
-export class CheckError extends Error {}
 class UsageError extends Error {}
-
-function fail(message: string): never {
-  throw new CheckError(message);
-}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
-import { SELECTED_IMAGE_ENV, selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
+import { SELECTED_IMAGE_ENV, selectedImageHost } from "../runtime.ts";
 import {
   checkpointPrefix,
   env,

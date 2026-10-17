@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import process from "node:process";
-import { selectedImageHost } from "../../web-e2e/run-web-e2e.ts";
+import { selectedImageHost } from "../runtime.ts";
 import { localAllocation } from "../admission.ts";
 import { env, jsonInteger, read, root, sha } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
