@@ -139,6 +139,7 @@ describe("private driver failure visibility", () => {
       text + "\0",
       "\u001b[31m" + text,
       "x".repeat(16385) + text,
+      "µ".repeat(8193) + "\n" + text,
       "\n".repeat(128) + text,
       projected.replace("AssertionError", "PrivateError"),
       projected.replace("binding.ts", "../binding.ts"),

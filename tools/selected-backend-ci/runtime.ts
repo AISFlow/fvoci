@@ -576,14 +576,11 @@ export const driverInterruptGrace = 3 * wrapperInterruptGrace;
 
 // Private Bun errors become only fixed source locations, never messages or argv.
 export function driverFailureDiagnostics(text: string): string[] {
-  if (
-    text.length > 16384 ||
-    [...text].some((char) => {
-      const code = char.charCodeAt(0);
-      return (code < 32 && char !== "\n" && char !== "\t") || code === 127;
-    })
-  )
-    return [];
+  if (text.length > 16384 || Buffer.byteLength(text, "utf8") > 16384) return [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if ((code < 32 && code !== 10 && code !== 9) || code === 127) return [];
+  }
   const lines = text.split("\n");
   if (lines.length > 128) return [];
   const sources = [
