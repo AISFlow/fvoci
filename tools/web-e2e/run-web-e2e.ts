@@ -1184,23 +1184,30 @@ export async function selectedHost(
 
   let config = "not-run",
     launcher = "not-run",
+    selected = 0;
+  let bodyFailure: { error: unknown } | undefined;
+  try {
     selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
-  if (selected === 0)
-    selected = await command(
-      ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
-      root,
-    );
-  if (consume && selected === 0 && !entryCancellation) {
-    selected = await capture(
-      runtime("config-list", true),
-      "config-list.stdout.log",
-      "config-list.stderr.log",
-    );
-    config = String(selected);
-  }
-  if (selected === 0 && !entryCancellation) {
-    selected = await command(runtime("run", true), root);
-    launcher = String(selected);
+    if (selected === 0)
+      selected = await command(
+        ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
+        root,
+      );
+    if (consume && selected === 0 && !entryCancellation) {
+      selected = await capture(
+        runtime("config-list", true),
+        "config-list.stdout.log",
+        "config-list.stderr.log",
+      );
+      config = String(selected);
+    }
+    if (selected === 0 && !entryCancellation) {
+      selected = await command(runtime("run", true), root);
+      launcher = String(selected);
+    }
+  } catch (error) {
+    bodyFailure = { error };
+    selected ||= 1;
   }
   selected ||= entryCancellation;
   const ownership = await capture(runtime("owner-return"), "ownership-stage.json", undefined, true);
@@ -1258,6 +1265,7 @@ export async function selectedHost(
   } catch {
     if (!selected) selected = 1;
   }
+  if (bodyFailure) throw bodyFailure.error;
   return pending || selected;
 }
 

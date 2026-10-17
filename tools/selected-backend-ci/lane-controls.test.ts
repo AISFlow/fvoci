@@ -1544,15 +1544,25 @@ test("independent local actor allocation keeps the caller grant private and clos
 import {readFileSync,writeFileSync,rmSync} from "node:fs";
 import {localAllocation} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts"))};
 import {preflight} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/runtime-access-check.ts"))};
+import {ownershipReturn} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/runtime.ts"))};
 const text=readFileSync(0,"utf8"), mode=process.argv[2], grant=JSON.parse(readFileSync(process.env.FVOCI_SELECTED_LOCAL_ALLOCATION!,"utf8"));
 try {
  assert.throws(()=>readFileSync(${JSON.stringify(preparationPath)}));
  const report=preflight({groups:[1000,${String(preparationGid)}].sort((a,b)=>a-b),files:{},preparation:mode==="foreign"?text+" ":text});
  writeFileSync(${JSON.stringify(join(output, "runtime-access-stage.json"))},JSON.stringify({source:grant.source,tree:grant.tree,owner:grant.owner,runner_uid:${String(preparationUid)},runner_gid:${String(preparationGid)},runtime_uid:1000,runtime_gid:1000,groups:report.groups,preflight_exit:0,preflight:report,local_allocation:report.local_allocation}),{mode:0o600});
  localAllocation("run");
+ const receiptPath=${JSON.stringify(join(output, "runtime-access-stage.json"))}, receipt=JSON.parse(readFileSync(receiptPath,"utf8"));
+ writeFileSync(receiptPath,JSON.stringify({...receipt,runner_uid:receipt.runner_uid+1}));
+ assert.throws(()=>localAllocation("run"));
+ writeFileSync(receiptPath,JSON.stringify(receipt));
+ writeFileSync(${JSON.stringify(join(output, "before.json"))},JSON.stringify({head:grant.source,tree:grant.tree}),{mode:0o600});
  Date.now=()=>Date.parse(grant.expiresUtc)+1;
  assert.throws(()=>localAllocation("run"));
  localAllocation("owner-return");
+ const emit=process.stdout.write;
+ process.stdout.write=()=>true;
+ try { ownershipReturn(${JSON.stringify(output)}); } finally { process.stdout.write=emit; }
+ assert.equal(JSON.parse(readFileSync(${JSON.stringify(join(output, "runtime-close-stage.json"))},"utf8")).ownership_return_qualified,true);
  rmSync(${JSON.stringify(join(output, "runtime-access-stage.json"))});
  assert.throws(()=>localAllocation("owner-return"));
  console.log("paired-private-expired-closure");

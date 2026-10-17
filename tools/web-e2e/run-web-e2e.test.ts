@@ -148,6 +148,8 @@ for (const mode of [
   "prepare-fail",
   "preexisting",
   "expired",
+  "expire-before-config",
+  "expire-before-run",
 ])
   test("local selected caller with real other-UID grant and modeled image: " + mode, async () => {
     const { root } = committedCheckout(),
@@ -179,7 +181,8 @@ for (const mode of [
       join(root, "scripts/run-selected-backend-e2e.ts"),
       `import fs from "node:fs";
 const mode=process.argv[2];fs.appendFileSync(process.env.FIXTURE_CALLS!,JSON.stringify({host:mode,uid:process.getuid?.(),gid:process.getgid?.(),lane:process.argv.includes("--lane"),requested:process.env.FIXTURE_RUNTIME_REQUESTED})+"\\n");
-if(mode==="permissions")console.log("1000,"+process.getgid?.());`,
+if(mode==="permissions")console.log("1000,"+process.getgid?.());
+if(mode==="config-list"&&process.env.FIXTURE_MODE==="expire-before-run")fs.writeFileSync(process.env.FIXTURE_EXPIRY_FLAG!,"expired");`,
     );
     writeFileSync(join(bin, "stat"), '#!/bin/sh\nprintf "986\\n"\n', { mode: 0o755 });
     const sha = checkedOutput(
@@ -294,7 +297,7 @@ if(a[0]==="run"){
     const preload = join(base, "disk.ts");
     writeFileSync(
       preload,
-      'import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));',
+      'import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));const clock=Date.now;Date.now=()=>fs.existsSync(process.env.FIXTURE_EXPIRY_FLAG??"")?Number(process.env.FIXTURE_EXPIRES)+1:clock();',
     );
     const restore = () => {
       expect(
@@ -316,7 +319,7 @@ if(a[0]==="run"){
     // the separate allocation fixture checks actual actor UID/groups/privacy.
     writeFileSync(
       join(bin, "sudo"),
-      '#!/bin/bash\nif [[ "$1" == chown || "$1" == install ]]; then exit 0; fi\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nif [[ "$1" == setpriv ]]; then shift; while [[ "$1" == --* ]]; do shift; done; export FIXTURE_RUNTIME_REQUESTED=1000:1000; fi\nexec "$@"\n',
+      '#!/bin/bash\nif [[ "$1" == chown || "$1" == install ]]; then if [[ "$FIXTURE_MODE" == expire-before-config ]]; then touch "$FIXTURE_EXPIRY_FLAG"; fi; exit 0; fi\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nif [[ "$1" == setpriv ]]; then shift; while [[ "$1" == --* ]]; do shift; done; export FIXTURE_RUNTIME_REQUESTED=1000:1000; fi\nexec "$@"\n',
       { mode: 0o755 },
     );
     expect(
@@ -344,6 +347,8 @@ if(a[0]==="run"){
       ORCA_TERMINAL_HANDLE: grant.workerTerminal,
       FVOCI_LOCAL_ROOT_TERMINAL: grant.rootTerminal,
       FIXTURE_MODE: mode,
+      FIXTURE_EXPIRES: String(Date.parse(grant.expiresUtc)),
+      FIXTURE_EXPIRY_FLAG: join(base, "expired-clock"),
       FIXTURE_CALLS: calls,
       FIXTURE_SOURCE: source,
       FIXTURE_IMAGE_SOURCE: CI_WEB_IMAGE_SOURCE,
@@ -394,6 +399,7 @@ if(a[0]==="run"){
       restore();
     }
     expect(exit, diagnostic).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
+    if (mode.startsWith("expire-before-")) expect(diagnostic).toContain("expired local allocation");
     expect(readFileSync(allocation, "utf8")).toBe(grantBytes);
     const rows = readFileSync(calls, "utf8")
       .trim()
@@ -424,7 +430,11 @@ if(a[0]==="run"){
     expect(host.map((row) => row.host)).toEqual(
       mode === "normal" || mode === "pending-fail"
         ? ["permissions", "config-list", "run", "owner-return"]
-        : [],
+        : mode === "expire-before-config"
+          ? ["permissions", "owner-return"]
+          : mode === "expire-before-run"
+            ? ["permissions", "config-list", "owner-return"]
+            : [],
     );
     for (const row of host)
       expect(row).toMatchObject({
