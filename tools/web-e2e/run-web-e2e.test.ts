@@ -276,7 +276,7 @@ if(a[0]==="run"){
       preload,
       'import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));',
     );
-    const restore = () =>
+    const restore = () => {
       expect(
         Bun.spawnSync(
           [
@@ -291,13 +291,14 @@ if(a[0]==="run"){
           { stdout: "pipe", stderr: "pipe" },
         ).exitCode,
       ).toBe(0);
+    };
     expect(
       Bun.spawnSync(
         ["sudo", "-n", "chown", "-R", `${String(actorUid)}:${String(actorGid)}`, base, root],
         { stdout: "pipe", stderr: "pipe" },
       ).exitCode,
     ).toBe(0);
-    let exit: number;
+    let exit = -1;
     try {
       const child = Bun.spawn(
         [
@@ -358,7 +359,7 @@ if(a[0]==="run"){
     } finally {
       restore();
     }
-    expect(exit!).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
+    expect(exit).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
     expect(readFileSync(allocation, "utf8")).toBe(grantBytes);
     const rows = readFileSync(calls, "utf8")
       .trim()

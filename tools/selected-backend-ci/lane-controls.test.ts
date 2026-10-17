@@ -1120,11 +1120,12 @@ try {
         },
       );
     };
-    const restore = () =>
+    const restore = () => {
       expect(
         spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, base])
           .exitCode,
       ).toBe(0);
+    };
     try {
       for (const mutate of [
         (value: LocalGrant) => {

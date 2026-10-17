@@ -417,7 +417,7 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
   if (local && fresh) {
     localAllocation("consume");
     process.env.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
-      .update(readFileSync(join(process.env.FVOCI_WEB_BUILD_HANDOFF as string, "handoff.json")))
+      .update(readFileSync(join(process.env.FVOCI_WEB_BUILD_HANDOFF, "handoff.json")))
       .digest("hex");
     fresh();
     for (const name of ["tmp", "home"]) mkdirSync(join(output, name), { mode: 0o700 });

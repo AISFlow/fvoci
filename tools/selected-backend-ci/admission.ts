@@ -727,6 +727,7 @@ export function expectedFiles(
   return result;
 }
 export interface Consumed {
+  localAuthorizationSha256?: string;
   source: string;
   tree: string;
   repository: string;
@@ -758,6 +759,8 @@ export function configListInputs(
   );
   const consumed = read(join(output, "handoff-consumed.json")) as Consumed,
     before = read(join(output, "before.json")) as Inputs;
+  if (local)
+    assert.equal(consumed.localAuthorizationSha256, env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
   assert.ok(
     consumed.source === before.head && before.head === (local?.source ?? env("GITHUB_SHA")),
   );
