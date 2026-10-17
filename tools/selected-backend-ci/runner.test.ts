@@ -66,6 +66,7 @@ import {
 } from "./runtime.ts";
 import type { RunBoundary } from "./runtime.ts";
 import { copyRunnerModules } from "./test-process.ts";
+import { context } from "./handoff.ts";
 import type {
   Aggregate,
   Artifact,
@@ -1242,6 +1243,49 @@ describe.serial("selected runner contract and fail-closed controls", () => {
     await withEnvironment(fixture.env, () => {
       expect(() => localAllocation("run", [uid(), gid()])).toThrow("refusing root grant");
     });
+  });
+
+  test("local packet context binds the same grant and dispatch across its image phases without GitHub authority", async () => {
+    const fixture = localFixture(uid(), gid()),
+      path = fixture.env.FVOCI_SELECTED_LOCAL_ALLOCATION as string;
+    const grant = read(path) as LocalGrant;
+    grant.allowedModes.push("handoff");
+    writeFileSync(path, JSON.stringify(grant));
+    const digest = sha(path);
+    await withEnvironment(
+      {
+        ...fixture.env,
+        FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: digest,
+        FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+        FVOCI_WEB_BUILD_PHASE: "prepare",
+        FVOCI_WEB_CONTAINER_IMAGE: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+        FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64),
+        FVOCI_WEB_CONTAINER_IMAGE_SOURCE: source,
+      },
+      () => {
+        const producer = context("collaboration-build");
+        expect(producer).toMatchObject({
+          repository: "orca-local",
+          run: grant.runId,
+          attempt: grant.dispatchId,
+          source,
+          tree,
+          localAuthorizationSha256: digest,
+        });
+        process.env.FVOCI_WEB_BUILD_PHASE = "consume";
+        expect(context("collaboration-flow")).toEqual(producer);
+        expect(() => context("collaboration-build")).toThrow("wrong handoff job");
+        process.env.GITHUB_SHA = source;
+        expect(() => context("collaboration-flow")).toThrow();
+        Reflect.deleteProperty(process.env, "GITHUB_SHA");
+        Reflect.deleteProperty(process.env, "FVOCI_WEB_CONTAINER_SDK_SHA256");
+        expect(() => context("collaboration-flow")).toThrow();
+        Reflect.deleteProperty(process.env, "FVOCI_SELECTED_IMAGE_WORKLOAD");
+        expect(() => context("collaboration-flow")).toThrow(
+          "local selected handoff requires the admitted image workload",
+        );
+      },
+    );
   });
 
   test("production handoff defaults refuse root and an unprivileged 1001 actor", () => {

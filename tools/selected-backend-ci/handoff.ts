@@ -232,6 +232,12 @@ export function context(job: string, h: HostFacts = host): Context {
     process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
       ? localAllocation("handoff")
       : undefined;
+  if (selectedLocal)
+    assert.equal(
+      process.env.FVOCI_SELECTED_IMAGE_WORKLOAD,
+      "1",
+      "local selected handoff requires the admitted image workload",
+    );
   const actual = browserJob();
   if (local) {
     assert.ok(browser() && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));

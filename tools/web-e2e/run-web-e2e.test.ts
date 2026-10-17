@@ -298,7 +298,7 @@ if(a[0]==="run"){
         { stdout: "pipe", stderr: "pipe" },
       ).exitCode,
     ).toBe(0);
-    let exit = -1;
+    let exit: number;
     try {
       const child = Bun.spawn(
         [
