@@ -1205,6 +1205,7 @@ function selectedImageInvocation(
     ROOT: root,
     HOME: join(output, "home"),
     TMPDIR: actor ? "/tmp" : privateDir,
+    BUN_INSTALL_CACHE_DIR: "/tmp/fvoci-bun-install-cache",
     CARGO_HOME: join(temp, "fvoci-image-cargo"),
     PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
   };
@@ -1301,8 +1302,8 @@ function selectedImageInvocation(
     args.push("--mount", `type=bind,source=${path},target=${path}${readonly ? ",readonly" : ""}`);
   }
   selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
-  // Bun's hardcoded /tmp node shims are symlinks, not admitted output assets.
-  // Keep them on owned ordinary disk outside output; TMPDIR/evidence stay put.
+  // Bun's node shims and package-cache version indexes contain symlinks.
+  // Keep both on owned tool /tmp outside output; TMPDIR/evidence stay put.
   // The later actor owns output but only traverses RUNNER_TEMP; /var/tmp also
   // permits that actor's private allocation without widening parent access.
   const nodeTemp = actor ? undefined : mkdtempSync("/var/tmp/fvoci-selected-tool.");
