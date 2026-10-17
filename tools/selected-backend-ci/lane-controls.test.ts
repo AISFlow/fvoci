@@ -1009,7 +1009,7 @@ describe("lease order", () => {
           if (!image) expect(item.kind).toBe("import-statement");
           // Installed tar bytes are included in the existing complete physical
           // dependency input collector; this registry binds repository modules.
-          if (item.path === "tar") continue;
+          if (["tar", "typescript"].includes(item.path)) continue;
           queue.push(Bun.resolveSync(item.path, dirname(file)));
         }
     }
@@ -1128,6 +1128,22 @@ try {
         spawnSync(["sudo", "-n", "chown", "-R", `${String(actorUid)}:${String(actorGid)}`, base])
           .exitCode,
       ).toBe(0);
+      const environment = {
+        PATH: "/usr/bin:/bin",
+        HOME: cohort,
+        TMPDIR: base,
+        FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+        FVOCI_SELECTED_LOCAL_ALLOCATION: path,
+        FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: allocationSha256,
+        FVOCI_CI_OWNER: "orca:fixture",
+        FVOCI_ROOT_RUN_OWNER: "orca:fixture",
+        FVOCI_LOCAL_RUN_ID: grant.runId,
+        FVOCI_LOCAL_DISPATCH_ID: grant.dispatchId,
+        FVOCI_LOCAL_TASK_ID: grant.taskId,
+        ORCA_TERMINAL_HANDLE: grant.workerTerminal,
+        FVOCI_LOCAL_ROOT_TERMINAL: grant.rootTerminal,
+        FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+      };
       return spawnSync(
         [
           "sudo",
@@ -1137,6 +1153,9 @@ try {
           `--regid=${String(actorGid)}`,
           "--clear-groups",
           "--",
+          "env",
+          "-i",
+          ...Object.entries(environment).map(([key, value]) => key + "=" + value),
           bun,
           "--no-env-file",
           probe,
@@ -1146,22 +1165,7 @@ try {
           cwd: checkout,
           stdout: "pipe",
           stderr: "pipe",
-          env: {
-            PATH: "/usr/bin:/bin",
-            HOME: cohort,
-            TMPDIR: base,
-            FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
-            FVOCI_SELECTED_LOCAL_ALLOCATION: path,
-            FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: allocationSha256,
-            FVOCI_CI_OWNER: "orca:fixture",
-            FVOCI_ROOT_RUN_OWNER: "orca:fixture",
-            FVOCI_LOCAL_RUN_ID: grant.runId,
-            FVOCI_LOCAL_DISPATCH_ID: grant.dispatchId,
-            FVOCI_LOCAL_TASK_ID: grant.taskId,
-            ORCA_TERMINAL_HANDLE: grant.workerTerminal,
-            FVOCI_LOCAL_ROOT_TERMINAL: grant.rootTerminal,
-            FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
-          },
+          env: { PATH: "/usr/bin:/bin" },
         },
       );
     };
