@@ -1203,7 +1203,7 @@ else process.exit(42);
         expect(row.hasActionToken).toBe(false);
         expect(row.wholeTemp).toBe(false);
         expect(row.privateNodeTemp).toBe(true);
-        expect(existsSync(row.nodeTemp as string)).toBe(
+        expect(fs.existsSync(row.nodeTemp as string)).toBe(
           ["selected-remove-fail", "selected-copy-remove-fail"].includes(mode),
         );
       }
