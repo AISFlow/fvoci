@@ -576,7 +576,14 @@ export const driverInterruptGrace = 3 * wrapperInterruptGrace;
 
 // Private Bun errors become only fixed source locations, never messages or argv.
 export function driverFailureDiagnostics(text: string): string[] {
-  if (text.length > 16384 || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) return [];
+  if (
+    text.length > 16384 ||
+    [...text].some((char) => {
+      const code = char.charCodeAt(0);
+      return (code < 32 && char !== "\n" && char !== "\t") || code === 127;
+    })
+  )
+    return [];
   const lines = text.split("\n");
   if (lines.length > 128) return [];
   const sources = [
@@ -597,6 +604,7 @@ export function driverFailureDiagnostics(text: string): string[] {
     "TypeError",
     "RangeError",
     "SyntaxError",
+    "ReferenceError",
     "RuntimeError",
   ];
   const result = new Set<string>();
@@ -620,9 +628,10 @@ export function driverFailureDiagnostics(text: string): string[] {
         kind = kinds.includes(name ?? "") ? name : undefined;
       }
       const frame = /^\s+at .*?\(?(\/[^()]*?):([1-9][0-9]{0,4}):[1-9][0-9]{0,4}\)?$/.exec(line);
-      const source = sources.find((name) => join(root, name) === frame?.[1]);
-      if (kind && source && Number(frame?.[2]) <= 10000)
-        result.add(`selected-driver failure type=${kind} source=${source}:${frame?.[2]}`);
+      const source = sources.find((name) => join(root, name) === frame?.[1]),
+        sourceLine = Number(frame?.[2]);
+      if (kind && source && sourceLine <= 10000)
+        result.add(`selected-driver failure type=${kind} source=${source}:${String(sourceLine)}`);
     }
     if (result.size === 4) break;
   }
