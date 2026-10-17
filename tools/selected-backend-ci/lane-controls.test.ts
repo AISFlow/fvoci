@@ -1573,7 +1573,7 @@ try {
  rmSync(${JSON.stringify(join(output, "runtime-access-stage.json"))});
  assert.throws(()=>localAllocation("owner-return"));
  console.log("paired-private-expired-closure");
-} catch { console.error("fixture_check="+check); console.log("refused"); process.exitCode=1; }`,
+} catch(error) { const line=/admission\\.ts:([0-9]+):/.exec((error as Error).stack??"")?.[1]??"0"; console.error("fixture_check="+check+" admission_line="+line); console.log("refused"); process.exitCode=1; }`,
   );
   const environment = {
     PATH: "/usr/bin:/bin",
