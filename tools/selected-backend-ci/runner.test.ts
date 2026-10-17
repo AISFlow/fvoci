@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "bun";
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import {
   chmodSync,
@@ -52,6 +52,7 @@ import {
 } from "./io.ts";
 import {
   driverCommand,
+  driverFailureDiagnostics,
   executeDriver,
   knownOnBrowserTest,
   laneDriver,
@@ -116,6 +117,111 @@ function directory(): string {
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true });
 });
+
+describe("private driver failure visibility", () => {
+  const source = "tools/selected-backend-ci/drivers/binding.ts";
+  const frame = `    at loadCurrent (${join(root, source)}:381:9)`;
+  const projected = "selected-driver failure type=AssertionError source=" + source + ":381";
+
+  test("only closed error classes and exact maintained numeric frames leave private logs", () => {
+    const text = "AssertionError [ERR_ASSERTION]: PRIVATE_CREDENTIAL_CANARY\n" + frame;
+    expect(driverFailureDiagnostics(text)).toEqual([projected]);
+    expect(driverFailureDiagnostics(projected + "\n" + text)).toEqual([projected]);
+    for (const fault of [
+      text.replace("AssertionError", "PrivateError"),
+      text.replace(root, root + "-foreign"),
+      text.replace("binding.ts", "binding.ts.private"),
+      text.replace(":381:", ":0:"),
+      text.replace(":381:", ":10001:"),
+      text.replace(":381:", ":381.0:"),
+      text + " PRIVATE_CREDENTIAL_CANARY",
+      text + "\r",
+      text + "\0",
+      "\u001b[31m" + text,
+      "x".repeat(16385) + text,
+      "\n".repeat(128) + text,
+      projected.replace("AssertionError", "PrivateError"),
+      projected.replace("binding.ts", "../binding.ts"),
+      projected + " PRIVATE_CREDENTIAL_CANARY",
+    ])
+      expect(driverFailureDiagnostics(fault)).toEqual([]);
+    expect(
+      driverFailureDiagnostics(
+        "Error: PRIVATE_CREDENTIAL_CANARY\n" +
+          Array.from({ length: 8 }, (_, i) => frame.replace(":381:", `:${String(i + 1)}:`)).join(
+            "\n",
+          ),
+      ),
+    ).toHaveLength(4);
+  });
+
+  test("a real install admission failure retains exit1 and projects no private error text", async () => {
+    const log = join(directory(), "driver.log"),
+      emitted: string[] = [],
+      stderr = spyOn(process.stderr, "write").mockImplementation((value) => {
+        emitted.push(String(value));
+        return true;
+      });
+    try {
+      expect(
+        await executeDriver(
+          driverCommand(laneDriver("install")),
+          { FVOCI_CI_OWNER: "fixture", FVOCI_CI_SELECTED_RUNS: "/PRIVATE_CREDENTIAL_CANARY" },
+          log,
+          new AbortController().signal,
+        ),
+      ).toBe(1);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(readFileSync(log, "utf8")).toContain("NOT GRANTED");
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    expect(emitted.join("")).toMatch(
+      /selected-driver failure type=AssertionError source=tools\/selected-backend-ci\/drivers\/binding\.ts:[1-9][0-9]*\n/,
+    );
+    expect(emitted.join("")).not.toContain("NOT GRANTED");
+    expect(emitted.join("")).not.toContain("PRIVATE_CREDENTIAL_CANARY");
+    expect(emitted.join("")).not.toContain(root);
+  });
+
+  for (const mutation of ["public", "symlink", "replacement"])
+    test(`a real child cannot project a ${mutation} driver-log path`, async () => {
+      const base = directory(),
+        log = join(base, "driver.log"),
+        foreign = join(base, "foreign.log"),
+        emitted: string[] = [];
+      writeFileSync(foreign, projected, { mode: 0o600 });
+      const stderr = spyOn(process.stderr, "write").mockImplementation((value) => {
+        emitted.push(String(value));
+        return true;
+      });
+      try {
+        expect(
+          await executeDriver(
+            [
+              process.execPath,
+              "--no-env-file",
+              "--eval",
+              `import {chmodSync,unlinkSync,symlinkSync,copyFileSync} from "node:fs";
+console.error(${JSON.stringify(projected)});
+const log=${JSON.stringify(log)}, foreign=${JSON.stringify(foreign)};
+if (${JSON.stringify(mutation)} === "public") chmodSync(log,0o644);
+else {unlinkSync(log); if (${JSON.stringify(mutation)} === "symlink") symlinkSync(foreign,log); else copyFileSync(foreign,log);}
+process.exit(19);`,
+            ],
+            {},
+            log,
+            new AbortController().signal,
+          ),
+        ).toBe(19);
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(emitted).toEqual([]);
+      expect(readFileSync(foreign, "utf8")).toBe(projected);
+    });
+});
+
 const source = call(["git", "rev-parse", "HEAD"]),
   tree = call(["git", "rev-parse", "HEAD^{tree}"]);
 const owner = "github:fixture/repo:123:1:collaboration-flow";

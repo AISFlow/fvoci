@@ -10,11 +10,13 @@ import {
   closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -571,6 +573,62 @@ const runBoundary: RunBoundary = {
 // Outlasts the longest grace a lane driver gives its own fixture wrappers (the
 // PostgreSQL wrapper, 2 x wrapperInterruptGrace) and the cleanup after it.
 export const driverInterruptGrace = 3 * wrapperInterruptGrace;
+
+// Private Bun errors become only fixed source locations, never messages or argv.
+export function driverFailureDiagnostics(text: string): string[] {
+  if (text.length > 16384 || /[\x00-\x08\x0b-\x1f\x7f]/.test(text)) return [];
+  const lines = text.split("\n");
+  if (lines.length > 128) return [];
+  const sources = [
+    "runtime.ts",
+    "admission.ts",
+    "io.ts",
+    "drivers/binding.ts",
+    "drivers/common.ts",
+    "drivers/install.ts",
+    "drivers/postgres.ts",
+    "drivers/sqlite.ts",
+    "drivers/restart.ts",
+  ].map((name) => "tools/selected-backend-ci/" + name);
+  const kinds = [
+    "Error",
+    "AssertionError",
+    "CheckError",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "RuntimeError",
+  ];
+  const result = new Set<string>();
+  let kind: string | undefined;
+  for (const line of lines) {
+    const projected =
+      /^selected-driver failure type=([A-Za-z]+) source=(tools\/selected-backend-ci\/[A-Za-z/.-]+):([1-9][0-9]{0,4})$/.exec(
+        line,
+      );
+    if (projected) {
+      if (
+        kinds.includes(projected[1] ?? "") &&
+        sources.includes(projected[2] ?? "") &&
+        Number(projected[3]) <= 10000
+      )
+        result.add(line);
+    } else {
+      const header = /^(error|Error|[A-Za-z]+Error)(?: \[[A-Z0-9_]+\])?:/.exec(line);
+      if (header) {
+        const name = header[1] === "error" ? "Error" : header[1];
+        kind = kinds.includes(name ?? "") ? name : undefined;
+      }
+      const frame = /^\s+at .*?\(?(\/[^()]*?):([1-9][0-9]{0,4}):[1-9][0-9]{0,4}\)?$/.exec(line);
+      const source = sources.find((name) => join(root, name) === frame?.[1]);
+      if (kind && source && Number(frame?.[2]) <= 10000)
+        result.add(`selected-driver failure type=${kind} source=${source}:${frame?.[2]}`);
+    }
+    if (result.size === 4) break;
+  }
+  return [...result];
+}
+
 // A lane driver owns fixture wrappers whose EXIT traps remove their
 // containers. On an interrupt it is not killed at once, as a stage child is:
 // it gets SIGINT and is waited for, so it closes its lane and writes its
@@ -584,7 +642,7 @@ export async function executeDriver(
   grace = driverInterruptGrace,
 ): Promise<number> {
   signal.throwIfAborted();
-  const fd = openSync(log, "wx");
+  const fd = openSync(log, "wx+", 0o600);
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     const child = spawn(command, {
@@ -604,7 +662,37 @@ export async function executeDriver(
     try {
       const exitCode = await child.exited;
       if (signal.aborted) throw signal.reason;
-      return observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
+      const code = observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
+      if (code !== 0)
+        try {
+          const facts = fstatSync(fd),
+            path = lstatSync(log);
+          if (
+            facts.isFile() &&
+            !path.isSymbolicLink() &&
+            facts.dev === path.dev &&
+            facts.ino === path.ino &&
+            facts.uid === uid() &&
+            facts.gid === gid() &&
+            (facts.mode & 0o777) === 0o600 &&
+            realpathSync(log) === log
+          ) {
+            const bytes = Buffer.alloc(Math.min(facts.size, 16384)),
+              offset = facts.size - bytes.length,
+              count = readSync(fd, bytes, 0, bytes.length, offset),
+              lines = bytes.subarray(0, count).toString("utf8").split("\n");
+            for (const line of driverFailureDiagnostics(
+              lines
+                .slice(offset ? 1 : 0)
+                .slice(-128)
+                .join("\n"),
+            ))
+              process.stderr.write(line + "\n");
+          }
+        } catch {
+          // Diagnostic failure cannot replace the actual child outcome.
+        }
+      return code;
     } finally {
       signal.removeEventListener("abort", interrupt);
     }
@@ -1502,6 +1590,13 @@ export async function selectedImageResult(
         } catch {
           process.stderr.write("selected image private failure capture failed\n");
         }
+        if (operation === "inputs")
+          try {
+            for (const line of driverFailureDiagnostics(result.stderr))
+              process.stderr.write(line + "\n");
+          } catch {
+            // Keep the original image exit and mandatory retirement.
+          }
       }
       retirementCode = result?.returncode ?? (cancelled || 1);
       try {
