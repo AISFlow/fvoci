@@ -1546,13 +1546,17 @@ import {localAllocation} from ${JSON.stringify(join(checkout, "tools/selected-ba
 import {preflight} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/runtime-access-check.ts"))};
 import {ownershipReturn,qualifyImageSource} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/runtime.ts"))};
 const text=readFileSync(0,"utf8"), mode=process.argv[2], grant=JSON.parse(readFileSync(process.env.FVOCI_SELECTED_LOCAL_ALLOCATION!,"utf8"));
+let check=1;
 try {
  assert.throws(()=>readFileSync(${JSON.stringify(preparationPath)}));
+ check=2;
  const image="sha256:"+"b".repeat(64);
  assert.equal(qualifyImageSource(${JSON.stringify(checkout)},image+" linux amd64 "+grant.source+" null",{image,sdk:"c".repeat(64),local:true},"x86_64",grant.source),grant.source);
+ check=3;
  const report=preflight({groups:[1000,${String(preparationGid)}].sort((a,b)=>a-b),files:{},preparation:mode==="foreign"?text+" ":text});
  writeFileSync(${JSON.stringify(join(output, "runtime-access-stage.json"))},JSON.stringify({source:grant.source,tree:grant.tree,owner:grant.owner,runner_uid:${String(preparationUid)},runner_gid:${String(preparationGid)},runtime_uid:1000,runtime_gid:1000,groups:report.groups,preflight_exit:0,preflight:report,local_allocation:report.local_allocation}),{mode:0o600});
  localAllocation("run");
+ check=4;
  const receiptPath=${JSON.stringify(join(output, "runtime-access-stage.json"))}, receipt=JSON.parse(readFileSync(receiptPath,"utf8"));
  writeFileSync(receiptPath,JSON.stringify({...receipt,runner_uid:receipt.runner_uid+1}));
  assert.throws(()=>localAllocation("run"));
@@ -1561,6 +1565,7 @@ try {
  Date.now=()=>Date.parse(grant.expiresUtc)+1;
  assert.throws(()=>localAllocation("run"));
  localAllocation("owner-return");
+ check=5;
  const emit=process.stdout.write;
  process.stdout.write=()=>true;
  try { ownershipReturn(${JSON.stringify(output)}); } finally { process.stdout.write=emit; }
@@ -1568,7 +1573,7 @@ try {
  rmSync(${JSON.stringify(join(output, "runtime-access-stage.json"))});
  assert.throws(()=>localAllocation("owner-return"));
  console.log("paired-private-expired-closure");
-} catch { console.log("refused"); process.exitCode=1; }`,
+} catch { console.error("fixture_check="+check); console.log("refused"); process.exitCode=1; }`,
   );
   const environment = {
     PATH: "/usr/bin:/bin",
@@ -1613,7 +1618,7 @@ try {
         ],
         { cwd: checkout, stdin: Buffer.from(text), stdout: "pipe", stderr: "pipe" },
       );
-      expect(result.exitCode).toBe(mode === "normal" ? 0 : 1);
+      expect(result.exitCode, result.stderr.toString()).toBe(mode === "normal" ? 0 : 1);
       expect(result.stdout.toString()).toBe(
         mode === "normal" ? "paired-private-expired-closure\n" : "refused\n",
       );
