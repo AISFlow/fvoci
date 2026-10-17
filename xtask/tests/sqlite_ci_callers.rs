@@ -387,7 +387,6 @@ fn contract(root: &Path) -> Check {
             "web",
             &[
                 "web-checks",
-                "web-native-checks",
                 "collaboration-build",
                 "collaboration-install-on",
                 "collaboration-postgres-on",
@@ -419,6 +418,20 @@ fn contract(root: &Path) -> Check {
             }
         }
         if workflow == "web" {
+            let native = job(&text, "web-native-checks").ok_or("missing native image checks")?;
+            contains(
+                native,
+                "container-browser \"$GITHUB_WORKSPACE\" --native-checks",
+                "native image checks",
+            )?;
+            for obsolete in [
+                "id: sqlite",
+                "rustup toolchain install",
+                "apt-get",
+                "path: target",
+            ] {
+                excludes(native, obsolete, "native image checks")?;
+            }
             let producer = job(&text, "workspace-browser-container-build")
                 .ok_or("missing container producer")?;
             let consumer =

@@ -21,6 +21,7 @@ import {
   readdirSync,
   realpathSync,
   statSync,
+  statfsSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -1000,10 +1001,14 @@ export function sqliteEnvironment(text: string): Record<string, string> {
 }
 
 async function browserPhase(root: string, phase: string, shards: string[]): Promise<number> {
-  if (!process.env.FVOCI_WEB_CONTAINER_IMAGE || !["prepare", "inputs", "consume"].includes(phase))
+  const nativeChecks = phase === "native-checks";
+  if (
+    !process.env.FVOCI_WEB_CONTAINER_IMAGE ||
+    !["prepare", "inputs", "consume", "native-checks"].includes(phase)
+  )
     fail("ordinary container phase required");
   if (
-    phase === "inputs" &&
+    (phase === "inputs" || nativeChecks) &&
     [
       "TEST_DATABASE_URL",
       "FVOCI_E2E_ADMIN_DATABASE_URL",
@@ -1017,20 +1022,22 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
   process.env.FVOCI_WEB_BUILD_PHASE = phase === "prepare" ? "prepare" : "consume";
   process.env.CARGO_NET_OFFLINE = "true";
   try {
-    qualifyCommittedApi(
-      root,
-      {
-        shard: shards[0] ?? "",
-        selected: false,
-        browserPhase: phase === "prepare" ? "prepare" : "consume",
-      },
-      process.env,
-    );
+    if (nativeChecks) qualifyNativeChecks(root);
+    else
+      qualifyCommittedApi(
+        root,
+        {
+          shard: shards[0] ?? "",
+          selected: false,
+          browserPhase: phase === "prepare" ? "prepare" : "consume",
+        },
+        process.env,
+      );
     if (phase === "prepare" && (shards.length || existsSync(join(root, "apps/web/dist"))))
       fail("producer requires absent dist and no shard");
     // Isolated jobs reconstruct their locked inputs; only the qualified native
     // packet crosses jobs. Local cohorts already share these bytes read-only.
-    if (phase === "prepare" || phase === "inputs") {
+    if (phase === "prepare" || phase === "inputs" || nativeChecks) {
       const target = nativeLinux(
         process.platform,
         process.arch,
@@ -1044,31 +1051,33 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
         root,
         fetchEnv,
       );
-      await stage(
-        "engine-fetch",
-        [
-          "cargo",
-          "fetch",
-          "--locked",
-          "--target",
-          target,
-          "--manifest-path",
-          join(root, "crates/collab-engine/Cargo.toml"),
-        ],
-        root,
-        fetchEnv,
-      );
+      if (!nativeChecks)
+        await stage(
+          "engine-fetch",
+          [
+            "cargo",
+            "fetch",
+            "--locked",
+            "--target",
+            target,
+            "--manifest-path",
+            join(root, "crates/collab-engine/Cargo.toml"),
+          ],
+          root,
+          fetchEnv,
+        );
       // Bun owns lifecycle scripts' node executable without a shell harness.
       await stage(
         "dependencies",
         [process.execPath, "--bun", "install", "--frozen-lockfile"],
         root,
       );
-      await stage(
-        "browser-version",
-        [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
-        join(root, "apps/web"),
-      );
+      if (!nativeChecks)
+        await stage(
+          "browser-version",
+          [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
+          join(root, "apps/web"),
+        );
     }
     if (phase === "inputs") return 0;
     const sdk = containerImage(
@@ -1097,6 +1106,32 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
       root,
     );
     Object.assign(process.env, sqliteEnvironment(readFileSync("/fvoci-run/sqlite.env", "utf8")));
+    if (nativeChecks) {
+      qualifyNativeChecks(root);
+      await stage(
+        "native-clippy",
+        [
+          "cargo",
+          "clippy",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--features",
+          "db-tests,api-schema",
+          "--",
+          "-D",
+          "warnings",
+        ],
+        root,
+      );
+      await stage(
+        "native-static-api",
+        ["cargo", "test", "--locked", "--offline", "--test", "static_api"],
+        root,
+      );
+      qualifyNativeChecks(root);
+      return 0;
+    }
     qualifyCommittedApi(
       root,
       {
@@ -2140,12 +2175,19 @@ export function containerRequest(
   architecture: string = process.arch,
 ) {
   const mode = argv[1];
-  if (!argv[0] || !["--prepare", "--consume", "--ci-shard", "--ci-shards"].includes(mode ?? ""))
+  if (
+    !argv[0] ||
+    !["--prepare", "--consume", "--ci-shard", "--ci-shards", "--native-checks"].includes(mode ?? "")
+  )
     throw new UsageError(
-      "container-browser ROOT {--prepare|--consume N|--ci-shard N|--ci-shards N,N,...}",
+      "container-browser ROOT {--prepare|--consume N|--ci-shard N|--ci-shards N,N,...|--native-checks}",
     );
   const options = new Map<string, string>();
-  for (let at = mode === "--prepare" ? 2 : 3; at < argv.length; at++) {
+  for (
+    let at = mode === "--prepare" || mode === "--native-checks" ? 2 : 3;
+    at < argv.length;
+    at++
+  ) {
     const name = argv[at] ?? "";
     const value = argv[at + 1];
     if (options.has(name)) throw new UsageError("duplicate container option");
@@ -2160,6 +2202,8 @@ export function containerRequest(
       at++;
     } else throw new UsageError("unknown or incomplete container option");
   }
+  if (mode === "--native-checks" && options.size)
+    fail("native checks use only the published image/SDK without packet or reuse overrides");
   const imageOverride = options.get("--image-pin"),
     sdkOverride = options.get("--sdk-sha256");
   if ((imageOverride === undefined) !== (sdkOverride === undefined))
@@ -2170,11 +2214,24 @@ export function containerRequest(
     options.has("--local-image-sdk"),
     env,
   );
-  const phase = mode === "--prepare" ? "prepare" : mode === "--consume" ? "consume" : "all";
-  const shards = phase === "prepare" ? [] : (argv[2] ?? "").split(",").map(containerShard);
+  const phase =
+    mode === "--native-checks"
+      ? "native-checks"
+      : mode === "--prepare"
+        ? "prepare"
+        : mode === "--consume"
+          ? "consume"
+          : "all";
+  const shards =
+    phase === "prepare" || phase === "native-checks"
+      ? []
+      : (argv[2] ?? "").split(",").map(containerShard);
   if (
     new Set(shards).size !== shards.length ||
-    (mode !== "--ci-shards" && phase !== "prepare" && shards.length !== 1)
+    (mode !== "--ci-shards" &&
+      phase !== "prepare" &&
+      phase !== "native-checks" &&
+      shards.length !== 1)
   )
     fail("duplicate or invalid shard selection");
   const ci =
@@ -2185,14 +2242,22 @@ export function containerRequest(
       env.GITHUB_ACTIONS !== "true" ||
       phase === "all" ||
       env.GITHUB_JOB !==
-        (phase === "prepare" ? "workspace-browser-container-build" : "workspace-browser-shard") ||
+        (phase === "native-checks"
+          ? "web-native-checks"
+          : phase === "prepare"
+            ? "workspace-browser-container-build"
+            : "workspace-browser-shard") ||
       !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? "") ||
       !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") ||
       !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? "") ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? ""))
   )
     fail("container phase requires its actual GitHub source/run/attempt/repository/job");
-  if (phase !== "all" && (!options.get("--handoff") || options.has("--reuse-cohort")))
+  if (
+    phase !== "all" &&
+    phase !== "native-checks" &&
+    (!options.get("--handoff") || options.has("--reuse-cohort"))
+  )
     fail("separate container phases require an explicit packet path without cohort reuse");
   if (phase === "all" && (options.has("--handoff") || options.has("--handoff-sha256")))
     fail("combined local cohort cannot accept a cross-job packet");
@@ -2204,9 +2269,48 @@ export function containerRequest(
   return { sdk, phase, shards, ci, options };
 }
 
+/** Standalone checks have no browser packet or service authority. */
+export function qualifyNativeChecks(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+  git: Git = spawnGit(root),
+): void {
+  const request = containerRequest([root, "--native-checks"], env);
+  if (
+    !process.getuid?.() ||
+    env.FVOCI_WEB_CONTAINER_JOB !== "web-native-checks" ||
+    env.FVOCI_WEB_CONTAINER_IMAGE !== request.sdk.image ||
+    env.FVOCI_WEB_CONTAINER_SDK_SHA256 !== request.sdk.sdk ||
+    env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE !== "0" ||
+    (!request.ci && env.FVOCI_WEB_CONTAINER_LOCAL !== "1")
+  )
+    fail("native checks require the allocated published-image container");
+  const source = env.FVOCI_WEB_CONTAINER_SOURCE ?? "";
+  if (
+    !/^[a-f0-9]{40}$/.test(source) ||
+    (request.ci && source !== env.GITHUB_SHA) ||
+    gitLine(git, ["rev-parse", "HEAD"]) !== source ||
+    gitLine(git, ["rev-parse", "--show-toplevel"]) !== realpathSync(root) ||
+    git(["diff", "--quiet", "HEAD", "--"]).status !== 0
+  )
+    fail("native checks require the exact clean source");
+  if (
+    env.CARGO_BUILD_JOBS !== "2" ||
+    env.CARGO_INCREMENTAL !== "0" ||
+    env.CARGO_PROFILE_DEV_DEBUG !== "0" ||
+    env.CARGO_PROFILE_TEST_DEBUG !== "0" ||
+    env.CARGO_TARGET_DIR !== join(root, "target")
+  )
+    fail("native checks require the original compiler profile");
+  const disk = statfsSync(root);
+  if (disk.bavail * disk.bsize < 20_000_000_000)
+    fail("native checks require the existing 20GB disk floor");
+}
+
 /** Shared local/CI execution: one pinned image and the existing qualified packet. */
 async function containerBrowser(argv: string[]): Promise<number> {
   const { sdk, phase: requestedPhase, shards, ci, options } = containerRequest(argv, process.env);
+  const nativeDeadline = performance.now() + 15 * 60_000;
   const root = realpathSync(argv[0] ?? fail("container root required"));
   const architecture = containerArchitecture(
     process.platform,
@@ -2255,6 +2359,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
   )
     fail("Docker platform override must match the native architecture");
   const image = sdk.image;
+  if (requestedPhase === "native-checks") {
+    const disk = statfsSync(root);
+    if (disk.bavail * disk.bsize < 20_000_000_000)
+      fail("native checks require the existing 20GB disk floor");
+  }
   if (ci) await stage("image-fetch", ["docker", "pull", "--platform", platform, image], root);
   const metadata = checkedOutput(
     [
@@ -2406,20 +2515,25 @@ async function containerBrowser(argv: string[]): Promise<number> {
   }
   const consumerDeadlines = new Map<string, number>();
   async function runContainer(
-    phase: "prepare" | "inputs" | "consume",
+    phase: "prepare" | "inputs" | "consume" | "native-checks",
     services: NodeJS.ProcessEnv = {},
     shard = "",
   ): Promise<number> {
     if (entryCancellation) return entryCancellation;
     const now = performance.now();
-    if (phase !== "prepare" && !consumerDeadlines.has(shard))
+    const producerPhase = phase === "prepare" || phase === "native-checks";
+    if (!producerPhase && !consumerDeadlines.has(shard))
       consumerDeadlines.set(shard, now + 20 * 60_000);
     const remaining =
-      phase === "prepare" ? 15 * 60_000 : (consumerDeadlines.get(shard) ?? now) - now;
+      phase === "native-checks"
+        ? nativeDeadline - now
+        : producerPhase
+          ? 15 * 60_000
+          : (consumerDeadlines.get(shard) ?? now) - now;
     if (remaining <= 0) return 1;
-    const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
-    const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
-    const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
+    const directory = producerPhase ? producer : join(batch, "consumer-" + shard);
+    const runDirectory = producerPhase ? batch : join(batch, "run-" + shard);
+    const output = producerPhase ? "producer-output" : "consumer-output-" + shard;
     const variables: Record<string, string> = {
       HOME: "/fvoci-run/home",
       CARGO_HOME: "/fvoci-run/cargo",
@@ -2451,7 +2565,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
       FVOCI_WEB_CONTAINER_RUN: run,
       FVOCI_WEB_CONTAINER_SOURCE: source,
       FVOCI_WEB_CONTAINER_JOB:
-        phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+        phase === "native-checks"
+          ? "web-native-checks"
+          : phase === "prepare"
+            ? "workspace-browser-build"
+            : "workspace-browser-shard",
       FVOCI_SELECTED_CI_OUTPUT: "/fvoci-run/output",
       FVOCI_WEB_BUILD_HANDOFF: "/fvoci-run/handoff",
     };
@@ -2549,17 +2667,16 @@ async function containerBrowser(argv: string[]): Promise<number> {
       "browser-phase",
       root,
       phase,
-      ...(phase === "prepare" ? [] : [shard]),
+      ...(producerPhase ? [] : [shard]),
     );
     const started = performance.now();
-    const logFd =
-      phase !== "prepare"
-        ? openSync(
-            join(runDirectory, phase === "consume" ? "console.log" : "inputs-console.log"),
-            "wx",
-            0o600,
-          )
-        : undefined;
+    const logFd = !producerPhase
+      ? openSync(
+          join(runDirectory, phase === "consume" ? "console.log" : "inputs-console.log"),
+          "wx",
+          0o600,
+        )
+      : undefined;
     let child;
     try {
       child = Bun.spawn(args, {
@@ -2681,6 +2798,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     );
     return result;
   }
+  if (requestedPhase === "native-checks") return runContainer("native-checks");
   if (cohort === batch && requestedPhase !== "consume") {
     const prepared = await runContainer("prepare");
     if (prepared !== 0) return prepared;

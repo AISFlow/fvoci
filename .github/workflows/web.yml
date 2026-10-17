@@ -250,62 +250,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
-      - name: Restore Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
+      - name: Check strict Clippy and default static transport in the shared image
         env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Restore native web gate Rust outputs
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target
-          key: v1-web-native-checks-ubuntu-26.04-${{ runner.arch }}-1.99.0-clippy-db-tests-api-schema-static-default-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          bun ci
-      - name: Check strict Clippy and default static transport
-        run: |
-          cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
-          cargo test --locked --offline --test static_api
+          TMPDIR: ${{ runner.temp }}
+        run: bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" --native-checks
 
       # Exact default-feature browser binaries and fresh dist, built once for all shards.
-      - *save_sqlite_input_hashes
-
   workspace-browser-container-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'

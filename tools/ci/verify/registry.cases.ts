@@ -1583,16 +1583,19 @@ function caseList(): MutationCase[] {
       "unpinned-job",
       "web-native-checks",
       swap(
-        SQLITE_STEP,
+        "      - name: Check strict Clippy",
         '      - run: xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/m"\n' +
-          SQLITE_STEP,
+          "      - name: Check strict Clippy",
       ),
       elsewhere("web-native-checks"),
     ],
     [
       "native-checks-apt",
       "web-native-checks",
-      swap(APT_NO_PYTHON, APT_PYTHON),
+      swap(
+        "      - name: Check strict Clippy",
+        "      - run: sudo apt-get install python3\n      - name: Check strict Clippy",
+      ),
       python("web-native-checks"),
     ],
     [

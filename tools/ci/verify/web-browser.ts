@@ -441,6 +441,7 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
     ...verifyWebHostInputsJobs(jobs),
+    ...verifyWebNativeImageJobs(jobs),
     ...verifyWebContainerHandoffJobs(jobs),
   ];
 }
@@ -482,7 +483,7 @@ const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
 const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
 const WEB_NATIVE_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
 
-export const WEB_SQLITE_JOBS = ["web-checks", "web-native-checks", ...WEB_NATIVE_JOBS];
+export const WEB_SQLITE_JOBS = ["web-checks", ...WEB_NATIVE_JOBS];
 // The same complete host preparation precedes every Web SQLite/cache identity.
 const WEB_SQLITE_RUN = String.raw`set -euo pipefail
 # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
@@ -521,6 +522,35 @@ const SQLITE_HASH_UPLOAD: Mapping = {
 };
 function isSQLiteHashUpload(step: Mapping): boolean {
   return pyEq(step, SQLITE_HASH_UPLOAD);
+}
+
+export function verifyWebNativeImageJobs(jobs: Mapping): string[] {
+  const expected = {
+    needs: "ci-plan",
+    if: "needs.ci-plan.outputs.select_web_checks == 'true'",
+    "runs-on": "ubuntu-26.04",
+    "timeout-minutes": 15,
+    steps: [
+      {
+        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        with: { "persist-credentials": false, "fetch-depth": 0 },
+      },
+      {
+        uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+        with: { "bun-version-file": ".bun-version" },
+      },
+      {
+        name: "Check strict Clippy and default static transport in the shared image",
+        env: { TMPDIR: "${{ runner.temp }}" },
+        run: 'bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" --native-checks',
+      },
+    ],
+  };
+  return pyEq(get(jobs, "web-native-checks"), expected)
+    ? []
+    : [
+        "web: web-native-checks requires its exact unmasked shared-image command, selection and budget without host preparation",
+      ];
 }
 
 export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
