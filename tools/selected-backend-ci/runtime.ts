@@ -12,6 +12,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -1109,7 +1110,7 @@ function selectedImageInvocation(
   environment: NodeJS.ProcessEnv,
   browserArgs: string[] = [],
   actor?: { groups: number[] },
-): { args: string[]; name: string; envFile: string } {
+): { args: string[]; name: string; envFile: string; nodeTemp?: string } {
   if (!selectedImageHost() || process.platform !== "linux" || process.arch !== "x64")
     fail("selected image operations require the native Linux x64 host controller");
   const architecture = containerArchitecture(
@@ -1291,8 +1292,12 @@ function selectedImageInvocation(
       (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
     args.push("--mount", `type=bind,source=${path},target=${path}${readonly ? ",readonly" : ""}`);
   }
-  if (actor) args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
-  else args.push("--mount", `type=bind,source=${privateDir},target=/tmp`);
+  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
+  // Bun's hardcoded /tmp node shims are symlinks, not admitted output assets.
+  // Keep them on owned ordinary disk outside output; TMPDIR/evidence stay put.
+  const nodeTemp = actor ? undefined : mkdtempSync(join(temp, "fvoci-selected-tool."));
+  if (nodeTemp) args.push("--mount", `type=bind,source=${nodeTemp},target=/tmp`);
+  else args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
   args.push(
     sdk.image,
     ...(operation === "browser"
@@ -1306,7 +1311,6 @@ function selectedImageInvocation(
           operation,
         ]),
   );
-  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
   try {
     writeFileSync(envFile, entries.map(([key, value]) => `${key}=${value}\n`).join(""), {
       flag: "wx",
@@ -1314,9 +1318,10 @@ function selectedImageInvocation(
     });
   } catch (error) {
     rmSync(envFile, { force: true });
+    if (nodeTemp) rmSync(nodeTemp, { recursive: true });
     throw error;
   }
-  return { args, name, envFile };
+  return { args, name, envFile, nodeTemp };
 }
 
 export function finishToolImage(name: string, code: number) {
@@ -1364,7 +1369,8 @@ export async function selectedImageResult(
   let result: Completed | undefined,
     failure: unknown,
     retirementCode = 1,
-    retirementPending = false;
+    retirementPending = false,
+    temporaryRemovable = true;
   let invocation: ReturnType<typeof selectedImageInvocation> | undefined;
   try {
     invocation = selectedImageInvocation(
@@ -1400,7 +1406,10 @@ export async function selectedImageResult(
         : [invocation.args];
       if (materialize) mkdirSync(browserSource, { mode: 0o700 });
       for (const [at, args] of commands.entries()) {
-        if (!materialize || at !== 1) retirementPending = true;
+        if (!materialize || at !== 1) {
+          retirementPending = true;
+          temporaryRemovable = false;
+        }
         const child = spawnSelectedCommand(
           args,
           process.env,
@@ -1441,6 +1450,7 @@ export async function selectedImageResult(
         if (materialize && at === 1) {
           retirementPending = false;
           const closed = finishToolImage(invocation.name, 0);
+          temporaryRemovable = closed.removeExit === 0;
           if (closed.code !== 0) throw new RuntimeExit(closed.code);
           let bytes = 0;
           for (const path of [browserSource, ...files(browserSource, true)]) {
@@ -1478,8 +1488,11 @@ export async function selectedImageResult(
       }
       retirementCode = result?.returncode ?? (cancelled || 1);
       try {
-        if (retirementPending)
-          retirementCode = finishToolImage(invocation.name, retirementCode).code;
+        if (retirementPending) {
+          const closed = finishToolImage(invocation.name, retirementCode);
+          retirementCode = closed.code;
+          temporaryRemovable = closed.removeExit === 0;
+        }
       } catch {
         retirementCode ||= 1;
         process.stderr.write("selected image retirement unconfirmed\n");
@@ -1490,6 +1503,13 @@ export async function selectedImageResult(
         retirementCode ||= 1;
         process.stderr.write("selected image private environment removal failed\n");
       }
+      if (temporaryRemovable && invocation.nodeTemp)
+        try {
+          rmSync(invocation.nodeTemp, { recursive: true });
+        } catch {
+          retirementCode ||= 1;
+          process.stderr.write("selected image private node temporary removal failed\n");
+        }
     }
     try {
       if (options.log && existsSync(options.log)) chmodSync(options.log, 0o600);
