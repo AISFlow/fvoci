@@ -59,7 +59,7 @@ import {
   type Manifest,
 } from "./ui-record.ts";
 import { awaitListening, portClosed, publishStartDiagnostic, requireSetup } from "./ui-server.ts";
-import { SERVER_BUDGET } from "./ui-start-diagnostic.ts";
+import { SERVER_BUDGET, type StartAllocation } from "./ui-start-diagnostic.ts";
 
 const FIXTURE_KEYS = [
   "FVOCI_LIBSQL_URL",
@@ -245,6 +245,7 @@ export async function start(
   directory: string,
   expectedSetup = false,
   clock: () => number = now,
+  allocation: StartAllocation = "unknown",
 ): Promise<Started> {
   if (executionMode() === "orca-local")
     return localServerStart(scope, manifest, environment, directory, expectedSetup);
@@ -295,7 +296,7 @@ export async function start(
       child !== undefined &&
       started !== undefined &&
       deadline !== undefined
-        ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock)
+        ? publishStartDiagnostic(scope, child, logpath, started, deadline, clock, allocation)
         : null;
     const cleanup: string[] = [];
     try {

@@ -797,7 +797,16 @@ test.each(
               }
             : baseline.dataset,
         ),
-      start: (_scope, _manifest, _env, path) => {
+      start: (_scope, _manifest, _env, path, _setup, _clock, allocation) => {
+        expect(allocation).toBe(
+          consumer === "restore"
+            ? "restore-source"
+            : consumer === "auth"
+              ? "auth-on"
+              : descriptors.length === 0
+                ? "on"
+                : "restart",
+        );
         const log = openSync(join(path, "server.private.log"), "wx", 0o600);
         descriptors.push(log);
         return Promise.resolve({
