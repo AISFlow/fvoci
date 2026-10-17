@@ -264,7 +264,7 @@ if(mode==="permissions")console.log("1000,"+process.getgid?.());`,
 const fs=require("node:fs"),a=process.argv.slice(2),e=process.env;
 if(a[0]==="pull"){}
 else if(a[0]==="info")console.log("linux amd64");
-else if(a[0]==="image"&&a[1]==="inspect")console.log(a[3]==="{{json .Config.Env}}"?JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]):"sha256:"+"b".repeat(64)+" linux amd64 "+e.FIXTURE_SOURCE+" "+JSON.stringify([e.FIXTURE_PIN]));
+else if(a[0]==="image"&&a[1]==="inspect")console.log(a[3]==="{{json .Config.Env}}"?JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]):"sha256:"+"b".repeat(64)+" linux amd64 "+e.FIXTURE_IMAGE_SOURCE+" "+JSON.stringify([e.FIXTURE_PIN]));
 else if(a[0]==="inspect")console.log("false "+(e.FIXTURE_MODE===e.FIXTURE_LAST_PHASE+"-fail"?19:0)+" false");
 else if(a[0]==="rm"){}
 else if(a[0]==="cp"){fs.mkdirSync(a[2]+"/chromium-1248/chrome-linux64",{recursive:true});fs.writeFileSync(a[2]+"/chromium-1248/chrome-linux64/deb.deps","owned");}
@@ -280,6 +280,17 @@ if(a[0]==="run"){
 `,
     );
     chmodSync(join(bin, "docker"), 0o755);
+    // The fake image qualifies fixed publication metadata; only this recipe-input
+    // comparison is modeled, while grant HEAD/tree/dirty checks use real Git.
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/bash\nif [[ "$1" == diff && "$2" == --quiet && "$3" == "' +
+        CI_WEB_IMAGE_SOURCE +
+        '" && "$4" == "' +
+        source +
+        '" && "$5" == -- ]]; then exit 0; fi\nexec /usr/bin/git "$@"\n',
+      { mode: 0o755 },
+    );
     const preload = join(base, "disk.ts");
     writeFileSync(
       preload,
@@ -334,6 +345,7 @@ if(a[0]==="run"){
       FIXTURE_MODE: mode,
       FIXTURE_CALLS: calls,
       FIXTURE_SOURCE: source,
+      FIXTURE_IMAGE_SOURCE: CI_WEB_IMAGE_SOURCE,
       FIXTURE_PIN: CI_WEB_IMAGE,
       FIXTURE_GRANT: allocation,
       FIXTURE_GRANT_SHA: grantSha,

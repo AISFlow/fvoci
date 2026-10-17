@@ -758,7 +758,7 @@ export function admittedBrowser(
   assert.equal(
     receipt.source,
     process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
-      ? localAllocation("run").source
+      ? localAllocation(process.env.FVOCI_LOCAL_PREPARATION_SHA256 ? "run" : "permissions").source
       : env("GITHUB_SHA"),
   );
   const directory = join(output, "browser");

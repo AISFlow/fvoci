@@ -1157,27 +1157,30 @@ export async function selectedHost(
     "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB" +
     (selectedImageHost() ? "," + SELECTED_IMAGE_ENV.join(",") : "");
   const actorEnvironment = local ? runtimeAllocationEnvironment(local) : {};
-  const runtime = (mode: string, browser = false) => [
-    "sudo",
-    "--preserve-env=" +
-      preserved +
-      (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
-      (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
-    "setpriv",
-    "--reuid=1000",
-    "--regid=1000",
-    "--groups=" + groups,
-    ...(local
-      ? ["env", ...Object.entries(actorEnvironment).map(([key, value]) => key + "=" + value)]
-      : []),
-    ...(mode === "owner-return" ? [] : ["env", "TMPDIR=" + join(output, "tmp")]),
-    process.execPath,
-    cli,
-    mode,
-    "--output",
-    output,
-    ...(mode === "config-list" ? [] : laneArgs),
-  ];
+  const runtime = (mode: string, browser = false) => {
+    if (local && mode !== "owner-return") localAllocation("permissions");
+    return [
+      "sudo",
+      "--preserve-env=" +
+        preserved +
+        (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
+        (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--groups=" + groups,
+      ...(local
+        ? ["env", ...Object.entries(actorEnvironment).map(([key, value]) => key + "=" + value)]
+        : []),
+      ...(mode === "owner-return" ? [] : ["env", "TMPDIR=" + join(output, "tmp")]),
+      process.execPath,
+      cli,
+      mode,
+      "--output",
+      output,
+      ...(mode === "config-list" ? [] : laneArgs),
+    ];
+  };
 
   let config = "not-run",
     launcher = "not-run",
