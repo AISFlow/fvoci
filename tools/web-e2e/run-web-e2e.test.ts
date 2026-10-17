@@ -1086,7 +1086,7 @@ const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STA
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.supplementary=a.flatMap((arg,index)=>arg==="--group-add"?[a[index+1]]:[]);row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
 if((a[0]==="run"||a[0]==="create")&&name.startsWith("fvoci-selected-tool-")){const mount=a.find(x=>x.startsWith("type=bind,source=")&&x.endsWith(",target=/tmp"));row.nodeTemp=mount?.slice("type=bind,source=".length).split(",target=")[0];const facts=fs.lstatSync(row.nodeTemp);row.privateNodeTemp=row.nodeTemp.startsWith("/var/tmp/fvoci-selected-tool.")&&!facts.isSymbolicLink()&&facts.uid===process.getuid()&&(facts.mode&0o777)===0o700;row.privateBunCache=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8").split("\n").includes("BUN_INSTALL_CACHE_DIR=/tmp/fvoci-bun-install-cache");if(a[0]==="run"){const shim=row.nodeTemp+"/bun-node-fixture";fs.mkdirSync(shim);for(const executable of["node","bun"])fs.symlinkSync(process.execPath,shim+"/"+executable);const cache=row.nodeTemp+"/fvoci-bun-install-cache";fs.mkdirSync(cache);fs.mkdirSync(cache+"/package-bytes");fs.symlinkSync("package-bytes",cache+"/1.0.0@@@1");}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
@@ -1292,6 +1292,7 @@ else process.exit(42);
             privateBunCache?: boolean;
             nodeTemp?: string;
             user?: string;
+            supplementary?: string[];
           },
       );
     if (selected)
@@ -1365,11 +1366,8 @@ else process.exit(42);
       expect(runs).toHaveLength(copyFailure ? 0 : 1);
       for (const row of rows.filter((row) => row.op[0] === "create" || row.op[0] === "run")) {
         expect(row.safe).toBe(true);
-        const supplementary = row.op.flatMap((arg, index) =>
-          arg === "--group-add" ? [row.op[index + 1]] : [],
-        );
-        expect(supplementary).not.toContain(String(process.getgid?.()));
-        expect(supplementary).toEqual(
+        expect(row.supplementary).not.toContain(String(process.getgid?.()));
+        expect(row.supplementary).toEqual(
           (process.getuid?.() === 1000 ? (process.getgroups?.() ?? []) : [])
             .filter((group) => group !== process.getgid?.())
             .map(String),
