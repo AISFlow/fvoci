@@ -939,6 +939,19 @@ describe("lease order", () => {
     "tools/web-e2e/smtp-sink.ts",
   ];
   const sink = "tools/web-e2e/smtp-sink.ts";
+  const imageModules = [
+    "tools/selected-backend-ci/handoff.ts",
+    "tools/selected-backend-ci/runtime-access-check.ts",
+    "tools/web-e2e/run-web-e2e.ts",
+    "tools/web-e2e/groups.ts",
+    "tools/web-e2e/database-urls.ts",
+    "tools/web-e2e/network-settle.ts",
+    "scripts/run-web-e2e.sh",
+    "scripts/start-test-postgres.sh",
+    "scripts/start-test-meili.sh",
+    "scripts/web-e2e-inner.sh",
+    "scripts/web-e2e-run-group.sh",
+  ];
   function closure(entries: string[]): string[] {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
     const seen = new Set<string>(),
@@ -949,6 +962,9 @@ describe("lease order", () => {
       for (const item of transpiler.scanImports(readFileSync(file, "utf8").replace(/^#!.*/, "")))
         if (!/^(?:node:|bun$|bun:)/.test(item.path)) {
           expect(item.kind).toBe("import-statement");
+          // Installed tar bytes are included in the existing complete physical
+          // dependency input collector; this registry binds repository modules.
+          if (item.path === "tar") continue;
           queue.push(Bun.resolveSync(item.path, dirname(file)));
         }
     }
@@ -959,16 +975,204 @@ describe("lease order", () => {
     expect(runner.filter((name) => name.includes("/drivers/"))).toEqual([]);
     expect(runner).toEqual(
       registeredModules
-        .filter((name) => !name.includes("/drivers/") && !laneOnly.includes(name))
+        .filter(
+          (name) =>
+            !name.includes("/drivers/") && !laneOnly.includes(name) && !imageModules.includes(name),
+        )
         .sort(),
     );
   });
+  test("the image entries' actual repository import closures are lease-bound", () => {
+    for (const name of [
+      "tools/web-e2e/run-web-e2e.ts",
+      "tools/selected-backend-ci/handoff.ts",
+      "tools/selected-backend-ci/runtime-access-check.ts",
+    ])
+      for (const imported of closure([name]))
+        expect<readonly string[]>(registeredModules).toContain(imported);
+  });
   test("the registry is exactly the runner and lane driver closures with the spawned sink", () => {
     const lanes = closure(registeredModules.filter((name) => name.includes("/drivers/")));
-    expect([...new Set([...closure([entry]), ...lanes, sink])].sort()).toEqual(
+    expect([...new Set([...closure([entry]), ...lanes, sink, ...imageModules])].sort()).toEqual(
       [...registeredModules].sort(),
     );
     expect(laneOnly.filter((name) => name !== sink && !lanes.includes(name))).toEqual([]);
+  });
+  test("another actual nonroot tuple admits only its grant and resets only its fresh cohort", () => {
+    const base = realpathSync(directory()),
+      checkout = join(base, "checkout"),
+      cohort = join(base, "cohort"),
+      output = join(cohort, "selected"),
+      actorUid = uid() + 1,
+      actorGid = gid() + 1;
+    chmodSync(base, 0o755);
+    mkdirSync(cohort, { mode: 0o700 });
+    mkdirSync(output, { mode: 0o700 });
+    for (const name of registeredModules) {
+      mkdirSync(dirname(join(checkout, name)), { recursive: true });
+      copyFileSync(join(root, name), join(checkout, name));
+    }
+    mkdirSync(join(checkout, "crates/collab-engine"), { recursive: true });
+    mkdirSync(join(checkout, "apps/web"), { recursive: true });
+    const git = (...args: string[]) => {
+      const value = spawnSync(
+        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", ...args],
+        { cwd: checkout, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(value.exitCode).toBe(0);
+      return value.stdout.toString().trim();
+    };
+    git("init", "-q");
+    git("add", ".");
+    git("commit", "-qm", "fixture", "--no-verify", "--no-gpg-sign");
+    const path = join(cohort, "local.json");
+    const grant: LocalGrant = {
+      schema: 1,
+      status: "GRANTED",
+      executionMode: "orca-local",
+      exclusiveLocalBatch: true,
+      currentDispatchConfirmed: true,
+      owner: "orca:fixture",
+      runId: "run_ab12",
+      dispatchId: "ctx_cd34",
+      taskId: "task_ef56",
+      workerTerminal: "fixture-worker",
+      rootTerminal: "fixture-root",
+      worktree: checkout,
+      uid: actorUid,
+      gid: actorGid,
+      source: git("rev-parse", "HEAD"),
+      tree: git("rev-parse", "HEAD^{tree}"),
+      allowedModes: ["prepare", "consume", "run"],
+      expiresUtc: new Date(Date.now() + 3600000).toISOString(),
+      outputRoot: output,
+      registrationHashes: Object.fromEntries(
+        registeredModules.map((name) => [name, sha(join(checkout, name))]),
+      ),
+      stageCommands: {},
+    };
+    const bun = join(base, "bun");
+    copyFileSync(process.execPath, bun);
+    chmodSync(bun, 0o755);
+    const probe = join(base, "probe.ts");
+    writeFileSync(
+      probe,
+      `import {localAllocation,selectedActor} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts"))};
+import {localSelectedFresh} from ${JSON.stringify(join(checkout, "tools/web-e2e/run-web-e2e.ts"))};
+import {mkdirSync,writeFileSync,readFileSync,existsSync,renameSync} from "node:fs";
+const mode=process.argv[2],root=${JSON.stringify(checkout)},out=${JSON.stringify(output)},temp=${JSON.stringify(cohort)};
+try {
+  const grant=localAllocation("prepare");
+  if(mode==="access")localAllocation("access");
+  if(mode==="cache")mkdirSync(root+"/target");
+  const reset=localSelectedFresh(root,out,temp);
+  for(const prefix of [out,root+"/target",root+"/apps/web/dist",root+"/crates/collab-engine/target",temp+"/fvoci-sqlite"])writeFileSync(prefix+"/generated","owned");
+  writeFileSync(temp+"/keep","outside reset");
+  if(mode==="replaced"){renameSync(root+"/target",root+"/retained");mkdirSync(root+"/target");}
+  reset();
+  if(existsSync(out+"/generated")||existsSync(root+"/target/generated")||readFileSync(temp+"/keep","utf8")!=="outside reset"||JSON.stringify(selectedActor())!==JSON.stringify([grant.uid,grant.gid]))throw Error("bad reset");
+  console.log("admitted-owned-reset");
+}catch {console.log("refused");process.exitCode=1;}`,
+    );
+    const execute = (mode: string, mutate: (value: LocalGrant) => void = () => undefined) => {
+      const current = structuredClone(grant);
+      mutate(current);
+      writeFileSync(path, JSON.stringify(current), { mode: 0o600 });
+      const allocationSha256 = sha(path);
+      expect(
+        spawnSync(["sudo", "-n", "chown", "-R", `${String(actorUid)}:${String(actorGid)}`, base])
+          .exitCode,
+      ).toBe(0);
+      return spawnSync(
+        [
+          "sudo",
+          "-n",
+          "setpriv",
+          `--reuid=${String(actorUid)}`,
+          `--regid=${String(actorGid)}`,
+          "--clear-groups",
+          "--",
+          bun,
+          "--no-env-file",
+          probe,
+          mode,
+        ],
+        {
+          cwd: checkout,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: cohort,
+            TMPDIR: base,
+            FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+            FVOCI_SELECTED_LOCAL_ALLOCATION: path,
+            FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: allocationSha256,
+            FVOCI_CI_OWNER: "orca:fixture",
+            FVOCI_ROOT_RUN_OWNER: "orca:fixture",
+            FVOCI_LOCAL_RUN_ID: grant.runId,
+            FVOCI_LOCAL_DISPATCH_ID: grant.dispatchId,
+            FVOCI_LOCAL_TASK_ID: grant.taskId,
+            ORCA_TERMINAL_HANDLE: grant.workerTerminal,
+            FVOCI_LOCAL_ROOT_TERMINAL: grant.rootTerminal,
+            FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+          },
+        },
+      );
+    };
+    const restore = () =>
+      expect(
+        spawnSync(["sudo", "-n", "chown", "-R", `${String(uid())}:${String(gid())}`, base])
+          .exitCode,
+      ).toBe(0);
+    try {
+      for (const mutate of [
+        (value: LocalGrant) => {
+          value.uid = uid();
+        },
+        (value: LocalGrant) => {
+          value.gid = gid();
+        },
+        (value: LocalGrant) => {
+          value.expiresUtc = "2000-01-01T00:00:00Z";
+        },
+      ]) {
+        const refused = execute("normal", mutate);
+        expect(refused.exitCode).toBe(1);
+        expect(refused.stdout.toString()).toBe("refused\n");
+        restore();
+      }
+      const missing = execute("access");
+      expect(missing.exitCode).toBe(1);
+      restore();
+      const cache = execute("cache");
+      expect(cache.exitCode).toBe(1);
+      restore();
+      expect(existsSync(join(checkout, "target"))).toBe(true);
+      rmSync(join(checkout, "target"), { recursive: true });
+      const accepted = execute("normal");
+      expect(accepted.exitCode).toBe(0);
+      expect(accepted.stdout.toString()).toBe("admitted-owned-reset\n");
+      restore();
+      // A replaced generated directory must not authorize deletion of its replacement.
+      for (const generated of [
+        output,
+        join(checkout, "target"),
+        join(checkout, "apps/web/dist"),
+        join(checkout, "crates/collab-engine/target"),
+        join(cohort, "fvoci-sqlite"),
+      ]) {
+        rmSync(generated, { recursive: true });
+      }
+      mkdirSync(output, { mode: 0o700 });
+      const changed = execute("replaced");
+      expect(changed.exitCode).toBe(1);
+      restore();
+      expect(readFileSync(join(checkout, "retained/generated"), "utf8")).toBe("owned");
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(grant);
+    } finally {
+      restore();
+    }
   });
   for (const edited of [
     "tools/selected-backend-ci/drivers/common.ts",
@@ -989,7 +1193,7 @@ describe("lease order", () => {
           copyRunnerModules(join(checkout, "tools/selected-backend-ci"));
           mkdirSync(join(checkout, "scripts"));
           copyFileSync(join(root, entry), join(checkout, entry));
-          for (const name of laneOnly) {
+          for (const name of [...laneOnly, ...imageModules]) {
             mkdirSync(dirname(join(checkout, name)), { recursive: true });
             copyFileSync(join(root, name), join(checkout, name));
           }

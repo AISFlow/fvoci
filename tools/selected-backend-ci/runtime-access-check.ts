@@ -5,9 +5,11 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import process from "node:process";
 import { accessible, digest, gid, groups, uid } from "./io.ts";
+import { selectedActor } from "./admission.ts";
 
 export function preflight(request: { groups: number[]; files: Record<string, number> }) {
-  assert.ok(uid() === 1000 && gid() === 1000 && deepEquals(groups(), request.groups));
+  const actor = selectedActor("access");
+  assert.ok(uid() === actor[0] && gid() === actor[1] && deepEquals(groups(), request.groups));
   const missing = Object.entries(request.files)
     .filter(([p, mask]) => !accessible(p, mask))
     .map(([p]) => p);

@@ -30,6 +30,7 @@ import {
   browserInventory,
   identity,
   localAllocation,
+  selectedActor,
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
@@ -331,7 +332,11 @@ export function prepareBrowser(output: string, chromium: string): string {
   );
   const copied = join(destination, relative(cache, chromium));
   write(join(output, "runtime-browser-stage.json"), {
-    source: env("GITHUB_SHA"),
+    source:
+      process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+        ? localAllocation(process.env.FVOCI_WEB_BUILD_PHASE === "consume" ? "consume" : "prepare")
+            .source
+        : env("GITHUB_SHA"),
     cache: destination,
     chromium: copied,
     files: before,
@@ -368,14 +373,19 @@ export async function runtimePermissions(
 ): Promise<void> {
   // The docker socket group joins the actor's groups; group 0 is never granted.
   assert.ok(dockerGid > 0, "root group is never granted as the docker group");
-  assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
+  const local =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("permissions")
+      : undefined;
+  const actor = local ? [local.uid, local.gid] : [1000, 1000];
   const owner = boundary.identity("run", output);
-  assertRuntimeJob();
+  if (!local) assertRuntimeJob();
   const runnerUid = uid(),
     runnerGid = gid(),
     temp = realpathSync(env("RUNNER_TEMP"));
   assert.ok(
-    output === join(temp, "fvoci-selected-current") && sqliteParent === join(temp, "fvoci-sqlite"),
+    output === (local?.outputRoot ?? join(temp, "fvoci-selected-current")) &&
+      sqliteParent === join(temp, "fvoci-sqlite"),
   );
   for (const prefix of [output, sqliteParent]) {
     assert.ok(
@@ -405,7 +415,7 @@ export async function runtimePermissions(
     assert.equal(env("SQLITE3_LIB_DIR"), "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib");
   else assert.ok(below(realpathSync(env("SQLITE3_LIB_DIR")), sqliteParent));
   const before = read(join(output, "before.json")) as Inputs;
-  assert.equal(before.head, env("GITHUB_SHA"));
+  assert.equal(before.head, local?.source ?? env("GITHUB_SHA"));
   assert.ok(deepEquals(read(join(output, "after.json")), before));
   const bun = realpathSync(tool("bun")),
     chromium = boundary.browser(output, bun);
@@ -440,7 +450,9 @@ export async function runtimePermissions(
   // Docker includes the existing primary GID in getgroups(); setpriv does
   // not unless requested. Keep both actual actors and the strict preflight
   // on the same set without granting any access beyond primary GID 1000.
-  const allowedGroups = new Set([dockerGid, ...(selectedImageHost() ? [1000] : [])]),
+  const allowedGroups = new Set(
+      local ? groups() : [dockerGid, ...(selectedImageHost() ? [1000] : [])],
+    ),
     needed: Record<string, unknown> = {};
   for (const [path, mask] of Object.entries(hostPaths)) {
     // The same complete set is checked in the image below. Host group grants
@@ -451,9 +463,9 @@ export async function runtimePermissions(
     ] as [string, number][]) {
       const facts = statSync(entry),
         permitted =
-          facts.uid === 1000
+          facts.uid === actor[0]
             ? facts.mode >> 6
-            : facts.gid === 1000 || facts.gid === dockerGid
+            : facts.gid === actor[1] || facts.gid === dockerGid
               ? facts.mode >> 3
               : facts.mode;
       if (
@@ -481,12 +493,11 @@ export async function runtimePermissions(
   // controller executable; image mount ancestry cannot prove host traversal.
   const result = spawnSync(
     [
-      "sudo",
-      "setpriv",
-      "--reuid=1000",
-      "--regid=1000",
-      "--groups=" + groupList.join(","),
+      ...(local
+        ? []
+        : ["sudo", "setpriv", "--reuid=1000", "--regid=1000", "--groups=" + groupList.join(",")]),
       selectedImageHost() ? process.execPath : bun,
+      "--no-env-file",
       join(import.meta.dir, "runtime-access-check.ts"),
     ],
     {
@@ -508,8 +519,8 @@ export async function runtimePermissions(
     owner,
     runner_uid: runnerUid,
     runner_gid: runnerGid,
-    runtime_uid: 1000,
-    runtime_gid: 1000,
+    runtime_uid: actor[0],
+    runtime_gid: actor[1],
     groups: groupList,
     required_group_paths: Object.values(needed).slice(0, 16),
     required_group_path_count: Object.keys(needed).length,
@@ -616,7 +627,7 @@ export async function executeDriver(
 export async function run(
   output: string,
   boundary: RunBoundary = runBoundary,
-  expected: readonly [number, number] = [1000, 1000],
+  expected: readonly [number, number] = selectedActor(),
   lane?: string,
 ): Promise<number> {
   assert.notEqual(process.env.GITHUB_JOB, "collaboration-build");
@@ -898,7 +909,7 @@ export async function run(
 
 export function ownershipReturn(
   output: string,
-  expected: readonly [number, number] = [1000, 1000],
+  expected: readonly [number, number] = selectedActor("owner-return"),
   lane?: string,
   admit: typeof identity = identity,
 ): void {
@@ -913,14 +924,17 @@ export function ownershipReturn(
   const lanes: Record<string, unknown>[] = [];
   diagnostic.lanes = lanes;
   try {
-    assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
+    const local =
+      process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+        ? localAllocation("owner-return")
+        : undefined;
     assertHandoffActor(output, expected);
     const owner = admit("run", output);
     diagnostic.phase = "current-source";
-    assertRuntimeJob();
+    if (!local) assertRuntimeJob();
     const requested = requestedRuns(lane);
     const before = read(join(output, "before.json")) as Inputs;
-    assert.equal(before.head, env("GITHUB_SHA"));
+    assert.equal(before.head, local?.source ?? env("GITHUB_SHA"));
     diagnostic.source = before.head;
     diagnostic.tree = /^[0-9a-f]{40}$/.test(before.tree) ? before.tree : null;
     const runtime = join(output, "runtime"),
@@ -1070,6 +1084,17 @@ export const CI_WEB_SDK_SHA256 = {
 // Only these fixed preparation, admission and browser operations enter the
 // existing tool image. There is deliberately no arbitrary command operation.
 export const SELECTED_IMAGE_ENV = [
+  "FVOCI_SELECTED_EXECUTION_MODE",
+  "FVOCI_SELECTED_LOCAL_ALLOCATION",
+  "FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256",
+  "FVOCI_CI_OWNER",
+  "FVOCI_ROOT_RUN_OWNER",
+  "FVOCI_CI_SELECTED_RUNS",
+  "FVOCI_LOCAL_RUN_ID",
+  "FVOCI_LOCAL_DISPATCH_ID",
+  "FVOCI_LOCAL_TASK_ID",
+  "ORCA_TERMINAL_HANDLE",
+  "FVOCI_LOCAL_ROOT_TERMINAL",
   "FVOCI_WEB_CONTAINER_IMAGE",
   "FVOCI_WEB_CONTAINER_SDK_SHA256",
   "FVOCI_WEB_CONTAINER_IMAGE_SOURCE",
@@ -1121,6 +1146,10 @@ function selectedImageInvocation(
 ): { args: string[]; name: string; envFile: string; nodeTemp?: string } {
   if (!selectedImageHost() || process.platform !== "linux" || process.arch !== "x64")
     fail("selected image operations require the native Linux x64 host controller");
+  const local =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation(operation)
+      : undefined;
   const architecture = containerArchitecture(
     process.platform,
     process.arch,
@@ -1139,10 +1168,10 @@ function selectedImageInvocation(
   );
   selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
   const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
-    output = join(temp, "fvoci-selected-current"),
+    output = local?.outputRoot ?? join(temp, "fvoci-selected-current"),
     owner = process.getuid?.(),
-    uid = actor ? 1000 : owner,
-    gid = actor ? 1000 : process.getgid?.();
+    uid = actor ? (local?.uid ?? 1000) : owner,
+    gid = actor ? (local?.gid ?? 1000) : process.getgid?.();
   if (
     !uid ||
     !gid ||
@@ -1273,11 +1302,14 @@ function selectedImageInvocation(
     operation === "browser" ? join(root, "apps/web") : root,
     "--interactive",
   ];
-  for (const group of actor?.groups ?? (uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
+  for (const group of actor?.groups ??
+    (local || uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
     if (group === 0) fail("selected image refuses privileged supplementary groups");
     args.push("--group-add", String(group));
   }
   const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
+  const allocation = local ? env("FVOCI_SELECTED_LOCAL_ALLOCATION") : undefined;
+  if (allocation) mounts.push(allocation);
   if (["prepare", "consume"].includes(operation)) {
     if (process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff"))
       fail("selected packet canonical path required");
@@ -1296,6 +1328,7 @@ function selectedImageInvocation(
     if (realpathSync(path) !== path || lstatSync(path).isSymbolicLink())
       fail("selected bind must be physical");
     const readonly =
+      path === allocation ||
       (path === root && !["prepare", "consume"].includes(operation)) ||
       (path === process.env.FVOCI_WEB_BUILD_HANDOFF && operation === "consume") ||
       (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
@@ -1308,7 +1341,7 @@ function selectedImageInvocation(
   // permits that actor's private allocation without widening parent access.
   const nodeTemp = actor ? undefined : mkdtempSync("/var/tmp/fvoci-selected-tool.");
   if (nodeTemp) args.push("--mount", `type=bind,source=${nodeTemp},target=/tmp`);
-  else args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
+  else args.push("--tmpfs", `/tmp:rw,mode=0700,uid=${String(uid)},gid=${String(gid)}`);
   args.push(
     sdk.image,
     ...(operation === "browser"

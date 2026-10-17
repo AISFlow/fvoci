@@ -18,7 +18,7 @@ import {
 import { dirname, isAbsolute, join, relative } from "node:path";
 import process from "node:process";
 import { selectedImageHost } from "../runtime.ts";
-import { localAllocation } from "../admission.ts";
+import { localAllocation, selectedActor } from "../admission.ts";
 import { env, jsonInteger, read, root, sha } from "../io.ts";
 import type { Browser, Inputs } from "../types.ts";
 import {
@@ -173,7 +173,7 @@ export interface Seam {
   portClosed: (port: number) => Promise<boolean>;
   // One JSON line on this process's stdout.
   emit: (line: string) => void;
-  // The running actor's uid and gid; the restart refuses anything but 1000:1000.
+  // The actual admitted host actor; product-container ownership is separate.
   actor: () => readonly [number | undefined, number | undefined];
 }
 
@@ -280,7 +280,8 @@ export async function restartSameApp(g: RestartContext, seam: Seam): Promise<Rec
     selected = g.browserEnv.FVOCI_E2E_SELECTED_BACKEND;
   const owner = env("FVOCI_CI_OWNER");
   const [actorUid, actorGid] = seam.actor();
-  assert.ok(actorUid === 1000 && actorGid === 1000);
+  const actor = selectedActor();
+  assert.ok(actorUid === actor[0] && actorGid === actor[1]);
   assert.ok(process.env.FVOCI_ROOT_RUN_OWNER === owner);
   assert.ok((selected === "postgres" || selected === "sqlite") && g.code === 0);
   assert.ok(

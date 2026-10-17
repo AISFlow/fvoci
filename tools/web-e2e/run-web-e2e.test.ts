@@ -51,6 +51,8 @@ import {
 } from "./run-web-e2e.ts";
 import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
 import { checkedOutput } from "../selected-backend-ci/runtime.ts";
+import { registeredModules } from "../selected-backend-ci/admission.ts";
+import type { LocalGrant } from "../selected-backend-ci/types.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
@@ -137,6 +139,265 @@ test("pending failure survives a later selected admission exception while retire
   expect(original).toBe(failure);
   expect(attempts).toBe(2);
 });
+
+for (const mode of [
+  "normal",
+  "pending-fail",
+  "consume-fail",
+  "prepare-fail",
+  "preexisting",
+  "expired",
+])
+  test("local selected caller with real other-UID grant and modeled image: " + mode, async () => {
+    const { root } = committedCheckout(),
+      base = tempDir(),
+      bin = join(base, "bin"),
+      temp = join(base, "cohort"),
+      output = join(temp, "selected"),
+      calls = join(base, "calls"),
+      actorUid = (process.getuid?.() ?? 0) + 1,
+      actorGid = (process.getgid?.() ?? 0) + 1;
+    mkdirSync(bin);
+    mkdirSync(temp, { mode: 0o700 });
+    mkdirSync(output, { mode: 0o700 });
+    const original = join(import.meta.dir, "../..");
+    for (const name of registeredModules) {
+      mkdirSync(join(root, name, ".."), { recursive: true });
+      fs.copyFileSync(join(original, name), join(root, name));
+    }
+    for (const path of ["crates/collab-engine", "apps/web"])
+      mkdirSync(join(root, path), { recursive: true });
+    const bun = join(bin, "bun");
+    fs.copyFileSync(process.execPath, bun);
+    chmodSync(bun, 0o755);
+    for (const name of ["start-test-postgres.sh", "start-test-meili.sh"])
+      writeFileSync(join(root, "scripts", name), '#!/bin/bash\nexec "$@"\n', { mode: 0o755 });
+    writeFileSync(
+      join(root, "scripts/run-selected-backend-e2e.ts"),
+      `import fs from "node:fs";
+const mode=process.argv[2];fs.appendFileSync(process.env.FIXTURE_CALLS!,JSON.stringify({host:mode,uid:process.getuid?.(),gid:process.getgid?.(),lane:process.argv.includes("--lane")})+"\\n");
+if(mode==="permissions")console.log((process.getgroups?.()??[]).sort((a,b)=>a-b).join(","));`,
+    );
+    writeFileSync(join(bin, "stat"), '#!/bin/sh\nprintf "986\\n"\n', { mode: 0o755 });
+    const sha = checkedOutput(
+      ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "add", "."],
+      root,
+    );
+    expect(sha).toBe("");
+    checkedOutput(
+      [
+        "git",
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@invalid",
+        "commit",
+        "-qm",
+        "local fixture",
+        "--no-verify",
+        "--no-gpg-sign",
+      ],
+      root,
+    );
+    const source = checkedOutput(["git", "rev-parse", "HEAD"], root),
+      tree = checkedOutput(["git", "rev-parse", "HEAD^{tree}"], root);
+    const allocation = join(temp, "allocation.json");
+    const grant: LocalGrant = {
+      schema: 1,
+      status: "GRANTED",
+      executionMode: "orca-local",
+      exclusiveLocalBatch: true,
+      currentDispatchConfirmed: true,
+      owner: "orca:fixture",
+      runId: "run_ab12",
+      dispatchId: "ctx_cd34",
+      taskId: "task_ef56",
+      workerTerminal: "fixture-worker",
+      rootTerminal: "fixture-root",
+      worktree: root,
+      uid: actorUid,
+      gid: actorGid,
+      source,
+      tree,
+      outputRoot: output,
+      allowedModes: [
+        "prepare",
+        "consume",
+        "pending",
+        "permissions",
+        "config-list",
+        "run",
+        "owner-return",
+      ],
+      expiresUtc:
+        mode === "expired" ? "2000-01-01T00:00:00Z" : new Date(Date.now() + 3600000).toISOString(),
+      registrationHashes: Object.fromEntries(
+        registeredModules.map((name) => [
+          name,
+          new Bun.CryptoHasher("sha256").update(readFileSync(join(root, name))).digest("hex"),
+        ]),
+      ),
+      stageCommands: {},
+    };
+    const grantBytes = JSON.stringify(grant),
+      grantSha = new Bun.CryptoHasher("sha256").update(grantBytes).digest("hex");
+    writeFileSync(allocation, grantBytes, { mode: 0o600 });
+    writeFileSync(calls, "");
+    if (mode === "preexisting") {
+      mkdirSync(join(root, "target"));
+      writeFileSync(join(root, "target/keep"), "existing cache");
+    }
+    writeFileSync(
+      join(bin, "docker"),
+      "#!" +
+        bun +
+        "\n" +
+        String.raw`
+const fs=require("node:fs"),a=process.argv.slice(2),e=process.env;
+if(a[0]==="info")console.log("linux amd64");
+else if(a[0]==="image"&&a[1]==="inspect")console.log(a[3]==="{{json .Config.Env}}"?JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]):"sha256:"+"b".repeat(64)+" linux amd64 "+e.FIXTURE_SOURCE+" "+JSON.stringify([e.FIXTURE_PIN]));
+else if(a[0]==="inspect")console.log("false "+(e.FIXTURE_MODE===e.FIXTURE_LAST_PHASE+"-fail"?19:0)+" false");
+else if(a[0]==="rm"){}
+else if(a[0]==="cp"){fs.mkdirSync(a[2]+"/chromium-1248/chrome-linux64",{recursive:true});fs.writeFileSync(a[2]+"/chromium-1248/chrome-linux64/deb.deps","owned");}
+else if(a[0]==="run"||a[0]==="create"){
+const variables=Object.fromEntries(fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8").trim().split("\n").map(line=>{const at=line.indexOf("=");return[line.slice(0,at),line.slice(at+1)];})),phase=a.at(-1),out=variables.FVOCI_SELECTED_CI_OUTPUT;
+fs.appendFileSync(e.FIXTURE_CALLS,JSON.stringify({image:phase,op:a[0],uid:a[a.indexOf("--user")+1],grant: variables.FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256===e.FIXTURE_GRANT_SHA,readonly:a.includes("type=bind,source="+e.FIXTURE_GRANT+",target="+e.FIXTURE_GRANT+",readonly"),github:Object.keys(variables).some(key=>key==="CI"||key.startsWith("GITHUB_")),socket:a.some(v=>v.includes("docker.sock")),caps:a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")})+"\n");
+if(a[0]==="run"){
+ if(phase==="prepare"){fs.writeFileSync(variables.FVOCI_WEB_BUILD_HANDOFF+"/handoff.json","{}");fs.writeFileSync(out+"/producer-owned","generated");fs.writeFileSync(e.FIXTURE_ROOT+"/target/producer-owned","generated");}
+ if(phase==="consume"&&(fs.existsSync(out+"/producer-owned")||fs.existsSync(e.FIXTURE_ROOT+"/target/producer-owned")))process.exit(42);
+ if(e.FIXTURE_MODE===phase+"-fail")process.exit(19);
+}
+}else process.exit(42);
+`,
+    );
+    chmodSync(join(bin, "docker"), 0o755);
+    const preload = join(base, "disk.ts");
+    writeFileSync(
+      preload,
+      'import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));',
+    );
+    const restore = () =>
+      expect(
+        Bun.spawnSync(
+          [
+            "sudo",
+            "-n",
+            "chown",
+            "-R",
+            `${String(process.getuid?.())}:${String(process.getgid?.())}`,
+            base,
+            root,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        ).exitCode,
+      ).toBe(0);
+    expect(
+      Bun.spawnSync(
+        ["sudo", "-n", "chown", "-R", `${String(actorUid)}:${String(actorGid)}`, base, root],
+        { stdout: "pipe", stderr: "pipe" },
+      ).exitCode,
+    ).toBe(0);
+    let exit: number;
+    try {
+      const child = Bun.spawn(
+        [
+          "sudo",
+          "-n",
+          "setpriv",
+          `--reuid=${String(actorUid)}`,
+          `--regid=${String(actorGid)}`,
+          "--clear-groups",
+          "--",
+          bun,
+          "--no-env-file",
+          "--preload",
+          preload,
+          join(root, "tools/web-e2e/run-web-e2e.ts"),
+          "entry",
+          root,
+          "--with-selected-backends",
+        ],
+        {
+          cwd: root,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            PATH: bin + ":/usr/bin:/bin",
+            HOME: base,
+            TMPDIR: base,
+            DOCKER_HOST: "unix:///fixture/socket",
+            FVOCI_E2E_PENDING: "1",
+            FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+            FVOCI_SELECTED_LOCAL_ALLOCATION: allocation,
+            FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: grantSha,
+            FVOCI_CI_OWNER: grant.owner,
+            FVOCI_ROOT_RUN_OWNER: grant.owner,
+            FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+            FVOCI_LOCAL_RUN_ID: grant.runId,
+            FVOCI_LOCAL_DISPATCH_ID: grant.dispatchId,
+            FVOCI_LOCAL_TASK_ID: grant.taskId,
+            ORCA_TERMINAL_HANDLE: grant.workerTerminal,
+            FVOCI_LOCAL_ROOT_TERMINAL: grant.rootTerminal,
+            FIXTURE_MODE: mode,
+            FIXTURE_CALLS: calls,
+            FIXTURE_SOURCE: source,
+            FIXTURE_PIN: CI_WEB_IMAGE,
+            FIXTURE_GRANT: allocation,
+            FIXTURE_GRANT_SHA: grantSha,
+            FIXTURE_ROOT: root,
+          },
+        },
+      );
+      const result = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      exit = result[0];
+      expect(result[1] + result[2]).not.toContain("unregistered module");
+    } finally {
+      restore();
+    }
+    expect(exit!).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
+    expect(readFileSync(allocation, "utf8")).toBe(grantBytes);
+    const rows = readFileSync(calls, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const work = rows.filter((row) => row.op === "run");
+    expect(work.map((row) => row.image)).toEqual(
+      mode === "expired" || mode === "preexisting"
+        ? []
+        : mode === "prepare-fail"
+          ? ["prepare"]
+          : mode === "consume-fail"
+            ? ["prepare", "consume"]
+            : ["prepare", "consume", "pending"],
+    );
+    for (const row of rows.filter((row) => row.image)) {
+      expect(row).toMatchObject({
+        uid: `${String(actorUid)}:${String(actorGid)}`,
+        grant: true,
+        readonly: true,
+        github: false,
+        socket: false,
+        caps: true,
+      });
+    }
+    const host = rows.filter((row) => row.host);
+    expect(host.map((row) => row.host)).toEqual(
+      mode === "normal" || mode === "pending-fail"
+        ? ["permissions", "config-list", "run", "owner-return"]
+        : [],
+    );
+    for (const row of host)
+      expect(row).toMatchObject({ uid: actorUid, gid: actorGid, lane: false });
+    if (mode === "preexisting")
+      expect(readFileSync(join(root, "target/keep"), "utf8")).toBe("existing cache");
+    if (fs.existsSync(join(output, "tmp")))
+      expect(readdirSync(join(output, "tmp")).filter((name) => name.endsWith(".env"))).toEqual([]);
+  });
 
 function refused(body: () => unknown, message: string | RegExp): void {
   expect(body).toThrow(CheckError);

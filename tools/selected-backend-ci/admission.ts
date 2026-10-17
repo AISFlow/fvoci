@@ -31,7 +31,22 @@ import type {
   Web,
 } from "./types.ts";
 
-const localModes = ["record-before", "stage", "record-after", "run"];
+const localModes = [
+  "record-before",
+  "stage",
+  "record-after",
+  "run",
+  "prepare",
+  "consume",
+  "pending",
+  "inputs",
+  "access",
+  "browser",
+  "permissions",
+  "config-list",
+  "owner-return",
+  "handoff",
+];
 export function allocationExpiry(value: string): number {
   assert.ok(
     /^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/.test(
@@ -53,7 +68,7 @@ export function allocationExpiry(value: string): number {
 }
 export function localAllocation(
   mode: string,
-  expected: readonly [number, number] = [1000, 1000],
+  expected: readonly [number, number] = [uid(), gid()],
 ): LocalGrant {
   const grant = localIdentity(expected);
   assert.ok(
@@ -101,6 +116,7 @@ function localIdentity(expected: readonly [number, number]): LocalGrant {
   assert.equal(uid(), expected[0], "selected runtime actor must be the fixed handoff uid and gid");
   assert.equal(gid(), expected[1], "selected runtime actor must be the fixed handoff uid and gid");
   assert.notEqual(grant.uid, 0, "refusing root grant");
+  assert.notEqual(grant.gid, 0, "refusing root grant group");
   assert.equal(grant.uid, uid());
   assert.equal(grant.gid, gid());
   assert.ok(/^[0-9a-f]{40}$/.test(grant.source) && /^[0-9a-f]{40}$/.test(grant.tree));
@@ -139,6 +155,17 @@ export const registeredModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/types.ts",
+  "tools/selected-backend-ci/handoff.ts",
+  "tools/selected-backend-ci/runtime-access-check.ts",
+  "tools/web-e2e/run-web-e2e.ts",
+  "tools/web-e2e/groups.ts",
+  "tools/web-e2e/database-urls.ts",
+  "tools/web-e2e/network-settle.ts",
+  "scripts/run-web-e2e.sh",
+  "scripts/start-test-postgres.sh",
+  "scripts/start-test-meili.sh",
+  "scripts/web-e2e-inner.sh",
+  "scripts/web-e2e-run-group.sh",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/equal-work.ts",
   "tools/selected-backend-ci/drivers/equal-work-policy.ts",
@@ -158,6 +185,14 @@ export const registeredModules = [
   "tools/web-e2e/smtp-sink.ts",
   "apps/web/e2e-pending/auth-session-contract.ts",
 ] as const;
+
+// CI retains its distinct handoff actor. Local preparation and runtime use
+// the actual tuple in the immutable allocation; this is not cross-UID isolation.
+export function selectedActor(mode = "run"): readonly [number, number] {
+  if (process.env.FVOCI_SELECTED_EXECUTION_MODE !== "orca-local") return [1000, 1000];
+  const grant = localAllocation(mode);
+  return [grant.uid, grant.gid];
+}
 
 const consumerCommonModules = [
   "tools/selected-backend-ci/admission.ts",
@@ -600,10 +635,15 @@ export interface BrowserStage {
 }
 export function admittedBrowser(
   output: string,
-  owner: readonly [number, number] = [1000, 1000],
+  owner: readonly [number, number] = selectedActor(),
 ): string {
   const receipt = read(join(output, "runtime-browser-stage.json")) as BrowserStage;
-  assert.equal(receipt.source, env("GITHUB_SHA"));
+  assert.equal(
+    receipt.source,
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("run").source
+      : env("GITHUB_SHA"),
+  );
   const directory = join(output, "browser");
   assert.ok(receipt.cache === directory && process.env.PLAYWRIGHT_BROWSERS_PATH === directory);
   const facts = statSync(directory);
@@ -629,7 +669,8 @@ export function admittedBrowser(
   return receipt.chromium;
 }
 export function runtimeAccess(files: string[], browser: Browser): void {
-  assert.ok(uid() === 1000 && gid() === 1000);
+  const actor = selectedActor();
+  assert.ok(uid() === actor[0] && gid() === actor[1]);
   for (const path of files) assert.ok(statSync(path).isFile() && accessible(path));
   const directory = resolve(browser.chromium.path, "..");
   assert.ok(deepEquals(browserInventory(directory), browser.chromium_directory_files));
@@ -703,9 +744,13 @@ export function configListInputs(
   browser: Browser;
   modules: Record<string, string>;
 } {
-  assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
   assert.equal(process.env.FVOCI_WEB_BUILD_PHASE, "consume");
-  assert.ok(uid() === 1000 && gid() === 1000);
+  const local =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("config-list")
+      : undefined;
+  const actor = local ? [local.uid, local.gid] : [1000, 1000];
+  assert.ok(uid() === actor[0] && gid() === actor[1]);
   const owner = identity("config-list", output, checkout);
   assert.ok(
     !existsSync(join(output, "runtime")) &&
@@ -713,15 +758,17 @@ export function configListInputs(
   );
   const consumed = read(join(output, "handoff-consumed.json")) as Consumed,
     before = read(join(output, "before.json")) as Inputs;
-  assert.ok(consumed.source === before.head && before.head === env("GITHUB_SHA"));
+  assert.ok(
+    consumed.source === before.head && before.head === (local?.source ?? env("GITHUB_SHA")),
+  );
   assert.ok(
     consumed.tree === before.tree &&
       before.tree === call(["git", "rev-parse", "HEAD^{tree}"], checkout),
   );
   assert.ok(
-    consumed.repository === env("GITHUB_REPOSITORY") &&
-      consumed.run === env("GITHUB_RUN_ID") &&
-      consumed.attempt === env("GITHUB_RUN_ATTEMPT"),
+    consumed.repository === (local ? "orca-local" : env("GITHUB_REPOSITORY")) &&
+      consumed.run === (local?.runId ?? env("GITHUB_RUN_ID")) &&
+      consumed.attempt === (local?.dispatchId ?? env("GITHUB_RUN_ATTEMPT")),
   );
   assert.equal(consumed.full_current_physical_inputs_equal, true);
   assert.equal(consumed.fresh_dist_equal, true);
@@ -775,8 +822,8 @@ export function configListInputs(
   const access = read(join(output, "runtime-access-stage.json")) as AccessReceipt;
   assert.ok(access.source === before.head && access.tree === before.tree && access.owner === owner);
   assert.ok(
-    access.runtime_uid === 1000 &&
-      access.runtime_gid === 1000 &&
+    access.runtime_uid === actor[0] &&
+      access.runtime_gid === actor[1] &&
       access.preflight_exit === 0 &&
       access.preflight.missing === 0,
   );

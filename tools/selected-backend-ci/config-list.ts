@@ -46,7 +46,7 @@ export async function configList(output: string): Promise<number> {
   const environment = {
     PATH: env("PATH"),
     LANG: process.env.LANG ?? "C.UTF-8",
-    CI: "true",
+    ...(process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local" ? {} : { CI: "true" }),
     TMPDIR: join(directory, "tmp"),
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(directory, "bun-transpiler-cache"),
     PLAYWRIGHT_BROWSERS_PATH: env("PLAYWRIGHT_BROWSERS_PATH"),
@@ -122,7 +122,7 @@ export async function configList(output: string): Promise<number> {
   if (code) return code;
   const report = join(directory, "listing.json"),
     facts = lstatSync(report);
-  assert.ok(facts.isFile() && !facts.isSymbolicLink() && facts.uid === 1000);
+  assert.ok(facts.isFile() && !facts.isSymbolicLink() && facts.uid === uid());
   chmodSync(report, 0o600);
   qualifyListing(read(report) as Listing);
   configListInputs(output);

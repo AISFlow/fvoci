@@ -25,7 +25,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import process from "node:process";
 import { Header, Parser } from "tar";
 import type { ReadEntry } from "tar";
-import { browserStages, collaborationStages, expectedFiles, identity } from "./admission.ts";
+import {
+  browserStages,
+  collaborationStages,
+  expectedFiles,
+  identity,
+  localAllocation,
+} from "./admission.ts";
 import {
   abiFiles,
   buildEnv,
@@ -106,9 +112,13 @@ function ldd(path: string): { exitCode: number; stdout: string; stderr: string }
 const distOf = (h: HostFacts) => join(h.checkout, "apps/web/dist");
 
 const browserJob = () =>
-  (process.env.FVOCI_WEB_CONTAINER_LOCAL === "1"
-    ? process.env.FVOCI_WEB_CONTAINER_JOB
-    : process.env.GITHUB_JOB) ?? "";
+  (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+    ? process.env.FVOCI_WEB_BUILD_PHASE === "prepare"
+      ? "collaboration-build"
+      : "collaboration-flow"
+    : process.env.FVOCI_WEB_CONTAINER_LOCAL === "1"
+      ? process.env.FVOCI_WEB_CONTAINER_JOB
+      : process.env.GITHUB_JOB) ?? "";
 export const browser = () =>
   [
     "workspace-browser-build",
@@ -205,6 +215,7 @@ export function distFiles(h: HostFacts = host): Record<string, string> {
 }
 
 export interface Context {
+  localAuthorizationSha256?: string;
   container_image?: string;
   container_sdk_sha256?: string;
   container_image_source?: string;
@@ -217,12 +228,17 @@ export interface Context {
 }
 export function context(job: string, h: HostFacts = host): Context {
   const local = process.env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  const selectedLocal =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("handoff")
+      : undefined;
   const actual = browserJob();
   if (local) {
     assert.ok(browser() && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
     assert.ok(process.getuid?.() !== 0, "browser container must be non-root");
     assert.match(env("FVOCI_WEB_CONTAINER_RUN"), /^[a-f0-9]{32}$/);
-  } else assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
+  } else if (!selectedLocal)
+    assert.ok(process.env.CI === "true" && process.env.GITHUB_ACTIONS === "true");
   if (job === "collaboration-flow" && collaborationConsumers.includes(actual)) job = actual;
   assert.equal(actual, job, "wrong handoff job");
   if (browser()) {
@@ -242,19 +258,21 @@ export function context(job: string, h: HostFacts = host): Context {
       assert.ok(
         /^[0-9]+$/.test(env("GITHUB_RUN_ID")) && /^[0-9]+$/.test(env("GITHUB_RUN_ATTEMPT")),
       );
-  } else identity("handoff", undefined, h.checkout);
+  } else identity("handoff", selectedLocal?.outputRoot, h.checkout);
   assert.equal(
     process.env.FVOCI_WEB_BUILD_PHASE,
     job === jobs()[0] ? "prepare" : "consume",
     "wrong web build phase",
   );
   const result: Context = {
-    repository: local ? "local-container" : env("GITHUB_REPOSITORY"),
-    run: env(local ? "FVOCI_WEB_CONTAINER_RUN" : "GITHUB_RUN_ID"),
-    attempt: local ? "1" : env("GITHUB_RUN_ATTEMPT"),
+    repository: selectedLocal ? "orca-local" : local ? "local-container" : env("GITHUB_REPOSITORY"),
+    run: selectedLocal?.runId ?? env(local ? "FVOCI_WEB_CONTAINER_RUN" : "GITHUB_RUN_ID"),
+    attempt: selectedLocal?.dispatchId ?? (local ? "1" : env("GITHUB_RUN_ATTEMPT")),
     source: call(["git", "rev-parse", "HEAD"], h.checkout),
     tree: call(["git", "rev-parse", "HEAD^{tree}"], h.checkout),
   };
+  if (selectedLocal)
+    result.localAuthorizationSha256 = env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256");
   if (local || process.env.FVOCI_WEB_CONTAINER_IMAGE) {
     const image = env("FVOCI_WEB_CONTAINER_IMAGE");
     const localImage = process.env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE === "1";
@@ -691,7 +709,10 @@ export function exportPacket(h: HostFacts = host): void {
     entries,
   };
   write(join(packet, "handoff.json"), manifest);
-  if (process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1")
+  if (
+    process.env.FVOCI_WEB_CONTAINER_LOCAL !== "1" &&
+    process.env.FVOCI_SELECTED_EXECUTION_MODE !== "orca-local"
+  )
     appendFileSync(
       env("GITHUB_OUTPUT"),
       "handoff_sha256=" + sha(join(packet, "handoff.json")) + "\n",

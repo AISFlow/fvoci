@@ -17,6 +17,7 @@ import {
   fail,
 } from "../selected-backend-ci/runtime.ts";
 import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
+import { localAllocation } from "../selected-backend-ci/admission.ts";
 export {
   CI_WEB_IMAGE,
   containerImage,
@@ -84,10 +85,11 @@ async function selectedImageOperation(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   const started = performance.now(),
-    log = join(
-      process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
-      operation + ".private.log",
-    );
+    output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+    log =
+      process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local" && operation === "prepare"
+        ? join(dirname(output), "fvoci-selected-prepare.private.log")
+        : join(output, operation + ".private.log");
   let status = 1;
   try {
     const result = await selectedImageResult(operation, root, {
@@ -143,6 +145,7 @@ function containerStageDiagnostics(path: string, selected = false): string[] {
 }
 
 async function selectedImagePhase(root: string, operation: string): Promise<number> {
+  if (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local") localAllocation(operation);
   if (
     process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1" ||
     process.env.FVOCI_WEB_CONTAINER_IMAGE !== CI_WEB_IMAGE ||
@@ -290,12 +293,18 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
   root = realpathSync(root);
   process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Date.now() + 900_000);
   const request = webRequest(argv, process.env);
+  const local =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("prepare")
+      : undefined;
   if (
     !request.selected ||
-    !request.committed ||
-    !["prepare", "consume"].includes(request.selectedPhase) ||
-    process.env.CI !== "true" ||
-    process.env.GITHUB_ACTIONS !== "true"
+    (local
+      ? request.selectedPhase !== "whole" || request.committed
+      : !request.committed ||
+        !["prepare", "consume"].includes(request.selectedPhase) ||
+        process.env.CI !== "true" ||
+        process.env.GITHUB_ACTIONS !== "true")
   )
     fail("selected images require the existing explicit committed CI phases");
   qualifyCommittedApi(root, request, process.env);
@@ -310,11 +319,12 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
     architecture,
   );
-  await stage(
-    "selected-image-fetch",
-    ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
-    root,
-  );
+  if (!local)
+    await stage(
+      "selected-image-fetch",
+      ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
+      root,
+    );
   const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
   const imageSource = containerImageSource(
     checkedOutput(
@@ -331,9 +341,19 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     sdk,
     architecture,
   );
-  qualifyImageSource(root, imageSource, process.env.GITHUB_SHA ?? "");
+  qualifyImageSource(root, imageSource, local?.source ?? process.env.GITHUB_SHA ?? "");
+  if (local) {
+    process.env.RUNNER_TEMP = dirname(local.outputRoot);
+    process.env.FVOCI_SELECTED_CI_OUTPUT = local.outputRoot;
+    process.env.FVOCI_SELECTED_CI_SQLITE_PARENT = join(dirname(local.outputRoot), "fvoci-sqlite");
+    process.env.FVOCI_WEB_BUILD_HANDOFF = join(
+      dirname(local.outputRoot),
+      "fvoci-web-build-handoff",
+    );
+    if (process.env.FVOCI_COLLAB_LANE) fail("local selected default runs all five lanes");
+  }
   const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
-    output = join(temp, "fvoci-selected-current"),
+    output = local?.outputRoot ?? join(temp, "fvoci-selected-current"),
     sqlite = join(temp, "fvoci-sqlite"),
     cargo = join(temp, "fvoci-image-cargo");
   if (
@@ -342,9 +362,10 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff")
   )
     fail("selected canonical paths required");
-  for (const path of [sqlite, cargo, join(output, "tmp"), join(output, "home")])
+  const fresh = local ? localSelectedFresh(root, output, temp) : undefined;
+  for (const path of [...(local ? [] : [sqlite]), cargo, join(output, "tmp"), join(output, "home")])
     mkdirSync(path, { mode: path === cargo ? 0o750 : 0o700 });
-  if (request.selectedPhase === "prepare")
+  if (local || request.selectedPhase === "prepare")
     mkdirSync(process.env.FVOCI_WEB_BUILD_HANDOFF, {
       mode: 0o700,
     });
@@ -361,10 +382,13 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
     FVOCI_WEB_CONTAINER_SDK_SHA256: CI_WEB_SDK_SHA256.x86_64,
     FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
-    FVOCI_WEB_BUILD_PHASE: request.selectedPhase,
+    FVOCI_WEB_BUILD_PHASE: local ? "prepare" : request.selectedPhase,
     CARGO_HOME: cargo,
     CARGO_TARGET_DIR: join(root, "target"),
     CARGO_BUILD_JOBS: "2",
+    ...(local
+      ? { CARGO_INCREMENTAL: "0", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0" }
+      : {}),
     LIBCLANG_PATH: "/usr/lib/llvm-18/lib",
     SQLITE3_LIB_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib",
     SQLITE3_INCLUDE_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/include",
@@ -372,23 +396,35 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     SQLITE3_NO_PKG_CONFIG: "1",
     PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
   });
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) =>
-      /^(CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_WEB_BUILD_HANDOFF(?:_SHA256)?)$/.test(
-        key,
+  const environment = () =>
+    Object.fromEntries(
+      Object.entries(process.env).filter(([key]) =>
+        /^(CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_WEB_BUILD_HANDOFF(?:_SHA256)?)$/.test(
+          key,
+        ),
       ),
-    ),
-  );
+    );
   const prepared = await selectedImageOperation(
-    request.selectedPhase as "prepare" | "consume",
+    local ? "prepare" : (request.selectedPhase as "prepare" | "consume"),
     root,
-    environment,
+    environment(),
   );
-  if (prepared === 0 && request.selectedPhase === "prepare" && process.env.HOME)
+  if (!local && prepared === 0 && request.selectedPhase === "prepare" && process.env.HOME)
     for (const name of ["registry", "git"])
       if (existsSync(join(cargo, name)))
         cpSync(join(cargo, name), join(process.env.HOME, ".cargo", name), { recursive: true });
   if (prepared || request.selectedPhase === "prepare") return prepared;
+  if (local && fresh) {
+    localAllocation("consume");
+    process.env.FVOCI_WEB_BUILD_HANDOFF_SHA256 = createHash("sha256")
+      .update(readFileSync(join(process.env.FVOCI_WEB_BUILD_HANDOFF as string, "handoff.json")))
+      .digest("hex");
+    fresh();
+    for (const name of ["tmp", "home"]) mkdirSync(join(output, name), { mode: 0o700 });
+    process.env.FVOCI_WEB_BUILD_PHASE = "consume";
+    const consumed = await selectedImageOperation("consume", root, environment());
+    if (consumed) return consumed;
+  }
   // Existing host wrappers own PG/Meili. The inner group sees their real
   // loopback bindings through Linux host networking, never their Docker socket.
   const pending = await command(
@@ -407,6 +443,66 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
   );
   process.env.PATH = join(output, "tools") + ":" + (process.env.PATH ?? "");
   return selectedAfterPending(pending, () => selectedHost(root, pending, true));
+}
+
+// Same-path handoff requires fresh destinations. Only directories created by
+// this admitted exclusive cohort may be emptied; an existing target/cache is
+// refused before allocation, never inferred to be disposable from its prefix.
+export function localSelectedFresh(root: string, output: string, temp: string): () => void {
+  const grant = localAllocation("prepare");
+  if (grant.worktree !== root || grant.outputRoot !== output || dirname(output) !== temp)
+    fail("local selected cohort paths differ from allocation");
+  for (const path of [temp, output])
+    if (!isPrivateDirectory(path) || statSync(path).gid !== grant.gid)
+      fail("private local selected cohort required");
+  if (readdirSync(output).length) fail("local selected output must start empty");
+  for (const name of [
+    "fvoci-image-cargo",
+    "fvoci-web-build-handoff",
+    "fvoci-selected-diagnostics",
+    "fvoci-selected-prepare.private.log",
+  ])
+    if (existsSync(join(temp, name))) fail("local selected cohort sibling already exists");
+  const paths = [
+    join(root, "target"),
+    join(root, "crates/collab-engine/target"),
+    join(root, "apps/web/dist"),
+    join(temp, "fvoci-sqlite"),
+  ];
+  const allocation = process.env.FVOCI_SELECTED_LOCAL_ALLOCATION as string;
+  for (const path of [output, ...paths]) {
+    if (allocation === path || allocation.startsWith(path + "/"))
+      fail("local allocation must remain outside materialization resets");
+    if (path !== output) {
+      try {
+        lstatSync(path);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+        throw error;
+      }
+      fail("local selected requires absent generated paths");
+    }
+  }
+  for (const path of paths) mkdirSync(path, { mode: 0o700 });
+  const owned = [output, ...paths].map((path) => ({ path, facts: lstatSync(path) }));
+  return () => {
+    localAllocation("consume");
+    for (const { path, facts } of owned) {
+      const current = lstatSync(path);
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        current.uid !== grant.uid ||
+        current.gid !== grant.gid ||
+        current.ino !== facts.ino ||
+        current.dev !== facts.dev ||
+        realpathSync(path) !== path
+      )
+        fail("local generated directory identity changed");
+    }
+    for (const { path } of owned)
+      for (const name of readdirSync(path)) rmSync(join(path, name), { recursive: true });
+  };
 }
 
 export async function selectedAfterPending(
@@ -626,7 +722,9 @@ async function webEntry(root: string, argv: string[]): Promise<number> {
   const request = webRequest(argv, process.env);
   if (
     request.selected &&
-    request.selectedPhase !== "whole" &&
+    (request.selectedPhase !== "whole" ||
+      process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local" ||
+      process.env.CI !== "true") &&
     process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
   )
     return selectedContainerEntry(root, argv);
@@ -701,7 +799,11 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
   }
   if (selected) {
     required("FVOCI_SELECTED_CI_OUTPUT");
-    required("GITHUB_ACTIONS");
+    const local =
+      process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+        ? localAllocation(selectedPhase)
+        : undefined;
+    if (!local) required("GITHUB_ACTIONS");
     if (selectedPhase === "whole") {
       if (
         !["collaboration-flow", ...LANE_JOBS].includes(process.env.GITHUB_JOB ?? "") ||
@@ -710,12 +812,15 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
         fail("wrong same-job selected authority");
     } else {
       process.env.FVOCI_WEB_BUILD_PHASE = selectedPhase;
-      if (!committed || process.env.CI !== "true" || process.env.GITHUB_ACTIONS !== "true")
+      if (
+        !committed ||
+        (!local && (process.env.CI !== "true" || process.env.GITHUB_ACTIONS !== "true"))
+      )
         fail("handoff requires explicit GitHub committed API mode");
       if (selectedPhase === "prepare") {
-        if (process.env.GITHUB_JOB !== "collaboration-build") fail("wrong producer job");
+        if (!local && process.env.GITHUB_JOB !== "collaboration-build") fail("wrong producer job");
       } else {
-        if (!["collaboration-flow", ...LANE_JOBS].includes(process.env.GITHUB_JOB ?? ""))
+        if (!local && !["collaboration-flow", ...LANE_JOBS].includes(process.env.GITHUB_JOB ?? ""))
           fail("wrong consumer job");
         required("FVOCI_WEB_BUILD_HANDOFF");
         required("FVOCI_WEB_BUILD_HANDOFF_SHA256");
@@ -925,6 +1030,10 @@ export async function selectedHost(
   pending: number,
   consume: boolean,
 ): Promise<number> {
+  const local =
+    process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation("permissions")
+      : undefined;
   if (entryCancellation) return pending || entryCancellation;
   const required = (key: string) => {
     const value = process.env[key];
@@ -1028,15 +1137,19 @@ export async function selectedHost(
     "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB" +
     (selectedImageHost() ? "," + SELECTED_IMAGE_ENV.join(",") : "");
   const runtime = (mode: string, browser = false) => [
-    "sudo",
-    "--preserve-env=" +
-      preserved +
-      (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
-      (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
-    "setpriv",
-    "--reuid=1000",
-    "--regid=1000",
-    "--groups=" + groups,
+    ...(local
+      ? []
+      : [
+          "sudo",
+          "--preserve-env=" +
+            preserved +
+            (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
+            (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--groups=" + groups,
+        ]),
     ...(mode === "owner-return" ? [] : ["env", "TMPDIR=" + join(output, "tmp")]),
     process.execPath,
     cli,
@@ -1048,8 +1161,10 @@ export async function selectedHost(
 
   let config = "not-run",
     launcher = "not-run",
-    selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
-  if (selected === 0)
+    selected = local
+      ? 0
+      : await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
+  if (!local && selected === 0)
     selected = await command(
       ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
       root,
@@ -1070,6 +1185,7 @@ export async function selectedHost(
   const ownership = await capture(runtime("owner-return"), "ownership-stage.json", undefined, true);
   if (ownership === 0) {
     if (
+      !local &&
       (await command(
         ["sudo", "chown", "-h", "-R", uid + ":" + gid, output, sqlite],
         root,
@@ -3262,6 +3378,10 @@ export function qualifyCommittedApi(
   git: Git = spawnGit(root),
 ): string {
   const local = env.FVOCI_WEB_CONTAINER_LOCAL === "1";
+  const selectedLocal =
+    request.selected && env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
+      ? localAllocation(env.FVOCI_WEB_BUILD_PHASE === "consume" ? "consume" : "prepare")
+      : undefined;
   if (local) {
     containerImage(
       env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
@@ -3271,13 +3391,15 @@ export function qualifyCommittedApi(
     );
     if (request.selected || Object.keys(env).some((key) => key.startsWith("GITHUB_")))
       fail("requires an ordinary local browser container");
-  } else if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true") fail("requires GitHub CI");
+  } else if (!selectedLocal && (env.CI !== "true" || env.GITHUB_ACTIONS !== "true"))
+    fail("requires GitHub CI");
   const job = local ? env.FVOCI_WEB_CONTAINER_JOB : env.GITHUB_JOB;
   const allowed = committedApiJobs(request, job);
-  if (job === undefined || !allowed.has(job)) {
+  if (!selectedLocal && (job === undefined || !allowed.has(job))) {
     fail("requires the allocated browser job");
   }
-  const sha = (local ? env.FVOCI_WEB_CONTAINER_SOURCE : env.GITHUB_SHA) ?? "";
+  const sha =
+    selectedLocal?.source ?? (local ? env.FVOCI_WEB_CONTAINER_SOURCE : env.GITHUB_SHA) ?? "";
   if (!/^[0-9a-f]{40}$/.test(sha) || gitLine(git, ["rev-parse", "HEAD"]) !== sha) {
     fail("checkout HEAD differs from tested SHA");
   }

@@ -88,6 +88,17 @@ const leaseModules = [
   "tools/selected-backend-ci/io.ts",
   "tools/selected-backend-ci/runtime.ts",
   "tools/selected-backend-ci/types.ts",
+  "tools/selected-backend-ci/handoff.ts",
+  "tools/selected-backend-ci/runtime-access-check.ts",
+  "tools/web-e2e/run-web-e2e.ts",
+  "tools/web-e2e/groups.ts",
+  "tools/web-e2e/database-urls.ts",
+  "tools/web-e2e/network-settle.ts",
+  "scripts/run-web-e2e.sh",
+  "scripts/start-test-postgres.sh",
+  "scripts/start-test-meili.sh",
+  "scripts/web-e2e-inner.sh",
+  "scripts/web-e2e-run-group.sh",
   "tools/selected-backend-ci/drivers/common.ts",
   "tools/selected-backend-ci/drivers/equal-work.ts",
   "tools/selected-backend-ci/drivers/equal-work-policy.ts",
@@ -1192,7 +1203,7 @@ describe.serial("selected runner contract and fail-closed controls", () => {
       if (mutation === "foreign-tree") grant.tree = "0".repeat(40);
       if (mutation === "bad-registration")
         grant.registrationHashes["tools/selected-backend-ci/drivers/sqlite.ts"] = "0".repeat(64);
-      if (mutation === "extra-mode") grant.allowedModes.push("permissions");
+      if (mutation === "extra-mode") grant.allowedModes.push("arbitrary-command");
       if (mutation === "same-terminal") grant.workerTerminal = grant.rootTerminal;
       if (mutation === "bad-task") grant.taskId = "other";
       if (mutation === "bad-owner") grant.owner = "foreign";
@@ -1377,7 +1388,9 @@ try {
         ciGrant.env,
       );
       expect(localCi.exitCode).toBe(1);
-      expect(localCi.stderr.toString()).toContain(
+      // The tuple is admitted; this deliberately incomplete copied checkout
+      // still fails its source binding. A complete other-UID lease is below.
+      expect(localCi.stderr.toString()).not.toContain(
         "selected runtime actor must be the fixed handoff uid and gid",
       );
     } finally {
@@ -1443,20 +1456,24 @@ try {
       ownTree(output, `${String(uid())}:${String(gid())}`);
     }
   });
-  test("single-field localAllocation rejects a matching 1000 uid with a different gid", () => {
-    const fixture = localFixture(1000, 1001);
+  test("single-field localAllocation rejects a process gid different from the grant", () => {
+    const fixture = localFixture(1000, 1000);
     ownTree(fixture.output, "1000:1001");
     try {
-      expectFixedActorRefusal(1000, 1001, "local-default", fixture.output, fixture.env);
+      const result = fixedActor(1000, 1001, "local-default", fixture.output, fixture.env);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toContain("1000 !== 1001");
     } finally {
       ownTree(fixture.output, `${String(uid())}:${String(gid())}`);
     }
   });
-  test("single-field localAllocation rejects a matching 1000 gid with a different uid", () => {
-    const fixture = localFixture(1001, 1000);
+  test("single-field localAllocation rejects a process uid different from the grant", () => {
+    const fixture = localFixture(1000, 1000);
     ownTree(fixture.output, "1001:1000");
     try {
-      expectFixedActorRefusal(1001, 1000, "local-default", fixture.output, fixture.env);
+      const result = fixedActor(1001, 1000, "local-default", fixture.output, fixture.env);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toContain("1000 !== 1001");
     } finally {
       ownTree(fixture.output, `${String(uid())}:${String(gid())}`);
     }
