@@ -1295,7 +1295,9 @@ function selectedImageInvocation(
   selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
   // Bun's hardcoded /tmp node shims are symlinks, not admitted output assets.
   // Keep them on owned ordinary disk outside output; TMPDIR/evidence stay put.
-  const nodeTemp = actor ? undefined : mkdtempSync(join(temp, "fvoci-selected-tool."));
+  // The later actor owns output but only traverses RUNNER_TEMP; /var/tmp also
+  // permits that actor's private allocation without widening parent access.
+  const nodeTemp = actor ? undefined : mkdtempSync("/var/tmp/fvoci-selected-tool.");
   if (nodeTemp) args.push("--mount", `type=bind,source=${nodeTemp},target=/tmp`);
   else args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
   args.push(
