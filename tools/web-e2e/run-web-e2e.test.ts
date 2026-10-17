@@ -49,9 +49,31 @@ import {
   type CommittedApiRequest,
 } from "./run-web-e2e.ts";
 import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
+import { checkedOutput } from "../selected-backend-ci/runtime.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
+
+test("checked child receives the current environment after browser cache selection", () => {
+  const key = "FVOCI_CHILD_ENV_FIXTURE",
+    previous = process.env[key];
+  try {
+    process.env[key] = "selected-private-browser-copy";
+    expect(
+      checkedOutput(
+        [
+          process.execPath,
+          "--eval",
+          'console.log(process.env.FVOCI_CHILD_ENV_FIXTURE ?? "absent")',
+        ],
+        process.cwd(),
+      ),
+    ).toBe("selected-private-browser-copy");
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(process.env, key);
+    else process.env[key] = previous;
+  }
+});
 
 function tempDir(): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-run-web-e2e.")));

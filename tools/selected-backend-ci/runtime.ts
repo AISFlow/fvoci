@@ -1592,7 +1592,7 @@ export function dockerEndpoint(root: string): string {
 }
 
 export function checkedOutput(argv: string[], cwd: string): string {
-  const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+  const result = Bun.spawnSync(argv, { cwd, env: process.env, stdout: "pipe", stderr: "pipe" });
   if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
   return result.stdout.toString().trim();
 }
