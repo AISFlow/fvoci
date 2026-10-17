@@ -324,7 +324,8 @@ if(a[0]==="run"){
       FIXTURE_GRANT_SHA: grantSha,
       FIXTURE_ROOT: root,
     };
-    let exit: number;
+    let exit: number,
+      diagnostic = "";
     try {
       const child = Bun.spawn(
         [
@@ -348,7 +349,7 @@ if(a[0]==="run"){
           "--with-selected-backends",
         ],
         {
-          cwd: root,
+          cwd: process.cwd(),
           stdout: "pipe",
           stderr: "pipe",
           env: { PATH: "/usr/bin:/bin" },
@@ -360,11 +361,12 @@ if(a[0]==="run"){
         new Response(child.stderr).text(),
       ]);
       exit = result[0];
+      diagnostic = result[2];
       expect(result[1] + result[2]).not.toContain("unregistered module");
     } finally {
       restore();
     }
-    expect(exit).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
+    expect(exit, diagnostic).toBe(mode === "normal" ? 0 : mode.endsWith("-fail") ? 19 : 1);
     expect(readFileSync(allocation, "utf8")).toBe(grantBytes);
     const rows = readFileSync(calls, "utf8")
       .trim()
