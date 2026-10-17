@@ -29,6 +29,7 @@ import {
 } from "./groups.ts";
 import { groupDatabaseStatement } from "./database-urls.ts";
 import { groupEnvironment, retainFailureArtifacts } from "./run-web-e2e.ts";
+import { copyRunnerModules } from "../selected-backend-ci/test-process.ts";
 
 // Substitute only the Bun child executable in this fixture's private copied
 // runtime. Production always uses process.execPath; native binaries stay real
@@ -45,14 +46,10 @@ function fixtureRuntime(source: string, destination: string, executable: string)
     "fixture-owned runtime copy required",
   );
   const shared = join(dirname(dirname(destination)), "selected-backend-ci");
-  mkdirSync(shared, { recursive: true });
-  writeFileSync(
-    join(shared, "types.ts"),
-    readFileSync(join(dirname(source), "../selected-backend-ci/types.ts")),
-  );
+  copyRunnerModules(shared);
   const text = readFileSync(source, "utf8"),
     start = text.indexOf("async function groupRuntime("),
-    end = text.indexOf("\nfunction checkedOutput(", start);
+    end = text.indexOf("\nexport async function qualifyCohortHostProgram(", start);
   check(start >= 0 && end > start, "group runtime boundary missing");
   const body = text.slice(start, end);
   check(body.split("process.execPath").length === 5, "four native Bun child boundaries required");
@@ -142,6 +139,7 @@ function cancellationBarrier(path: string, observed: (text: string) => boolean):
 }
 
 export async function entryTool(tool: string, args: string[]): Promise<void> {
+  if (tool === "docker") throw new FixtureError("fixture must not contact Docker");
   if (tool === "ip") {
     const barrier = process.env.FVOCI_FIXTURE_MONITOR_BARRIER;
     if (!barrier) return;
@@ -257,9 +255,9 @@ async function ciShardFixture(source: string): Promise<void> {
       "bin",
     ])
       mkdirSync(path === "bin" ? bin : join(checkout, path), { recursive: true });
+    copyRunnerModules(join(checkout, "tools/selected-backend-ci"));
     for (const file of [
       "scripts/run-web-e2e.sh",
-      "tools/selected-backend-ci/types.ts",
       ...["groups.ts", "compat.ts", "run-web-e2e.ts"].map((name) => "tools/web-e2e/" + name),
     ]) {
       const text = readFileSync(join(source, file), "utf8");
@@ -270,7 +268,7 @@ async function ciShardFixture(source: string): Promise<void> {
           : text,
       );
     }
-    for (const tool of ["bun", "bash", "cargo", "ip"]) {
+    for (const tool of ["bun", "bash", "cargo", "ip", "docker"]) {
       const file = join(bin, tool);
       writeFileSync(
         file,
@@ -457,6 +455,9 @@ async function ciShardFixture(source: string): Promise<void> {
     const selected = {
       ...ci(),
       ...sqlite,
+      // Exercise the existing inner consume boundary. The outer image bridge,
+      // including its prior handoff admission, has its own runner fixtures.
+      FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
       GITHUB_JOB: "collaboration-flow",
       FVOCI_E2E_PENDING: "1",
       FVOCI_TEST_HANDOFF_EXIT: "7",
@@ -468,7 +469,7 @@ async function ciShardFixture(source: string): Promise<void> {
         !/fvoci-web-e2e-fake-(sqlite-prep|generate-api|cargo)/.test(result.text) &&
         count(result.text, "fvoci-web-e2e-fake-bun-build") === 1 &&
         count(result.text, "committed API outputs match") === 2 &&
-        count(result.text, "fvoci-web-e2e-fake-handoff-admit") === 1 &&
+        count(result.text, "fvoci-web-e2e-fake-handoff-admit") === 0 &&
         count(result.text, "fvoci-web-e2e-fake-handoff-consume") === 1 &&
         rows(result.text).length === 0,
       "selected consumer rebuild or authority changed: " + result.text,
