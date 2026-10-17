@@ -390,7 +390,7 @@ export async function runtimePermissions(
         if (facts.isSymbolicLink() || facts.uid !== runnerUid)
           try {
             process.stderr.write(
-              `selected permissions descendant prefix=${prefix === output ? "output" : "sqlite"} symlink=${Number(facts.isSymbolicLink())} owner_match=${Number(facts.uid === runnerUid)}\n`,
+              `selected permissions descendant prefix=${prefix === output ? "output" : "sqlite"} symlink=${facts.isSymbolicLink() ? "1" : "0"} owner_match=${facts.uid === runnerUid ? "1" : "0"}\n`,
             );
           } catch {
             // Diagnostic output cannot replace the original permission refusal.
