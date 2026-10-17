@@ -1181,8 +1181,7 @@ else process.exit(42);
           },
       );
     if (selected) {
-      for (const row of rows)
-        if (row.privateNodeTemp && row.nodeTemp) scratch.push(row.nodeTemp);
+      for (const row of rows) if (row.privateNodeTemp && row.nodeTemp) scratch.push(row.nodeTemp);
       if (mode === "selected-prepare-fail") {
         expect(stderr).toContain(
           "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",
