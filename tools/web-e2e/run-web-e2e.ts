@@ -155,7 +155,7 @@ export async function selectedImagePhase(root: string, operation: string): Promi
     const before = JSON.parse(readFileSync(0, "utf8")) as Inputs;
     const { inputCheck } = await import("../selected-backend-ci/drivers/common.ts");
     const checked = await inputCheck(before, before.head, before.tree);
-    process.stdout.write(JSON.stringify(checked));
+    await Bun.write(Bun.stdout, JSON.stringify(checked));
     return 0;
   }
   if (operation === "access") {
