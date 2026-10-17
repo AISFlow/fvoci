@@ -280,23 +280,13 @@ export function prepareBrowser(output: string, chromium: string): string {
   const component = dirname(dirname(chromium)),
     cache = dirname(component);
   assert.match(basename(component), /^chromium-[0-9]+$/);
-  const imageCache =
-    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1" && cache === "/opt/playwright";
   assert.ok(!lstatSync(cache).isSymbolicLink());
-  if (imageCache) {
-    // Only the admitted immutable image cache may be root-owned. The copied
-    // browser remains private to the actual preparation user and later actor.
-    assert.ok(process.env.FVOCI_WEB_CONTAINER_IMAGE && process.env.FVOCI_WEB_CONTAINER_SDK_SHA256);
-    for (const path of [cache, ...files(cache, true)]) {
-      const facts = lstatSync(path);
-      assert.ok(facts.uid === 0 && !facts.isSymbolicLink() && (facts.mode & 0o022) === 0);
-    }
-  } else assert.ok(statSync(cache).uid === runner && statSync(cache).gid === gid());
+  assert.ok(statSync(cache).uid === runner && statSync(cache).gid === gid());
   const components = readdirSync(cache)
     .filter((name) => /^(chromium|chromium_headless_shell|ffmpeg)-[0-9]+$/.test(name))
     .sort();
   assert.ok(components.includes(basename(component)));
-  const owner = imageCache ? undefined : ([runner, gid()] as const);
+  const owner = [runner, gid()] as const;
   const before = Object.fromEntries(
     components.map((name) => [name, browserInventory(join(cache, name), owner)]),
   );
@@ -1373,7 +1363,8 @@ export async function selectedImageResult(
   process.once("SIGTERM", terminate);
   let result: Completed | undefined,
     failure: unknown,
-    retirementCode = 1;
+    retirementCode = 1,
+    retirementPending = false;
   let invocation: ReturnType<typeof selectedImageInvocation> | undefined;
   try {
     invocation = selectedImageInvocation(
@@ -1394,42 +1385,79 @@ export async function selectedImageResult(
     ]);
     const fd = options.log ? openSync(options.log, "w", 0o600) : undefined;
     try {
-      const child = spawnSelectedCommand(
-        invocation.args,
-        process.env,
-        fd ?? "pipe",
-        fd ?? "pipe",
-        signal,
-        options.input,
-      );
-      const bytes = async (stream: typeof child.stdout) => {
-        if (typeof stream === "number") fail("selected image stream missing");
-        return await new Response(stream).arrayBuffer();
-      };
-      const [stdout, stderr, exit] = await Promise.allSettled([
-        fd === undefined ? bytes(child.stdout) : Promise.resolve(new ArrayBuffer(0)),
-        fd === undefined ? bytes(child.stderr) : Promise.resolve(new ArrayBuffer(0)),
-        child.exited,
-      ]);
-      signal.throwIfAborted();
-      if (
-        stdout.status === "rejected" ||
-        stderr.status === "rejected" ||
-        exit.status === "rejected"
-      ) {
-        const failed = [stdout, stderr, exit].find((value) => value.status === "rejected");
-        if (failed?.status === "rejected" && failed.reason instanceof Error) throw failed.reason;
-        fail("selected image stream or exit collection failed");
+      const materialize = ["prepare", "consume"].includes(operation),
+        browserSource = join(
+          process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+          "browser-source",
+        ),
+        started = performance.now();
+      const commands = materialize
+        ? [
+            invocation.args.map((arg, at) => (at === 1 ? "create" : arg)),
+            ["docker", "cp", invocation.name + ":/opt/playwright/.", browserSource],
+            invocation.args,
+          ]
+        : [invocation.args];
+      if (materialize) mkdirSync(browserSource, { mode: 0o700 });
+      for (const [at, args] of commands.entries()) {
+        if (!materialize || at !== 1) retirementPending = true;
+        const child = spawnSelectedCommand(
+          args,
+          process.env,
+          fd ?? "pipe",
+          fd ?? "pipe",
+          signal,
+          options.input,
+        );
+        const bytes = async (stream: typeof child.stdout) => {
+          if (typeof stream === "number") fail("selected image stream missing");
+          return await new Response(stream).arrayBuffer();
+        };
+        const [stdout, stderr, exit] = await Promise.allSettled([
+          fd === undefined ? bytes(child.stdout) : Promise.resolve(new ArrayBuffer(0)),
+          fd === undefined ? bytes(child.stderr) : Promise.resolve(new ArrayBuffer(0)),
+          child.exited,
+        ]);
+        signal.throwIfAborted();
+        if (
+          stdout.status === "rejected" ||
+          stderr.status === "rejected" ||
+          exit.status === "rejected"
+        ) {
+          const failed = [stdout, stderr, exit].find((value) => value.status === "rejected");
+          if (failed?.status === "rejected" && failed.reason instanceof Error) throw failed.reason;
+          fail("selected image stream or exit collection failed");
+        }
+        const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+        result = {
+          returncode: observedExit({
+            exitCode: exit.value,
+            signalCode: child.signalCode ?? undefined,
+          }),
+          stdout: decoder.decode(stdout.value),
+          stderr: decoder.decode(stderr.value),
+        };
+        if (result.returncode !== 0) break;
+        if (materialize && at === 1) {
+          const closed = finishToolImage(invocation.name, 0);
+          retirementPending = closed.removeExit !== 0;
+          if (closed.code !== 0) throw new RuntimeExit(closed.code);
+          let bytes = 0;
+          for (const path of [browserSource, ...files(browserSource, true)]) {
+            const facts = lstatSync(path);
+            assert.ok(facts.uid === uid() && facts.gid === gid() && !facts.isSymbolicLink());
+            if (facts.isFile()) bytes += facts.size;
+          }
+          assert.equal(statSync(browserSource).mode & 0o777, 0o700);
+          process.stderr.write(
+            "selected-image browser_materialization elapsed_seconds=" +
+              ((performance.now() - started) / 1000).toFixed(3) +
+              " bytes=" +
+              String(bytes) +
+              " exit=0\n",
+          );
+        }
       }
-      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-      result = {
-        returncode: observedExit({
-          exitCode: exit.value,
-          signalCode: child.signalCode ?? undefined,
-        }),
-        stdout: decoder.decode(stdout.value),
-        stderr: decoder.decode(stderr.value),
-      };
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
@@ -1450,7 +1478,8 @@ export async function selectedImageResult(
       }
       retirementCode = result?.returncode ?? (cancelled || 1);
       try {
-        retirementCode = finishToolImage(invocation.name, retirementCode).code;
+        if (retirementPending)
+          retirementCode = finishToolImage(invocation.name, retirementCode).code;
       } catch {
         retirementCode ||= 1;
         process.stderr.write("selected image retirement unconfirmed\n");

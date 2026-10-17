@@ -141,13 +141,13 @@ function fixtureRun(output: string): number {
   return before.fixture_exit;
 }
 
-export function footerMain(parse: typeof parseCLI, argv: string[]): number {
+export async function footerMain(parse: typeof parseCLI, argv: string[]): Promise<number> {
   const args = parse(argv);
   assert.ok(args);
   switch (args.mode) {
     case "permissions":
       assert.ok(args.sqliteParent !== undefined && args.dockerGid !== undefined);
-      runtimePermissions(args.output, args.sqliteParent, args.dockerGid, {
+      await runtimePermissions(args.output, args.sqliteParent, args.dockerGid, {
         identity,
         browser: (output) => (read(join(output, "before.json")) as FixtureInputs).fixture_chrome,
       });
@@ -161,9 +161,9 @@ export function footerMain(parse: typeof parseCLI, argv: string[]): number {
       throw new Error("mode outside the footer fixture");
   }
 }
-export function footerEntry(parse: typeof parseCLI): void {
+export async function footerEntry(parse: typeof parseCLI): Promise<void> {
   try {
-    process.exitCode = footerMain(parse, process.argv.slice(2));
+    process.exitCode = await footerMain(parse, process.argv.slice(2));
   } catch {
     process.stderr.write("selected backend admission failed; private inputs withheld\n");
     process.exitCode = 1;

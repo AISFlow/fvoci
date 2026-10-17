@@ -91,7 +91,7 @@ function footerCase(
       entry,
       'import { footerEntry } from "../tools/selected-backend-ci/footer.fixture.ts";\n' +
         'import { parseCLI } from "./selected-cli.ts";\n' +
-        "footerEntry(parseCLI);\n",
+        "await footerEntry(parseCLI);\n",
     );
     const output = join(temp, "fvoci-selected-current");
     mkdirSync(output, { mode: 0o700 });

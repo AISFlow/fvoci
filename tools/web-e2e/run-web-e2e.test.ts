@@ -1,7 +1,8 @@
 // run-web-e2e.ts checks on temporary checkouts and directories; the shard
 // fixture (scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh) drives the
 // same commands through the real wrapper.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   lstatSync,
@@ -867,7 +868,16 @@ for (const mode of [
   "native-remove-fail",
   "native-cancel",
   ...(process.platform === "linux" && nativeArchitecture(process.arch) === "x86_64"
-    ? ["selected-pending", "selected-fail", "selected-cancel", "selected-remove-fail"]
+    ? [
+        "selected-pending",
+        "selected-fail",
+        "selected-cancel",
+        "selected-remove-fail",
+        "selected-prepare-fail",
+        "selected-copy-fail",
+        "selected-copy-cancel",
+        "selected-copy-remove-fail",
+      ]
     : []),
   ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
   "inputs-fail",
@@ -880,7 +890,13 @@ for (const mode of [
 ])
   test("isolated CI Docker topology: " + mode, async () => {
     const native = mode.startsWith("native-");
-    const selected = mode.startsWith("selected-");
+    const selected = mode.startsWith("selected-"),
+      selectedPrepare = [
+        "selected-prepare-fail",
+        "selected-copy-fail",
+        "selected-copy-cancel",
+        "selected-copy-remove-fail",
+      ].includes(mode);
     const { root, sha } = committedCheckout(),
       bin = tempDir(),
       state = join(bin, "state.json"),
@@ -901,7 +917,7 @@ const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STA
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run") {const phase=a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
 if(a[0]==="pull"){}
@@ -910,11 +926,13 @@ else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-m
 else if(a[0]==="image"&&a[1]==="inspect"&&a[3]==="{{json .Config.Env}}")console.log(JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]));
 else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
 else if(a[0]==="network"){}
-else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-fail")process.exit(19);if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-cancel"){s[name]=true;save();fs.writeFileSync(process.env.FIXTURE_READY,"READY");await new Promise(resolve=>process.once("SIGTERM",resolve));}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-cancel"){s[name]=true;save();await new Promise(resolve=>{process.once("SIGTERM",resolve);console.log("NATIVE_READY");});process.exit(0);}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-fail")process.exit(19);if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
+else if(a[0]==="create"){s[name]={running:false,created:true};save();console.log("d".repeat(64));}
+else if(a[0]==="cp"){if(process.env.FIXTURE_MODE==="selected-copy-fail"){console.error("PRIVATE_CONSOLE_CANARY");process.exit(23);}if(process.env.FIXTURE_MODE==="selected-copy-cancel"){fs.writeFileSync(process.env.FIXTURE_READY,"READY");await new Promise(resolve=>process.once("SIGTERM",resolve));process.exit(0);}if(!a[1].endsWith(":/opt/playwright/."))process.exit(42);const dest=a[2];fs.mkdirSync(dest+"/chromium-1248/chrome-linux64",{recursive:true});fs.writeFileSync(dest+"/chromium-1248/chrome-linux64/deb.deps","PRIVATE_DEPENDENCY_CANARY",{mode:0o600});}
+else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="selected-prepare"&&process.env.FIXTURE_MODE==="selected-prepare-fail"){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=selected-dependencies elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=selected-dependencies finished at=2026-10-17T04:16:01Z elapsed_seconds=15.928 exit=19");process.exit(19);}if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-fail")process.exit(19);if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-cancel"){s[name]=true;save();fs.writeFileSync(process.env.FIXTURE_READY,"READY");await new Promise(resolve=>process.once("SIGTERM",resolve));}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-cancel"){s[name]=true;save();await new Promise(resolve=>{process.once("SIGTERM",resolve);console.log("NATIVE_READY");});process.exit(0);}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-fail")process.exit(19);if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
-else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(((key.startsWith("fvoci-selected-tool-")&&process.env.FIXTURE_MODE==="selected-fail")||key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"||key.endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-fail")?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
+else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(((!v?.created&&key.startsWith("fvoci-selected-tool-")&&["selected-fail","selected-prepare-fail"].includes(process.env.FIXTURE_MODE))||key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"||key.endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-fail")?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
 else if(a[0]==="stop"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);if(typeof s[key]==="object")s[key].running=false;else s[key]=false;save();}
-else if(a[0]==="rm"){if((a.at(-1).startsWith("fvoci-selected-tool-")&&process.env.FIXTURE_MODE==="selected-remove-fail"||a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"||a.at(-1).endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-remove-fail")){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
+else if(a[0]==="rm"){if((a.at(-1).startsWith("fvoci-selected-tool-")&&["selected-remove-fail","selected-copy-remove-fail"].includes(process.env.FIXTURE_MODE)||a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"||a.at(-1).endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-remove-fail")){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
 else process.exit(42);
 `;
     writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
@@ -923,56 +941,68 @@ else process.exit(42);
       writeFileSync(output, "", { mode: 0o600 });
       for (const path of [
         selectedOutput,
-        join(selectedOutput, "tmp"),
-        join(selectedOutput, "home"),
-        join(bin, "fvoci-sqlite"),
-        join(bin, "fvoci-image-cargo"),
+        ...(selectedPrepare
+          ? []
+          : [
+              join(selectedOutput, "tmp"),
+              join(selectedOutput, "home"),
+              join(bin, "fvoci-sqlite"),
+              join(bin, "fvoci-image-cargo"),
+            ]),
       ])
         mkdirSync(path, { mode: 0o700 });
     }
     let ready = false,
       rejectReady: (() => void) | undefined;
     let watcher: ReturnType<typeof watch> | undefined;
-    const readyEvent =
-      mode === "selected-cancel"
-        ? new Promise<void>((resolve, reject) => {
-            rejectReady = () => {
-              if (!ready) reject(new Error("selected fixture exited before readiness"));
-            };
-            watcher = watch(bin, (_event, name) => {
-              if (name !== "ready") return;
-              try {
-                if (readFileSync(join(bin, "ready"), "utf8") === "READY") {
-                  ready = true;
-                  watcher?.close();
-                  resolve();
-                }
-              } catch {
-                /* creation event precedes completed write */
+    const readyEvent = ["selected-cancel", "selected-copy-cancel"].includes(mode)
+      ? new Promise<void>((resolve, reject) => {
+          rejectReady = () => {
+            if (!ready) reject(new Error("selected fixture exited before readiness"));
+          };
+          watcher = watch(bin, (_event, name) => {
+            if (name !== "ready") return;
+            try {
+              if (readFileSync(join(bin, "ready"), "utf8") === "READY") {
+                ready = true;
+                watcher?.close();
+                resolve();
               }
-            });
-            watcher.unref();
-          })
-        : undefined;
+            } catch {
+              /* creation event precedes completed write */
+            }
+          });
+          watcher.unref();
+        })
+      : undefined;
+    const diskPreload = join(bin, "disk-preload.ts");
+    writeFileSync(
+      diskPreload,
+      String.raw`import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));`,
+    );
     const child = Bun.spawn(
       [
         process.execPath,
         "--no-env-file",
+        "--preload",
+        diskPreload,
         CLI,
-        selected ? "selected-image-pending" : "container-browser",
+        selectedPrepare ? "entry" : selected ? "selected-image-pending" : "container-browser",
         root,
-        ...(selected
-          ? []
-          : native
-            ? ["--native-checks"]
-            : [
-                "--consume",
-                "2",
-                "--handoff",
-                packet,
-                "--handoff-sha256",
-                new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
-              ]),
+        ...(selectedPrepare
+          ? ["--ci-use-committed-api", "--ci-prepare-selected"]
+          : selected
+            ? []
+            : native
+              ? ["--native-checks"]
+              : [
+                  "--consume",
+                  "2",
+                  "--handoff",
+                  packet,
+                  "--handoff-sha256",
+                  new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
+                ]),
         ...(mode === "published-default" || native || selected
           ? []
           : ["--image-pin", pin, "--sdk-sha256", "c".repeat(64)]),
@@ -984,7 +1014,13 @@ else process.exit(42);
           PATH: bin + ":" + (process.env.PATH ?? ""),
           CI: "true",
           GITHUB_ACTIONS: "true",
-          GITHUB_JOB: native ? "web-native-checks" : "workspace-browser-shard",
+          GITHUB_JOB: selectedPrepare
+            ? "collaboration-build"
+            : native
+              ? "web-native-checks"
+              : "workspace-browser-shard",
+          HOME: selectedPrepare ? bin : process.env.HOME,
+          FVOCI_E2E_PENDING: selectedPrepare ? "1" : process.env.FVOCI_E2E_PENDING,
           GITHUB_SHA: sha,
           GITHUB_REPOSITORY: "fixture/repo",
           GITHUB_RUN_ID: "12",
@@ -998,6 +1034,9 @@ else process.exit(42);
             ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
             : undefined,
           FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected ? sha : undefined,
+          FVOCI_WEB_BUILD_HANDOFF: selectedPrepare
+            ? join(bin, "fvoci-web-build-handoff")
+            : undefined,
           FVOCI_SELECTED_IMAGE_DEADLINE: String(Date.now() + 900000),
           ACTIONS_RUNTIME_TOKEN: "PRIVATE_ACTION_CANARY",
           FIXTURE_READY: join(bin, "ready"),
@@ -1062,18 +1101,24 @@ else process.exit(42);
       "remote-endpoint",
     ].includes(mode);
     expect(code, stderr).toBe(
-      mode === "native-cancel" || mode === "selected-cancel"
+      mode === "native-cancel" || mode === "selected-cancel" || mode === "selected-copy-cancel"
         ? 143
         : refused ||
             mode === "remove-fail" ||
             mode === "native-remove-fail" ||
-            mode === "selected-remove-fail"
+            mode === "selected-remove-fail" ||
+            mode === "selected-copy-remove-fail"
           ? 1
-          : mode === "inputs-fail"
-            ? 17
-            : mode === "consume-fail" || mode === "native-fail" || mode === "selected-fail"
-              ? 19
-              : 0,
+          : mode === "selected-copy-fail"
+            ? 23
+            : mode === "inputs-fail"
+              ? 17
+              : mode === "consume-fail" ||
+                  mode === "native-fail" ||
+                  mode === "selected-fail" ||
+                  mode === "selected-prepare-fail"
+                ? 19
+                : 0,
     );
     expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
     expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
@@ -1111,16 +1156,33 @@ else process.exit(42);
           },
       );
     if (selected) {
+      if (mode === "selected-prepare-fail") {
+        expect(stderr).toContain(
+          "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",
+        );
+        expect(stderr).toContain(
+          "web-e2e stage=selected-dependencies finished at=2026-10-17T04:16:01Z elapsed_seconds=15.928 exit=19",
+        );
+        const log = join(selectedOutput, "prepare.private.log");
+        expect(readFileSync(log, "utf8")).toContain("PRIVATE_CONSOLE_CANARY");
+        expect(statSync(log).mode & 0o777).toBe(0o600);
+        expect(rows.filter((row) => row.op[0] === "create")).toHaveLength(1);
+        expect(rows.filter((row) => row.op[0] === "cp")).toHaveLength(1);
+        expect(rows.filter((row) => row.op[0] === "rm")).toHaveLength(2);
+      }
       const runs = rows.filter((row) => row.op[0] === "run");
-      expect(runs).toHaveLength(1);
-      expect(runs[0]?.safe).toBe(true);
-      expect(runs[0]?.hasActionToken).toBe(false);
-      expect(runs[0]?.wholeTemp).toBe(false);
+      const copyFailure = mode.startsWith("selected-copy-");
+      expect(runs).toHaveLength(copyFailure ? 0 : 1);
+      for (const row of rows.filter((row) => row.op[0] === "create" || row.op[0] === "run")) {
+        expect(row.safe).toBe(true);
+        expect(row.hasActionToken).toBe(false);
+        expect(row.wholeTemp).toBe(false);
+      }
       expect(rows.some((row) => row.op[0] === "rm")).toBe(true);
       expect(
         readdirSync(join(selectedOutput, "tmp")).filter((name) => name.endsWith(".env")),
       ).toEqual([]);
-      if (mode !== "selected-remove-fail")
+      if (!["selected-remove-fail", "selected-copy-remove-fail"].includes(mode))
         expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
       return;
     }
@@ -1531,44 +1593,59 @@ describe("CLI", () => {
 });
 
 test("native source admission rejects stale source, image, profile and wrong job", () => {
-  const { root, sha } = committedCheckout();
-  const sdk = containerRequest([root, "--native-checks"], {}).sdk;
-  const env = {
-    FVOCI_WEB_CONTAINER_LOCAL: "1",
-    FVOCI_WEB_CONTAINER_JOB: "web-native-checks",
-    FVOCI_WEB_CONTAINER_SOURCE: sha,
-    FVOCI_WEB_CONTAINER_IMAGE: sdk.image,
-    FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
-    FVOCI_WEB_CONTAINER_LOCAL_IMAGE: "0",
-    CARGO_BUILD_JOBS: "2",
-    CARGO_INCREMENTAL: "0",
-    CARGO_PROFILE_DEV_DEBUG: "0",
-    CARGO_PROFILE_TEST_DEBUG: "0",
-    CARGO_TARGET_DIR: join(root, "target"),
-  };
-  expect(() => {
-    qualifyNativeChecks(root, env);
-  }).not.toThrow();
-  for (const changed of [
-    { FVOCI_WEB_CONTAINER_SOURCE: "a".repeat(40) },
-    { FVOCI_WEB_CONTAINER_IMAGE: "foreign" },
-    { FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64) },
-    { CARGO_PROFILE_TEST_DEBUG: "2" },
-    { CI: "true", GITHUB_ACTIONS: "true", GITHUB_JOB: "workspace-browser-shard" },
-  ])
+  const facts = fs.statfsSync("."),
+    empty = fs.statfsSync(".");
+  facts.bavail = 30_000_000;
+  facts.bsize = 4096;
+  empty.bavail = 0;
+  const disk = spyOn(fs, "statfsSync").mockReturnValue(facts);
+  try {
+    const { root, sha } = committedCheckout();
+    const sdk = containerRequest([root, "--native-checks"], {}).sdk;
+    const env = {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_JOB: "web-native-checks",
+      FVOCI_WEB_CONTAINER_SOURCE: sha,
+      FVOCI_WEB_CONTAINER_IMAGE: sdk.image,
+      FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
+      FVOCI_WEB_CONTAINER_LOCAL_IMAGE: "0",
+      CARGO_BUILD_JOBS: "2",
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_DEV_DEBUG: "0",
+      CARGO_PROFILE_TEST_DEBUG: "0",
+      CARGO_TARGET_DIR: join(root, "target"),
+    };
     expect(() => {
-      qualifyNativeChecks(root, { ...env, ...changed });
-    }).toThrow(CheckError);
-  writeFileSync(join(root, "apps/web/openapi.json"), "dirty");
-  expect(() => {
-    qualifyNativeChecks(root, env);
-  }).toThrow(/clean source/);
-  for (const args of [
-    ["--handoff", "/packet"],
-    ["--reuse-cohort", "/packet"],
-    ["--image-pin", sdk.image, "--sdk-sha256", sdk.sdk],
-  ])
-    expect(() => containerRequest([root, "--native-checks", ...args], {})).toThrow(
-      /without packet or reuse overrides/,
-    );
+      qualifyNativeChecks(root, env);
+    }).not.toThrow();
+    disk.mockReturnValue(empty);
+    expect(() => {
+      qualifyNativeChecks(root, env);
+    }).toThrow(/20GB disk floor/);
+    disk.mockReturnValue(facts);
+    for (const changed of [
+      { FVOCI_WEB_CONTAINER_SOURCE: "a".repeat(40) },
+      { FVOCI_WEB_CONTAINER_IMAGE: "foreign" },
+      { FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64) },
+      { CARGO_PROFILE_TEST_DEBUG: "2" },
+      { CI: "true", GITHUB_ACTIONS: "true", GITHUB_JOB: "workspace-browser-shard" },
+    ])
+      expect(() => {
+        qualifyNativeChecks(root, { ...env, ...changed });
+      }).toThrow(CheckError);
+    writeFileSync(join(root, "apps/web/openapi.json"), "dirty");
+    expect(() => {
+      qualifyNativeChecks(root, env);
+    }).toThrow(/clean source/);
+    for (const args of [
+      ["--handoff", "/packet"],
+      ["--reuse-cohort", "/packet"],
+      ["--image-pin", sdk.image, "--sdk-sha256", sdk.sdk],
+    ])
+      expect(() => containerRequest([root, "--native-checks", ...args], {})).toThrow(
+        /without packet or reuse overrides/,
+      );
+  } finally {
+    disk.mockRestore();
+  }
 });

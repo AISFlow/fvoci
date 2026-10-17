@@ -83,25 +83,63 @@ async function selectedImageOperation(
   root: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
-  const started = performance.now();
-  const result = await selectedImageResult(operation, root, {
-    env: environment,
-    required: false,
-    log: join(
+  const started = performance.now(),
+    log = join(
       process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
       operation + ".private.log",
-    ),
-  });
-  process.stderr.write(
-    "selected-image phase=" +
-      operation +
-      " elapsed_seconds=" +
-      ((performance.now() - started) / 1000).toFixed(3) +
-      " exit=" +
-      String(result.returncode) +
-      "\n",
-  );
-  return result.returncode;
+    );
+  let status = 1;
+  try {
+    const result = await selectedImageResult(operation, root, {
+      env: environment,
+      required: false,
+      log,
+    });
+    status = result.returncode;
+    process.stderr.write(
+      "selected-image phase=" +
+        operation +
+        " elapsed_seconds=" +
+        ((performance.now() - started) / 1000).toFixed(3) +
+        " exit=" +
+        String(status) +
+        "\n",
+    );
+    return status;
+  } finally {
+    if (status !== 0)
+      try {
+        for (const line of containerStageDiagnostics(log, true)) process.stderr.write(line + "\n");
+      } catch {
+        process.stderr.write("selected-image diagnostics_unavailable=1\n");
+      }
+  }
+}
+
+function containerStageDiagnostics(path: string, selected = false): string[] {
+  const size = statSync(path).size,
+    bytes = Buffer.alloc(Math.min(size, 16384)),
+    offset = size - bytes.length,
+    fd = openSync(path, "r");
+  try {
+    readSync(fd, bytes, 0, bytes.length, offset);
+  } finally {
+    closeSync(fd);
+  }
+  return bytes
+    .toString("utf8")
+    .split("\n")
+    .slice(offset ? 1 : 0)
+    .filter(
+      (line) =>
+        /^(?:web-e2e stage=(?:cargo-fetch|engine-fetch|dependencies|browser-version|sqlite-sdk-admit|browser-input-before|web-build|fixture-build|default-server-build|worker-build|browser-input-after|browser-handoff-export|browser-handoff-consume|browser-group) (?:started|elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})|web build handoff check_line=[0-9]{1,6})$/.test(
+          line,
+        ) ||
+        (selected &&
+          /^web-e2e stage=(?:selected-(?:dependencies|handoff-admit|cargo-fetch|sqlite-sdk|input-before|lib|install|engine|input-after|handoff-consume|handoff-export)|collaboration-(?:wire-restart-fixtures|helper-fixtures|types)|web-build) (?:started(?: at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?|(?:finished at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z )?elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})$/.test(
+            line,
+          )),
+    );
 }
 
 async function selectedImagePhase(root: string, operation: string): Promise<number> {
@@ -228,7 +266,8 @@ async function selectedImagePhase(root: string, operation: string): Promise<numb
   );
   Object.assign(process.env, sqliteEnvironment(readFileSync(join(sqlite, "environment"), "utf8")));
   const { prepareBrowser } = await import("../selected-backend-ci/runtime.ts");
-  process.env.PLAYWRIGHT_BROWSERS_PATH = "/opt/playwright";
+  const browserSource = join(output, "browser-source");
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browserSource;
   const chromium = checkedOutput(
     [
       process.execPath,
@@ -238,6 +277,7 @@ async function selectedImagePhase(root: string, operation: string): Promise<numb
     root,
   );
   prepareBrowser(output, chromium);
+  rmSync(browserSource, { recursive: true });
   process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
   process.env.CARGO_NET_OFFLINE = "true";
   return webEntry(root, [
@@ -2973,28 +3013,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
       if (logFd !== undefined) {
         try {
           const path = join(
-              runDirectory,
-              phase === "consume" ? "console.log" : "inputs-console.log",
-            ),
-            size = statSync(path).size,
-            bytes = Buffer.alloc(Math.min(size, 16384)),
-            offset = size - bytes.length,
-            fd = openSync(path, "r");
-          try {
-            readSync(fd, bytes, 0, bytes.length, offset);
-          } finally {
-            closeSync(fd);
-          }
-          for (const line of bytes
-            .toString("utf8")
-            .split("\n")
-            .slice(offset ? 1 : 0))
-            if (
-              /^(?:web-e2e stage=(?:cargo-fetch|engine-fetch|dependencies|browser-version|sqlite-sdk-admit|browser-input-before|web-build|fixture-build|default-server-build|worker-build|browser-input-after|browser-handoff-export|browser-handoff-consume|browser-group) (?:started|elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})|web build handoff check_line=[0-9]{1,6})$/.test(
-                line,
-              )
-            )
-              process.stderr.write(line + "\n");
+            runDirectory,
+            phase === "consume" ? "console.log" : "inputs-console.log",
+          );
+          for (const line of containerStageDiagnostics(path)) process.stderr.write(line + "\n");
         } catch {
           process.stderr.write("container-browser diagnostics_unavailable=1\n");
         }
