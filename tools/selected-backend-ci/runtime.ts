@@ -22,7 +22,7 @@ import {
   statfsSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
 import {
   admittedBrowser,
@@ -31,6 +31,7 @@ import {
   identity,
   localAllocation,
   selectedActor,
+  runtimeAllocationEnvironment,
   runtimeAccess,
 } from "./admission.ts";
 import { reference } from "./build.ts";
@@ -377,8 +378,8 @@ export async function runtimePermissions(
     process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
       ? localAllocation("permissions")
       : undefined;
-  const actor = local ? [local.uid, local.gid] : [1000, 1000];
-  const owner = boundary.identity("run", output);
+  const actor = [1000, 1000];
+  const owner = boundary.identity("permissions", output);
   if (!local) assertRuntimeJob();
   const runnerUid = uid(),
     runnerGid = gid(),
@@ -450,9 +451,7 @@ export async function runtimePermissions(
   // Docker includes the existing primary GID in getgroups(); setpriv does
   // not unless requested. Keep both actual actors and the strict preflight
   // on the same set without granting any access beyond primary GID 1000.
-  const allowedGroups = new Set(
-      local ? groups() : [dockerGid, ...(selectedImageHost() ? [1000] : [])],
-    ),
+  const allowedGroups = new Set([dockerGid, ...(selectedImageHost() ? [1000] : [])]),
     needed: Record<string, unknown> = {};
   for (const [path, mask] of Object.entries(hostPaths)) {
     // The same complete set is checked in the image below. Host group grants
@@ -487,21 +486,35 @@ export async function runtimePermissions(
     }
   }
   const groupList = [...allowedGroups].sort((a, b) => a - b);
+  const actorEnvironment = local ? runtimeAllocationEnvironment(local) : {};
+  const preparation = local
+    ? readFileSync(env("FVOCI_SELECTED_LOCAL_ALLOCATION"), "utf8")
+    : undefined;
   if (selectedImageHost())
-    await selectedImageAccess({ groups: groupList, files: accessiblePaths }, root, true);
+    await selectedImageAccess(
+      { groups: groupList, files: accessiblePaths, preparation },
+      root,
+      true,
+    );
   // Retain the original host preflight for source ancestry and the actual
   // controller executable; image mount ancestry cannot prove host traversal.
   const result = spawnSync(
     [
+      "sudo",
+      ...(local ? ["--preserve-env=" + SELECTED_IMAGE_ENV.join(",")] : []),
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1000",
+      "--groups=" + groupList.join(","),
       ...(local
-        ? []
-        : ["sudo", "setpriv", "--reuid=1000", "--regid=1000", "--groups=" + groupList.join(",")]),
+        ? ["env", ...Object.entries(actorEnvironment).map(([key, value]) => key + "=" + value)]
+        : []),
       selectedImageHost() ? process.execPath : bun,
       "--no-env-file",
       join(import.meta.dir, "runtime-access-check.ts"),
     ],
     {
-      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: hostPaths })),
+      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: hostPaths, preparation })),
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -513,6 +526,15 @@ export async function runtimePermissions(
     receipt = { invalid_receipt: true };
   }
   const exit = observedExit(result);
+  if (local) {
+    const pair = (
+      receipt as { local_allocation?: { preparation_sha256: string; runtime_sha256: string } }
+    ).local_allocation;
+    assert.ok(
+      pair?.preparation_sha256 === env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256") &&
+        pair.runtime_sha256 === local.runtimeAllocation?.sha256,
+    );
+  }
   write(join(output, "runtime-access-stage.json"), {
     source: before.head,
     tree: before.tree,
@@ -526,6 +548,9 @@ export async function runtimePermissions(
     required_group_path_count: Object.keys(needed).length,
     preflight_exit: exit,
     preflight: receipt,
+    ...(local
+      ? { local_allocation: (receipt as { local_allocation?: unknown }).local_allocation }
+      : {}),
   });
   assert.ok(
     exit === 0 &&
@@ -567,7 +592,10 @@ const runBoundary: RunBoundary = {
         "--eval",
         "console.log(require('@playwright/test').chromium.executablePath())",
       ]);
-    if ((process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci") === "github-ci")
+    if (
+      (process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci") === "github-ci" ||
+      selectedImageHost()
+    )
       assert.equal(chromium, admittedBrowser(output));
     return {
       bun: { path: bun, sha256: sha(bun) },
@@ -930,7 +958,7 @@ export function ownershipReturn(
         ? localAllocation("owner-return")
         : undefined;
     assertHandoffActor(output, expected);
-    const owner = admit("run", output);
+    const owner = admit("owner-return", output);
     diagnostic.phase = "current-source";
     if (!local) assertRuntimeJob();
     const requested = requestedRuns(lane);
@@ -1089,6 +1117,7 @@ export const SELECTED_IMAGE_ENV = [
   "FVOCI_SELECTED_EXECUTION_MODE",
   "FVOCI_SELECTED_LOCAL_ALLOCATION",
   "FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256",
+  "FVOCI_LOCAL_PREPARATION_SHA256",
   "FVOCI_CI_OWNER",
   "FVOCI_ROOT_RUN_OWNER",
   "FVOCI_CI_SELECTED_RUNS",
@@ -1150,7 +1179,7 @@ function selectedImageInvocation(
     fail("selected image operations require the native Linux x64 host controller");
   const local =
     process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
-      ? localAllocation(operation)
+      ? localAllocation(actor ? "permissions" : operation)
       : undefined;
   const architecture = containerArchitecture(
     process.platform,
@@ -1172,8 +1201,8 @@ function selectedImageInvocation(
   const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
     output = local?.outputRoot ?? join(temp, "fvoci-selected-current"),
     owner = process.getuid?.(),
-    uid = actor ? (local?.uid ?? 1000) : owner,
-    gid = actor ? (local?.gid ?? 1000) : process.getgid?.();
+    uid = actor ? 1000 : owner,
+    gid = actor ? 1000 : process.getgid?.();
   if (
     !uid ||
     !gid ||
@@ -1237,6 +1266,7 @@ function selectedImageInvocation(
       ),
     ),
     ...Object.fromEntries(SELECTED_IMAGE_ENV.map((key) => [key, process.env[key]])),
+    ...(local && actor ? runtimeAllocationEnvironment(local) : {}),
     FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
     ROOT: root,
     HOME: join(output, "home"),
@@ -1317,6 +1347,25 @@ function selectedImageInvocation(
   const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
   const allocation = local ? env("FVOCI_SELECTED_LOCAL_ALLOCATION") : undefined;
   if (allocation) mounts.push(allocation);
+  if (local?.runtimeAllocation) mounts.push(local.runtimeAllocation.path);
+  if (local) {
+    const common = realpathSync(
+      resolve(root, checkedOutput(["git", "rev-parse", "--git-common-dir"], root)),
+    );
+    if (!below(common, root)) fail("local selected requires the granted ordinary execution clone");
+    const alternates = join(common, "objects/info/alternates");
+    if (existsSync(alternates))
+      for (const path of readFileSync(alternates, "utf8").trim().split("\n")) {
+        if (
+          !isAbsolute(path) ||
+          basename(path) !== "objects" ||
+          realpathSync(path) !== path ||
+          !statSync(path).isDirectory()
+        )
+          fail("physical shared Git objects required");
+        mounts.push(path);
+      }
+  }
   if (["prepare", "consume"].includes(operation)) {
     if (process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff"))
       fail("selected packet canonical path required");
@@ -1336,6 +1385,15 @@ function selectedImageInvocation(
       fail("selected bind must be physical");
     const readonly =
       path === allocation ||
+      path === local?.runtimeAllocation?.path ||
+      (local &&
+        ![
+          root,
+          output,
+          join(temp, "fvoci-sqlite"),
+          join(temp, "fvoci-image-cargo"),
+          process.env.FVOCI_WEB_BUILD_HANDOFF,
+        ].includes(path)) ||
       (path === root && !["prepare", "consume"].includes(operation)) ||
       (path === process.env.FVOCI_WEB_BUILD_HANDOFF && operation === "consume") ||
       (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
@@ -1590,7 +1648,7 @@ export async function selectedImageInputs(before: Inputs, root: string): Promise
 }
 
 export async function selectedImageAccess(
-  request: { groups: number[]; files: Record<string, number> },
+  request: { groups: number[]; files: Record<string, number>; preparation?: string },
   root: string,
   actor = false,
 ) {

@@ -165,6 +165,7 @@ export interface LocalGrant {
   outputRoot: string;
   registrationHashes: Record<string, string>;
   stageCommands: Record<string, string[]>;
+  runtimeAllocation?: Reference;
   purpose?: "equal-work" | "auth-session" | "turso-ui" | "keycloak";
 }
 
@@ -203,7 +204,20 @@ export interface LocalConsumerGrant extends LocalGrant {
     };
   };
 }
+export interface LocalRuntimeAccess {
+  preparation_sha256: string;
+  runtime_sha256: string;
+  runId: string;
+  dispatchId: string;
+  taskId: string;
+  workerTerminal: string;
+  rootTerminal: string;
+  expiresUtc: string;
+}
 export interface AccessReceipt {
+  local_allocation?: LocalRuntimeAccess;
+  runner_uid?: number;
+  runner_gid?: number;
   source: string;
   tree: string;
   owner: string;

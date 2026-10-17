@@ -16,7 +16,11 @@ import {
   fail,
 } from "../selected-backend-ci/runtime.ts";
 import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
-import { localAllocation } from "../selected-backend-ci/admission.ts";
+import {
+  allocationExpiry,
+  localAllocation,
+  runtimeAllocationEnvironment,
+} from "../selected-backend-ci/admission.ts";
 export {
   CI_WEB_IMAGE,
   CI_WEB_IMAGE_SOURCE,
@@ -291,12 +295,17 @@ async function selectedImagePhase(root: string, operation: string): Promise<numb
 
 async function selectedContainerEntry(root: string, argv: string[]): Promise<number> {
   root = realpathSync(root);
-  process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Date.now() + 900_000);
+  const started = Date.now();
   const request = webRequest(argv, process.env);
   const local =
     process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local"
       ? localAllocation("prepare")
       : undefined;
+  if (local) runtimeAllocationEnvironment(local);
+  const expires = local
+    ? Math.min(allocationExpiry(local.expiresUtc), started + 3_600_000)
+    : Infinity;
+  process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Math.min(started + 900_000, expires));
   if (
     !request.selected ||
     (local
@@ -422,6 +431,8 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     fresh();
     for (const name of ["tmp", "home"]) mkdirSync(join(output, name), { mode: 0o700 });
     process.env.FVOCI_WEB_BUILD_PHASE = "consume";
+    // A single successful prepare admits the separate original consume window.
+    process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Math.min(Date.now() + 900_000, expires));
     const consumed = await selectedImageOperation("consume", root, environment());
     if (consumed) return consumed;
   }
@@ -452,9 +463,17 @@ export function localSelectedFresh(root: string, output: string, temp: string): 
   const grant = localAllocation("prepare");
   if (grant.worktree !== root || grant.outputRoot !== output || dirname(output) !== temp)
     fail("local selected cohort paths differ from allocation");
-  for (const path of [temp, output])
-    if (!isPrivateDirectory(path) || statSync(path).gid !== grant.gid)
-      fail("private local selected cohort required");
+  if (!isPrivateDirectory(output) || statSync(output).gid !== grant.gid)
+    fail("private local selected output required");
+  const parent = lstatSync(temp);
+  if (
+    !parent.isDirectory() ||
+    parent.isSymbolicLink() ||
+    parent.uid !== grant.uid ||
+    parent.gid !== grant.gid ||
+    (parent.mode & 0o777) !== 0o711
+  )
+    fail("owned traversable local cohort parent required");
   if (readdirSync(output).length) fail("local selected output must start empty");
   for (const name of [
     "fvoci-image-cargo",
@@ -483,7 +502,8 @@ export function localSelectedFresh(root: string, output: string, temp: string): 
       fail("local selected requires absent generated paths");
     }
   }
-  for (const path of paths) mkdirSync(path, { mode: 0o700 });
+  for (const path of paths)
+    mkdirSync(path, { mode: path === join(temp, "fvoci-sqlite") ? 0o700 : 0o750 });
   const owned = [output, ...paths].map((path) => ({ path, facts: lstatSync(path) }));
   return () => {
     localAllocation("consume");
@@ -1136,20 +1156,20 @@ export async function selectedHost(
   const preserved =
     "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB" +
     (selectedImageHost() ? "," + SELECTED_IMAGE_ENV.join(",") : "");
+  const actorEnvironment = local ? runtimeAllocationEnvironment(local) : {};
   const runtime = (mode: string, browser = false) => [
+    "sudo",
+    "--preserve-env=" +
+      preserved +
+      (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
+      (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
+    "setpriv",
+    "--reuid=1000",
+    "--regid=1000",
+    "--groups=" + groups,
     ...(local
-      ? []
-      : [
-          "sudo",
-          "--preserve-env=" +
-            preserved +
-            (browser ? ",PLAYWRIGHT_BROWSERS_PATH" : "") +
-            (mode === "config-list" ? ",FVOCI_WEB_BUILD_PHASE" : ""),
-          "setpriv",
-          "--reuid=1000",
-          "--regid=1000",
-          "--groups=" + groups,
-        ]),
+      ? ["env", ...Object.entries(actorEnvironment).map(([key, value]) => key + "=" + value)]
+      : []),
     ...(mode === "owner-return" ? [] : ["env", "TMPDIR=" + join(output, "tmp")]),
     process.execPath,
     cli,
@@ -1161,10 +1181,8 @@ export async function selectedHost(
 
   let config = "not-run",
     launcher = "not-run",
-    selected = local
-      ? 0
-      : await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
-  if (!local && selected === 0)
+    selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
+  if (selected === 0)
     selected = await command(
       ["sudo", "install", "-d", "-o", "1000", "-g", "1000", "-m", "0700", join(output, "tmp")],
       root,
@@ -1185,7 +1203,6 @@ export async function selectedHost(
   const ownership = await capture(runtime("owner-return"), "ownership-stage.json", undefined, true);
   if (ownership === 0) {
     if (
-      !local &&
       (await command(
         ["sudo", "chown", "-h", "-R", uid + ":" + gid, output, sqlite],
         root,

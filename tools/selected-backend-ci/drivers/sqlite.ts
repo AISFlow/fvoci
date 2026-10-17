@@ -24,7 +24,6 @@ import {
 import { dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
 import { SELECTED_IMAGE_ENV, selectedImageHost } from "../runtime.ts";
-import { selectedActor } from "../admission.ts";
 import {
   checkpointPrefix,
   env,
@@ -1240,7 +1239,7 @@ export async function main(
   seam: Seam = sqliteSeam,
   driver = sqliteDriver,
   source: Environment = process.env,
-  identity: readonly [number, number] = selectedActor(),
+  identity: readonly [number, number] = [1000, 1000],
 ): Promise<number> {
   // The whole binding is checked before any resource is created.
   env("FVOCI_CI_SELECTED_RUNS", source);

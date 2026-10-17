@@ -25,7 +25,6 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { SELECTED_IMAGE_ENV, selectedImageHost } from "../runtime.ts";
-import { selectedActor } from "../admission.ts";
 import {
   bunDriver,
   env,
@@ -1675,9 +1674,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       /^root-current-postgres-[0-9a-f]{12}$/.test(basename(run)),
   );
   const facts = statSync(run);
-  assert.ok(
-    facts.isDirectory() && facts.uid === selectedActor()[0] && (facts.mode & 0o777) === 0o700,
-  );
+  assert.ok(facts.isDirectory() && facts.uid === 1000 && (facts.mode & 0o777) === 0o700);
   if (mode === "--pg-ready") {
     write(join(run, "fixture-pg-ready.json"), await fixtureInfo("pg"));
     trapInterrupts();

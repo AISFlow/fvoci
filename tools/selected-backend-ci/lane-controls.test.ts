@@ -1051,7 +1051,7 @@ describe("lease order", () => {
       actorUid = uid() + 1,
       actorGid = gid() + 1;
     chmodSync(base, 0o755);
-    mkdirSync(cohort, { mode: 0o700 });
+    mkdirSync(cohort, { mode: 0o711 });
     mkdirSync(output, { mode: 0o700 });
     for (const name of registeredModules) {
       mkdirSync(dirname(join(checkout, name)), { recursive: true });
@@ -1102,7 +1102,7 @@ describe("lease order", () => {
     const probe = join(base, "probe.ts");
     writeFileSync(
       probe,
-      `import {localAllocation,selectedActor} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts"))};
+      `import {localAllocation} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts"))};
 import {localSelectedFresh} from ${JSON.stringify(join(checkout, "tools/web-e2e/run-web-e2e.ts"))};
 import {mkdirSync,writeFileSync,readFileSync,existsSync,renameSync} from "node:fs";
 const mode=process.argv[2],root=${JSON.stringify(checkout)},out=${JSON.stringify(output)},temp=${JSON.stringify(cohort)};
@@ -1115,7 +1115,7 @@ try {
   writeFileSync(temp+"/keep","outside reset");
   if(mode==="replaced"){renameSync(root+"/target",root+"/retained");mkdirSync(root+"/target");}
   reset();
-  if(existsSync(out+"/generated")||existsSync(root+"/target/generated")||readFileSync(temp+"/keep","utf8")!=="outside reset"||JSON.stringify(selectedActor())!==JSON.stringify([grant.uid,grant.gid]))throw Error("bad reset");
+  if(existsSync(out+"/generated")||existsSync(root+"/target/generated")||readFileSync(temp+"/keep","utf8")!=="outside reset")throw Error("bad reset");
   console.log("admitted-owned-reset");
 }catch(error) {console.error((error as Error).message);console.log("refused");process.exitCode=1;}`,
     );
@@ -1467,4 +1467,144 @@ describe("config-list launcher gate", () => {
       expect(marks).toEqual(["owner"]);
       expect(readFileSync(join(safe, `config-list.${occupied}.log`), "utf8")).toBe("OLD_CAPTURE");
     });
+});
+
+test("independent local actor allocation keeps the caller grant private and closes only admitted work after expiry", () => {
+  const base = directory(),
+    checkout = join(base, "checkout"),
+    output = join(base, "output"),
+    preparationUid = uid() + 1,
+    preparationGid = gid() + 1,
+    actorPath = join(base, "actor.json"),
+    preparationPath = join(base, "preparation.json");
+  chmodSync(base, 0o711);
+  mkdirSync(output, { mode: 0o700 });
+  for (const name of registeredModules) {
+    mkdirSync(dirname(join(checkout, name)), { recursive: true });
+    copyFileSync(join(root, name), join(checkout, name));
+  }
+  const git = (...args: string[]) => {
+    const result = spawnSync(
+      ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", ...args],
+      { cwd: checkout, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-qm", "fixture", "--no-verify", "--no-gpg-sign");
+  const actor: LocalGrant = {
+    schema: 1,
+    status: "GRANTED",
+    executionMode: "orca-local",
+    exclusiveLocalBatch: true,
+    currentDispatchConfirmed: true,
+    owner: "orca:fixture",
+    runId: "run_ab12",
+    dispatchId: "ctx_cd34",
+    taskId: "task_ef56",
+    workerTerminal: "worker",
+    rootTerminal: "root",
+    worktree: checkout,
+    uid: 1000,
+    gid: 1000,
+    source: git("rev-parse", "HEAD"),
+    tree: git("rev-parse", "HEAD^{tree}"),
+    allowedModes: ["access", "browser", "config-list", "run", "owner-return", "inputs"],
+    expiresUtc: new Date(Date.now() + 3600000).toISOString(),
+    outputRoot: output,
+    registrationHashes: Object.fromEntries(
+      registeredModules.map((name) => [name, sha(join(checkout, name))]),
+    ),
+    stageCommands: {},
+  };
+  writeFileSync(actorPath, JSON.stringify(actor), { mode: 0o600 });
+  const actorSha = sha(actorPath),
+    preparation: LocalGrant = {
+      ...actor,
+      uid: preparationUid,
+      gid: preparationGid,
+      allowedModes: ["prepare", "consume", "permissions", "stage"],
+      runtimeAllocation: { path: actorPath, sha256: actorSha },
+      stageCommands: { lib: ["cargo", "build", "--locked"] },
+    };
+  const text = JSON.stringify(preparation);
+  writeFileSync(preparationPath, text, { mode: 0o600 });
+  const preparationSha = sha(preparationPath),
+    bun = join(base, "bun"),
+    probe = join(base, "probe.ts");
+  copyFileSync(process.execPath, bun);
+  chmodSync(bun, 0o755);
+  writeFileSync(
+    probe,
+    `import {strict as assert} from "node:assert";
+import {readFileSync,writeFileSync,rmSync} from "node:fs";
+import {localAllocation} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/admission.ts"))};
+import {preflight} from ${JSON.stringify(join(checkout, "tools/selected-backend-ci/runtime-access-check.ts"))};
+const text=readFileSync(0,"utf8"), mode=process.argv[2], grant=JSON.parse(readFileSync(process.env.FVOCI_SELECTED_LOCAL_ALLOCATION!,"utf8"));
+try {
+ assert.throws(()=>readFileSync(${JSON.stringify(preparationPath)}));
+ const report=preflight({groups:[1000,${String(preparationGid)}].sort((a,b)=>a-b),files:{},preparation:mode==="foreign"?text+" ":text});
+ writeFileSync(${JSON.stringify(join(output, "runtime-access-stage.json"))},JSON.stringify({source:grant.source,tree:grant.tree,owner:grant.owner,runner_uid:${String(preparationUid)},runner_gid:${String(preparationGid)},runtime_uid:1000,runtime_gid:1000,groups:report.groups,preflight_exit:0,preflight:report,local_allocation:report.local_allocation}),{mode:0o600});
+ localAllocation("run");
+ Date.now=()=>Date.parse(grant.expiresUtc)+1;
+ assert.throws(()=>localAllocation("run"));
+ localAllocation("owner-return");
+ rmSync(${JSON.stringify(join(output, "runtime-access-stage.json"))});
+ assert.throws(()=>localAllocation("owner-return"));
+ console.log("paired-private-expired-closure");
+} catch { console.log("refused"); process.exitCode=1; }`,
+  );
+  const environment = {
+    PATH: "/usr/bin:/bin",
+    FVOCI_SELECTED_EXECUTION_MODE: "orca-local",
+    FVOCI_SELECTED_LOCAL_ALLOCATION: actorPath,
+    FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: actorSha,
+    FVOCI_LOCAL_PREPARATION_SHA256: preparationSha,
+    FVOCI_CI_OWNER: actor.owner,
+    FVOCI_ROOT_RUN_OWNER: actor.owner,
+    FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+    FVOCI_LOCAL_RUN_ID: actor.runId,
+    FVOCI_LOCAL_DISPATCH_ID: actor.dispatchId,
+    FVOCI_LOCAL_TASK_ID: actor.taskId,
+    ORCA_TERMINAL_HANDLE: actor.workerTerminal,
+    FVOCI_LOCAL_ROOT_TERMINAL: actor.rootTerminal,
+  };
+  const change = (...args: string[]) =>
+    expect(spawnSync(["sudo", "-n", "chown", ...args]).exitCode).toBe(0);
+  change("1000:1000", actorPath, output);
+  change(`${String(preparationUid)}:${String(preparationGid)}`, preparationPath);
+  try {
+    for (const mode of ["foreign", "extra-group", "normal"]) {
+      const result = spawnSync(
+        [
+          "sudo",
+          "-n",
+          "setpriv",
+          "--reuid=1000",
+          "--regid=1000",
+          "--groups=1000," +
+            String(preparationGid) +
+            (mode === "extra-group" ? "," + String(preparationGid + 1) : ""),
+          "env",
+          "-i",
+          ...Object.entries(environment).map(([key, value]) => key + "=" + value),
+          bun,
+          "--no-env-file",
+          probe,
+          mode,
+        ],
+        { cwd: checkout, stdin: Buffer.from(text), stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode).toBe(mode === "normal" ? 0 : 1);
+      expect(result.stdout.toString()).toBe(
+        mode === "normal" ? "paired-private-expired-closure\n" : "refused\n",
+      );
+    }
+  } finally {
+    change("-R", `${String(uid())}:${String(gid())}`, base);
+  }
+  expect(readFileSync(preparationPath, "utf8")).toBe(text);
+  expect(sha(actorPath)).toBe(actorSha);
 });

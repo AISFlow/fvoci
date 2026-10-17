@@ -158,8 +158,9 @@ for (const mode of [
       calls = join(base, "calls"),
       actorUid = (process.getuid?.() ?? 0) + 1,
       actorGid = (process.getgid?.() ?? 0) + 1;
+    chmodSync(base, 0o711);
     mkdirSync(bin);
-    mkdirSync(temp, { mode: 0o700 });
+    mkdirSync(temp, { mode: 0o711 });
     mkdirSync(output, { mode: 0o700 });
     const original = join(import.meta.dir, "../..");
     for (const name of registeredModules) {
@@ -177,7 +178,7 @@ for (const mode of [
       join(root, "scripts/run-selected-backend-e2e.ts"),
       `import fs from "node:fs";
 const mode=process.argv[2];fs.appendFileSync(process.env.FIXTURE_CALLS!,JSON.stringify({host:mode,uid:process.getuid?.(),gid:process.getgid?.(),lane:process.argv.includes("--lane")})+"\\n");
-if(mode==="permissions")console.log((process.getgroups?.()??[]).sort((a,b)=>a-b).join(","));`,
+if(mode==="permissions")console.log("1000,"+process.getgid?.());`,
     );
     writeFileSync(join(bin, "stat"), '#!/bin/sh\nprintf "986\\n"\n', { mode: 0o755 });
     const sha = checkedOutput(
@@ -221,15 +222,7 @@ if(mode==="permissions")console.log((process.getgroups?.()??[]).sort((a,b)=>a-b)
       source,
       tree,
       outputRoot: output,
-      allowedModes: [
-        "prepare",
-        "consume",
-        "pending",
-        "permissions",
-        "config-list",
-        "run",
-        "owner-return",
-      ],
+      allowedModes: ["prepare", "consume", "pending", "permissions"],
       expiresUtc:
         mode === "expired" ? "2000-01-01T00:00:00Z" : new Date(Date.now() + 3600000).toISOString(),
       registrationHashes: Object.fromEntries(
@@ -239,6 +232,18 @@ if(mode==="permissions")console.log((process.getgroups?.()??[]).sort((a,b)=>a-b)
         ]),
       ),
       stageCommands: {},
+    };
+    const runtimePath = join(base, "runtime-allocation.json");
+    const runtimeGrant = {
+      ...grant,
+      uid: 1000,
+      gid: 1000,
+      allowedModes: ["access", "browser", "config-list", "run", "owner-return", "inputs"],
+    };
+    writeFileSync(runtimePath, JSON.stringify(runtimeGrant), { mode: 0o600 });
+    grant.runtimeAllocation = {
+      path: runtimePath,
+      sha256: new Bun.CryptoHasher("sha256").update(readFileSync(runtimePath)).digest("hex"),
     };
     const grantBytes = JSON.stringify(grant),
       grantSha = new Bun.CryptoHasher("sha256").update(grantBytes).digest("hex");
@@ -300,6 +305,13 @@ if(a[0]==="run"){
         { stdout: "pipe", stderr: "pipe" },
       ).exitCode,
     ).toBe(0);
+    expect(Bun.spawnSync(["sudo", "-n", "chown", "1000:1000", runtimePath]).exitCode).toBe(0);
+    // Model only sudo dispatch, but retain real setpriv for the different actor.
+    writeFileSync(
+      join(bin, "sudo"),
+      '#!/bin/bash\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nexec /usr/bin/sudo -n --preserve-env=FIXTURE_CALLS,PATH "$@"\n',
+      { mode: 0o755 },
+    );
     const environment = {
       PATH: bin + ":/usr/bin:/bin",
       HOME: base,
@@ -401,7 +413,11 @@ if(a[0]==="run"){
         : [],
     );
     for (const row of host)
-      expect(row).toMatchObject({ uid: actorUid, gid: actorGid, lane: false });
+      expect(row).toMatchObject({
+        uid: row.host === "permissions" ? actorUid : 1000,
+        gid: row.host === "permissions" ? actorGid : 1000,
+        lane: false,
+      });
     if (mode === "preexisting")
       expect(readFileSync(join(root, "target/keep"), "utf8")).toBe("existing cache");
     if (fs.existsSync(join(output, "tmp")))

@@ -5,15 +5,20 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import process from "node:process";
 import { accessible, digest, gid, groups, uid } from "./io.ts";
-import { selectedActor } from "./admission.ts";
+import { qualifyRuntimePair, selectedActor } from "./admission.ts";
 
-export function preflight(request: { groups: number[]; files: Record<string, number> }) {
+export function preflight(request: {
+  groups: number[];
+  files: Record<string, number>;
+  preparation?: string;
+}) {
   const actor = selectedActor("access");
   assert.ok(uid() === actor[0] && gid() === actor[1] && deepEquals(groups(), request.groups));
   const missing = Object.entries(request.files)
     .filter(([p, mask]) => !accessible(p, mask))
     .map(([p]) => p);
   return {
+    ...(request.preparation ? { local_allocation: qualifyRuntimePair(request.preparation) } : {}),
     uid: uid(),
     gid: gid(),
     groups: groups(),

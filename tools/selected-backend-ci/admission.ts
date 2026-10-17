@@ -27,6 +27,7 @@ import type {
   Inputs,
   LocalConsumerGrant,
   LocalGrant,
+  LocalRuntimeAccess,
   Reference,
   Web,
 } from "./types.ts";
@@ -70,7 +71,7 @@ export function localAllocation(
   mode: string,
   expected: readonly [number, number] = [uid(), gid()],
 ): LocalGrant {
-  const grant = localIdentity(expected);
+  const grant = localIdentity(expected, mode === "owner-return");
   assert.ok(
     grant.purpose === undefined ||
       grant.purpose === "equal-work" ||
@@ -82,16 +83,53 @@ export function localAllocation(
       grant.allowedModes.every((value) => localModes.includes(value)),
   );
   registered(grant, registeredModules);
+  if (grant.runtimeAllocation) {
+    assert.ok(!["run", "config-list", "owner-return", "browser"].includes(mode));
+    runtimeAllocationEnvironment(grant);
+  } else if (
+    process.env.FVOCI_LOCAL_PREPARATION_SHA256 ||
+    grant.allowedModes.some((value) =>
+      ["access", "browser", "config-list", "owner-return", "inputs"].includes(value),
+    )
+  ) {
+    assert.ok(uid() === 1000 && gid() === 1000);
+    runtimePairBinding(grant);
+    assert.ok(Object.keys(grant.stageCommands).length === 0);
+    assert.ok(grant.allowedModes.every((value) => runtimeModes.includes(value)));
+    if (mode !== "access") {
+      const access = read(join(grant.outputRoot, "runtime-access-stage.json")) as AccessReceipt;
+      assert.ok(
+        access.source === grant.source &&
+          access.tree === grant.tree &&
+          access.owner === grant.owner,
+      );
+      assert.ok(access.runtime_uid === 1000 && access.runtime_gid === 1000);
+      assert.ok(
+        access.runner_uid &&
+          access.runner_gid &&
+          access.preflight_exit === 0 &&
+          access.preflight.missing === 0,
+      );
+      assert.ok(deepEquals(groups(), access.groups));
+      assert.ok(deepEquals(access.local_allocation, runtimePairBinding(grant)));
+    }
+  }
   return grant;
 }
 
-function localIdentity(expected: readonly [number, number]): LocalGrant {
+function localIdentity(expected: readonly [number, number], closing = false): LocalGrant {
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE, "orca-local");
   assert.ok(!process.env.CI && !Object.keys(process.env).some((key) => key.startsWith("GITHUB_")));
   const path = env("FVOCI_SELECTED_LOCAL_ALLOCATION");
   assert.ok(isAbsolute(path) && !lstatSync(path).isSymbolicLink());
   const facts = statSync(path);
-  assert.ok(facts.uid === uid() && (facts.mode & 0o777) === 0o600);
+  assert.ok(
+    facts.isFile() &&
+      facts.nlink === 1 &&
+      facts.uid === uid() &&
+      facts.gid === gid() &&
+      (facts.mode & 0o777) === 0o600,
+  );
   assert.equal(sha(path), env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
   // Purpose belongs to each entry: the selected lanes and every local
   // consumer admit only their own exact purposes after this shared identity.
@@ -128,7 +166,11 @@ function localIdentity(expected: readonly [number, number]): LocalGrant {
     ),
     0,
   );
-  assert.ok(Date.now() < allocationExpiry(grant.expiresUtc), "expired local allocation");
+  assert.ok(
+    Date.now() < allocationExpiry(grant.expiresUtc) ||
+      (closing && process.env.FVOCI_LOCAL_PREPARATION_SHA256),
+    "expired local allocation",
+  );
   assert.ok(
     isAbsolute(grant.outputRoot) &&
       resolve(grant.outputRoot, "runtime") === env("FVOCI_CI_SELECTED_RUNS"),
@@ -186,12 +228,87 @@ export const registeredModules = [
   "apps/web/e2e-pending/auth-session-contract.ts",
 ] as const;
 
-// CI retains its distinct handoff actor. Local preparation and runtime use
-// the actual tuple in the immutable allocation; this is not cross-UID isolation.
+// A stays caller-owned and pins the independently controller-issued actor B.
+// Only the actor opens B; neither allocation is copied or rewritten.
+const runtimeModes = ["access", "browser", "config-list", "run", "owner-return", "inputs"];
+export function runtimeAllocationEnvironment(grant: LocalGrant): Record<string, string> {
+  const reference = grant.runtimeAllocation;
+  assert.ok(reference && isAbsolute(reference.path) && /^[a-f0-9]{64}$/.test(reference.sha256));
+  const facts = lstatSync(reference.path);
+  assert.ok(
+    facts.isFile() &&
+      !facts.isSymbolicLink() &&
+      facts.nlink === 1 &&
+      facts.uid === 1000 &&
+      facts.gid === 1000 &&
+      (facts.mode & 0o777) === 0o600,
+  );
+  assert.equal(realpathSync(reference.path), reference.path);
+  for (const prefix of [
+    grant.outputRoot,
+    join(dirname(grant.outputRoot), "fvoci-sqlite"),
+    join(root, "target"),
+    join(root, "crates/collab-engine/target"),
+    join(root, "apps/web/dist"),
+  ])
+    assert.ok(!below(reference.path, prefix));
+  assert.notEqual(reference.path, env("FVOCI_SELECTED_LOCAL_ALLOCATION"));
+  return {
+    FVOCI_SELECTED_LOCAL_ALLOCATION: reference.path,
+    FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: reference.sha256,
+    FVOCI_LOCAL_PREPARATION_SHA256: env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"),
+  };
+}
+export function runtimePairBinding(grant: LocalGrant): LocalRuntimeAccess {
+  const preparation = env("FVOCI_LOCAL_PREPARATION_SHA256");
+  assert.match(preparation, /^[a-f0-9]{64}$/);
+  return {
+    preparation_sha256: preparation,
+    runtime_sha256: env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"),
+    runId: grant.runId,
+    dispatchId: grant.dispatchId,
+    taskId: grant.taskId,
+    workerTerminal: grant.workerTerminal,
+    rootTerminal: grant.rootTerminal,
+    expiresUtc: grant.expiresUtc,
+  };
+}
+export function qualifyRuntimePair(text: string): LocalRuntimeAccess {
+  const actor = localAllocation("access", [1000, 1000]);
+  assert.equal(digest(text), env("FVOCI_LOCAL_PREPARATION_SHA256"));
+  const preparation = JSON.parse(text) as LocalGrant;
+  assert.ok(preparation.uid > 0 && preparation.gid > 0);
+  assert.ok(
+    preparation.runtimeAllocation?.path === env("FVOCI_SELECTED_LOCAL_ALLOCATION") &&
+      preparation.runtimeAllocation.sha256 === env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"),
+  );
+  for (const key of [
+    "schema",
+    "status",
+    "executionMode",
+    "exclusiveLocalBatch",
+    "currentDispatchConfirmed",
+    "owner",
+    "runId",
+    "dispatchId",
+    "taskId",
+    "workerTerminal",
+    "rootTerminal",
+    "worktree",
+    "source",
+    "tree",
+    "expiresUtc",
+    "outputRoot",
+    "purpose",
+  ] as const)
+    assert.equal(preparation[key], actor[key]);
+  assert.ok(deepEquals(preparation.registrationHashes, actor.registrationHashes));
+  return runtimePairBinding(actor);
+}
 export function selectedActor(mode = "run"): readonly [number, number] {
-  if (process.env.FVOCI_SELECTED_EXECUTION_MODE !== "orca-local") return [1000, 1000];
-  const grant = localAllocation(mode);
-  return [grant.uid, grant.gid];
+  if (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local")
+    localAllocation(mode, [1000, 1000]);
+  return [1000, 1000];
 }
 
 const consumerCommonModules = [
@@ -759,8 +876,7 @@ export function configListInputs(
   );
   const consumed = read(join(output, "handoff-consumed.json")) as Consumed,
     before = read(join(output, "before.json")) as Inputs;
-  if (local)
-    assert.equal(consumed.localAuthorizationSha256, env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"));
+  if (local) assert.equal(consumed.localAuthorizationSha256, env("FVOCI_LOCAL_PREPARATION_SHA256"));
   assert.ok(
     consumed.source === before.head && before.head === (local?.source ?? env("GITHUB_SHA")),
   );

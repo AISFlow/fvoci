@@ -775,9 +775,13 @@ ROOT-issued `orca-local` allocation for this exact
 source/tree, worktree, task, dispatch, terminal, registered modules, stage
 commands, actor and expiry. The grant file and its SHA-256 are passed through
 the existing allocation environment; the runner never creates authority or
-sets GitHub variables. Preparation and runtime use the actual nonroot grant
-UID/GID, without claiming cross-UID isolation. CI retains its distinct actor.
-The output directory and its private parent must be owned by that actor, output
+sets GitHub variables. The actual nonroot preparation grant pins a separate
+ROOT-issued allocation for the existing runtime actor1000:1000; each original
+0600 grant remains owned by its intended principal. The runner reuses the CI
+permissions and ownership-return handoff rather than changing the product actor.
+Use a precreated exclusive ordinary execution clone as the granted worktree;
+only shared Git objects are exposed read-only. The preparation-owned cohort
+parent must have mode0711 and output mode0700. Output
 must be empty, and both native target directories and web dist must be absent.
 An existing checkout cache is refused. The packet and allocation remain outside
 the reset paths; fresh consume empties only directories created by this cohort
