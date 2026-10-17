@@ -871,7 +871,9 @@ describe("local lease", () => {
             expect(calls).toBe(1);
             expect(closed).toBe(true);
             expect(() => localAllocation("run")).toThrow("expired local allocation");
-            expect(() => ownershipReturn(output)).toThrow("expired local allocation");
+            expect(() => {
+              ownershipReturn(output);
+            }).toThrow("expired local allocation");
           });
         } finally {
           observed.mockRestore();
@@ -1571,8 +1573,9 @@ try {
     ORCA_TERMINAL_HANDLE: actor.workerTerminal,
     FVOCI_LOCAL_ROOT_TERMINAL: actor.rootTerminal,
   };
-  const change = (...args: string[]) =>
+  const change = (...args: string[]) => {
     expect(spawnSync(["sudo", "-n", "chown", ...args]).exitCode).toBe(0);
+  };
   change("1000:1000", actorPath, output);
   change(`${String(preparationUid)}:${String(preparationGid)}`, preparationPath);
   try {

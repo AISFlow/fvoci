@@ -159,6 +159,7 @@ for (const mode of [
       actorUid = (process.getuid?.() ?? 0) + 1,
       actorGid = (process.getgid?.() ?? 0) + 1;
     chmodSync(base, 0o711);
+    chmodSync(root, 0o755);
     mkdirSync(bin);
     mkdirSync(temp, { mode: 0o711 });
     mkdirSync(output, { mode: 0o700 });
@@ -249,6 +250,7 @@ if(mode==="permissions")console.log("1000,"+process.getgid?.());`,
       grantSha = new Bun.CryptoHasher("sha256").update(grantBytes).digest("hex");
     writeFileSync(allocation, grantBytes, { mode: 0o600 });
     writeFileSync(calls, "");
+    chmodSync(calls, 0o666);
     if (mode === "preexisting") {
       mkdirSync(join(root, "target"));
       writeFileSync(join(root, "target/keep"), "existing cache");
@@ -299,6 +301,12 @@ if(a[0]==="run"){
         ).exitCode,
       ).toBe(0);
     };
+    // Model only sudo dispatch, but retain real setpriv for the different actor.
+    writeFileSync(
+      join(bin, "sudo"),
+      '#!/bin/bash\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nexec /usr/bin/sudo -n --preserve-env=FIXTURE_CALLS,PATH "$@"\n',
+      { mode: 0o755 },
+    );
     expect(
       Bun.spawnSync(
         ["sudo", "-n", "chown", "-R", `${String(actorUid)}:${String(actorGid)}`, base, root],
@@ -306,12 +314,6 @@ if(a[0]==="run"){
       ).exitCode,
     ).toBe(0);
     expect(Bun.spawnSync(["sudo", "-n", "chown", "1000:1000", runtimePath]).exitCode).toBe(0);
-    // Model only sudo dispatch, but retain real setpriv for the different actor.
-    writeFileSync(
-      join(bin, "sudo"),
-      '#!/bin/bash\nif [[ "$1" == --preserve-env=* ]]; then shift; fi\nexec /usr/bin/sudo -n --preserve-env=FIXTURE_CALLS,PATH "$@"\n',
-      { mode: 0o755 },
-    );
     const environment = {
       PATH: bin + ":/usr/bin:/bin",
       HOME: base,
@@ -337,8 +339,7 @@ if(a[0]==="run"){
       FIXTURE_GRANT_SHA: grantSha,
       FIXTURE_ROOT: root,
     };
-    let exit: number,
-      diagnostic = "";
+    let exit: number, diagnostic: string;
     try {
       const child = Bun.spawn(
         [
