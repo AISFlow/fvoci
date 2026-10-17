@@ -1,6 +1,6 @@
 import { fixtureQueryArgs } from "../../../tools/web-e2e/database-urls.ts";
 import { execFileSync } from "node:child_process";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Request, type Response } from "@playwright/test";
 import { readJson, flowSchemas, createE2eUser, login, logout, watchCspViolations } from "./helpers";
 import { currentStep, freshCode, totp } from "./mfa-helpers";
 
@@ -27,16 +27,82 @@ async function inviteAccount(page: Page, email: string): Promise<string> {
     .filter({ hasText: /^멤버$/ })
     .click();
   await page.getByLabel("초대할 이메일").fill(email);
-  await page.getByRole("button", { name: "초대", exact: true }).click();
   const link = page.getByRole("link").filter({ hasText: "/invite/" });
-  await expect(link).toBeVisible();
-  const href = await link.getAttribute("href");
-  expect(href).toBeTruthy();
-  const required1 = href;
-  if (required1 === null) {
-    throw new Error("Missing fixture value: href");
+  let request: Request | undefined;
+  let requestCount = 0,
+    responseSeen = false,
+    status = 0,
+    finished = false,
+    failed = false;
+  const onRequest = (candidate: Request) => {
+    try {
+      const url = new URL(candidate.url());
+      if (
+        candidate.method() !== "POST" ||
+        url.origin !== new URL(page.url()).origin ||
+        !/^\/api\/v1\/workspaces\/[^/]+\/invitations$/.test(url.pathname) ||
+        candidate.frame() !== page.mainFrame()
+      )
+        return;
+      requestCount = Math.min(255, requestCount + 1);
+      request ??= candidate;
+    } catch {
+      /* Observation cannot replace the original assertion. */
+    }
+  };
+  const onResponse = (response: Response) => {
+    if (response.request() !== request) return;
+    responseSeen = true;
+    const code = response.status();
+    status = Number.isInteger(code) && code >= 100 && code <= 599 ? code : 0;
+  };
+  const onFinished = (candidate: Request) => {
+    if (candidate === request) finished = true;
+  };
+  const onFailed = (candidate: Request) => {
+    if (candidate === request) failed = true;
+  };
+  page.on("request", onRequest);
+  page.on("response", onResponse);
+  page.on("requestfinished", onFinished);
+  page.on("requestfailed", onFailed);
+  try {
+    await page.getByRole("button", { name: "초대", exact: true }).click();
+    await expect(link).toBeVisible();
+    const href = await link.getAttribute("href");
+    expect(href).toBeTruthy();
+    const required1 = href;
+    if (required1 === null) {
+      throw new Error("Missing fixture value: href");
+    }
+    return required1;
+  } catch (original) {
+    try {
+      if (!page.isClosed()) {
+        const linkCount = Math.min(255, await link.count());
+        await page.evaluate(
+          ({ expected, requestCount, responseSeen, status, finished, failed, linkCount }) => {
+            const input = document.getElementById("workspace-invite-email");
+            const field = input instanceof HTMLInputElement ? input : null;
+            const submit = field?.closest("form")?.querySelector('button[type="submit"]');
+            // Only this closed string reaches the existing retained trace summary.
+            console.warn(
+              `fvoci-invite-observation request_count=${requestCount} response_seen=${Number(responseSeen)} status=${status} request_finished=${Number(finished)} request_failed=${Number(failed)} field_present=${Number(field !== null)} field_matches=${Number(field?.value === expected)} field_invalid=${Number(field?.getAttribute("aria-invalid") === "true")} submit_disabled=${Number(submit instanceof HTMLButtonElement && submit.disabled)} link_count=${linkCount}`,
+            );
+          },
+          { expected: email, requestCount, responseSeen, status, finished, failed, linkCount },
+        );
+      }
+    } catch {
+      /* A closed page or diagnostic failure keeps the original failure. */
+    }
+    throw original;
+  } finally {
+    page.off("request", onRequest);
+    page.off("response", onResponse);
+    page.off("requestfinished", onFinished);
+    page.off("requestfailed", onFailed);
   }
-  return required1;
 }
 
 test("owner invites a second user who signs up, accepts, and appears in members", async ({
