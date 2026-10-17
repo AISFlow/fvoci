@@ -250,62 +250,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
-      - name: Restore Cargo downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
+      - name: Check strict Clippy and default static transport in the shared image
         env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Restore native web gate Rust outputs
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target
-          key: v1-web-native-checks-ubuntu-26.04-${{ runner.arch }}-1.99.0-clippy-db-tests-api-schema-static-default-devdebug0-testdebug0-${{ github.sha }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/**', 'packages/**', 'apps/**', 'third-party/**', 'patches/**') }}-${{ steps.sqlite.outputs.cache_identity }}
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          bun ci
-      - name: Check strict Clippy and default static transport
-        run: |
-          cargo clippy --locked --offline --all-targets --features db-tests,api-schema -- -D warnings
-          cargo test --locked --offline --test static_api
+          TMPDIR: ${{ runner.temp }}
+        run: bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" --native-checks
 
       # Exact default-feature browser binaries and fresh dist, built once for all shards.
-      - *save_sqlite_input_hashes
-
   workspace-browser-container-build:
     needs: ci-plan
     if: needs.ci-plan.outputs.select_workspace_browser_shard == 'true'
@@ -419,10 +375,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         id: cache_collaboration_flow_4
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -430,56 +386,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Restore web gate Rust outputs
-        id: cache_collaboration_main_seed
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target
-          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.99.0-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium system libraries for matching native inputs
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Qualify current selected native outputs (no browser or DB)
         id: prepare
         env:
@@ -521,15 +428,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Save web gate Rust outputs
-        if: github.ref == 'refs/heads/main' && steps.cache_collaboration_main_seed.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target
-          key: v2-web-ubuntu-26.04-${{ runner.arch }}-1.99.0-db-api-schema-nodebug-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}-${{ hashFiles('src/**', 'tests/**', 'migrations/**', 'scripts/**', 'vendor/**', 'crates/collab-engine/src/**') }}-${{ steps.sqlite.outputs.cache_identity }}
-      - *save_sqlite_input_hashes
-
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
   collaboration-install-on:
     needs: [ci-plan, collaboration-build]
     if: needs.ci-plan.outputs.select_collaboration_install_on == 'true'
@@ -541,60 +440,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium and system libraries
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -611,12 +467,6 @@ jobs:
           artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/fvoci-web-build-handoff
-      - name: Check collaborative browser fixtures
-        # Same per-test bound as the web and editor test scripts (node --test had none).
-        run: |
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
-          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
@@ -631,7 +481,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Publish the qualified install receipt
         id: publish-install
@@ -665,8 +514,6 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
-      - *save_sqlite_input_hashes
-
   collaboration-postgres-on:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
     if: needs.ci-plan.outputs.select_collaboration_postgres_on == 'true'
@@ -676,60 +523,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium and system libraries
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -752,12 +556,6 @@ jobs:
           artifact-ids: ${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/fvoci-closed-install
-      - name: Check collaborative browser fixtures
-        # Same per-test bound as the web and editor test scripts (node --test had none).
-        run: |
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
-          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
@@ -773,7 +571,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -799,8 +596,6 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
-      - *save_sqlite_input_hashes
-
   collaboration-sqlite-on:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
     if: needs.ci-plan.outputs.select_collaboration_sqlite_on == 'true'
@@ -810,60 +605,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium and system libraries
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -886,12 +638,6 @@ jobs:
           artifact-ids: ${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/fvoci-closed-install
-      - name: Check collaborative browser fixtures
-        # Same per-test bound as the web and editor test scripts (node --test had none).
-        run: |
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
-          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
@@ -907,7 +653,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -933,8 +678,6 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
-      - *save_sqlite_input_hashes
-
   collaboration-postgres-off:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
     if: needs.ci-plan.outputs.select_collaboration_postgres_off == 'true'
@@ -944,60 +687,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium and system libraries
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1020,12 +720,6 @@ jobs:
           artifact-ids: ${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/fvoci-closed-install
-      - name: Check collaborative browser fixtures
-        # Same per-test bound as the web and editor test scripts (node --test had none).
-        run: |
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
-          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
@@ -1041,7 +735,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -1067,8 +760,6 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
-      - *save_sqlite_input_hashes
-
   collaboration-sqlite-off:
     needs: [ci-plan, collaboration-build, collaboration-install-on]
     if: needs.ci-plan.outputs.select_collaboration_sqlite_off == 'true'
@@ -1078,60 +769,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
-      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Restore Cargo downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
-      - name: Prepare owned pinned Rustup component metadata before input capture
-        run: |
-          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \
-            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            RUSTUP_AUTO_INSTALL=0 \
-            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target
-          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"
-      - name: Prepare pinned SQLite root build inputs
-        id: sqlite
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
-        run: |
-          set -euo pipefail
-          # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
-          . /etc/os-release
-          [[ "$ID" == ubuntu && "$VERSION_ID" == 26.04 ]]
-          case "$(dpkg --print-architecture)" in
-            amd64)
-              test -f /etc/apt/apt-mirrors.txt
-              grep -Fq 'mirror+file:/etc/apt/apt-mirrors.txt' /etc/apt/sources.list.d/ubuntu.sources
-              grep -Fq 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' /etc/apt/sources.list.d/ubuntu.sources
-              test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              ;;
-            arm64) ;;
-            *) exit 1 ;;
-          esac
-          printf '%s\n' 'APT::Get::Always-Include-Phased-Updates "true";' 'APT::Get::Never-Include-Phased-Updates "false";' | sudo tee /etc/apt/apt.conf.d/99fvoci-phased-updates >/dev/null
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o APT::Update::Error-Mode=any update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev
-          mkdir "$RUNNER_TEMP/fvoci-sqlite"
-          dpkg-query -W > "$RUNNER_TEMP/fvoci-sqlite/build-packages.txt"
-          bash scripts/prepare-sqlite-ci.sh --parent "$RUNNER_TEMP/fvoci-sqlite" \
-            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
-      - *sqlite_input_hashes
-      - name: Prepare locked dependencies
-        run: |
-          cargo fetch --locked
-          cargo fetch --locked --manifest-path crates/collab-engine/Cargo.toml
-          bun ci
-      - name: Prepare Chromium and system libraries
-        working-directory: apps/web
-        run: bun --bun x --no-install playwright install --with-deps chromium
+          key: v2-cargo-server-ubuntu-26.04-${{ runner.arch }}-1.99.0-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml') }}
       - name: Require a successful exact producer artifact
         env:
           PRODUCER_RESULT: ${{ needs.collaboration-build.result }}
@@ -1154,12 +802,6 @@ jobs:
           artifact-ids: ${{ needs.collaboration-install-on.outputs.install_receipt_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/fvoci-closed-install
-      - name: Check collaborative browser fixtures
-        # Same per-test bound as the web and editor test scripts (node --test had none).
-        run: |
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-wire.test.ts ./apps/web/e2e-pending/collab-restart.test.ts
-          bun test --isolate --timeout=60000 ./apps/web/e2e-pending/collab-helpers.test.ts
-          (cd apps/web && bun --bun x --no-install tsc -p e2e-pending/collab-tsconfig.json)
       - name: Pending collaboration and mandatory selected normal PostgreSQL/SQLite restart
         id: browser
         env:
@@ -1175,7 +817,6 @@ jobs:
           export FVOCI_SELECTED_CI_SQLITE_PARENT="$RUNNER_TEMP/fvoci-sqlite"
           export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"
           mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"
-          export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
           bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected
       - name: Retain failed browser DOM diagnostics
         if: (failure() || cancelled()) && steps.browser.outputs.failure-artifacts != ''
@@ -1201,8 +842,6 @@ jobs:
           path: |
             ${{ steps.browser.outputs.selected-safe-diagnostics }}
             ${{ steps.browser.outputs.selected-private-diagnostics }}
-      - *save_sqlite_input_hashes
-
   web-ci-gate:
     name: web-ci-gate
     needs:

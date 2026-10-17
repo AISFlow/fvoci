@@ -5,7 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import { decodeUtf8, get, require, UiError } from "./ui-common.ts";
 import { now, pause, poll, type Child, type Scope } from "./ui-processes.ts";
-import { serverStartDiagnostic } from "./ui-start-diagnostic.ts";
+import { serverStartDiagnostic, type StartAllocation } from "./ui-start-diagnostic.ts";
 
 /** Loopback GET; never through a proxy named by the environment. */
 export function getJson(url: string, seconds: number): Promise<{ status: number; body: unknown }> {
@@ -60,6 +60,7 @@ export function publishStartDiagnostic(
   started: number | null,
   deadline: number | null,
   clock: () => number = now,
+  allocation: StartAllocation = "unknown",
 ) {
   const result = serverStartDiagnostic(
     child ? () => poll(child) : null,
@@ -67,6 +68,7 @@ export function publishStartDiagnostic(
     started,
     deadline,
     clock,
+    allocation,
   );
   try {
     scope.io.output.out(JSON.stringify(result));

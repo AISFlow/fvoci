@@ -124,7 +124,12 @@ export function inputs(systemInclude = "/usr/include"): Inputs {
   if (existsSync(compilerInputs)) add(compilerInputs);
   if (process.env.FVOCI_WEB_CONTAINER_SDK_SHA256) {
     add("/opt/fvoci-sqlite/consumer-inputs.json");
-    add("/fvoci-run/sqlite/consumer-inputs.json");
+    add(
+      join(
+        process.env.FVOCI_SELECTED_CI_SQLITE_PARENT ?? "/fvoci-run/sqlite",
+        "consumer-inputs.json",
+      ),
+    );
   }
   for (const directory of [
     join(root, "node_modules"),
@@ -315,7 +320,7 @@ export function recordAfter(output: string): void {
     host_runtime_files: libs,
     os_release: readFileSync("/etc/os-release", "utf8"),
     scope:
-      "current Ubuntu 26.04 build-host ABI evidence only; runtime uses its own image libraries",
+      "current Ubuntu 26.04 compiler namespace ABI evidence only; runtime uses its own image libraries",
   });
 }
 export async function stage(

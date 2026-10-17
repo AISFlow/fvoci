@@ -1462,144 +1462,63 @@ function caseList(): MutationCase[] {
       const to = next < 0 ? text.length : from + header.length + next;
       return text.slice(0, from) + edit(text.slice(from, to)) + text.slice(to);
     };
-  // Swaps the step starting at `marker` with the step after it.
-  const swapWithNext =
-    (marker: string): Edit =>
-    (section) => {
-      const a = section.indexOf(marker);
-      if (a < 0) throw new Error(`step marker not found: ${marker}`);
-      const b = section.indexOf("\n      - ", a + 1) + 1;
-      const c = section.indexOf("\n      - ", b + 1) + 1;
-      if (b <= 0 || c <= 0) throw new Error(`step end not found: ${marker}`);
-      return section.slice(0, a) + section.slice(b, c) + section.slice(a, b) + section.slice(c);
-    };
-  // Repeats the step starting at `marker` right after itself.
-  const duplicateStep =
-    (marker: string): Edit =>
-    (section) => {
-      const a = section.indexOf(marker);
-      const b = section.indexOf("\n      - ", a + 1) + 1;
-      if (a < 0 || b <= 0) throw new Error(`step marker not found: ${marker}`);
-      return section.slice(0, b) + section.slice(a, b) + section.slice(b);
-    };
-  const META =
-    "      - name: Prepare owned pinned Rustup component metadata before input capture\n";
-  const META_BUILD =
-    "          env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \\\n" +
-    "            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \\\n" +
-    "            RUSTUP_AUTO_INSTALL=0 \\\n" +
-    "            cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
-    '          xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
-  const META_PYTHON =
-    'python3 -B scripts/prepare-rustup-ci-metadata.py --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"';
-  const SQLITE_STEP = "      - name: Prepare pinned SQLite root build inputs\n";
-  const APT_NO_PYTHON =
-    "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-remove gcc binutils curl libclang-18-dev=1:18.1.8-20ubuntu8 linux-libc-dev libcrypt-dev\n";
-  const APT_PYTHON = APT_NO_PYTHON.replace(" gcc", " python3 gcc");
-  const helper = (job: string) => `web: ${job} Rustup metadata must build and run the locked xtask`;
-  const order = (job: string) => `web: ${job} Rustup metadata must follow the toolchain install`;
-  const once = (job: string) => `web: ${job} requires exactly one Rustup metadata step`;
-  const elsewhere = (job: string) =>
-    `web: ${job} may prepare Rustup metadata only in its pinned step`;
   const python = (job: string) => `web: ${job} may not install or run python3`;
   const LANE_JOBS = ["install-on", "postgres-on", "sqlite-on", "postgres-off", "sqlite-off"].map(
     (lane) => `collaboration-${lane}`,
   );
   const webCases: [string, string, Edit, string][] = [
-    [
-      "untimed-python-helper",
-      "collaboration-build",
-      swap(`        run: |\n${META_BUILD}`, `        run: ${META_PYTHON}\n`),
-      helper("collaboration-build"),
-    ],
-    [
-      "timed-python-helper",
-      "collaboration-sqlite-off",
-      swap(META_BUILD, `          ${META_PYTHON}\n`),
-      helper("collaboration-sqlite-off"),
-    ],
-    [
-      "auto-install-allowed",
-      "collaboration-build",
-      swap("            RUSTUP_AUTO_INSTALL=0 \\\n", ""),
-      helper("collaboration-build"),
-    ],
-    [
-      "target-dir-override-kept",
-      "collaboration-build",
-      swap("-u CARGO_TARGET_DIR ", ""),
-      helper("collaboration-build"),
-    ],
-    [
-      "cargo-alias",
-      "collaboration-install-on",
-      swap(
-        "          xtask/target/debug/xtask prepare-rustup-ci-metadata",
-        "          cargo xtask prepare-rustup-ci-metadata",
-      ),
-      helper("collaboration-install-on"),
-    ],
-    [
-      "offline-helper-build",
-      "collaboration-postgres-on",
-      swap(
-        "cargo build --quiet --locked --manifest",
-        "cargo build --quiet --locked --offline --manifest",
-      ),
-      helper("collaboration-postgres-on"),
-    ],
-    [
-      "step-env-override",
-      "collaboration-sqlite-on",
-      swap(META, `${META}        env:\n          RUSTUP_AUTO_INSTALL: "1"\n`),
-      helper("collaboration-sqlite-on"),
-    ],
-    [
-      "before-cargo-restore",
-      "collaboration-build",
-      swapWithNext("      - name: Restore Cargo downloads\n"),
-      order("collaboration-build"),
-    ],
-    [
-      "after-sqlite",
-      "collaboration-postgres-off",
-      swapWithNext(META),
-      order("collaboration-postgres-off"),
-    ],
-    [
-      "step-missing",
-      "collaboration-build",
-      swap(META, "      - name: Prepare Rustup component metadata\n"),
-      once("collaboration-build"),
-    ],
-    ["step-duplicated", "collaboration-build", duplicateStep(META), once("collaboration-build")],
-    [
-      "extra-python-step",
-      "collaboration-build",
-      swap(SQLITE_STEP, `      - run: ${META_PYTHON}\n${SQLITE_STEP}`),
-      elsewhere("collaboration-build"),
-    ],
+    ...["collaboration-build", ...LANE_JOBS].flatMap((job): [string, string, Edit, string][] => [
+      [
+        "host-apt-" + job,
+        job,
+        swap(
+          "      - name: Restore Cargo downloads\n",
+          "      - run: sudo apt-get install gcc\n      - name: Restore Cargo downloads\n",
+        ),
+        "host preparation must remain absent",
+      ],
+      [
+        "host-rustup-" + job,
+        job,
+        swap(
+          "      - name: Restore Cargo downloads\n",
+          "      - run: rustup toolchain install 1.99.0\n      - name: Restore Cargo downloads\n",
+        ),
+        "host preparation must remain absent",
+      ],
+      [
+        "host-python-" + job,
+        job,
+        swap(
+          "      - name: Restore Cargo downloads\n",
+          "      - run: python3 -m pip --version\n      - name: Restore Cargo downloads\n",
+        ),
+        python(job),
+      ],
+      [
+        "shallow-image-source-" + job,
+        job,
+        swap("          fetch-depth: 0\n", "          fetch-depth: 1\n"),
+        "default exact checkout without stored credentials",
+      ],
+    ]),
     [
       "unpinned-job",
       "web-native-checks",
       swap(
-        SQLITE_STEP,
-        '      - run: xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/m"\n' +
-          SQLITE_STEP,
+        "      - name: Check strict Clippy",
+        '      - run: xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/m"\n      - name: Check strict Clippy',
       ),
-      elsewhere("web-native-checks"),
+      "web: web-native-checks must not prepare Rustup metadata on the host",
     ],
     [
       "native-checks-apt",
       "web-native-checks",
-      swap(APT_NO_PYTHON, APT_PYTHON),
+      swap(
+        "      - name: Check strict Clippy",
+        "      - run: sudo apt-get install python3\n      - name: Check strict Clippy",
+      ),
       python("web-native-checks"),
-    ],
-    [
-      "producer-apt",
-      "collaboration-build",
-      swap(APT_NO_PYTHON, APT_PYTHON),
-      python("collaboration-build"),
     ],
     [
       "static-python",
@@ -1609,30 +1528,6 @@ function caseList(): MutationCase[] {
         "          bun run lint\n          python3 -m pip --version\n",
       ),
       python("web-static"),
-    ],
-    [
-      "setup-python",
-      "collaboration-build",
-      swap(SQLITE_STEP, `      - uses: actions/setup-python@${"2".repeat(40)}\n${SQLITE_STEP}`),
-      python("collaboration-build"),
-    ],
-    [
-      "job-env-python",
-      "collaboration-build",
-      swap(
-        "    timeout-minutes: 15\n",
-        "    timeout-minutes: 15\n    env:\n      PYTHONPATH: scripts\n",
-      ),
-      python("collaboration-build"),
-    ],
-    [
-      "lane-extra-python",
-      "collaboration-postgres-on",
-      swap(
-        "          bun ci\n",
-        "          bun ci\n          python3 scripts/ci_selection.py verify-workflows\n",
-      ),
-      python("collaboration-postgres-on"),
     ],
     [
       "checks-extra-python",
@@ -1645,27 +1540,10 @@ function caseList(): MutationCase[] {
       "web-checks",
       swap(
         "      - name: Verify normal web e2e shard plan\n",
-        "      - run: python3 scripts/selected-backend-ci/test_off_registration.py\n" +
-          "      - name: Verify normal web e2e shard plan\n",
+        "      - run: python3 scripts/selected-backend-ci/test_off_registration.py\n      - name: Verify normal web e2e shard plan\n",
       ),
       python("web-checks"),
     ],
-    [
-      "checks-python-registration-line",
-      "web-checks",
-      swap(
-        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n",
-        "          (cd apps/web && bun test e2e-pending/collab-playwright.config.test.ts --timeout 60000)\n" +
-          "          python3 scripts/selected-backend-ci/test_off_registration.py\n",
-      ),
-      python("web-checks"),
-    ],
-    ...["web-checks", ...LANE_JOBS].map((job): [string, string, Edit, string] => [
-      `apt-${job}`,
-      job,
-      swap(APT_NO_PYTHON, APT_PYTHON),
-      python(job),
-    ]),
   ];
   for (const [name, job, edit, needle] of webCases) {
     add(`web-rustup-${name}`, "web.yml", inJob(job, edit), needle);
@@ -1692,7 +1570,7 @@ function caseList(): MutationCase[] {
         "          path: target\n",
       ),
     ),
-    order("collaboration-build"),
+    "source downloads only; no helper fallback cache",
   );
   add(
     "web-rustup-restore-wrong-action",
@@ -1703,7 +1581,7 @@ function caseList(): MutationCase[] {
         step.replace("uses: actions/cache/restore@", "uses: actions/upload-artifact@"),
       ),
     ),
-    order("collaboration-build"),
+    "locked source-download cache required",
   );
   const SMOKE = "web: web-static must type-check and test the install smoke helpers";
   add(

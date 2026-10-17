@@ -270,7 +270,12 @@ export function context(job: string, h: HostFacts = host): Context {
     assert.match(imageSource, /^[a-f0-9]{40}$/);
     result.container_image_source = imageSource;
   }
-  if (browser()) {
+  if (browser() || process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") {
+    if (process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1")
+      assert.ok(
+        result.container_image && result.container_sdk_sha256 && result.container_image_source,
+        "selected image identity required",
+      );
     const native = nativeHost();
     assert.ok(
       result.container_image || native.machine === "x86_64",
@@ -636,8 +641,19 @@ export function exportPacket(h: HostFacts = host): void {
   const current = context(jobs()[0], h);
   const { output, packet } = paths();
   const bundle = qualify(output, h);
-  assert.ok(!existsSync(packet));
-  mkdirSync(packet, { mode: 0o700 });
+  if (process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") {
+    const facts = lstatSync(packet);
+    assert.ok(
+      facts.isDirectory() &&
+        !facts.isSymbolicLink() &&
+        facts.uid === process.getuid?.() &&
+        (facts.mode & 0o777) === 0o700 &&
+        readdirSync(packet).length === 0,
+    );
+  } else {
+    assert.ok(!existsSync(packet));
+    mkdirSync(packet, { mode: 0o700 });
+  }
   const { files, executables, core } = packetFiles(bundle, output, h);
   const entries: Record<string, Entry> = {};
   const archive = join(packet, "payload.tar");

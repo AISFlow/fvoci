@@ -1,3 +1,38 @@
+import {
+  CI_WEB_IMAGE,
+  CI_WEB_SDK_SHA256,
+  SELECTED_IMAGE_ENV,
+  selectedImageHost,
+  selectedImageResult,
+  finishToolImage,
+  containerImage,
+  containerArchitecture,
+  qualifyContainerDaemon,
+  qualifyImageSource,
+  CheckError,
+  RuntimeExit,
+  dockerEndpoint,
+  checkedOutput,
+  fail,
+} from "../selected-backend-ci/runtime.ts";
+import type { SelectedImageOperation } from "../selected-backend-ci/runtime.ts";
+export {
+  CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
+  containerImage,
+  selectedImageHost,
+  selectedImageBudget,
+  SELECTED_IMAGE_ENV,
+  selectedImageInputs,
+  selectedImageAccess,
+  selectedImageConfigList,
+  selectedImageBrowser,
+  containerArchitecture,
+  qualifyContainerDaemon,
+  containerImageSource,
+  qualifyImageSource,
+  CheckError,
+} from "../selected-backend-ci/runtime.ts";
 // Checks scripts/run-web-e2e.sh runs as `bun tools/web-e2e/run-web-e2e.ts
 // <command> ...`: committed API qualification, shard plan line parsing, and
 // the selected companion's SQLite prefix containment, private diagnostics
@@ -21,6 +56,7 @@ import {
   readdirSync,
   realpathSync,
   statSync,
+  statfsSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -28,11 +64,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes, createHash } from "node:crypto";
 import process from "node:process";
-import {
-  nativeArchitecture,
-  nativeLinux,
-  type NativeArchitecture,
-} from "../selected-backend-ci/types.ts";
+import type { Inputs } from "../selected-backend-ci/types.ts";
+import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
 import {
   validateSpecRelpath,
   discoverGroups,
@@ -41,33 +74,373 @@ import {
   DEFAULT_SHARD_COUNT,
   TIMER_FILTERS,
 } from "./groups.ts";
-
-export const CI_WEB_IMAGE =
-  "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c";
-const CI_WEB_SDK_SHA256 = {
-  x86_64: "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
-  aarch64: "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
-} as const;
 const BROWSER_SERVICE_IMAGES = [
   "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
   "getmeili/meilisearch:v1.55.0@sha256:ff546679970126f8822e15d1b6a06bfbff1f2ce2e43f810cfb5258012f92de5c",
 ] as const;
+async function selectedImageOperation(
+  operation: SelectedImageOperation,
+  root: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  const started = performance.now(),
+    log = join(
+      process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+      operation + ".private.log",
+    );
+  let status = 1;
+  try {
+    const result = await selectedImageResult(operation, root, {
+      env: environment,
+      required: false,
+      log,
+    });
+    status = result.returncode;
+    process.stderr.write(
+      "selected-image phase=" +
+        operation +
+        " elapsed_seconds=" +
+        ((performance.now() - started) / 1000).toFixed(3) +
+        " exit=" +
+        String(status) +
+        "\n",
+    );
+    return status;
+  } finally {
+    if (status !== 0)
+      try {
+        for (const line of containerStageDiagnostics(log, true)) process.stderr.write(line + "\n");
+      } catch {
+        process.stderr.write("selected-image diagnostics_unavailable=1\n");
+      }
+  }
+}
 
-export function containerImage(
-  image: string,
-  sdk: string,
-  local: boolean,
-  env: NodeJS.ProcessEnv,
-): { image: string; sdk: string; local: boolean } {
-  if (!/^[a-f0-9]{64}$/.test(sdk)) fail("an explicit sealed SQLite SDK SHA-256 is required");
+function containerStageDiagnostics(path: string, selected = false): string[] {
+  const size = statSync(path).size,
+    bytes = Buffer.alloc(Math.min(size, 16384)),
+    offset = size - bytes.length,
+    fd = openSync(path, "r");
+  try {
+    readSync(fd, bytes, 0, bytes.length, offset);
+  } finally {
+    closeSync(fd);
+  }
+  return bytes
+    .toString("utf8")
+    .split("\n")
+    .slice(offset ? 1 : 0)
+    .filter(
+      (line) =>
+        /^(?:web-e2e stage=(?:cargo-fetch|engine-fetch|dependencies|browser-version|sqlite-sdk-admit|browser-input-before|web-build|fixture-build|default-server-build|worker-build|browser-input-after|browser-handoff-export|browser-handoff-consume|browser-group) (?:started|elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})|web build handoff check_line=[0-9]{1,6})$/.test(
+          line,
+        ) ||
+        (selected &&
+          /^web-e2e stage=(?:selected-(?:dependencies|handoff-admit|cargo-fetch|sqlite-sdk|input-before|lib|install|engine|input-after|handoff-consume|handoff-export)|collaboration-(?:wire-restart-fixtures|helper-fixtures|types)|web-build) (?:started(?: at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?|(?:finished at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z )?elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})$/.test(
+            line,
+          )),
+    );
+}
+
+export async function selectedImagePhase(root: string, operation: string): Promise<number> {
   if (
-    !(
-      local ? /^sha256:[a-f0-9]{64}$/ : /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/
-    ).test(image) ||
-    (local && (env.CI !== undefined || Object.keys(env).some((key) => key.startsWith("GITHUB_"))))
+    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1" ||
+    process.env.FVOCI_WEB_CONTAINER_IMAGE !== CI_WEB_IMAGE ||
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 !== CI_WEB_SDK_SHA256.x86_64
   )
-    fail("registry image digest required; local engine IDs require explicit non-CI local SDK mode");
-  return { image, sdk, local };
+    fail("fixed selected tool image required");
+  const output = process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+    sqlite = process.env.FVOCI_SELECTED_CI_SQLITE_PARENT ?? fail("selected SQLite parent required");
+  if (operation === "inputs") {
+    const before = JSON.parse(readFileSync(0, "utf8")) as Inputs;
+    const { inputCheck } = await import("../selected-backend-ci/drivers/common.ts");
+    const checked = await inputCheck(before, before.head, before.tree);
+    await Bun.write(Bun.stdout, JSON.stringify(checked));
+    return 0;
+  }
+  if (operation === "access") {
+    const { preflight } = await import("../selected-backend-ci/runtime-access-check.ts");
+    const request = JSON.parse(readFileSync(0, "utf8")) as Parameters<typeof preflight>[0];
+    const receipt = preflight(request);
+    process.stdout.write(JSON.stringify(receipt));
+    return receipt.missing ? 1 : 0;
+  }
+  if (operation === "config-list") {
+    const { configList } = await import("../selected-backend-ci/config-list.ts");
+    return configList(output);
+  }
+  if (operation === "pending") {
+    process.env.FVOCI_COLLAB_ENGINE = join(root, "crates/collab-engine/target/debug/collab-engine");
+    return groupWrapper([]);
+  }
+  if (!["prepare", "consume"].includes(operation)) fail("unknown selected image operation");
+  const target = nativeLinux(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+    process.env.CARGO_BUILD_TARGET,
+  ).target;
+  if (target !== "x86_64-unknown-linux-gnu") fail("selected targets remain native x64");
+  await stage(
+    "selected-dependencies",
+    [process.execPath, "--bun", "install", "--frozen-lockfile"],
+    root,
+  );
+  if (operation === "consume")
+    await stage(
+      "selected-handoff-admit",
+      [
+        process.execPath,
+        "--no-env-file",
+        join(root, "tools/selected-backend-ci/handoff.ts"),
+        "admit",
+      ],
+      root,
+    );
+  for (const manifest of [join(root, "Cargo.toml"), join(root, "crates/collab-engine/Cargo.toml")])
+    await stage(
+      "selected-cargo-fetch",
+      ["cargo", "fetch", "--locked", "--target", target, "--manifest-path", manifest],
+      root,
+      { ...process.env, CARGO_NET_OFFLINE: "false" },
+    );
+  if (operation === "consume") {
+    await stage(
+      "collaboration-wire-restart-fixtures",
+      [
+        process.execPath,
+        "test",
+        "--isolate",
+        "--timeout=60000",
+        "./apps/web/e2e-pending/collab-wire.test.ts",
+        "./apps/web/e2e-pending/collab-restart.test.ts",
+      ],
+      root,
+    );
+    await stage(
+      "collaboration-helper-fixtures",
+      [
+        process.execPath,
+        "test",
+        "--isolate",
+        "--timeout=60000",
+        "./apps/web/e2e-pending/collab-helpers.test.ts",
+      ],
+      root,
+    );
+    await stage(
+      "collaboration-types",
+      [
+        process.execPath,
+        "--bun",
+        "x",
+        "--no-install",
+        "tsc",
+        "-p",
+        "e2e-pending/collab-tsconfig.json",
+      ],
+      join(root, "apps/web"),
+    );
+  }
+  const tools = join(output, "tools");
+  mkdirSync(tools, { mode: 0o755 });
+  copyFileSync(process.execPath, join(tools, "bun"));
+  chmodSync(join(tools, "bun"), 0o755);
+  await stage(
+    "selected-sqlite-sdk",
+    [
+      "/usr/local/bin/fvoci-ci-tools",
+      "sqlite-ci",
+      "--image-sdk",
+      "/opt/fvoci-sqlite",
+      "--expected-sdk-sha256",
+      CI_WEB_SDK_SHA256.x86_64,
+      "--image-ref",
+      CI_WEB_IMAGE,
+      "--parent",
+      sqlite,
+      "--env-file",
+      join(sqlite, "environment"),
+    ],
+    root,
+  );
+  Object.assign(process.env, sqliteEnvironment(readFileSync(join(sqlite, "environment"), "utf8")));
+  const { prepareBrowser } = await import("../selected-backend-ci/runtime.ts");
+  const browserSource = join(output, "browser-source");
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browserSource;
+  const chromium = checkedOutput(
+    [
+      process.execPath,
+      "--eval",
+      "console.log(require('@playwright/test').chromium.executablePath())",
+    ],
+    root,
+  );
+  prepareBrowser(output, chromium);
+  rmSync(browserSource, { recursive: true });
+  process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
+  process.env.CARGO_NET_OFFLINE = "true";
+  return webEntry(root, [
+    "--ci-use-committed-api",
+    operation === "prepare" ? "--ci-prepare-selected" : "--ci-consume-selected",
+  ]);
+}
+
+async function selectedContainerEntry(root: string, argv: string[]): Promise<number> {
+  root = realpathSync(root);
+  process.env.FVOCI_SELECTED_IMAGE_DEADLINE = String(Date.now() + 900_000);
+  const request = webRequest(argv, process.env);
+  if (
+    !request.selected ||
+    !request.committed ||
+    !["prepare", "consume"].includes(request.selectedPhase) ||
+    process.env.CI !== "true" ||
+    process.env.GITHUB_ACTIONS !== "true"
+  )
+    fail("selected images require the existing explicit committed CI phases");
+  qualifyCommittedApi(root, request, process.env);
+  const architecture = containerArchitecture(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+  );
+  if (architecture !== "x86_64") fail("selected collaboration remains native x64");
+  qualifyContainerDaemon(
+    dockerEndpoint(root),
+    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    architecture,
+  );
+  await stage(
+    "selected-image-fetch",
+    ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
+    root,
+  );
+  const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
+  const imageSource = qualifyImageSource(
+    root,
+    checkedOutput(
+      [
+        "docker",
+        "image",
+        "inspect",
+        "--format",
+        '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
+        CI_WEB_IMAGE,
+      ],
+      root,
+    ),
+    sdk,
+    architecture,
+    process.env.GITHUB_SHA ?? "",
+  );
+  const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
+    output = join(temp, "fvoci-selected-current"),
+    sqlite = join(temp, "fvoci-sqlite"),
+    cargo = join(temp, "fvoci-image-cargo");
+  if (
+    process.env.FVOCI_SELECTED_CI_OUTPUT !== output ||
+    process.env.FVOCI_SELECTED_CI_SQLITE_PARENT !== sqlite ||
+    process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff")
+  )
+    fail("selected canonical paths required");
+  for (const path of [sqlite, cargo, join(output, "tmp"), join(output, "home")])
+    mkdirSync(path, { mode: path === cargo ? 0o750 : 0o700 });
+  if (request.selectedPhase === "prepare")
+    mkdirSync(process.env.FVOCI_WEB_BUILD_HANDOFF, {
+      mode: 0o700,
+    });
+  // Download cache only. Installed dependencies and native outputs are always
+  // materialized and checked inside the admitted image.
+  for (const name of ["registry", "git"])
+    if (process.env.HOME && existsSync(join(process.env.HOME, ".cargo", name)))
+      cpSync(join(process.env.HOME, ".cargo", name), join(cargo, name), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+  Object.assign(process.env, {
+    FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+    FVOCI_WEB_CONTAINER_SDK_SHA256: CI_WEB_SDK_SHA256.x86_64,
+    FVOCI_WEB_CONTAINER_IMAGE_SOURCE: imageSource,
+    FVOCI_WEB_BUILD_PHASE: request.selectedPhase,
+    CARGO_HOME: cargo,
+    CARGO_TARGET_DIR: join(root, "target"),
+    CARGO_BUILD_JOBS: "2",
+    LIBCLANG_PATH: "/usr/lib/llvm-18/lib",
+    SQLITE3_LIB_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib",
+    SQLITE3_INCLUDE_DIR: "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/include",
+    SQLITE3_STATIC: "1",
+    SQLITE3_NO_PKG_CONFIG: "1",
+    PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
+  });
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) =>
+      /^(CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_WEB_BUILD_HANDOFF(?:_SHA256)?)$/.test(
+        key,
+      ),
+    ),
+  );
+  const prepared = await selectedImageOperation(
+    request.selectedPhase as "prepare" | "consume",
+    root,
+    environment,
+  );
+  if (prepared === 0 && request.selectedPhase === "prepare" && process.env.HOME)
+    for (const name of ["registry", "git"])
+      if (existsSync(join(cargo, name)))
+        cpSync(join(cargo, name), join(process.env.HOME, ".cargo", name), { recursive: true });
+  if (prepared || request.selectedPhase === "prepare") return prepared;
+  // Existing host wrappers own PG/Meili. The inner group sees their real
+  // loopback bindings through Linux host networking, never their Docker socket.
+  const pending = await command(
+    [
+      "bash",
+      join(root, "scripts/start-test-postgres.sh"),
+      "bash",
+      join(root, "scripts/start-test-meili.sh"),
+      process.execPath,
+      "--no-env-file",
+      import.meta.path,
+      "selected-image-pending",
+      root,
+    ],
+    root,
+  );
+  process.env.PATH = join(output, "tools") + ":" + (process.env.PATH ?? "");
+  return selectedAfterPending(pending, () => selectedHost(root, pending, true));
+}
+
+export async function selectedAfterPending(
+  pending: number,
+  body: () => Promise<number>,
+): Promise<number> {
+  try {
+    const status = await body();
+    return pending || status;
+  } catch (error) {
+    if (pending) return pending;
+    throw error;
+  }
+}
+
+export function selectedPermissionDiagnostics(text: string): string[] {
+  if (Buffer.byteLength(text) > 16384) return [];
+  const lines = text.split("\n"),
+    result: string[] = [];
+  for (const [prefix, pattern] of [
+    [
+      "selected permissions descendant ",
+      /^selected permissions descendant prefix=(?:output|sqlite) (?:symlink=1 owner_match=[01]|symlink=0 owner_match=0)$/,
+    ],
+    [
+      "selected permissions failure at ",
+      /^selected permissions failure at (?:tools\/selected-backend-ci\/(?:runtime|admission|io)|scripts\/run-selected-backend-e2e)\.ts:[1-9][0-9]{0,3}$/,
+    ],
+  ] as const) {
+    const matches = lines.filter((line) => line.startsWith(prefix));
+    if (matches.length === 1 && matches[0] && pattern.test(matches[0])) result.push(matches[0]);
+  }
+  return result;
 }
 
 // Each admitted ordinary-browser shard retains every registered group.
@@ -140,12 +513,6 @@ async function stage(name: string, argv: string[], root: string, env = process.e
     `web-e2e stage=${name}${dated ? " finished at=" + timestamp() : ""} elapsed_seconds=${((performance.now() - started) / 1000).toFixed(3)} exit=${String(status)}\n`,
   );
   if (status !== 0) throw new RuntimeExit(status);
-}
-
-class RuntimeExit extends Error {
-  constructor(readonly status: number) {
-    super("web e2e command failed");
-  }
 }
 
 export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
@@ -257,6 +624,13 @@ export function webRequest(argv: string[], env: NodeJS.ProcessEnv) {
 }
 
 async function webEntry(root: string, argv: string[]): Promise<number> {
+  const request = webRequest(argv, process.env);
+  if (
+    request.selected &&
+    request.selectedPhase !== "whole" &&
+    process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
+  )
+    return selectedContainerEntry(root, argv);
   entryCancellation = 0;
   const interrupt = () => {
       entryCancellation ||= 130;
@@ -350,7 +724,8 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     }
   }
   if (committed) api();
-  if (selectedPhase === "consume") await stage("selected-handoff-admit", handoff("admit"), root);
+  if (selectedPhase === "consume" && process.env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1")
+    await stage("selected-handoff-admit", handoff("admit"), root);
   if (
     Bun.spawnSync(bun("--bun", "x", "--no-install", "playwright", "--version"), {
       cwd: join(root, "apps/web"),
@@ -445,6 +820,18 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
         process.env.SQLITE3_NO_PKG_CONFIG !== "1"
       )
         fail("selected consumer requires the workflow-prepared SQLite environment");
+    } else if (process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") {
+      const sqlite =
+        process.env.FVOCI_SELECTED_CI_SQLITE_PARENT ?? fail("selected SDK parent required");
+      Object.assign(
+        process.env,
+        sqliteEnvironment(readFileSync(join(sqlite, "environment"), "utf8")),
+      );
+      if (
+        process.env.SQLITE3_LIB_DIR !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib" ||
+        process.env.SQLITE3_INCLUDE_DIR !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/include"
+      )
+        fail("selected workload requires the admitted immutable image SDK");
     } else {
       const temporary = mkdtempSync(join(tmpdir(), "fvoci-sqlite-env.")),
         file = join(temporary, "env");
@@ -526,14 +913,12 @@ async function webEntryBody(root: string, argv: string[]): Promise<number> {
     await stage("selected-handoff-export", handoff("export"), root);
     return 0;
   }
+  if (selected && process.env.FVOCI_SELECTED_IMAGE_WORKLOAD === "1") return 0;
   const pending = await group(specs);
   if (!selected || entryCancellation) return pending || entryCancellation;
-  try {
-    return await selectedHost(root, pending, selectedPhase === "consume");
-  } catch (error) {
-    if (pending) return pending;
-    throw error;
-  }
+  return selectedAfterPending(pending, () =>
+    selectedHost(root, pending, selectedPhase === "consume"),
+  );
 }
 
 export async function selectedHost(
@@ -549,14 +934,52 @@ export async function selectedHost(
   };
   const output = required("FVOCI_SELECTED_CI_OUTPUT"),
     sqlite = required("FVOCI_SELECTED_CI_SQLITE_PARENT");
-  requirePathWithin(required("SQLITE3_LIB_DIR"), sqlite);
+  if (selectedImageHost()) {
+    if (required("SQLITE3_LIB_DIR") !== "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib")
+      fail("selected image SDK path changed");
+  } else requirePathWithin(required("SQLITE3_LIB_DIR"), sqlite);
   const diagnostics = join(required("RUNNER_TEMP"), "fvoci-selected-diagnostics");
   createSafeDiagnostics(diagnostics, process.env);
   const uid = String(process.getuid?.()),
     gid = String(process.getgid?.());
+  const capture = async (
+    args: string[],
+    stdout: string,
+    stderr?: string,
+    cleanup = false,
+    directory = diagnostics,
+  ) => {
+    let out: number | undefined, err: number | undefined;
+    try {
+      out = openSync(join(directory, stdout), "wx", 0o600);
+      if (stderr) err = openSync(join(directory, stderr), "wx", 0o600);
+      return await command(
+        args,
+        root,
+        process.env,
+        { stdout: out, stderr: err ?? "inherit" },
+        cleanup,
+      );
+    } catch {
+      process.stderr.write("selected private capture failed\n");
+      return 1;
+    } finally {
+      if (out !== undefined) closeSync(out);
+      if (err !== undefined) closeSync(err);
+    }
+  };
   const dockerGid = checkedOutput(["stat", "-c", "%g", "/var/run/docker.sock"], root);
   const cli = join(root, "scripts/run-selected-backend-e2e.ts");
-  const groups = checkedOutput(
+  for (const file of ["permissions.stdout.private.log", "permissions.stderr.private.log"]) {
+    try {
+      lstatSync(join(output, file));
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      fail("selected private permissions capture unavailable");
+    }
+    fail("selected private permissions capture already exists");
+  }
+  const permissions = await capture(
     [
       process.execPath,
       cli,
@@ -568,8 +991,24 @@ export async function selectedHost(
       "--docker-gid",
       dockerGid,
     ],
-    root,
+    "permissions.stdout.private.log",
+    "permissions.stderr.private.log",
+    false,
+    output,
   );
+  if (entryCancellation) return pending || entryCancellation;
+  if (permissions !== 0) {
+    try {
+      const path = join(output, "permissions.stderr.private.log");
+      if (statSync(path).size <= 16384)
+        for (const line of selectedPermissionDiagnostics(readFileSync(path, "utf8")))
+          process.stderr.write(line + "\n");
+    } catch {
+      // Evidence capture cannot replace the original permission refusal.
+    }
+    fail("container browser prerequisite failed");
+  }
+  const groups = readFileSync(join(output, "permissions.stdout.private.log"), "utf8").trim();
   process.env.PLAYWRIGHT_BROWSERS_PATH = join(output, "browser");
   const lane = process.env.FVOCI_COLLAB_LANE,
     laneArgs: string[] = [];
@@ -587,7 +1026,8 @@ export async function selectedHost(
     }
   }
   const preserved =
-    "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB";
+    "PATH,CI,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_JOB" +
+    (selectedImageHost() ? "," + SELECTED_IMAGE_ENV.join(",") : "");
   const runtime = (mode: string, browser = false) => [
     "sudo",
     "--preserve-env=" +
@@ -606,26 +1046,7 @@ export async function selectedHost(
     output,
     ...(mode === "config-list" ? [] : laneArgs),
   ];
-  const capture = async (args: string[], stdout: string, stderr?: string, cleanup = false) => {
-    let out: number | undefined, err: number | undefined;
-    try {
-      out = openSync(join(diagnostics, stdout), "wx", 0o600);
-      if (stderr) err = openSync(join(diagnostics, stderr), "wx", 0o600);
-      return await command(
-        args,
-        root,
-        process.env,
-        { stdout: out, stderr: err ?? "inherit" },
-        cleanup,
-      );
-    } catch {
-      process.stderr.write("selected private capture failed\n");
-      return 1;
-    } finally {
-      if (out !== undefined) closeSync(out);
-      if (err !== undefined) closeSync(err);
-    }
-  };
+
   let config = "not-run",
     launcher = "not-run",
     selected = await command(["sudo", "chown", "-h", "-R", "1000:1000", output, sqlite], root);
@@ -1000,10 +1421,14 @@ export function sqliteEnvironment(text: string): Record<string, string> {
 }
 
 async function browserPhase(root: string, phase: string, shards: string[]): Promise<number> {
-  if (!process.env.FVOCI_WEB_CONTAINER_IMAGE || !["prepare", "inputs", "consume"].includes(phase))
+  const nativeChecks = phase === "native-checks";
+  if (
+    !process.env.FVOCI_WEB_CONTAINER_IMAGE ||
+    !["prepare", "inputs", "consume", "native-checks"].includes(phase)
+  )
     fail("ordinary container phase required");
   if (
-    phase === "inputs" &&
+    (phase === "inputs" || nativeChecks) &&
     [
       "TEST_DATABASE_URL",
       "FVOCI_E2E_ADMIN_DATABASE_URL",
@@ -1017,20 +1442,22 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
   process.env.FVOCI_WEB_BUILD_PHASE = phase === "prepare" ? "prepare" : "consume";
   process.env.CARGO_NET_OFFLINE = "true";
   try {
-    qualifyCommittedApi(
-      root,
-      {
-        shard: shards[0] ?? "",
-        selected: false,
-        browserPhase: phase === "prepare" ? "prepare" : "consume",
-      },
-      process.env,
-    );
+    if (nativeChecks) qualifyNativeChecks(root);
+    else
+      qualifyCommittedApi(
+        root,
+        {
+          shard: shards[0] ?? "",
+          selected: false,
+          browserPhase: phase === "prepare" ? "prepare" : "consume",
+        },
+        process.env,
+      );
     if (phase === "prepare" && (shards.length || existsSync(join(root, "apps/web/dist"))))
       fail("producer requires absent dist and no shard");
     // Isolated jobs reconstruct their locked inputs; only the qualified native
     // packet crosses jobs. Local cohorts already share these bytes read-only.
-    if (phase === "prepare" || phase === "inputs") {
+    if (phase === "prepare" || phase === "inputs" || nativeChecks) {
       const target = nativeLinux(
         process.platform,
         process.arch,
@@ -1044,31 +1471,33 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
         root,
         fetchEnv,
       );
-      await stage(
-        "engine-fetch",
-        [
-          "cargo",
-          "fetch",
-          "--locked",
-          "--target",
-          target,
-          "--manifest-path",
-          join(root, "crates/collab-engine/Cargo.toml"),
-        ],
-        root,
-        fetchEnv,
-      );
+      if (!nativeChecks)
+        await stage(
+          "engine-fetch",
+          [
+            "cargo",
+            "fetch",
+            "--locked",
+            "--target",
+            target,
+            "--manifest-path",
+            join(root, "crates/collab-engine/Cargo.toml"),
+          ],
+          root,
+          fetchEnv,
+        );
       // Bun owns lifecycle scripts' node executable without a shell harness.
       await stage(
         "dependencies",
         [process.execPath, "--bun", "install", "--frozen-lockfile"],
         root,
       );
-      await stage(
-        "browser-version",
-        [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
-        join(root, "apps/web"),
-      );
+      if (!nativeChecks)
+        await stage(
+          "browser-version",
+          [process.execPath, "--bun", "x", "--no-install", "playwright", "--version"],
+          join(root, "apps/web"),
+        );
     }
     if (phase === "inputs") return 0;
     const sdk = containerImage(
@@ -1097,6 +1526,32 @@ async function browserPhase(root: string, phase: string, shards: string[]): Prom
       root,
     );
     Object.assign(process.env, sqliteEnvironment(readFileSync("/fvoci-run/sqlite.env", "utf8")));
+    if (nativeChecks) {
+      qualifyNativeChecks(root);
+      await stage(
+        "native-clippy",
+        [
+          "cargo",
+          "clippy",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--features",
+          "db-tests,api-schema",
+          "--",
+          "-D",
+          "warnings",
+        ],
+        root,
+      );
+      await stage(
+        "native-static-api",
+        ["cargo", "test", "--locked", "--offline", "--test", "static_api"],
+        root,
+      );
+      qualifyNativeChecks(root);
+      return 0;
+    }
     qualifyCommittedApi(
       root,
       {
@@ -2005,84 +2460,6 @@ async function groupRuntime(argv: string[]): Promise<number> {
   return status;
 }
 
-function checkedOutput(argv: string[], cwd: string): string {
-  const result = Bun.spawnSync(argv, { cwd, stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
-  return result.stdout.toString().trim();
-}
-
-export function containerArchitecture(
-  system: string,
-  runtime: string,
-  kernel: string,
-  darwinArm?: string,
-): NativeArchitecture {
-  if (system !== "linux" && system !== "darwin")
-    fail("a Linux or Darwin Docker client is required");
-  if (system === "darwin" && darwinArm !== "0" && darwinArm !== "1")
-    fail("physical Darwin architecture is required");
-  const physical = nativeArchitecture(
-    system === "darwin" ? (darwinArm === "1" ? "arm64" : "x64") : kernel,
-  );
-  if (nativeArchitecture(runtime) !== physical || nativeArchitecture(kernel) !== physical)
-    fail("translated Docker clients are unsupported");
-  return physical;
-}
-
-export function qualifyContainerDaemon(
-  endpoint: string,
-  info: string,
-  arch: NativeArchitecture,
-): void {
-  if (!/^unix:\/\/\/[^\s?#\0]+$/.test(endpoint)) fail("a local Unix Docker endpoint is required");
-  const match = /^linux (\S+)$/.exec(info);
-  if (!match || nativeArchitecture(match[1] as string) !== arch)
-    fail("Docker requires a native Linux daemon matching the physical client architecture");
-}
-
-export function containerImageSource(
-  metadata: string,
-  sdk: { image: string; local: boolean },
-  arch: NativeArchitecture,
-): string {
-  const match = /^(sha256:[a-f0-9]{64}) linux (\S+) ([a-f0-9]{40}) (.+)$/.exec(metadata);
-  if (!match || nativeArchitecture(match[2] as string) !== arch)
-    fail("the pinned native ci-web image must match the client and daemon");
-  let digests: unknown;
-  try {
-    digests = JSON.parse(match[4] as string);
-  } catch {
-    fail("invalid image digest metadata");
-  }
-  if (sdk.local ? match[1] !== sdk.image : !Array.isArray(digests) || !digests.includes(sdk.image))
-    fail("the actual immutable image identity is required");
-  return match[3] as string;
-}
-
-export function qualifyImageSource(root: string, imageSource: string, current: string): void {
-  if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
-    fail("exact image and consumer source revisions required");
-  checkedOutput(
-    [
-      "git",
-      "diff",
-      "--quiet",
-      imageSource,
-      current,
-      "--",
-      "docker/ci-base/Dockerfile",
-      "xtask/src",
-      "xtask/Cargo.toml",
-      "xtask/Cargo.lock",
-      ":(glob)xtask/*.tsv",
-      "tests/support/official_sqld.rs",
-      "rust-toolchain.toml",
-      ".bun-version",
-    ],
-    root,
-  );
-}
-
 // Reuse never relabels a packet: the image still runs the original exact
 // checkout and native qualifier. Only these host Docker functions may differ.
 export async function qualifyCohortHostProgram(
@@ -2140,12 +2517,19 @@ export function containerRequest(
   architecture: string = process.arch,
 ) {
   const mode = argv[1];
-  if (!argv[0] || !["--prepare", "--consume", "--ci-shard", "--ci-shards"].includes(mode ?? ""))
+  if (
+    !argv[0] ||
+    !["--prepare", "--consume", "--ci-shard", "--ci-shards", "--native-checks"].includes(mode ?? "")
+  )
     throw new UsageError(
-      "container-browser ROOT {--prepare|--consume N|--ci-shard N|--ci-shards N,N,...}",
+      "container-browser ROOT {--prepare|--consume N|--ci-shard N|--ci-shards N,N,...|--native-checks}",
     );
   const options = new Map<string, string>();
-  for (let at = mode === "--prepare" ? 2 : 3; at < argv.length; at++) {
+  for (
+    let at = mode === "--prepare" || mode === "--native-checks" ? 2 : 3;
+    at < argv.length;
+    at++
+  ) {
     const name = argv[at] ?? "";
     const value = argv[at + 1];
     if (options.has(name)) throw new UsageError("duplicate container option");
@@ -2160,6 +2544,8 @@ export function containerRequest(
       at++;
     } else throw new UsageError("unknown or incomplete container option");
   }
+  if (mode === "--native-checks" && options.size)
+    fail("native checks use only the published image/SDK without packet or reuse overrides");
   const imageOverride = options.get("--image-pin"),
     sdkOverride = options.get("--sdk-sha256");
   if ((imageOverride === undefined) !== (sdkOverride === undefined))
@@ -2170,11 +2556,24 @@ export function containerRequest(
     options.has("--local-image-sdk"),
     env,
   );
-  const phase = mode === "--prepare" ? "prepare" : mode === "--consume" ? "consume" : "all";
-  const shards = phase === "prepare" ? [] : (argv[2] ?? "").split(",").map(containerShard);
+  const phase =
+    mode === "--native-checks"
+      ? "native-checks"
+      : mode === "--prepare"
+        ? "prepare"
+        : mode === "--consume"
+          ? "consume"
+          : "all";
+  const shards =
+    phase === "prepare" || phase === "native-checks"
+      ? []
+      : (argv[2] ?? "").split(",").map(containerShard);
   if (
     new Set(shards).size !== shards.length ||
-    (mode !== "--ci-shards" && phase !== "prepare" && shards.length !== 1)
+    (mode !== "--ci-shards" &&
+      phase !== "prepare" &&
+      phase !== "native-checks" &&
+      shards.length !== 1)
   )
     fail("duplicate or invalid shard selection");
   const ci =
@@ -2185,14 +2584,22 @@ export function containerRequest(
       env.GITHUB_ACTIONS !== "true" ||
       phase === "all" ||
       env.GITHUB_JOB !==
-        (phase === "prepare" ? "workspace-browser-container-build" : "workspace-browser-shard") ||
+        (phase === "native-checks"
+          ? "web-native-checks"
+          : phase === "prepare"
+            ? "workspace-browser-container-build"
+            : "workspace-browser-shard") ||
       !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? "") ||
       !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") ||
       !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? "") ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? ""))
   )
     fail("container phase requires its actual GitHub source/run/attempt/repository/job");
-  if (phase !== "all" && (!options.get("--handoff") || options.has("--reuse-cohort")))
+  if (
+    phase !== "all" &&
+    phase !== "native-checks" &&
+    (!options.get("--handoff") || options.has("--reuse-cohort"))
+  )
     fail("separate container phases require an explicit packet path without cohort reuse");
   if (phase === "all" && (options.has("--handoff") || options.has("--handoff-sha256")))
     fail("combined local cohort cannot accept a cross-job packet");
@@ -2204,9 +2611,48 @@ export function containerRequest(
   return { sdk, phase, shards, ci, options };
 }
 
+/** Standalone checks have no browser packet or service authority. */
+export function qualifyNativeChecks(
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+  git: Git = spawnGit(root),
+): void {
+  const request = containerRequest([root, "--native-checks"], env);
+  if (
+    !process.getuid?.() ||
+    env.FVOCI_WEB_CONTAINER_JOB !== "web-native-checks" ||
+    env.FVOCI_WEB_CONTAINER_IMAGE !== request.sdk.image ||
+    env.FVOCI_WEB_CONTAINER_SDK_SHA256 !== request.sdk.sdk ||
+    env.FVOCI_WEB_CONTAINER_LOCAL_IMAGE !== "0" ||
+    (!request.ci && env.FVOCI_WEB_CONTAINER_LOCAL !== "1")
+  )
+    fail("native checks require the allocated published-image container");
+  const source = env.FVOCI_WEB_CONTAINER_SOURCE ?? "";
+  if (
+    !/^[a-f0-9]{40}$/.test(source) ||
+    (request.ci && source !== env.GITHUB_SHA) ||
+    gitLine(git, ["rev-parse", "HEAD"]) !== source ||
+    gitLine(git, ["rev-parse", "--show-toplevel"]) !== realpathSync(root) ||
+    git(["diff", "--quiet", "HEAD", "--"]).status !== 0
+  )
+    fail("native checks require the exact clean source");
+  if (
+    env.CARGO_BUILD_JOBS !== "2" ||
+    env.CARGO_INCREMENTAL !== "0" ||
+    env.CARGO_PROFILE_DEV_DEBUG !== "0" ||
+    env.CARGO_PROFILE_TEST_DEBUG !== "0" ||
+    env.CARGO_TARGET_DIR !== join(root, "target")
+  )
+    fail("native checks require the original compiler profile");
+  const disk = statfsSync(root);
+  if (disk.bavail * disk.bsize < 20_000_000_000)
+    fail("native checks require the existing 20GB disk floor");
+}
+
 /** Shared local/CI execution: one pinned image and the existing qualified packet. */
 async function containerBrowser(argv: string[]): Promise<number> {
   const { sdk, phase: requestedPhase, shards, ci, options } = containerRequest(argv, process.env);
+  const nativeDeadline = performance.now() + 15 * 60_000;
   const root = realpathSync(argv[0] ?? fail("container root required"));
   const architecture = containerArchitecture(
     process.platform,
@@ -2223,28 +2669,8 @@ async function containerBrowser(argv: string[]): Promise<number> {
   if (ci && orchestratorSource !== process.env.GITHUB_SHA)
     fail("container checkout differs from tested SHA");
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
-  let endpoint: unknown = process.env.DOCKER_HOST;
-  if (process.env.DOCKER_CONTEXT || !endpoint) {
-    const json = checkedOutput(
-      [
-        "docker",
-        "context",
-        "inspect",
-        "--format",
-        "{{json .Endpoints.docker.Host}}",
-        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
-      ],
-      root,
-    );
-    try {
-      endpoint = JSON.parse(json);
-    } catch {
-      fail("invalid Docker endpoint metadata");
-    }
-  }
-  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
   qualifyContainerDaemon(
-    endpoint,
+    dockerEndpoint(root),
     checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
     architecture,
   );
@@ -2255,6 +2681,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
   )
     fail("Docker platform override must match the native architecture");
   const image = sdk.image;
+  if (requestedPhase === "native-checks") {
+    const disk = statfsSync(root);
+    if (disk.bavail * disk.bsize < 20_000_000_000)
+      fail("native checks require the existing 20GB disk floor");
+  }
   if (ci) await stage("image-fetch", ["docker", "pull", "--platform", platform, image], root);
   const metadata = checkedOutput(
     [
@@ -2267,8 +2698,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     ],
     root,
   );
-  const imageSource = containerImageSource(metadata, sdk, architecture);
-  qualifyImageSource(root, imageSource, orchestratorSource);
+  const imageSource = qualifyImageSource(root, metadata, sdk, architecture, orchestratorSource);
   let source = orchestratorSource;
   checkedOutput(["git", "diff", "--quiet", "HEAD", "--"], root);
   const common = realpathSync(
@@ -2406,20 +2836,25 @@ async function containerBrowser(argv: string[]): Promise<number> {
   }
   const consumerDeadlines = new Map<string, number>();
   async function runContainer(
-    phase: "prepare" | "inputs" | "consume",
+    phase: "prepare" | "inputs" | "consume" | "native-checks",
     services: NodeJS.ProcessEnv = {},
     shard = "",
   ): Promise<number> {
     if (entryCancellation) return entryCancellation;
     const now = performance.now();
-    if (phase !== "prepare" && !consumerDeadlines.has(shard))
+    const producerPhase = phase === "prepare" || phase === "native-checks";
+    if (!producerPhase && !consumerDeadlines.has(shard))
       consumerDeadlines.set(shard, now + 20 * 60_000);
     const remaining =
-      phase === "prepare" ? 15 * 60_000 : (consumerDeadlines.get(shard) ?? now) - now;
+      phase === "native-checks"
+        ? nativeDeadline - now
+        : producerPhase
+          ? 15 * 60_000
+          : (consumerDeadlines.get(shard) ?? now) - now;
     if (remaining <= 0) return 1;
-    const directory = phase === "prepare" ? producer : join(batch, "consumer-" + shard);
-    const runDirectory = phase === "prepare" ? batch : join(batch, "run-" + shard);
-    const output = phase === "prepare" ? "producer-output" : "consumer-output-" + shard;
+    const directory = producerPhase ? producer : join(batch, "consumer-" + shard);
+    const runDirectory = producerPhase ? batch : join(batch, "run-" + shard);
+    const output = producerPhase ? "producer-output" : "consumer-output-" + shard;
     const variables: Record<string, string> = {
       HOME: "/fvoci-run/home",
       CARGO_HOME: "/fvoci-run/cargo",
@@ -2451,7 +2886,11 @@ async function containerBrowser(argv: string[]): Promise<number> {
       FVOCI_WEB_CONTAINER_RUN: run,
       FVOCI_WEB_CONTAINER_SOURCE: source,
       FVOCI_WEB_CONTAINER_JOB:
-        phase === "prepare" ? "workspace-browser-build" : "workspace-browser-shard",
+        phase === "native-checks"
+          ? "web-native-checks"
+          : phase === "prepare"
+            ? "workspace-browser-build"
+            : "workspace-browser-shard",
       FVOCI_SELECTED_CI_OUTPUT: "/fvoci-run/output",
       FVOCI_WEB_BUILD_HANDOFF: "/fvoci-run/handoff",
     };
@@ -2549,17 +2988,16 @@ async function containerBrowser(argv: string[]): Promise<number> {
       "browser-phase",
       root,
       phase,
-      ...(phase === "prepare" ? [] : [shard]),
+      ...(producerPhase ? [] : [shard]),
     );
     const started = performance.now();
-    const logFd =
-      phase !== "prepare"
-        ? openSync(
-            join(runDirectory, phase === "consume" ? "console.log" : "inputs-console.log"),
-            "wx",
-            0o600,
-          )
-        : undefined;
+    const logFd = !producerPhase
+      ? openSync(
+          join(runDirectory, phase === "consume" ? "console.log" : "inputs-console.log"),
+          "wx",
+          0o600,
+        )
+      : undefined;
     let child;
     try {
       child = Bun.spawn(args, {
@@ -2594,32 +3032,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
       process.removeListener("SIGTERM", terminate);
       rmSync(envFile);
     }
-    const inspect = Bun.spawnSync(
-      [
-        "docker",
-        "inspect",
-        "--format",
-        "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
-        name,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    let removeExit = -1;
-    if (inspect.exitCode === 0) {
-      if (result === 0 && inspect.stdout.toString().trim() !== "false 0 false") result = 1;
-      if (!inspect.stdout.toString().startsWith("false ")) {
-        // A stopped/lost Docker client is not proof its container retired.
-        // Attempt bounded stop, keep the first failure, and never rm --force.
-        Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
-        if (result === 0) result = 1;
-      }
-      const removed = Bun.spawnSync(["docker", "rm", "-v", name], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      removeExit = removed.exitCode;
-      if (removed.exitCode !== 0 && result === 0) result = 1;
-    } else if (result === 0) result = 1;
+    const retired = finishToolImage(name, result);
+    result = retired.code;
+    const inspect = retired.inspected,
+      removeExit = retired.removeExit;
     if (ci && phase === "consume") {
       try {
         const output = process.env.GITHUB_OUTPUT;
@@ -2649,28 +3065,10 @@ async function containerBrowser(argv: string[]): Promise<number> {
       if (logFd !== undefined) {
         try {
           const path = join(
-              runDirectory,
-              phase === "consume" ? "console.log" : "inputs-console.log",
-            ),
-            size = statSync(path).size,
-            bytes = Buffer.alloc(Math.min(size, 16384)),
-            offset = size - bytes.length,
-            fd = openSync(path, "r");
-          try {
-            readSync(fd, bytes, 0, bytes.length, offset);
-          } finally {
-            closeSync(fd);
-          }
-          for (const line of bytes
-            .toString("utf8")
-            .split("\n")
-            .slice(offset ? 1 : 0))
-            if (
-              /^(?:web-e2e stage=(?:cargo-fetch|engine-fetch|dependencies|browser-version|sqlite-sdk-admit|browser-input-before|web-build|fixture-build|default-server-build|worker-build|browser-input-after|browser-handoff-export|browser-handoff-consume|browser-group) (?:started|elapsed_seconds=[0-9]+\.[0-9]{3} exit=[0-9]{1,3})|web build handoff check_line=[0-9]{1,6})$/.test(
-                line,
-              )
-            )
-              process.stderr.write(line + "\n");
+            runDirectory,
+            phase === "consume" ? "console.log" : "inputs-console.log",
+          );
+          for (const line of containerStageDiagnostics(path)) process.stderr.write(line + "\n");
         } catch {
           process.stderr.write("container-browser diagnostics_unavailable=1\n");
         }
@@ -2681,6 +3079,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
     );
     return result;
   }
+  if (requestedPhase === "native-checks") return runContainer("native-checks");
   if (cohort === batch && requestedPhase !== "consume") {
     const prepared = await runContainer("prepare");
     if (prepared !== 0) return prepared;
@@ -2746,14 +3145,7 @@ async function containerBrowser(argv: string[]): Promise<number> {
   }
   return 0;
 }
-
-/** A refusal: the CLI prints the message to stderr and exits 1. */
-export class CheckError extends Error {}
 class UsageError extends Error {}
-
-function fail(message: string): never {
-  throw new CheckError(message);
-}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -3177,6 +3569,19 @@ if (import.meta.main) {
     if (argv[0] === "container-browser") process.exit(await containerBrowser(argv.slice(1)));
     if (argv[0] === "browser-phase")
       process.exit(await browserPhase(argv[1] ?? "", argv[2] ?? "", argv.slice(3)));
+    if (argv[0] === "selected-image-phase") {
+      arity(argv.slice(1), 2);
+      process.exit(await selectedImagePhase(argv[1] ?? "", argv[2] ?? ""));
+    }
+    if (argv[0] === "selected-image-pending") {
+      arity(argv.slice(1), 1);
+      process.exit(
+        await selectedImageOperation("pending", realpathSync(argv[1] ?? ""), {
+          ...process.env,
+          FVOCI_E2E_SHARED_SERVICES: "1",
+        }),
+      );
+    }
     if (argv[0] === "group-runtime") process.exit(await groupRuntime(argv.slice(1)));
     if (argv[0] === "group-wrapper") process.exit(await groupWrapper(argv.slice(1)));
     process.stdout.write(run(argv));

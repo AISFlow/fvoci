@@ -386,6 +386,8 @@ export async function executeUi(
           env,
           directory,
           setupNeeded,
+          undefined,
+          flow,
         ));
         audit.serverStarts += 1;
         // The audit owns this actual FD even if the identity lookup fails.
@@ -487,7 +489,15 @@ export async function executeUi(
           });
           const restartDir = join(directory, "restart");
           mkdirSync(restartDir, 0o700);
-          ({ server, base, log, roomLog } = await steps.start(scope, manifest, env, restartDir));
+          ({ server, base, log, roomLog } = await steps.start(
+            scope,
+            manifest,
+            env,
+            restartDir,
+            false,
+            undefined,
+            "restart",
+          ));
           audit.serverStarts += 1;
           const allocation: (typeof serverAllocations)[number] = [
             server,
@@ -868,6 +878,8 @@ export async function executeAuth(
           env,
           directory,
           setupNeeded,
+          undefined,
+          `auth-${flow}`,
         ));
         audit.serverStarts += 1;
         const allocation: (typeof serverAllocations)[number] = [directory, undefined, roomLog, log];

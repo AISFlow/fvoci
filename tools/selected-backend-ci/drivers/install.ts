@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
+import { selectedImageHost } from "../runtime.ts";
 import { env, failureDigest, read, root, sha } from "../io.ts";
 import type { Environment } from "../io.ts";
 import type { Inputs } from "../types.ts";
@@ -20,6 +21,7 @@ import {
   emit,
   failureCheckpoint,
   fileSha,
+  inputCheck,
   now,
   readText,
   runtimeError,
@@ -283,13 +285,16 @@ export function finalize(state: State, seam: Seam): Promise<number> {
         cleanupErrors.push("owned-container-cleanup-unconfirmed");
     }
     const binaries = current.build.binaries;
-    const unchanged = await attempt("install-post-input-observation-failed", () => {
+    const unchanged = await attempt("install-post-input-observation-failed", async () => {
+      const checked = selectedImageHost()
+        ? await inputCheck(before, before.head, before.tree)
+        : null;
       const changedInputs = [
         ...Object.entries(before.tracked)
           .filter(([path, digest]) => fileSha(join(root, path)) !== digest)
           .map(([path]) => path),
         ...Object.entries(before.external)
-          .filter(([path, digest]) => fileSha(path) !== digest)
+          .filter(([path, digest]) => (checked ? checked.external[path] : fileSha(path)) !== digest)
           .map(([path]) => path),
       ];
       const changedBinaries = Object.keys(binaries).filter(

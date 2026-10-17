@@ -185,7 +185,7 @@ export function verifyWebContainerHandoffJobs(jobs: Mapping): string[] {
   return errors;
 }
 
-// The selected runner owns the existing main/lib/install/engine compiler stages
+// The selected runner owns the existing lib/install/engine compiler stages
 // and qualifies their complete packet once in this job. No intermediate target
 // artifact or normalized checkout timestamp is needed inside one producer.
 export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
@@ -222,20 +222,36 @@ export function verifyCollaborationPreparationJobs(jobs: Mapping): string[] {
         'export FVOCI_WEB_BUILD_HANDOFF="$RUNNER_TEMP/fvoci-web-build-handoff"\n' +
         'mkdir -m 0700 "$FVOCI_SELECTED_CI_OUTPUT"\n' +
         "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected\n", "complete unmasked compiler and packet qualification in one owned producer");
-  for (const step of steps.filter((step) => usesPrefix(step, "actions/cache"))) {
-    const withs = safeGet(step, "with");
-    const path = safeGet(withs, "path");
-    const key = safeGet(withs, "key");
-    if (typeof path === "string" && path.trim() === "~/.cargo/registry\n~/.cargo/git") continue;
-    require(isMapping(withs) &&
-      path === "target" &&
-      !has(withs, "restore-keys") &&
-      typeof key === "string" &&
-      key.includes("steps.sqlite.outputs.cache_identity") &&
-      steps.indexOf(step) >
-        steps.findIndex(
-          (item) => safeGet(item, "id") === "sqlite",
-        ), "only identity-bound root seed after SQLite preparation; no helper fallback cache");
+  for (const name of ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)]) {
+    const job = safeGet(jobs, name),
+      raw = safeGet(job, "steps");
+    const list = Array.isArray(raw)
+      ? raw.flatMap((step): Mapping[] => (isMapping(step) ? [step] : []))
+      : [];
+    require(!list.some((step) =>
+      /(?:apt-get|rustup |prepare-sqlite-ci|prepare-rustup-ci-metadata|playwright install|cargo (?:build|fetch)|bun ci)/.test(
+        stepRun(step),
+      ),
+    ), "host preparation must remain absent: " + name);
+    const downloads = list.filter((step) => safeGet(step, "name") === "Restore Cargo downloads");
+    const downloadUse = safeGet(downloads[0], "uses");
+    require(downloads.length === 1 &&
+      downloads[0] !== undefined &&
+      typeof downloadUse === "string" &&
+      /^actions\/cache(?:\/restore)?@/.test(
+        downloadUse,
+      ), "locked source-download cache required: " + name);
+    for (const step of list.filter((step) => usesPrefix(step, "actions/cache"))) {
+      const withs = safeGet(step, "with"),
+        key = safeGet(withs, "key");
+      require(isMapping(withs) &&
+        safeGet(withs, "path") === "~/.cargo/registry\n~/.cargo/git\n" &&
+        !has(withs, "restore-keys") &&
+        typeof key === "string" &&
+        key.includes(
+          "'crates/collab-engine/Cargo.lock', 'crates/collab-engine/Cargo.toml'",
+        ), "source downloads only; no helper fallback cache: " + name);
+    }
   }
   return errors;
 }
@@ -345,6 +361,7 @@ export function verifyWebBuildHandoffJobs(jobs: Mapping): string[] {
     require(checkout.length === 1 &&
       pyEq(get(checkout[0] as Mapping, "with"), {
         "persist-credentials": false,
+        "fetch-depth": 0,
       }), "default exact checkout without stored credentials");
     require(get(job, "if") ===
       "needs.ci-plan.outputs.select_" +
@@ -441,6 +458,7 @@ export function verifyWebBuildHandoff(ctx: VerifyContext): string[] {
     ...verifyWebRustupMetadataJobs(jobs, isMapping(workflow) ? workflow : {}),
     ...verifyWebStaticInstallSmokeJobs(jobs),
     ...verifyWebHostInputsJobs(jobs),
+    ...verifyWebNativeImageJobs(jobs),
     ...verifyWebContainerHandoffJobs(jobs),
   ];
 }
@@ -463,26 +481,8 @@ export function verifyNoRunScopedCacheKeys(jobs: Mapping): string[] {
   });
 }
 
-// Rustup component metadata is prepared by the xtask helper, built from its own
-// lockfile on the host (the consumer's target and rustflags overrides cleared,
-// no toolchain auto-install) and run directly. It runs once in every job that
-// captures native build inputs: after the pinned toolchain install and the
-// Cargo download restore, before the SQLite step and every product Cargo
-// command. The helper build itself writes only xtask/target and the Cargo
-// registry; with auto-install off it cannot change the pinned toolchain.
-export const RUSTUP_METADATA_STEP =
-  "Prepare owned pinned Rustup component metadata before input capture";
-export const RUSTUP_METADATA_RUN =
-  "env -u CARGO_BUILD_TARGET -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR \\\n" +
-  "  -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \\\n" +
-  "  RUSTUP_AUTO_INSTALL=0 \\\n" +
-  "  cargo build --quiet --locked --manifest-path xtask/Cargo.toml --target-dir xtask/target\n" +
-  'xtask/target/debug/xtask prepare-rustup-ci-metadata --output "$RUNNER_TEMP/fvoci-rustup-ci-metadata"\n';
-const CARGO_DOWNLOADS = "~/.cargo/registry\n~/.cargo/git\n";
-const TOOLCHAIN_INSTALL = "rustup toolchain install 1.99.0 --profile minimal --component clippy";
-const WEB_NATIVE_JOBS = ["collaboration-build", ...WEB_COLLAB_LANES.map((lane) => lane.name)];
-
-export const WEB_SQLITE_JOBS = ["web-checks", "web-native-checks", ...WEB_NATIVE_JOBS];
+// Only the remaining host web-checks boundary prepares a host SQLite prefix.
+export const WEB_SQLITE_JOBS = ["web-checks"];
 // The same complete host preparation precedes every Web SQLite/cache identity.
 const WEB_SQLITE_RUN = String.raw`set -euo pipefail
 # Select the signed Ubuntu primary archive only on x64; preserve ARM mirrors.
@@ -521,6 +521,35 @@ const SQLITE_HASH_UPLOAD: Mapping = {
 };
 function isSQLiteHashUpload(step: Mapping): boolean {
   return pyEq(step, SQLITE_HASH_UPLOAD);
+}
+
+export function verifyWebNativeImageJobs(jobs: Mapping): string[] {
+  const expected = {
+    needs: "ci-plan",
+    if: "needs.ci-plan.outputs.select_web_checks == 'true'",
+    "runs-on": "ubuntu-26.04",
+    "timeout-minutes": 15,
+    steps: [
+      {
+        uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        with: { "persist-credentials": false, "fetch-depth": 0 },
+      },
+      {
+        uses: "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+        with: { "bun-version-file": ".bun-version" },
+      },
+      {
+        name: "Check strict Clippy and default static transport in the shared image",
+        env: { TMPDIR: "${{ runner.temp }}" },
+        run: 'bun --no-env-file tools/web-e2e/run-web-e2e.ts container-browser "$GITHUB_WORKSPACE" --native-checks',
+      },
+    ],
+  };
+  return pyEq(get(jobs, "web-native-checks"), expected)
+    ? []
+    : [
+        "web: web-native-checks requires its exact unmasked shared-image command, selection and budget without host preparation",
+      ];
 }
 
 export function verifyWebHostInputsJobs(jobs: Mapping): string[] {
@@ -587,54 +616,11 @@ export function verifyWebRustupMetadataJobs(jobs: Mapping, workflow: Mapping): s
   if (PYTHON.test(JSON.stringify(without(workflow, "jobs")))) {
     errors.push("web: workflow-level settings may not configure python");
   }
-  const pinned = new Set<unknown>();
-  for (const name of WEB_NATIVE_JOBS) {
-    const job = get(jobs, name);
-    const steps = isMapping(job) ? get(job, "steps") : undefined;
-    const list: unknown[] = Array.isArray(steps) ? steps : [];
-    const at = list.flatMap((step, index) =>
-      isMapping(step) && get(step, "name") === RUSTUP_METADATA_STEP ? [index] : [],
-    );
-    const index = at[0];
-    if (at.length !== 1 || index === undefined) {
-      errors.push(`web: ${name} requires exactly one Rustup metadata step`);
-      continue;
-    }
-    const original = list[index] as Mapping;
-    const step = original;
-    pinned.add(original);
-    if (!pyEq(Object.keys(step).sort(), ["name", "run"]) || stepRun(step) !== RUSTUP_METADATA_RUN) {
-      errors.push(
-        `web: ${name} Rustup metadata must build and run the locked xtask helper without toolchain auto-install`,
-      );
-    }
-    const install = pySplitlines(stepRun(list[index - 2])).at(-1);
-    const restore = list[index - 1];
-    const sqlite = list[index + 1];
-    if (
-      install !== TOOLCHAIN_INSTALL ||
-      !isMapping(restore) ||
-      get(restore, "name") !== "Restore Cargo downloads" ||
-      !/^actions\/cache(\/restore)?@/.test(String(get(restore, "uses", ""))) ||
-      !pyEq(
-        get(isMapping(get(restore, "with")) ? (get(restore, "with") as Mapping) : {}, "path"),
-        CARGO_DOWNLOADS,
-      ) ||
-      !isMapping(sqlite) ||
-      get(sqlite, "id") !== "sqlite"
-    ) {
-      errors.push(
-        `web: ${name} Rustup metadata must follow the toolchain install and Cargo download restore and precede SQLite preparation`,
-      );
-    }
-  }
   for (const [name, job] of Object.entries(jobs)) {
     const steps = isMapping(job) ? get(job, "steps") : undefined;
     const list: unknown[] = Array.isArray(steps) ? steps : [];
-    if (
-      list.some((step) => !pinned.has(step) && stepRun(step).includes("prepare-rustup-ci-metadata"))
-    ) {
-      errors.push(`web: ${name} may prepare Rustup metadata only in its pinned step`);
+    if (list.some((step) => stepRun(step).includes("prepare-rustup-ci-metadata"))) {
+      errors.push(`web: ${name} must not prepare Rustup metadata on the host`);
     }
     // Job keys, step fields and every run line.
     if (PYTHON.test(JSON.stringify(job)))

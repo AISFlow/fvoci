@@ -175,11 +175,19 @@ fn web_build_stops_on_preflight_failure() {
     }
     let selected = r.root.join("tools/selected-backend-ci");
     fs::create_dir_all(&selected).unwrap();
-    fs::copy(
-        repo().join("tools/selected-backend-ci/types.ts"),
-        selected.join("types.ts"),
-    )
-    .unwrap();
+    for name in [
+        "types.ts",
+        "runtime.ts",
+        "build.ts",
+        "admission.ts",
+        "io.ts",
+    ] {
+        fs::copy(
+            repo().join("tools/selected-backend-ci").join(name),
+            selected.join(name),
+        )
+        .unwrap();
+    }
     write_exec(
         &r.bin.join("bun"),
         &format!(
@@ -387,7 +395,6 @@ fn contract(root: &Path) -> Check {
             "web",
             &[
                 "web-checks",
-                "web-native-checks",
                 "collaboration-build",
                 "collaboration-install-on",
                 "collaboration-postgres-on",
@@ -404,7 +411,11 @@ fn contract(root: &Path) -> Check {
         let all = jobs(&text);
         let mut actual: Vec<&str> = all
             .iter()
-            .filter(|(_, (s, e))| has_line(&text[*s..*e], "        id: sqlite"))
+            .filter(|(name, (s, e))| {
+                has_line(&text[*s..*e], "        id: sqlite")
+                    || (workflow == "web"
+                        && (name == "collaboration-build" || COLLAB_LANES.contains(&name.as_str())))
+            })
             .map(|(n, _)| n.as_str())
             .collect();
         if workflow == "web" {
@@ -419,6 +430,20 @@ fn contract(root: &Path) -> Check {
             }
         }
         if workflow == "web" {
+            let native = job(&text, "web-native-checks").ok_or("missing native image checks")?;
+            contains(
+                native,
+                "container-browser \"$GITHUB_WORKSPACE\" --native-checks",
+                "native image checks",
+            )?;
+            for obsolete in [
+                "id: sqlite",
+                "rustup toolchain install",
+                "apt-get",
+                "path: target",
+            ] {
+                excludes(native, obsolete, "native image checks")?;
+            }
             let producer = job(&text, "workspace-browser-container-build")
                 .ok_or("missing container producer")?;
             let consumer =
@@ -489,6 +514,88 @@ fn contract(root: &Path) -> Check {
             let body = job(&text, name).ok_or_else(|| format!("missing job {name}"))?;
             let what = format!("{workflow}/{name}");
             let what = what.as_str();
+            if workflow == "web" && (*name == "collaboration-build" || COLLAB_LANES.contains(name))
+            {
+                for host in [
+                    "id: sqlite",
+                    "apt-get",
+                    "rustup toolchain install",
+                    "prepare-rustup-ci-metadata",
+                    "playwright install",
+                    "cargo ",
+                    "path: target",
+                    "path: crates/collab-engine/target",
+                ] {
+                    excludes(body, host, what)?;
+                }
+                contains(body, "fetch-depth: 0", what)?;
+                contains(body, "timeout-minutes: 15", what)?;
+                let phase = if *name == "collaboration-build" {
+                    "prepare"
+                } else {
+                    "consume"
+                };
+                contains(body, &format!("--ci-{phase}-selected"), what)?;
+                let id = if phase == "prepare" {
+                    "id: prepare"
+                } else {
+                    "id: browser"
+                };
+                let matches: Vec<_> = blocks(body)
+                    .into_iter()
+                    .filter(|(s, e)| body[*s..*e].contains(id))
+                    .collect();
+                ensure(
+                    matches.len() == 1 && !masked(&body[matches[0].0..matches[0].1]),
+                    || format!("{what}: image workload must be unmasked"),
+                )?;
+                if phase == "prepare" {
+                    contains(body, "    needs: ci-plan\n", what)?;
+                    excludes(body, "actions/download-artifact@", what)?;
+                    excludes(body, "touch -", what)?;
+                    let publish: Vec<_> = blocks(body)
+                        .into_iter()
+                        .filter(|(s, e)| body[*s..*e].contains("id: publish"))
+                        .collect();
+                    ensure(
+                        publish.len() == 1 && !masked(&body[publish[0].0..publish[0].1]),
+                        || format!("{what}: publication must be unmasked"),
+                    )?;
+                    contains(
+                        body,
+                        "name: web-current-build-${{ github.run_attempt }}",
+                        what,
+                    )?;
+                    contains(
+                        body,
+                        "handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}",
+                        what,
+                    )?;
+                    less_equal(matches[0].1, publish[0].0, what)?;
+                } else {
+                    contains(
+                        body,
+                        if *name == "collaboration-install-on" {
+                            "needs: [ci-plan, collaboration-build]\n"
+                        } else {
+                            "needs: [ci-plan, collaboration-build, collaboration-install-on]\n"
+                        },
+                        what,
+                    )?;
+                    contains(
+                        body,
+                        "artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}",
+                        what,
+                    )?;
+                    contains(body, "FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}", what)?;
+                    less(
+                        find(body, "Download this run")?,
+                        find(body, "id: browser")?,
+                        what,
+                    )?;
+                }
+                continue;
+            }
             if let Some((_, cohort)) = RUST_HANDOFFS
                 .iter()
                 .find(|(consumer, _)| workflow == "rust" && consumer == name)
@@ -512,44 +619,6 @@ fn contract(root: &Path) -> Check {
                 )?;
                 less(find(body, "Verify cached SQLite prefix")?, download, what)?;
                 less(download, unpack, what)?;
-            } else if workflow == "web" && COLLAB_LANES.contains(name) {
-                // Each lane prepares its own SDK before admitting the producer's exact artifact.
-                excludes(body, "path: target", what)?;
-                excludes(body, "path: crates/collab-engine/target", what)?;
-                if *name == "collaboration-install-on" {
-                    contains(body, "needs: [ci-plan, collaboration-build]\n", what)?;
-                } else {
-                    contains(
-                        body,
-                        "needs: [ci-plan, collaboration-build, collaboration-install-on]\n",
-                        what,
-                    )?;
-                }
-                contains(
-                    body,
-                    "artifact-ids: ${{ needs.collaboration-build.outputs.artifact_id }}",
-                    what,
-                )?;
-                contains(
-                    body,
-                    "FVOCI_WEB_BUILD_HANDOFF_SHA256: ${{ needs.collaboration-build.outputs.handoff_sha256 }}",
-                    what,
-                )?;
-                contains(
-                    body,
-                    "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-consume-selected",
-                    what,
-                )?;
-                less(
-                    find(body, "id: sqlite")?,
-                    find(body, "Download this run")?,
-                    what,
-                )?;
-                less(
-                    find(body, "Download this run")?,
-                    find(body, "id: browser")?,
-                    what,
-                )?;
             } else {
                 less(find(body, "id: sqlite")?, find(body, "path: target")?, what)?;
                 let after = &body[find(body, "path: target")? + "path: target".len()..];
@@ -603,47 +672,6 @@ fn contract(root: &Path) -> Check {
                 ensure(!masked(unguarded), || {
                     format!("{what}: preparation cannot be skipped or masked")
                 })?;
-            }
-            if workflow == "web" && *name == "collaboration-build" {
-                contains(body, "    needs: ci-plan\n", what)?;
-                contains(body, "    timeout-minutes: 15\n", what)?;
-                excludes(body, "actions/download-artifact@", what)?;
-                excludes(body, "touch -", what)?;
-                let required = |line: &str| -> Result<(usize, usize), String> {
-                    let matching: Vec<_> = steps
-                        .iter()
-                        .copied()
-                        .filter(|b| has_line(text_of(*b), line))
-                        .collect();
-                    ensure(matching.len() == 1, || {
-                        format!("{what}: missing/duplicate {line}")
-                    })?;
-                    Ok(matching[0])
-                };
-                let compile = required("        id: prepare")?;
-                let publish = required("        id: publish")?;
-                for block in [compile, publish] {
-                    ensure(!masked(text_of(block)), || {
-                        format!("{what}: qualification/publication must be unmasked")
-                    })?;
-                }
-                contains(
-                    text_of(compile),
-                    "bash scripts/run-web-e2e.sh --ci-use-committed-api --ci-prepare-selected\n",
-                    what,
-                )?;
-                contains(
-                    text_of(publish),
-                    "name: web-current-build-${{ github.run_attempt }}\n",
-                    what,
-                )?;
-                contains(
-                    body,
-                    "handoff_sha256: ${{ steps.prepare.outputs.handoff_sha256 }}\n",
-                    what,
-                )?;
-                less_equal(ready.1, compile.0, what)?;
-                less_equal(compile.1, publish.0, what)?;
             }
             for block in &steps {
                 let step = text_of(*block);
@@ -843,35 +871,35 @@ fn assert_mutations_fail(
 fn new_producer_mutations_fail_same_wiring_contract() {
     let _serial = serial();
     let (_temp, root) = contract_copy();
-    for (workflow, name) in [("rust", "postgres-build"), ("web", "collaboration-build")] {
-        let path = root.join(format!(".github/workflows/{workflow}.yml"));
-        let original = fs::read_to_string(&path).unwrap();
-        let span = job_span(&original, name);
-        let body = &original[span.0..span.1];
-        let steps = blocks(body);
-        let text_of = |(s, e): (usize, usize)| &body[s..e];
-        let prep = *steps
-            .iter()
-            .find(|b| has_line(text_of(**b), "        id: sqlite"))
-            .unwrap();
-        let cache = *steps
-            .iter()
-            .find(|b| text_of(**b).lines().any(is_target_path_line))
-            .unwrap();
-        let helper = steps
-            .iter()
-            .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
-            .copied();
-        let cache_text = text_of(cache);
-        let move_cache_before = |anchor: (usize, usize)| {
-            format!(
-                "{}{cache_text}{}{}",
-                &body[..anchor.0],
-                &body[anchor.0..cache.0],
-                &body[cache.1..]
-            )
-        };
-        let mut changes: Vec<(String, String, Option<&str>)> = vec![
+    let (workflow, name) = ("rust", "postgres-build");
+    let path = root.join(format!(".github/workflows/{workflow}.yml"));
+    let original = fs::read_to_string(&path).unwrap();
+    let span = job_span(&original, name);
+    let body = &original[span.0..span.1];
+    let steps = blocks(body);
+    let text_of = |(s, e): (usize, usize)| &body[s..e];
+    let prep = *steps
+        .iter()
+        .find(|b| has_line(text_of(**b), "        id: sqlite"))
+        .unwrap();
+    let cache = *steps
+        .iter()
+        .find(|b| text_of(**b).lines().any(is_target_path_line))
+        .unwrap();
+    let helper = steps
+        .iter()
+        .find(|b| text_of(**b).contains("path: crates/collab-engine/target"))
+        .copied();
+    let cache_text = text_of(cache);
+    let move_cache_before = |anchor: (usize, usize)| {
+        format!(
+            "{}{cache_text}{}{}",
+            &body[..anchor.0],
+            &body[anchor.0..cache.0],
+            &body[cache.1..]
+        )
+    };
+    let mut changes: Vec<(String, String, Option<&str>)> = vec![
             (
                 "missing producer preparation".into(),
                 replace_once(body, "id: sqlite\n", "id: missing-sqlite\n"),
@@ -935,55 +963,35 @@ fn new_producer_mutations_fail_same_wiring_contract() {
                 None,
             ),
         ];
-        if let Some(helper) = helper {
-            changes.push((
-                "helper borrows SQLite inputs".into(),
-                replace_once(
-                    body,
-                    text_of(helper),
-                    &format!(
-                        "{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n",
-                        text_of(helper)
-                    ),
+    if let Some(helper) = helper {
+        changes.push((
+            "helper borrows SQLite inputs".into(),
+            replace_once(
+                body,
+                text_of(helper),
+                &format!(
+                    "{}          sqlite: ${{{{ steps.sqlite.outputs.cache_identity }}}}\n",
+                    text_of(helper)
                 ),
-                None,
-            ));
-        }
-        if workflow == "rust" {
-            let verify = *steps
-                .iter()
-                .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
-                .unwrap();
-            changes.push((
-                "missing producer verification".into(),
-                format!("{}{}", &body[..verify.0], &body[verify.1..]),
-                None,
-            ));
-            changes.push((
-                "output cache before verification".into(),
-                move_cache_before(verify),
-                None,
-            ));
-        } else {
-            let save = *steps
-                .iter()
-                .find(|b| {
-                    text_of(**b).contains("actions/cache/save@")
-                        && has_line(text_of(**b), "          path: target")
-                })
-                .unwrap();
-            changes.push((
-                "save key drifts from its restore".into(),
-                replace_once(
-                    body,
-                    text_of(save),
-                    &text_of(save).replacen("v2-web-", "v2-drifted-", 1),
-                ),
-                None,
-            ));
-        }
-        assert_mutations_fail(&path, &root, &original, span, changes);
+            ),
+            None,
+        ));
     }
+    let verify = *steps
+        .iter()
+        .find(|b| text_of(**b).contains("name: Verify cached SQLite prefix or build\n"))
+        .unwrap();
+    changes.push((
+        "missing producer verification".into(),
+        format!("{}{}", &body[..verify.0], &body[verify.1..]),
+        None,
+    ));
+    changes.push((
+        "output cache before verification".into(),
+        move_cache_before(verify),
+        None,
+    ));
+    assert_mutations_fail(&path, &root, &original, span, changes);
 }
 
 #[test]
@@ -1108,7 +1116,27 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             "name: web-browser-container-build-${{ github.run_attempt }}",
             "name: foreign-packet",
         ),
-        ("collaboration-build", "id: sqlite", "id: missing-sqlite"),
+        ("collaboration-build", "fetch-depth: 0", "fetch-depth: 1"),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - id: sqlite\n        run: fixture\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - run: cargo build --locked\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - uses: actions/cache@fixture\n        with:\n          path: target\n          key: unqualified\n",
+        ),
+        (
+            "collaboration-build",
+            "    steps:\n",
+            "    steps:\n      - uses: actions/cache@fixture\n        with:\n          path: crates/collab-engine/target\n          key: unqualified\n",
+        ),
         (
             "collaboration-build",
             "    needs: ci-plan\n",
@@ -1124,6 +1152,11 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
             "collaboration-build",
             "        id: prepare\n",
             "        id: prepare\n        if: false\n",
+        ),
+        (
+            "collaboration-build",
+            "        id: prepare\n",
+            "        id: prepare\n        continue-on-error: true\n",
         ),
         (
             "collaboration-build",
@@ -1152,8 +1185,8 @@ fn web_producer_consumer_mutations_fail_same_wiring_contract() {
         ),
         (
             "collaboration-install-on",
-            "id: sqlite",
-            "id: missing-sqlite",
+            "id: browser",
+            "id: missing-browser",
         ),
         (
             "collaboration-install-on",

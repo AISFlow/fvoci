@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "bun";
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import {
   chmodSync,
@@ -52,6 +52,7 @@ import {
 } from "./io.ts";
 import {
   driverCommand,
+  driverFailureDiagnostics,
   executeDriver,
   knownOnBrowserTest,
   laneDriver,
@@ -116,6 +117,179 @@ function directory(): string {
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true });
 });
+
+test("selected image Inputs stdout completes before forced child exit", async () => {
+  const { CI_WEB_IMAGE, CI_WEB_SDK_SHA256 } = await import("./runtime.ts");
+  for (const [count, closed] of [
+    [1, false],
+    [50000, false],
+    [50000, true],
+  ] as const) {
+    const before: Inputs = {
+      head: "a".repeat(40),
+      tree: "b".repeat(40),
+      status: "",
+      tracked: { "fixture.ts": "c".repeat(64) },
+      external: Object.fromEntries(
+        Array.from({ length: count }, (_, i) => ["/fixture/input-" + String(i), "d".repeat(64)]),
+      ),
+      untracked: {},
+    };
+    const expected = JSON.stringify(before),
+      child = spawnSelectedCommand(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--eval",
+          `import {mock} from "bun:test";
+mock.module(${JSON.stringify(join(root, "tools/selected-backend-ci/drivers/common.ts"))}, () => ({
+  async inputCheck(before, head, tree) {
+    if (before.head !== head || before.tree !== tree) throw new Error("fixture identity mismatch");
+    return before;
+  },
+}));
+const {selectedImagePhase} = await import(${JSON.stringify(join(root, "tools/web-e2e/run-web-e2e.ts"))});
+process.exit(await selectedImagePhase(${JSON.stringify(root)}, "inputs"));`,
+        ],
+        {
+          FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+          FVOCI_WEB_CONTAINER_IMAGE: CI_WEB_IMAGE,
+          FVOCI_WEB_CONTAINER_SDK_SHA256: CI_WEB_SDK_SHA256.x86_64,
+          FVOCI_SELECTED_CI_OUTPUT: directory(),
+          FVOCI_SELECTED_CI_SQLITE_PARENT: directory(),
+        },
+        "pipe",
+        "pipe",
+        new AbortController().signal,
+        expected,
+      );
+    assert.ok(child.stdout instanceof ReadableStream);
+    assert.ok(child.stderr instanceof ReadableStream);
+    if (closed) await child.stdout.cancel();
+    const [stdout, stderr, exit] = await Promise.all([
+      closed ? Promise.resolve(new ArrayBuffer(0)) : new Response(child.stdout).arrayBuffer(),
+      new Response(child.stderr).arrayBuffer(),
+      child.exited,
+    ]);
+    if (closed) {
+      expect(exit).not.toBe(0);
+      expect(new TextDecoder().decode(stderr)).toContain("EPIPE");
+      continue;
+    }
+    expect(exit).toBe(0);
+    expect(stderr.byteLength).toBe(0);
+    expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
+    expect(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(stdout)),
+    ).toEqual(before);
+  }
+});
+
+describe("private driver failure visibility", () => {
+  const source = "tools/selected-backend-ci/drivers/binding.ts";
+  const frame = `    at loadCurrent (${join(root, source)}:381:9)`;
+  const projected = "selected-driver failure type=AssertionError source=" + source + ":381";
+
+  test("only closed error classes and exact maintained numeric frames leave private logs", () => {
+    const text = "AssertionError [ERR_ASSERTION]: PRIVATE_CREDENTIAL_CANARY\n" + frame;
+    expect(driverFailureDiagnostics(text)).toEqual([projected]);
+    expect(driverFailureDiagnostics(projected + "\n" + text)).toEqual([projected]);
+    for (const fault of [
+      text.replace("AssertionError", "PrivateError"),
+      text.replace(root, root + "-foreign"),
+      text.replace("binding.ts", "binding.ts.private"),
+      text.replace(":381:", ":0:"),
+      text.replace(":381:", ":10001:"),
+      text.replace(":381:", ":381.0:"),
+      text + " PRIVATE_CREDENTIAL_CANARY",
+      text + "\r",
+      text + "\0",
+      "\u001b[31m" + text,
+      "x".repeat(16385) + text,
+      "µ".repeat(8193) + "\n" + text,
+      "\n".repeat(128) + text,
+      projected.replace("AssertionError", "PrivateError"),
+      projected.replace("binding.ts", "../binding.ts"),
+      projected + " PRIVATE_CREDENTIAL_CANARY",
+    ])
+      expect(driverFailureDiagnostics(fault)).toEqual([]);
+    expect(
+      driverFailureDiagnostics(
+        "Error: PRIVATE_CREDENTIAL_CANARY\n" +
+          Array.from({ length: 8 }, (_, i) => frame.replace(":381:", `:${String(i + 1)}:`)).join(
+            "\n",
+          ),
+      ),
+    ).toHaveLength(4);
+  });
+
+  test("a real install admission failure retains exit1 and projects no private error text", async () => {
+    const log = join(directory(), "driver.log"),
+      emitted: string[] = [],
+      stderr = spyOn(process.stderr, "write").mockImplementation((value) => {
+        emitted.push(String(value));
+        return true;
+      });
+    try {
+      expect(
+        await executeDriver(
+          driverCommand(laneDriver("install")),
+          { FVOCI_CI_OWNER: "fixture", FVOCI_CI_SELECTED_RUNS: "/PRIVATE_CREDENTIAL_CANARY" },
+          log,
+          new AbortController().signal,
+        ),
+      ).toBe(1);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(readFileSync(log, "utf8")).toContain("NOT GRANTED");
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    expect(emitted.join("")).toMatch(
+      /selected-driver failure type=AssertionError source=tools\/selected-backend-ci\/drivers\/binding\.ts:[1-9][0-9]*\n/,
+    );
+    expect(emitted.join("")).not.toContain("NOT GRANTED");
+    expect(emitted.join("")).not.toContain("PRIVATE_CREDENTIAL_CANARY");
+    expect(emitted.join("")).not.toContain(root);
+  });
+
+  for (const mutation of ["public", "symlink", "replacement"])
+    test(`a real child cannot project a ${mutation} driver-log path`, async () => {
+      const base = directory(),
+        log = join(base, "driver.log"),
+        foreign = join(base, "foreign.log"),
+        emitted: string[] = [];
+      writeFileSync(foreign, projected, { mode: 0o600 });
+      const stderr = spyOn(process.stderr, "write").mockImplementation((value) => {
+        emitted.push(String(value));
+        return true;
+      });
+      try {
+        expect(
+          await executeDriver(
+            [
+              process.execPath,
+              "--no-env-file",
+              "--eval",
+              `import {chmodSync,unlinkSync,symlinkSync,copyFileSync} from "node:fs";
+console.error(${JSON.stringify(projected)});
+const log=${JSON.stringify(log)}, foreign=${JSON.stringify(foreign)};
+if (${JSON.stringify(mutation)} === "public") chmodSync(log,0o644);
+else {unlinkSync(log); if (${JSON.stringify(mutation)} === "symlink") symlinkSync(foreign,log); else copyFileSync(foreign,log);}
+process.exit(19);`,
+            ],
+            {},
+            log,
+            new AbortController().signal,
+          ),
+        ).toBe(19);
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(emitted).toEqual([]);
+      expect(readFileSync(foreign, "utf8")).toBe(projected);
+    });
+});
+
 const source = call(["git", "rev-parse", "HEAD"]),
   tree = call(["git", "rev-parse", "HEAD^{tree}"]);
 const owner = "github:fixture/repo:123:1:collaboration-flow";
@@ -940,10 +1114,165 @@ describe.serial("selected runner contract and fail-closed controls", () => {
         expect(() => identity("run")).toThrow();
       });
   });
-  test("permissions never grant group 0 as the docker group", () => {
-    expect(() => {
-      runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
-    }).toThrow("root group is never granted as the docker group");
+  test("permissions never grant group 0 as the docker group", async () => {
+    let message = "";
+    try {
+      await runtimePermissions("/fixture/output", "/fixture/sqlite", 0);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("root group is never granted as the docker group");
+  });
+  test("real permission refusal reaches the parent as source-only evidence", () => {
+    const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-location-"));
+    try {
+      const output = join(base, "fvoci-selected-current"),
+        sqlite = join(base, "fvoci-sqlite"),
+        bin = join(base, "bin");
+      mkdirSync(output, { mode: 0o700 });
+      mkdirSync(join(sqlite, "lib"), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(join(bin, "stat"), "#!" + process.execPath + '\nconsole.log("0");\n');
+      chmodSync(join(bin, "stat"), 0o755);
+      const result = spawnSync(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--eval",
+          `import {selectedHost} from ${JSON.stringify(join(root, "tools/web-e2e/run-web-e2e.ts"))};try{await selectedHost(${JSON.stringify(root)},0,true)}catch{process.exitCode=1}`,
+        ],
+        {
+          cwd: root,
+          env: {
+            PATH: bin + ":" + (process.env.PATH ?? ""),
+            RUNNER_TEMP: base,
+            FVOCI_SELECTED_CI_OUTPUT: output,
+            FVOCI_SELECTED_CI_SQLITE_PARENT: sqlite,
+            SQLITE3_LIB_DIR: join(sqlite, "lib"),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).toBe(1);
+      const line = result.stderr.toString().trim();
+      expect(line).toMatch(
+        /^selected permissions failure at tools\/selected-backend-ci\/runtime\.ts:[1-9][0-9]{0,3}$/,
+      );
+      const number = Number(line.split(":").at(-1));
+      expect(
+        readFileSync(join(root, "tools/selected-backend-ci/runtime.ts"), "utf8").split("\n")[
+          number - 1
+        ],
+      ).toContain("assert.ok(dockerGid > 0");
+      expect(result.stderr.toString()).toBe(line + "\n");
+      for (const name of ["permissions.stdout.private.log", "permissions.stderr.private.log"])
+        expect(statSync(join(output, name)).mode & 0o777).toBe(0o600);
+      expect(readdirSync(join(base, "fvoci-selected-diagnostics"))).toEqual([]);
+      expect(readdirSync(output).sort()).toEqual([
+        "permissions.stderr.private.log",
+        "permissions.stdout.private.log",
+      ]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test("permissions CLI withholds a private multiline message with a forged source frame", () => {
+    const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-canary-"));
+    try {
+      const preload = join(base, "preload.ts"),
+        message =
+          "PRIVATE_PERMISSION_CANARY\n    at " +
+          join(root, "tools/selected-backend-ci/runtime.ts") +
+          ":369:2";
+      writeFileSync(
+        preload,
+        `import {mock} from 'bun:test';import {strict as original} from 'node:assert';mock.module('node:assert',()=>({strict:{...original,ok(){throw new Error(${JSON.stringify(message)})}}}));`,
+      );
+      const result = spawnSync(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--preload",
+          preload,
+          join(root, "scripts/run-selected-backend-e2e.ts"),
+          "permissions",
+          "--output",
+          base,
+          "--sqlite-parent",
+          base,
+          "--docker-gid",
+          "0",
+        ],
+        { cwd: root, stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toBe(
+        "selected backend admission failed; private inputs withheld\n",
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  test("parent permissions capture rejects ambiguous, foreign and malformed child evidence", () => {
+    const safe = "selected permissions failure at tools/selected-backend-ci/runtime.ts:369";
+    for (const evidence of [
+      safe + "\n" + safe,
+      safe + " PRIVATE_PERMISSION_CANARY",
+      safe.replace("runtime.ts", "foreign.ts"),
+      safe.replace(":369", ":0"),
+    ]) {
+      const base = mkdtempSync(join(tmpdir(), "fvoci-permissions-parent-"));
+      try {
+        const repo = join(base, "repo"),
+          web = join(repo, "tools/web-e2e"),
+          output = join(base, "fvoci-selected-current"),
+          sqlite = join(base, "fvoci-sqlite"),
+          bin = join(base, "bin");
+        mkdirSync(web, { recursive: true });
+        copyRunnerModules(join(repo, "tools/selected-backend-ci"));
+        for (const name of ["run-web-e2e.ts", "groups.ts", "compat.ts"])
+          copyFileSync(join(root, "tools/web-e2e", name), join(web, name));
+        mkdirSync(join(repo, "scripts"));
+        writeFileSync(
+          join(repo, "scripts/run-selected-backend-e2e.ts"),
+          `console.error(${JSON.stringify("PRIVATE_PERMISSION_CANARY\n" + evidence)});process.exit(1);`,
+        );
+        mkdirSync(output, { mode: 0o700 });
+        mkdirSync(join(sqlite, "lib"), { recursive: true });
+        mkdirSync(bin);
+        writeFileSync(join(bin, "stat"), "#!" + process.execPath + '\nconsole.log("0");\n');
+        chmodSync(join(bin, "stat"), 0o755);
+        const result = spawnSync(
+          [
+            process.execPath,
+            "--no-env-file",
+            "--eval",
+            `import {selectedHost} from ${JSON.stringify(join(web, "run-web-e2e.ts"))};try{await selectedHost(${JSON.stringify(repo)},0,true)}catch{process.exitCode=1}`,
+          ],
+          {
+            cwd: repo,
+            env: {
+              PATH: bin + ":" + (process.env.PATH ?? ""),
+              RUNNER_TEMP: base,
+              FVOCI_SELECTED_CI_OUTPUT: output,
+              FVOCI_SELECTED_CI_SQLITE_PARENT: sqlite,
+              SQLITE3_LIB_DIR: join(sqlite, "lib"),
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr.toString()).toBe("");
+        const privateLog = join(output, "permissions.stderr.private.log");
+        expect(statSync(privateLog).mode & 0o777).toBe(0o600);
+        expect(readFileSync(privateLog, "utf8")).toContain("PRIVATE_PERMISSION_CANARY");
+        expect(readdirSync(join(base, "fvoci-selected-diagnostics"))).toEqual([]);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
   });
   test("lane argument is parsed and allowed only for run and owner-return", async () => {
     expect(parseCLI(["run", "--output", "/fixture", "--lane", "sqlite/off"])).toMatchObject({

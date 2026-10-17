@@ -1,7 +1,8 @@
 // run-web-e2e.ts checks on temporary checkouts and directories; the shard
 // fixture (scripts/fixtures/web-e2e/run-ci-shard-fixture-test.sh) drives the
 // same commands through the real wrapper.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   lstatSync,
@@ -14,12 +15,14 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  watch,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CheckError,
   CI_WEB_IMAGE,
+  CI_WEB_IMAGE_SOURCE,
   containerImage,
   containerRequest,
   containerFailureArtifacts,
@@ -38,15 +41,67 @@ import {
   normalizePath,
   planSpecs,
   qualifyCommittedApi,
+  qualifyNativeChecks,
+  selectedImageBudget,
+  selectedAfterPending,
+  selectedPermissionDiagnostics,
   requirePathWithin,
   resolvePath,
   writeLauncherReceipt,
   type CommittedApiRequest,
 } from "./run-web-e2e.ts";
 import { nativeArchitecture, nativeLinux } from "../selected-backend-ci/types.ts";
+import { checkedOutput } from "../selected-backend-ci/runtime.ts";
 
 const CLI = join(import.meta.dir, "run-web-e2e.ts");
 const scratch: string[] = [];
+
+test("selected permission projection withholds private entries and admits only unique fixed failures", () => {
+  const location = "selected permissions failure at tools/selected-backend-ci/runtime.ts:390",
+    descendant = "selected permissions descendant prefix=output symlink=1 owner_match=1";
+  expect(
+    selectedPermissionDiagnostics(`PRIVATE_CREDENTIAL_CANARY\n${descendant}\n${location}\n`),
+  ).toEqual([descendant, location]);
+  expect(
+    selectedPermissionDiagnostics(
+      "selected permissions descendant prefix=sqlite symlink=0 owner_match=0\n",
+    ),
+  ).toEqual(["selected permissions descendant prefix=sqlite symlink=0 owner_match=0"]);
+  for (const text of [
+    descendant + " PRIVATE_CREDENTIAL_CANARY",
+    descendant.replace("output", "/private/PRIVATE_CREDENTIAL_CANARY"),
+    descendant.replace("symlink=1", "symlink=0"),
+    descendant.replace("owner_match=1", "owner_match=2"),
+    descendant + "\r",
+    "\u001b[31m" + descendant,
+    descendant + "\n" + descendant,
+    descendant + "\n" + "x".repeat(16384),
+    location.replace("tools/selected-backend-ci/runtime", "/private/runtime"),
+    location + "\n" + location,
+  ])
+    expect(selectedPermissionDiagnostics(text)).toEqual([]);
+});
+
+test("checked child receives the current environment after browser cache selection", () => {
+  const key = "FVOCI_CHILD_ENV_FIXTURE",
+    previous = process.env[key];
+  try {
+    process.env[key] = "selected-private-browser-copy";
+    expect(
+      checkedOutput(
+        [
+          process.execPath,
+          "--eval",
+          'console.log(process.env.FVOCI_CHILD_ENV_FIXTURE ?? "absent")',
+        ],
+        process.cwd(),
+      ),
+    ).toBe("selected-private-browser-copy");
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(process.env, key);
+    else process.env[key] = previous;
+  }
+});
 
 function tempDir(): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "fvoci-run-web-e2e.")));
@@ -56,6 +111,32 @@ function tempDir(): string {
 
 afterEach(() => {
   for (const directory of scratch.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+test("selected image operations consume one original entry deadline", () => {
+  expect(selectedImageBudget("901000", 1000)).toBe(900000);
+  expect(selectedImageBudget("901000", 900999)).toBe(1);
+  for (const deadline of [undefined, "NaN", "901000.5", "1000", "999", "901001"])
+    expect(() => selectedImageBudget(deadline, 1000)).toThrow(/budget/);
+});
+
+test("pending failure survives a later selected admission exception while retirement is still attempted", async () => {
+  const failure = new Error("modeled selected admission failure");
+  let attempts = 0;
+  const admission = () => {
+    attempts++;
+    return Promise.reject(failure);
+  };
+  expect(await selectedAfterPending(19, admission)).toBe(19);
+  expect(attempts).toBe(1);
+  let original: unknown;
+  try {
+    await selectedAfterPending(0, admission);
+  } catch (error) {
+    original = error;
+  }
+  expect(original).toBe(failure);
+  expect(attempts).toBe(2);
 });
 
 function refused(body: () => unknown, message: string | RegExp): void {
@@ -142,6 +223,19 @@ function committedCheckout(): { root: string; sha: string } {
     "outputs",
   );
   return { root, sha: git(root, "rev-parse", "HEAD") };
+}
+
+// Model only the historical publication's baseline at the existing Git child
+// boundary. Real Git still compares every input; fixtures need no old objects.
+function publicationGit(source: string): string {
+  const executable = Bun.which("git");
+  if (!executable) throw new Error("Git fixture executable missing");
+  return (
+    "#!" +
+    process.execPath +
+    "\n" +
+    `const a=process.argv.slice(2);if(a[0]==="diff"&&a[1]==="--quiet"&&a[2]===${JSON.stringify(CI_WEB_IMAGE_SOURCE)}&&a[4]==="--")a[2]=${JSON.stringify(source)};const r=Bun.spawnSync([${JSON.stringify(executable)},...a],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(r.exitCode || (r.signalCode?1:0));\n`
+  );
 }
 
 describe("qualifyCommittedApi", () => {
@@ -376,9 +470,13 @@ try {
 
 test("image source qualification covers copied helper support and catalogs without unrelated tests", () => {
   const { root } = committedCheckout();
-  for (const directory of ["xtask/tests", "tests/support"])
+  for (const directory of ["xtask/tests", "tests/support", "docker/ci-base"])
     mkdirSync(join(root, directory), { recursive: true });
-  for (const file of ["xtask/catalog.tsv", "tests/support/official_sqld.rs"])
+  for (const file of [
+    "xtask/catalog.tsv",
+    "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
+  ])
     writeFileSync(join(root, file), "original input\n");
   const commit = () => {
     git(root, "add", ".");
@@ -397,23 +495,122 @@ test("image source qualification covers copied helper support and catalogs witho
     return git(root, "rev-parse", "HEAD");
   };
   const image = commit();
+  const sdk = {
+    image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+    sdk: "b".repeat(64),
+    local: false,
+  };
+  const metadata =
+    "sha256:" + "c".repeat(64) + " linux amd64 " + image + " " + JSON.stringify([sdk.image]);
   writeFileSync(join(root, "xtask/tests/caller.rs"), "unrelated test\n");
   expect(() => {
-    qualifyImageSource(root, image, commit());
+    qualifyImageSource(root, metadata, sdk, "x86_64", commit());
   }).not.toThrow();
   for (const file of [
     "xtask/catalog.tsv",
     "tests/support/official_sqld.rs",
+    "docker/ci-base/Dockerfile",
     "xtask/new-catalog.tsv",
   ]) {
     writeFileSync(join(root, file), "changed copied input\n");
     expect(() => {
-      qualifyImageSource(root, image, commit());
+      qualifyImageSource(root, metadata, sdk, "x86_64", commit());
     }).toThrow(CheckError);
     if (file === "xtask/new-catalog.tsv") rmSync(join(root, file));
     else writeFileSync(join(root, file), "original input\n");
     commit();
   }
+});
+
+test("only the exact published tuple admits future recipe drift, keeping compiled input refusal", () => {
+  const { root, sha } = committedCheckout();
+  const bin = tempDir();
+  writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
+  for (const directory of ["docker/ci-base", "tests/support"])
+    mkdirSync(join(root, directory), { recursive: true });
+  const commit = () => {
+    git(root, "add", ".");
+    git(
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "future image input",
+    );
+    return git(root, "rev-parse", "HEAD");
+  };
+  writeFileSync(join(root, "docker/ci-base/Dockerfile"), "future recipe\n");
+  const current = commit();
+  writeFileSync(join(root, "tests/support/official_sqld.rs"), "changed compiled helper\n");
+  const changed = commit();
+  const image = "sha256:" + "b".repeat(64),
+    accepted: Parameters<typeof qualifyImageSource>[] = [],
+    rejected: Parameters<typeof qualifyImageSource>[] = [];
+  for (const [arch, dockerArch, seal, otherSeal] of [
+    [
+      "x86_64",
+      "amd64",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+    ],
+    [
+      "aarch64",
+      "arm64",
+      "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+      "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+    ],
+  ] as const) {
+    const sdk = { image: CI_WEB_IMAGE, sdk: seal, local: false };
+    const metadata =
+      image +
+      " linux " +
+      dockerArch +
+      " " +
+      CI_WEB_IMAGE_SOURCE +
+      " " +
+      JSON.stringify([CI_WEB_IMAGE]);
+    accepted.push([root, metadata, sdk, arch, current]);
+    for (const [inspection, selection] of [
+      [metadata.replace(CI_WEB_IMAGE_SOURCE, current), sdk],
+      [metadata.replace(CI_WEB_IMAGE, "foreign"), sdk],
+      [metadata, { ...sdk, sdk: "0".repeat(64) }],
+      [metadata, { ...sdk, sdk: otherSeal }],
+      [metadata, { ...sdk, image: "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64) }],
+    ] as const)
+      rejected.push([root, inspection, selection, arch, current]);
+    const override = "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64),
+      inspection =
+        image +
+        " linux " +
+        dockerArch +
+        " " +
+        CI_WEB_IMAGE_SOURCE +
+        " " +
+        JSON.stringify([override]);
+    // Overrides accept equal inputs but must refuse the future recipe.
+    for (const selection of [
+      { image: override, sdk: seal, local: false },
+      { image, sdk: seal, local: true },
+    ]) {
+      accepted.push([root, inspection, selection, arch, sha]);
+      rejected.push([root, inspection, selection, arch, current]);
+    }
+    rejected.push([root, metadata, sdk, arch, changed]);
+  }
+  // Set the fixture child PATH at launch, without changing the test process's
+  // command resolution or requiring any publication history in its checkout.
+  const source = `import assert from "node:assert/strict";import {qualifyImageSource,CheckError} from ${JSON.stringify(CLI)};for(const args of ${JSON.stringify(accepted)})assert.equal(qualifyImageSource(...args),${JSON.stringify(CI_WEB_IMAGE_SOURCE)});for(const args of ${JSON.stringify(rejected)})assert.throws(()=>qualifyImageSource(...args),CheckError);`;
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", source], {
+    env: { ...process.env, PATH: bin + ":" + (process.env.PATH ?? "") },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(child.exitCode, child.stderr.toString()).toBe(0);
 });
 
 test("real commands preserve normal and nonzero exits", () => {
@@ -552,6 +749,13 @@ test("published defaults bind native SDK seals in both local and actual CI reque
       expect(local.sdk).toEqual({ image: CI_WEB_IMAGE, sdk, local: false });
       expect(producer.sdk).toEqual(local.sdk);
       expect(consumer.sdk).toEqual(local.sdk);
+      expect(
+        containerRequest(
+          ["/checkout", "--native-checks"],
+          { ...ci, GITHUB_JOB: "web-native-checks" },
+          architecture,
+        ).sdk,
+      ).toEqual(local.sdk);
     }
   }
   for (const args of [
@@ -825,6 +1029,23 @@ test("modeled native Linux/Darwin clients, daemon/image identity and ABI closure
 for (const mode of [
   "normal",
   "published-default",
+  "native-checks",
+  "native-fail",
+  "native-remove-fail",
+  "native-cancel",
+  ...(process.platform === "linux" && nativeArchitecture(process.arch) === "x86_64"
+    ? [
+        "selected-pending",
+        "selected-source-mismatch",
+        "selected-fail",
+        "selected-cancel",
+        "selected-remove-fail",
+        "selected-prepare-fail",
+        "selected-copy-fail",
+        "selected-copy-cancel",
+        "selected-copy-remove-fail",
+      ]
+    : []),
   ...(nativeArchitecture(process.arch) === "x86_64" ? ["amd64", "x64"] : ["arm64"]),
   "inputs-fail",
   "consume-fail",
@@ -835,6 +1056,14 @@ for (const mode of [
   "remote-endpoint",
 ])
   test("isolated CI Docker topology: " + mode, async () => {
+    const native = mode.startsWith("native-");
+    const selected = mode.startsWith("selected-"),
+      selectedPrepare = [
+        "selected-prepare-fail",
+        "selected-copy-fail",
+        "selected-copy-cancel",
+        "selected-copy-remove-fail",
+      ].includes(mode);
     const { root, sha } = committedCheckout(),
       bin = tempDir(),
       state = join(bin, "state.json"),
@@ -846,8 +1075,10 @@ for (const mode of [
     writeFileSync(join(packet, "payload.tar"), "");
     writeFileSync(state, "{}");
     mkdirSync(join(bin, "tmp"), { mode: 0o711 });
+    if (mode === "published-default" || native || selected)
+      writeFileSync(join(bin, "git"), publicationGit(sha), { mode: 0o755 });
     const pin =
-      mode === "published-default"
+      mode === "published-default" || native || selected
         ? CI_WEB_IMAGE
         : "ghcr.io/aisflow/fvoci-ci-web@sha256:" + "a".repeat(64);
     const docker = String.raw`
@@ -855,36 +1086,94 @@ const fs=require("node:fs"),a=process.argv.slice(2),file=process.env.FIXTURE_STA
 const save=()=>fs.writeFileSync(file,JSON.stringify(s));
 const name=a[a.indexOf("--name")+1];
 const row={op:a.slice(0,2),name:a.includes("--name")?name:undefined};
-if(a[0]==="run") {const phase=a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":"service";row.phase=phase;row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if(a[0]==="run"||a[0]==="create") {const phase=a.at(-1)==="prepare"&&name.startsWith("fvoci-selected-tool-")?"selected-prepare":a.at(-1)==="pending"?"selected-pending":a.at(-2)==="inputs"?"inputs":a.at(-2)==="consume"?"consume":a.at(-1)==="native-checks"?"native-checks":"service";row.phase=phase;row.safe=a.includes("--cpus=2")&&a.includes("--memory=16g")&&a.includes("--pids-limit=1024")&&a.includes("--cap-drop=ALL")&&a.includes("--security-opt=no-new-privileges")&&!a.some(x=>x.includes("docker.sock")||x==="--privileged"||x==="--pid=host");row.user=a[a.indexOf("--user")+1];row.supplementary=a.flatMap((arg,index)=>arg==="--group-add"?[a[index+1]]:[]);row.network=a.includes("--network")?a[a.indexOf("--network")+1]:null;const env=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8");row.hasActionToken=env.includes("PRIVATE_ACTION_CANARY");row.wholeTemp=a.some(x=>x==="type=bind,source="+process.env.RUNNER_TEMP+",target="+process.env.RUNNER_TEMP);row.hasDatabase=env.includes("TEST_DATABASE_URL=");row.hasMeili=env.includes("MEILI_MASTER_KEY=");if(phase!=="service"){row.sdk=env.match(/^FVOCI_WEB_CONTAINER_SDK_SHA256=([a-f0-9]+)$/m)?.[1];row.imagePinned=a.includes(process.env.FIXTURE_PIN);}if(phase==="consume"){const ledger=JSON.parse(env.match(/^FVOCI_E2E_SERVICE_WITNESS=(.+)$/m)?.[1]??"null");row.serviceWitness=Array.isArray(ledger)&&ledger.length===2&&ledger.every(e=>env.includes(e.name+"="+e.container+"\n")&&typeof e.inspected==="string");}}
+if((a[0]==="run"||a[0]==="create")&&name.startsWith("fvoci-selected-tool-")){const mount=a.find(x=>x.startsWith("type=bind,source=")&&x.endsWith(",target=/tmp"));row.nodeTemp=mount?.slice("type=bind,source=".length).split(",target=")[0];const facts=fs.lstatSync(row.nodeTemp);row.privateNodeTemp=row.nodeTemp.startsWith("/var/tmp/fvoci-selected-tool.")&&!facts.isSymbolicLink()&&facts.uid===process.getuid()&&(facts.mode&0o777)===0o700;row.privateBunCache=fs.readFileSync(a[a.indexOf("--env-file")+1],"utf8").split("\n").includes("BUN_INSTALL_CACHE_DIR=/tmp/fvoci-bun-install-cache");if(a[0]==="run"){const shim=row.nodeTemp+"/bun-node-fixture";fs.mkdirSync(shim);for(const executable of["node","bun"])fs.symlinkSync(process.execPath,shim+"/"+executable);const cache=row.nodeTemp+"/fvoci-bun-install-cache";fs.mkdirSync(cache);fs.mkdirSync(cache+"/package-bytes");fs.symlinkSync("package-bytes",cache+"/1.0.0@@@1");}}
 if(a[0]==="pull"||a[0]==="run")row.platform=a[a.indexOf("--platform")+1];
 fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(row)+"\n");
 if(a[0]==="pull"){}
 else if(a[0]==="context"&&a[1]==="inspect")console.log(JSON.stringify(process.env.FIXTURE_MODE==="remote-endpoint"?"tcp://PRIVATE_ENDPOINT_CANARY":"unix:///fixture/docker.sock"));
 else if(a[0]==="info")console.log("linux "+(process.env.FIXTURE_MODE==="daemon-mismatch"?process.env.FIXTURE_OTHER_ARCH:["amd64","x64","arm64"].includes(process.env.FIXTURE_MODE)?process.env.FIXTURE_MODE:process.env.FIXTURE_ARCH));
+else if(a[0]==="image"&&a[1]==="inspect"&&a[3]==="{{json .Config.Env}}")console.log(JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]));
 else if(a[0]==="image"&&a[1]==="inspect")console.log("sha256:"+"b".repeat(64)+" linux "+(process.env.FIXTURE_MODE==="image-mismatch"?process.env.FIXTURE_OTHER_ARCH:process.env.FIXTURE_ARCH)+" "+process.env.FIXTURE_SHA+" "+JSON.stringify([process.env.FIXTURE_MODE==="foreign-digest"?"foreign":process.env.FIXTURE_PIN]));
 else if(a[0]==="network"){}
-else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
+else if(a[0]==="create"){s[name]={running:false,created:true};save();console.log("d".repeat(64));}
+else if(a[0]==="cp"){if(process.env.FIXTURE_MODE==="selected-copy-fail"){console.error("PRIVATE_CONSOLE_CANARY");process.exit(23);}if(process.env.FIXTURE_MODE==="selected-copy-cancel"){fs.writeFileSync(process.env.FIXTURE_READY,"READY");await new Promise(resolve=>process.once("SIGTERM",resolve));process.exit(0);}if(!a[1].endsWith(":/opt/playwright/."))process.exit(42);const dest=a[2];fs.mkdirSync(dest+"/chromium-1248/chrome-linux64",{recursive:true});fs.writeFileSync(dest+"/chromium-1248/chrome-linux64/deb.deps","PRIVATE_DEPENDENCY_CANARY",{mode:0o600});}
+else if(a[0]==="run") {s[name]=a.includes("-d");if(row.phase==="service"){s[name]={running:true,id:(name.includes("-pg-")?"a":"b").repeat(64),image:a[a.indexOf("--env-file")+2],label:a[a.indexOf("--label")+1].split("=")[1]};console.log(s[name].id);}save();if(row.phase==="selected-prepare"&&process.env.FIXTURE_MODE==="selected-prepare-fail"){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=selected-dependencies elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=selected-dependencies finished at=2026-10-17T04:16:01Z elapsed_seconds=15.928 exit=19");process.exit(19);}if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-fail")process.exit(19);if(row.phase==="selected-pending"&&process.env.FIXTURE_MODE==="selected-cancel"){s[name]=true;save();fs.writeFileSync(process.env.FIXTURE_READY,"READY");await new Promise(resolve=>process.once("SIGTERM",resolve));}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-cancel"){s[name]=true;save();await new Promise(resolve=>{process.once("SIGTERM",resolve);console.log("NATIVE_READY");});process.exit(0);}if(row.phase==="native-checks"&&process.env.FIXTURE_MODE==="native-fail")process.exit(19);if(row.phase==="inputs"&&process.env.FIXTURE_MODE==="inputs-fail")process.exit(17);if(row.phase==="consume"&&["consume-fail","remove-fail"].includes(process.env.FIXTURE_MODE)){console.error("PRIVATE_CONSOLE_CANARY".repeat(2000));console.error("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");console.error("web-e2e stage=browser-handoff-consume started");console.error("web-e2e stage=PRIVATE_CONSOLE_CANARY elapsed_seconds=0.001 exit=1");console.error("web-e2e stage=browser-group elapsed_seconds=0.001 exit=1 PRIVATE_CONSOLE_CANARY");if(process.env.FIXTURE_MODE==="consume-fail"){console.error("web build handoff check_line=705");console.error("web build handoff refused: PRIVATE_CONSOLE_CANARY");console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=19");process.exit(19);}console.error("web-e2e stage=browser-handoff-consume elapsed_seconds=0.020 exit=0");}}
 else if(a[0]==="exec"){if(a.includes("SHOW server_version_num"))console.log("180006");}
-else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
+else if(a[0]==="inspect"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1),v=s[key];if(a[2].startsWith("[")){const fields=[v.id,"/"+key,v.image,"2026-10-17T00:00:00Z",123,{"fvoci.test-run":v.label},[]];console.log(JSON.stringify(fields)+"\n"+fields.slice(2).map(x=>JSON.stringify(x)).join("|"));}else if(a[2]==="{{.Id}}")console.log(v.id);else console.log((typeof v==="object"?v.running:v?true:false)+" "+(((!v?.created&&key.startsWith("fvoci-selected-tool-")&&["selected-fail","selected-prepare-fail"].includes(process.env.FIXTURE_MODE))||key.endsWith("consume2")&&process.env.FIXTURE_MODE==="consume-fail"||key.endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-fail")?"19":(typeof v==="object"?!v.running:!v)&&key.includes("meili")?"143":"0")+" false");}
 else if(a[0]==="stop"){const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);if(typeof s[key]==="object")s[key].running=false;else s[key]=false;save();}
-else if(a[0]==="rm"){if(a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
+else if(a[0]==="rm"){if((a.at(-1).startsWith("fvoci-selected-tool-")&&["selected-remove-fail","selected-copy-remove-fail"].includes(process.env.FIXTURE_MODE)||a.at(-1).endsWith("consume2")&&process.env.FIXTURE_MODE==="remove-fail"||a.at(-1).endsWith("native-checks")&&process.env.FIXTURE_MODE==="native-remove-fail")){console.error("PRIVATE_REMOVE_CANARY");process.exit(23);}const key=Object.keys(s).find(k=>s[k]?.id===a.at(-1))??a.at(-1);delete s[key];save();}
 else process.exit(42);
 `;
     writeFileSync(join(bin, "docker"), "#!" + process.execPath + "\n" + docker, { mode: 0o755 });
+    const selectedOutput = join(bin, "fvoci-selected-current");
+    if (selected) {
+      writeFileSync(output, "", { mode: 0o600 });
+      for (const path of [
+        selectedOutput,
+        ...(selectedPrepare
+          ? []
+          : [
+              join(selectedOutput, "tmp"),
+              join(selectedOutput, "home"),
+              join(bin, "fvoci-sqlite"),
+              join(bin, "fvoci-image-cargo"),
+            ]),
+      ])
+        mkdirSync(path, { mode: 0o700 });
+    }
+    let ready = false,
+      rejectReady: (() => void) | undefined;
+    let watcher: ReturnType<typeof watch> | undefined;
+    const readyEvent = ["selected-cancel", "selected-copy-cancel"].includes(mode)
+      ? new Promise<void>((resolve, reject) => {
+          rejectReady = () => {
+            if (!ready) reject(new Error("selected fixture exited before readiness"));
+          };
+          watcher = watch(bin, (_event, name) => {
+            if (name !== "ready") return;
+            try {
+              if (readFileSync(join(bin, "ready"), "utf8") === "READY") {
+                ready = true;
+                watcher?.close();
+                resolve();
+              }
+            } catch {
+              /* creation event precedes completed write */
+            }
+          });
+          watcher.unref();
+        })
+      : undefined;
+    const diskPreload = join(bin, "disk-preload.ts");
+    writeFileSync(
+      diskPreload,
+      String.raw`import {mock} from "bun:test";import * as fs from "node:fs";const original=fs.statfsSync;mock.module("node:fs",()=>({...fs,statfsSync:(...args:Parameters<typeof original>)=>({...original(...args),bavail:30_000_000,bsize:4096})}));`,
+    );
     const child = Bun.spawn(
       [
         process.execPath,
         "--no-env-file",
+        "--preload",
+        diskPreload,
         CLI,
-        "container-browser",
+        selectedPrepare ? "entry" : selected ? "selected-image-pending" : "container-browser",
         root,
-        "--consume",
-        "2",
-        "--handoff",
-        packet,
-        "--handoff-sha256",
-        new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
-        ...(mode === "published-default"
+        ...(selectedPrepare
+          ? ["--ci-use-committed-api", "--ci-prepare-selected"]
+          : selected
+            ? []
+            : native
+              ? ["--native-checks"]
+              : [
+                  "--consume",
+                  "2",
+                  "--handoff",
+                  packet,
+                  "--handoff-sha256",
+                  new Bun.CryptoHasher("sha256").update("{}").digest("hex"),
+                ]),
+        ...(mode === "published-default" || native || selected
           ? []
           : ["--image-pin", pin, "--sdk-sha256", "c".repeat(64)]),
       ],
@@ -895,15 +1184,41 @@ else process.exit(42);
           PATH: bin + ":" + (process.env.PATH ?? ""),
           CI: "true",
           GITHUB_ACTIONS: "true",
-          GITHUB_JOB: "workspace-browser-shard",
+          GITHUB_JOB: selectedPrepare
+            ? "collaboration-build"
+            : native
+              ? "web-native-checks"
+              : "workspace-browser-shard",
+          HOME: selectedPrepare ? bin : process.env.HOME,
+          FVOCI_E2E_PENDING: selectedPrepare ? "1" : process.env.FVOCI_E2E_PENDING,
           GITHUB_SHA: sha,
           GITHUB_REPOSITORY: "fixture/repo",
           GITHUB_RUN_ID: "12",
           GITHUB_RUN_ATTEMPT: "1",
           GITHUB_OUTPUT: output,
+          RUNNER_TEMP: bin,
+          FVOCI_SELECTED_CI_OUTPUT: selected ? selectedOutput : undefined,
+          FVOCI_SELECTED_CI_SQLITE_PARENT: selected ? join(bin, "fvoci-sqlite") : undefined,
+          FVOCI_WEB_CONTAINER_IMAGE: selected ? pin : undefined,
+          FVOCI_WEB_CONTAINER_SDK_SHA256: selected
+            ? "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892"
+            : undefined,
+          FVOCI_WEB_CONTAINER_IMAGE_SOURCE: selected
+            ? mode === "selected-source-mismatch"
+              ? "0".repeat(40)
+              : CI_WEB_IMAGE_SOURCE
+            : undefined,
+          FVOCI_WEB_BUILD_HANDOFF: selectedPrepare
+            ? join(bin, "fvoci-web-build-handoff")
+            : undefined,
+          FVOCI_SELECTED_IMAGE_DEADLINE: String(Date.now() + 900000),
+          BUN_INSTALL_CACHE_DIR: "PRIVATE_BUN_CACHE_CANARY",
+          ACTIONS_RUNTIME_TOKEN: "PRIVATE_ACTION_CANARY",
+          FIXTURE_READY: join(bin, "ready"),
           FIXTURE_STATE: state,
           FIXTURE_CALLS: calls,
-          FIXTURE_SHA: sha,
+          FIXTURE_SHA:
+            mode === "published-default" || native || selected ? CI_WEB_IMAGE_SOURCE : sha,
           FIXTURE_PIN: pin,
           FIXTURE_MODE: mode,
           FIXTURE_ARCH: nativeArchitecture(process.arch),
@@ -917,40 +1232,44 @@ else process.exit(42);
         stderr: "pipe",
       },
     );
+    if (readyEvent)
+      void child.exited.then(
+        () => rejectReady?.(),
+        () => rejectReady?.(),
+      );
+    const stdoutResult = async () => {
+      if (readyEvent) {
+        await readyEvent;
+        child.kill("SIGTERM");
+        return new Response(child.stdout).text();
+      }
+      if (mode !== "native-cancel") return new Response(child.stdout).text();
+      const reader = child.stdout.getReader(),
+        decoder = new TextDecoder();
+      let output = "";
+      try {
+        while (!output.includes("NATIVE_READY\n")) {
+          const chunk = await reader.read();
+          if (chunk.done) throw new Error("native fixture exited before ready");
+          output += decoder.decode(chunk.value);
+        }
+        child.kill("SIGTERM");
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          output += decoder.decode(chunk.value);
+        }
+        return output;
+      } finally {
+        if (child.exitCode === null && !output.includes("NATIVE_READY\n")) child.kill("SIGTERM");
+      }
+    };
     const [code, stdout, stderr] = await Promise.all([
       child.exited,
-      new Response(child.stdout).text(),
+      stdoutResult(),
       new Response(child.stderr).text(),
     ]);
-    const refused = [
-      "daemon-mismatch",
-      "image-mismatch",
-      "foreign-digest",
-      "remote-endpoint",
-    ].includes(mode);
-    expect(code, stderr).toBe(
-      refused || mode === "remove-fail"
-        ? 1
-        : mode === "inputs-fail"
-          ? 17
-          : mode === "consume-fail"
-            ? 19
-            : 0,
-    );
-    expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
-    expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
-    expect(stdout + stderr).not.toContain("PRIVATE_CONSOLE_CANARY");
-    expect(stdout + stderr).not.toContain("PRIVATE_REMOVE_CANARY");
-    if (mode === "consume-fail" || mode === "remove-fail") {
-      expect(stderr).toContain("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");
-      expect(stderr).toContain("web-e2e stage=browser-handoff-consume started");
-      expect(stderr).toContain(
-        mode === "consume-fail"
-          ? "container-browser failure child_exit=19 inspect_exit=0 running=0 container_exit=19 oom=0 remove_exit=0"
-          : "container-browser failure child_exit=0 inspect_exit=0 running=0 container_exit=0 oom=0 remove_exit=23",
-      );
-      if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
-    }
+    watcher?.close();
     const rows = readFileSync(calls, "utf8")
       .trim()
       .split("\n")
@@ -966,10 +1285,120 @@ else process.exit(42);
             sdk?: string;
             imagePinned?: boolean;
             serviceWitness?: boolean;
+            safe?: boolean;
+            hasActionToken?: boolean;
+            wholeTemp?: boolean;
+            privateNodeTemp?: boolean;
+            privateBunCache?: boolean;
+            nodeTemp?: string;
+            user?: string;
+            supplementary?: string[];
           },
       );
+    if (selected)
+      for (const row of rows) if (row.privateNodeTemp && row.nodeTemp) scratch.push(row.nodeTemp);
+    const refused = [
+      "daemon-mismatch",
+      "image-mismatch",
+      "foreign-digest",
+      "remote-endpoint",
+      "selected-source-mismatch",
+    ].includes(mode);
+    expect(code, stderr).toBe(
+      mode === "native-cancel" || mode === "selected-cancel" || mode === "selected-copy-cancel"
+        ? 143
+        : refused ||
+            mode === "remove-fail" ||
+            mode === "native-remove-fail" ||
+            mode === "selected-remove-fail" ||
+            mode === "selected-copy-remove-fail"
+          ? 1
+          : mode === "selected-copy-fail"
+            ? 23
+            : mode === "inputs-fail"
+              ? 17
+              : mode === "consume-fail" ||
+                  mode === "native-fail" ||
+                  mode === "selected-fail" ||
+                  mode === "selected-prepare-fail"
+                ? 19
+                : 0,
+    );
+    expect(stdout + stderr).not.toContain("PRIVATE_DEPENDENCY_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_ENDPOINT_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_CONSOLE_CANARY");
+    expect(stdout + stderr).not.toContain("PRIVATE_REMOVE_CANARY");
+    if (mode === "consume-fail" || mode === "remove-fail") {
+      expect(stderr).toContain("web-e2e stage=sqlite-sdk-admit elapsed_seconds=0.010 exit=0");
+      expect(stderr).toContain("web-e2e stage=browser-handoff-consume started");
+      expect(stderr).toContain(
+        mode === "consume-fail"
+          ? "container-browser failure child_exit=19 inspect_exit=0 running=0 container_exit=19 oom=0 remove_exit=0"
+          : "container-browser failure child_exit=0 inspect_exit=0 running=0 container_exit=0 oom=0 remove_exit=23",
+      );
+      if (mode === "consume-fail") expect(stderr).toContain("web build handoff check_line=705");
+    }
+    if (selected) {
+      if (mode === "selected-source-mismatch") {
+        expect(stderr).toContain("selected image source changed");
+        expect(rows.some((row) => ["run", "create", "network"].includes(row.op[0] ?? ""))).toBe(
+          false,
+        );
+        expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+        return;
+      }
+      if (mode === "selected-prepare-fail") {
+        expect(stderr).toContain(
+          "web-e2e stage=selected-dependencies started at=2026-10-17T04:15:45Z",
+        );
+        expect(stderr).toContain(
+          "web-e2e stage=selected-dependencies finished at=2026-10-17T04:16:01Z elapsed_seconds=15.928 exit=19",
+        );
+        const log = join(selectedOutput, "prepare.private.log");
+        expect(readFileSync(log, "utf8")).toContain("PRIVATE_CONSOLE_CANARY");
+        expect(statSync(log).mode & 0o777).toBe(0o600);
+        expect(rows.filter((row) => row.op[0] === "create")).toHaveLength(1);
+        expect(rows.filter((row) => row.op[0] === "cp")).toHaveLength(1);
+        expect(rows.filter((row) => row.op[0] === "rm")).toHaveLength(2);
+      }
+      const runs = rows.filter((row) => row.op[0] === "run");
+      const copyFailure = mode.startsWith("selected-copy-");
+      expect(runs).toHaveLength(copyFailure ? 0 : 1);
+      for (const row of rows.filter((row) => row.op[0] === "create" || row.op[0] === "run")) {
+        expect(row.safe).toBe(true);
+        expect(row.supplementary).not.toContain(String(process.getgid?.()));
+        expect(row.supplementary).toEqual(
+          (process.getuid?.() === 1000 ? (process.getgroups?.() ?? []) : [])
+            .filter((group) => group !== process.getgid?.())
+            .map(String),
+        );
+        expect(row.hasActionToken).toBe(false);
+        expect(row.wholeTemp).toBe(false);
+        expect(row.privateNodeTemp).toBe(true);
+        expect(row.privateBunCache).toBe(true);
+        expect(fs.existsSync(row.nodeTemp as string)).toBe(
+          ["selected-remove-fail", "selected-copy-remove-fail"].includes(mode),
+        );
+        if (row.op[0] === "run")
+          expect(fs.existsSync(join(row.nodeTemp as string, "fvoci-bun-install-cache"))).toBe(
+            mode === "selected-remove-fail",
+          );
+      }
+      expect(
+        readdirSync(join(selectedOutput, "tmp")).some((entry) => entry.startsWith("bun-node")),
+      ).toBe(false);
+      expect(rows.some((row) => row.op[0] === "rm")).toBe(true);
+      if (mode === "selected-copy-remove-fail")
+        expect(rows.filter((row) => row.op[0] === "rm")).toHaveLength(1);
+      expect(
+        readdirSync(join(selectedOutput, "tmp")).filter((name) => name.endsWith(".env")),
+      ).toEqual([]);
+      if (!["selected-remove-fail", "selected-copy-remove-fail"].includes(mode))
+        expect(JSON.parse(readFileSync(state, "utf8"))).toEqual({});
+      return;
+    }
     expect(rows.filter((row) => row.op[0] === "pull")).toHaveLength(
-      refused ? (["daemon-mismatch", "remote-endpoint"].includes(mode) ? 0 : 1) : 3,
+      refused ? (["daemon-mismatch", "remote-endpoint"].includes(mode) ? 0 : 1) : native ? 1 : 3,
     );
     if (refused) {
       expect(rows.some((row) => row.op[0] === "run" || row.op[0] === "network")).toBe(false);
@@ -989,6 +1418,23 @@ else process.exit(42);
             : "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
         );
       }
+    if (native) {
+      const work = rows.filter((row) => row.op[0] === "run");
+      expect(work).toHaveLength(1);
+      expect(work[0]?.phase).toBe("native-checks");
+      expect(work[0]?.network).toBeNull();
+      expect(work[0]?.hasDatabase).toBe(false);
+      expect(work[0]?.hasMeili).toBe(false);
+      expect(work[0]?.imagePinned).toBe(true);
+      expect(work[0]?.safe).toBe(true);
+      expect(work[0]?.user).toBe(`${String(process.getuid?.())}:${String(process.getgid?.())}`);
+      if (mode === "native-cancel") expect(rows.some((row) => row.op[0] === "stop")).toBe(true);
+      expect(rows.some((row) => row.op[0] === "network")).toBe(false);
+      expect(
+        Object.keys(JSON.parse(readFileSync(state, "utf8")) as Record<string, unknown>),
+      ).toHaveLength(mode === "native-remove-fail" ? 1 : 0);
+      return;
+    }
     const inputs = rows.findIndex((row) => row.phase === "inputs"),
       consume = rows.findIndex((row) => row.phase === "consume"),
       network = rows.findIndex((row) => row.op[0] === "network" && row.op[1] === "create");
@@ -1355,4 +1801,62 @@ describe("CLI", () => {
       expect(cli(args).status).toBe(2);
     }
   });
+});
+
+test("native source admission rejects stale source, image, profile and wrong job", () => {
+  const facts = fs.statfsSync("."),
+    empty = fs.statfsSync(".");
+  facts.bavail = 30_000_000;
+  facts.bsize = 4096;
+  empty.bavail = 0;
+  const disk = spyOn(fs, "statfsSync").mockReturnValue(facts);
+  try {
+    const { root, sha } = committedCheckout();
+    const sdk = containerRequest([root, "--native-checks"], {}).sdk;
+    const env = {
+      FVOCI_WEB_CONTAINER_LOCAL: "1",
+      FVOCI_WEB_CONTAINER_JOB: "web-native-checks",
+      FVOCI_WEB_CONTAINER_SOURCE: sha,
+      FVOCI_WEB_CONTAINER_IMAGE: sdk.image,
+      FVOCI_WEB_CONTAINER_SDK_SHA256: sdk.sdk,
+      FVOCI_WEB_CONTAINER_LOCAL_IMAGE: "0",
+      CARGO_BUILD_JOBS: "2",
+      CARGO_INCREMENTAL: "0",
+      CARGO_PROFILE_DEV_DEBUG: "0",
+      CARGO_PROFILE_TEST_DEBUG: "0",
+      CARGO_TARGET_DIR: join(root, "target"),
+    };
+    expect(() => {
+      qualifyNativeChecks(root, env);
+    }).not.toThrow();
+    disk.mockReturnValue(empty);
+    expect(() => {
+      qualifyNativeChecks(root, env);
+    }).toThrow(/20GB disk floor/);
+    disk.mockReturnValue(facts);
+    for (const changed of [
+      { FVOCI_WEB_CONTAINER_SOURCE: "a".repeat(40) },
+      { FVOCI_WEB_CONTAINER_IMAGE: "foreign" },
+      { FVOCI_WEB_CONTAINER_SDK_SHA256: "b".repeat(64) },
+      { CARGO_PROFILE_TEST_DEBUG: "2" },
+      { CI: "true", GITHUB_ACTIONS: "true", GITHUB_JOB: "workspace-browser-shard" },
+    ])
+      expect(() => {
+        qualifyNativeChecks(root, { ...env, ...changed });
+      }).toThrow(CheckError);
+    writeFileSync(join(root, "apps/web/openapi.json"), "dirty");
+    expect(() => {
+      qualifyNativeChecks(root, env);
+    }).toThrow(/clean source/);
+    for (const args of [
+      ["--handoff", "/packet"],
+      ["--reuse-cohort", "/packet"],
+      ["--image-pin", sdk.image, "--sdk-sha256", sdk.sdk],
+    ])
+      expect(() => containerRequest([root, "--native-checks", ...args], {})).toThrow(
+        /without packet or reuse overrides/,
+      );
+  } finally {
+    disk.mockRestore();
+  }
 });

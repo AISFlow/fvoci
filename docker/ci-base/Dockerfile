@@ -34,8 +34,12 @@ RUN --mount=type=bind,from=rust-toolchain,source=/etc/ssl/certs/ca-certificates.
  && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       curl git gcc g++ make binutils libc6-dev pkg-config \
-      unzip xz-utils zstd sudo \
+      unzip xz-utils zstd sudo locales \
       libclang-18-dev=1:18.1.8-20ubuntu8 \
+ && localedef -i en_US -f UTF-8 en_US.UTF-8 \
+ && locale -a > /tmp/fvoci-locales \
+ && grep -Fx en_US.utf8 /tmp/fvoci-locales \
+ && rm /tmp/fvoci-locales \
  && dpkg-query -W gcc binutils libc6 libc6-dev libclang-18-dev curl \
       > /usr/local/share/ci-base-build-packages.txt \
  && cat /usr/local/share/ci-base-build-packages.txt \

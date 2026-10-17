@@ -7,7 +7,7 @@ import process from "node:process";
 import { parseArgs } from "node:util";
 import { recordAfter, recordBefore, stage } from "../tools/selected-backend-ci/build.ts";
 import { configList } from "../tools/selected-backend-ci/config-list.ts";
-import { uid } from "../tools/selected-backend-ci/io.ts";
+import { root, uid } from "../tools/selected-backend-ci/io.ts";
 import { ownershipReturn, run, runtimePermissions } from "../tools/selected-backend-ci/runtime.ts";
 
 export const modes = [
@@ -130,7 +130,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       return stage(output, args.stageName, args.command);
     case "permissions":
       assert.ok(args.sqliteParent && args.dockerGid !== undefined);
-      runtimePermissions(output, args.sqliteParent, args.dockerGid);
+      await runtimePermissions(output, args.sqliteParent, args.dockerGid);
       break;
     case "owner-return":
       ownershipReturn(output, undefined, args.lane);
@@ -151,6 +151,43 @@ if (import.meta.main) {
         ? "invalid selected backend CLI arguments\n"
         : "selected backend admission failed; private inputs withheld\n",
     );
+    if (process.argv[2] === "permissions" && error instanceof Error) {
+      try {
+        const stack = error.stack,
+          code: unknown = Reflect.get(error, "code");
+        const headers = [
+          `${error.name}: ${error.message}\n`,
+          ...(typeof code === "string" ? [`${error.name} [${code}]: ${error.message}\n`] : []),
+        ];
+        const header = headers.find((value) => stack?.startsWith(value));
+        const frame = header ? (stack?.slice(header.length).split("\n")[0] ?? "") : "";
+        // Only the first actual caller frame, never text in the error message
+        // or a later frame used to replace a foreign/missing throw location.
+        for (const file of [
+          "tools/selected-backend-ci/runtime.ts",
+          "tools/selected-backend-ci/admission.ts",
+          "tools/selected-backend-ci/io.ts",
+          "scripts/run-selected-backend-e2e.ts",
+        ]) {
+          const path = `${root}/${file}:`,
+            direct = `    at ${path}`,
+            named = `(${path}`;
+          const offset = frame.startsWith(direct)
+            ? direct.length
+            : frame.includes(named) && /^ {4}at [^()]+ $/.test(frame.slice(0, frame.indexOf(named)))
+              ? frame.indexOf(named) + named.length
+              : -1;
+          const numbers =
+            offset >= 0 ? /^([1-9][0-9]{0,3}):[1-9][0-9]{0,3}\)?$/.exec(frame.slice(offset)) : null;
+          if (numbers?.[1]) {
+            process.stderr.write(`selected permissions failure at ${file}:${numbers[1]}\n`);
+            break;
+          }
+        }
+      } catch {
+        // Malformed/unavailable stack evidence stays unknown; keep the verdict.
+      }
+    }
     process.exitCode = error instanceof CliError ? 2 : 1;
   }
 }

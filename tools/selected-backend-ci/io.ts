@@ -123,6 +123,7 @@ export function spawnSelectedCommand(
   stdout: number | "pipe",
   stderr: number | "pipe",
   signal: AbortSignal,
+  input?: string,
 ) {
   signal.throwIfAborted();
   return spawn(command, {
@@ -130,7 +131,7 @@ export function spawnSelectedCommand(
     env: environment,
     stdout,
     stderr,
-    stdin: "inherit",
+    stdin: input === undefined ? "inherit" : new TextEncoder().encode(input),
     signal,
     killSignal: "SIGKILL",
   });

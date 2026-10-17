@@ -17,6 +17,7 @@ import {
   verifyWebHostInputsJobs,
   verifyWebContainerHandoffJobs,
   WEB_SQLITE_JOBS,
+  verifyWebNativeImageJobs,
 } from "./web-browser.ts";
 import { ROOT, RegistryTree, loadContext, realJobs } from "./rust2-fixture.ts";
 import { SQLITE_PACKAGES, verifySqlitePrefixCache } from "./rust-sqlite.ts";
@@ -40,7 +41,40 @@ const runOf = (step: Mapping): string => {
   return run;
 };
 
-test("every Web SQLite caller installs required packages before capture without unrelated upgrades", () => {
+test("native checks reject host fallback, overrides and masked failures", () => {
+  const jobs = realJobs("web.yml");
+  expect(verifyWebNativeImageJobs(jobs)).toEqual([]);
+  for (const mutate of [
+    (job: Mapping) => {
+      job["if"] = "always()";
+    },
+    (job: Mapping) => {
+      job["timeout-minutes"] = 16;
+    },
+    (job: Mapping) => {
+      job["continue-on-error"] = true;
+    },
+    (job: Mapping) => {
+      (job["steps"] as Mapping[]).push({ run: "sudo apt-get install gcc" });
+    },
+    (job: Mapping) => {
+      ((job["steps"] as Mapping[])[2] as Mapping)["continue-on-error"] = true;
+    },
+    (job: Mapping) => {
+      const step = (job["steps"] as Mapping[])[2] as Mapping;
+      step["run"] = runOf(step) + " --image-pin foreign";
+    },
+    (job: Mapping) => {
+      (job["steps"] as Mapping[]).pop();
+    },
+  ]) {
+    const bad = clone(jobs);
+    mutate(bad["web-native-checks"] as Mapping);
+    expect(verifyWebNativeImageJobs(bad).length).toBeGreaterThan(0);
+  }
+});
+
+test("every remaining host Web SQLite caller installs required packages before capture without unrelated upgrades", () => {
   const jobs = realJobs("web.yml");
   expect(verifyWebHostInputsJobs(jobs)).toEqual([]);
   for (const name of WEB_SQLITE_JOBS) {
@@ -168,7 +202,7 @@ test("SQLite diagnostics publish only the exact hash file after original mandato
 
 test("actual workflow diagnostic hashes canaries, bounds rows, and cannot replace the original producer refusal", () => {
   const jobs = realJobs("web.yml");
-  const run = runOf(stepWith(jobs, "collaboration-build", byId("sqlite_diagnostics")));
+  const run = runOf(stepWith(jobs, "web-checks", byId("sqlite_diagnostics")));
   const match =
     /^bun --no-env-file - <<'SQLITE_INPUT_HASHES'\n([\s\S]+)SQLITE_INPUT_HASHES\n$/.exec(run);
   expect(match).not.toBeNull();
@@ -804,10 +838,14 @@ test("single collaboration producer keeps seed source times and rejects helper f
   }
   for (const field of ["key", "restore-keys"]) {
     const bad = clone(jobs);
-    const seed = stepWith(bad, "collaboration-build", byId("cache_collaboration_main_seed"));
+    const seed = stepWith(
+      bad,
+      "collaboration-build",
+      (step) => step["name"] === "Restore Cargo downloads",
+    );
     (seed["with"] as Mapping)[field] = "foreign";
     expect(verifyCollaborationPreparationJobs(bad).join("\n")).toContain(
-      "only identity-bound root seed",
+      "source downloads only; no helper fallback cache",
     );
   }
 });

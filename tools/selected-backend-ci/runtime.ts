@@ -1,3 +1,5 @@
+import type { CommandOptions, Completed } from "./drivers/common.ts";
+import { nativeArchitecture, type NativeArchitecture } from "./types.ts";
 import { deepEquals, spawn, spawnSync } from "bun";
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
@@ -8,13 +10,18 @@ import {
   closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
+  rmSync,
   statSync,
+  statfsSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -40,6 +47,7 @@ import {
   failureDigest,
   files,
   gid,
+  groups,
   inventory,
   jsonInteger,
   observedExit,
@@ -48,6 +56,7 @@ import {
   root,
   sha,
   sourceInputText,
+  spawnSelectedCommand,
   tool,
   uid,
   wrapperInterruptGrace,
@@ -274,11 +283,8 @@ export function prepareBrowser(output: string, chromium: string): string {
   const component = dirname(dirname(chromium)),
     cache = dirname(component);
   assert.match(basename(component), /^chromium-[0-9]+$/);
-  assert.ok(
-    !lstatSync(cache).isSymbolicLink() &&
-      statSync(cache).uid === runner &&
-      statSync(cache).gid === gid(),
-  );
+  assert.ok(!lstatSync(cache).isSymbolicLink());
+  assert.ok(statSync(cache).uid === runner && statSync(cache).gid === gid());
   const components = readdirSync(cache)
     .filter((name) => /^(chromium|chromium_headless_shell|ffmpeg)-[0-9]+$/.test(name))
     .sort();
@@ -345,17 +351,23 @@ export interface PermissionBoundary {
 const permissionBoundary: PermissionBoundary = {
   identity,
   browser: (output, bun) =>
-    prepareBrowser(
-      output,
-      call([bun, "--eval", "console.log(require('@playwright/test').chromium.executablePath())"]),
-    ),
+    selectedImageHost()
+      ? admittedBrowser(output, [uid(), gid()])
+      : prepareBrowser(
+          output,
+          call([
+            bun,
+            "--eval",
+            "console.log(require('@playwright/test').chromium.executablePath())",
+          ]),
+        ),
 };
-export function runtimePermissions(
+export async function runtimePermissions(
   output: string,
   sqliteParent: string,
   dockerGid: number,
   boundary: PermissionBoundary = permissionBoundary,
-): void {
+): Promise<void> {
   // The docker socket group joins the actor's groups; group 0 is never granted.
   assert.ok(dockerGid > 0, "root group is never granted as the docker group");
   assert.equal(process.env.FVOCI_SELECTED_EXECUTION_MODE ?? "github-ci", "github-ci");
@@ -377,13 +389,23 @@ export function runtimePermissions(
       for (const name of readdirSync(directory)) {
         const path = join(directory, name),
           facts = lstatSync(path);
+        if (facts.isSymbolicLink() || facts.uid !== runnerUid)
+          try {
+            process.stderr.write(
+              `selected permissions descendant prefix=${prefix === output ? "output" : "sqlite"} symlink=${facts.isSymbolicLink() ? "1" : "0"} owner_match=${facts.uid === runnerUid ? "1" : "0"}\n`,
+            );
+          } catch {
+            // Diagnostic output cannot replace the original permission refusal.
+          }
         assert.ok(!facts.isSymbolicLink() && facts.uid === runnerUid);
         if (facts.isDirectory()) check(path);
       }
     }
     check(prefix);
   }
-  assert.ok(below(realpathSync(env("SQLITE3_LIB_DIR")), sqliteParent));
+  if (selectedImageHost())
+    assert.equal(env("SQLITE3_LIB_DIR"), "/opt/fvoci-sqlite/x86_64-unknown-linux-gnu/lib");
+  else assert.ok(below(realpathSync(env("SQLITE3_LIB_DIR")), sqliteParent));
   const before = read(join(output, "before.json")) as Inputs;
   assert.equal(before.head, env("GITHUB_SHA"));
   assert.ok(deepEquals(read(join(output, "after.json")), before));
@@ -404,9 +426,27 @@ export function runtimePermissions(
     ),
   );
   accessiblePaths[dirname(output)] = accessiblePaths[dirname(sqliteParent)] = constants.X_OK;
-  const allowedGroups = new Set([dockerGid]),
+  const hostPath = (path: string) =>
+    path === root || path === temp || below(path, root) || below(path, temp);
+  const hostPaths = selectedImageHost()
+    ? Object.fromEntries(Object.entries(accessiblePaths).filter(([path]) => hostPath(path)))
+    : accessiblePaths;
+  if (selectedImageHost()) {
+    assert.equal(
+      sha(process.execPath),
+      before.external[bun],
+      "host controller Bun differs from the admitted Bun",
+    );
+    hostPaths[process.execPath] = constants.R_OK | constants.X_OK;
+  }
+  // Docker includes the existing primary GID in getgroups(); setpriv does
+  // not unless requested. Keep both actual actors and the strict preflight
+  // on the same set without granting any access beyond primary GID 1000.
+  const allowedGroups = new Set([dockerGid, ...(selectedImageHost() ? [1000] : [])]),
     needed: Record<string, unknown> = {};
-  for (const [path, mask] of Object.entries(accessiblePaths)) {
+  for (const [path, mask] of Object.entries(hostPaths)) {
+    // The same complete set is checked in the image below. Host group grants
+    // apply only to actual bind-mounted source and private preparation files.
     for (const [entry, required] of [
       [path, mask],
       ...ancestors(path).map((p) => [p, constants.X_OK] as const),
@@ -437,6 +477,10 @@ export function runtimePermissions(
     }
   }
   const groupList = [...allowedGroups].sort((a, b) => a - b);
+  if (selectedImageHost())
+    await selectedImageAccess({ groups: groupList, files: accessiblePaths }, root, true);
+  // Retain the original host preflight for source ancestry and the actual
+  // controller executable; image mount ancestry cannot prove host traversal.
   const result = spawnSync(
     [
       "sudo",
@@ -444,11 +488,11 @@ export function runtimePermissions(
       "--reuid=1000",
       "--regid=1000",
       "--groups=" + groupList.join(","),
-      bun,
+      selectedImageHost() ? process.execPath : bun,
       join(import.meta.dir, "runtime-access-check.ts"),
     ],
     {
-      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: accessiblePaths })),
+      stdin: Buffer.from(JSON.stringify({ groups: groupList, files: hostPaths })),
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -529,6 +573,68 @@ const runBoundary: RunBoundary = {
 // Outlasts the longest grace a lane driver gives its own fixture wrappers (the
 // PostgreSQL wrapper, 2 x wrapperInterruptGrace) and the cleanup after it.
 export const driverInterruptGrace = 3 * wrapperInterruptGrace;
+
+// Private Bun errors become only fixed source locations, never messages or argv.
+export function driverFailureDiagnostics(text: string): string[] {
+  if (text.length > 16384 || Buffer.byteLength(text, "utf8") > 16384) return [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if ((code < 32 && code !== 10 && code !== 9) || code === 127) return [];
+  }
+  const lines = text.split("\n");
+  if (lines.length > 128) return [];
+  const sources = [
+    "runtime.ts",
+    "admission.ts",
+    "io.ts",
+    "drivers/binding.ts",
+    "drivers/common.ts",
+    "drivers/install.ts",
+    "drivers/postgres.ts",
+    "drivers/sqlite.ts",
+    "drivers/restart.ts",
+  ].map((name) => "tools/selected-backend-ci/" + name);
+  const kinds = [
+    "Error",
+    "AssertionError",
+    "CheckError",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+    "ReferenceError",
+    "RuntimeError",
+  ];
+  const result = new Set<string>();
+  let kind: string | undefined;
+  for (const line of lines) {
+    const projected =
+      /^selected-driver failure type=([A-Za-z]+) source=(tools\/selected-backend-ci\/[A-Za-z/.-]+):([1-9][0-9]{0,4})$/.exec(
+        line,
+      );
+    if (projected) {
+      if (
+        kinds.includes(projected[1] ?? "") &&
+        sources.includes(projected[2] ?? "") &&
+        Number(projected[3]) <= 10000
+      )
+        result.add(line);
+    } else {
+      const header = /^(error|Error|[A-Za-z]+Error)(?: \[[A-Z0-9_]+\])?:/.exec(line);
+      if (header) {
+        const name = header[1] === "error" ? "Error" : header[1];
+        kind = kinds.includes(name ?? "") ? name : undefined;
+      }
+      const frame = /^\s+at .*?\(?(\/[^()]*?):([1-9][0-9]{0,4}):[1-9][0-9]{0,4}\)?$/.exec(line);
+      const source = sources.find((name) => join(root, name) === frame?.[1]),
+        sourceLine = Number(frame?.[2]);
+      if (kind && source && sourceLine <= 10000)
+        result.add(`selected-driver failure type=${kind} source=${source}:${String(sourceLine)}`);
+    }
+    if (result.size === 4) break;
+  }
+  return [...result];
+}
+
 // A lane driver owns fixture wrappers whose EXIT traps remove their
 // containers. On an interrupt it is not killed at once, as a stage child is:
 // it gets SIGINT and is waited for, so it closes its lane and writes its
@@ -542,7 +648,7 @@ export async function executeDriver(
   grace = driverInterruptGrace,
 ): Promise<number> {
   signal.throwIfAborted();
-  const fd = openSync(log, "wx");
+  const fd = openSync(log, "wx+", 0o600);
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     const child = spawn(command, {
@@ -562,7 +668,37 @@ export async function executeDriver(
     try {
       const exitCode = await child.exited;
       if (signal.aborted) throw signal.reason;
-      return observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
+      const code = observedExit({ exitCode, signalCode: child.signalCode ?? undefined });
+      if (code !== 0)
+        try {
+          const facts = fstatSync(fd),
+            path = lstatSync(log);
+          if (
+            facts.isFile() &&
+            !path.isSymbolicLink() &&
+            facts.dev === path.dev &&
+            facts.ino === path.ino &&
+            facts.uid === uid() &&
+            facts.gid === gid() &&
+            (facts.mode & 0o777) === 0o600 &&
+            realpathSync(log) === log
+          ) {
+            const bytes = Buffer.alloc(Math.min(facts.size, 16384)),
+              offset = facts.size - bytes.length,
+              count = readSync(fd, bytes, 0, bytes.length, offset),
+              lines = bytes.subarray(0, count).toString("utf8").split("\n");
+            for (const line of driverFailureDiagnostics(
+              lines
+                .slice(offset ? 1 : 0)
+                .slice(-128)
+                .join("\n"),
+            ))
+              process.stderr.write(line + "\n");
+          }
+        } catch {
+          // Diagnostic failure cannot replace the actual child outcome.
+        }
+      return code;
     } finally {
       signal.removeEventListener("abort", interrupt);
     }
@@ -586,7 +722,18 @@ export async function run(
   const runtime = join(output, "runtime");
   mkdirSync(runtime, { mode: 0o700 });
   const browser = boundary.browser(output);
-  boundary.access(Object.keys(before.external), browser);
+  if (selectedImageHost()) {
+    const files = Object.fromEntries(
+      Object.keys(before.external).map((path) => [path, constants.R_OK]),
+    );
+    for (const path of [browser.bun.path, browser.chromium.path])
+      files[path] = constants.R_OK | constants.X_OK;
+    await selectedImageAccess({ groups: groups(), files }, root);
+    boundary.access(
+      Object.keys(before.external).filter((path) => below(path, root) || below(path, output)),
+      browser,
+    );
+  } else boundary.access(Object.keys(before.external), browser);
   const bundle = read(join(output, "bundle.json")) as Bundle,
     web = read(join(output, "web-receipt.json")) as Web,
     abi = read(join(output, "abi-receipt.json")) as Abi;
@@ -1003,4 +1150,680 @@ export function ownershipReturn(
   } finally {
     process.stdout.write(JSON.stringify(diagnostic) + "\n");
   }
+}
+
+export const CI_WEB_IMAGE =
+  "ghcr.io/aisflow/fvoci-ci-web@sha256:cb1f5290f97ad5fb156b852ac0d21466e91571063979af4e9838172f41d8e23c";
+
+export const CI_WEB_IMAGE_SOURCE = "a1d59f717dd522fd5ca5a63aff83118f84889ad6";
+export const CI_WEB_SDK_SHA256 = {
+  x86_64: "dfd2e7b84d19f6e8ca03b80ded497d69606df8685ed6f1a929b6e8ecaba35892",
+  aarch64: "171384584c2a218a591e6d42784578c28ab1f64741487090b285006022260cca",
+} as const;
+
+// The host keeps the selected drivers and their Docker/UID/process controls.
+// Only these fixed preparation, admission and browser operations enter the
+// existing tool image. There is deliberately no arbitrary command operation.
+export const SELECTED_IMAGE_ENV = [
+  "FVOCI_WEB_CONTAINER_IMAGE",
+  "FVOCI_WEB_CONTAINER_SDK_SHA256",
+  "FVOCI_WEB_CONTAINER_IMAGE_SOURCE",
+  "FVOCI_SELECTED_CI_OUTPUT",
+  "FVOCI_SELECTED_CI_SQLITE_PARENT",
+  "FVOCI_WEB_BUILD_HANDOFF",
+  "FVOCI_WEB_BUILD_HANDOFF_SHA256",
+  "FVOCI_WEB_BUILD_PHASE",
+  "FVOCI_SELECTED_IMAGE_DEADLINE",
+  "RUNNER_TEMP",
+  "CARGO_HOME",
+  "CARGO_TARGET_DIR",
+  "CARGO_BUILD_JOBS",
+  "CARGO_INCREMENTAL",
+  "CARGO_PROFILE_DEV_DEBUG",
+  "CARGO_PROFILE_TEST_DEBUG",
+  "LIBCLANG_PATH",
+  "SQLITE3_LIB_DIR",
+  "SQLITE3_INCLUDE_DIR",
+  "SQLITE3_STATIC",
+  "SQLITE3_NO_PKG_CONFIG",
+] as const;
+
+export function selectedImageHost(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    env.FVOCI_WEB_CONTAINER_IMAGE !== undefined &&
+    env.FVOCI_SELECTED_CI_SQLITE_PARENT !== undefined &&
+    env.FVOCI_SELECTED_IMAGE_WORKLOAD !== "1"
+  );
+}
+
+export function selectedImageBudget(value: string | undefined, now: number): number {
+  const deadline = Number(value),
+    remaining = deadline - now;
+  if (!Number.isSafeInteger(deadline) || remaining <= 0 || remaining > 900_000)
+    fail("original selected entry budget exhausted or invalid");
+  return remaining;
+}
+
+export type SelectedImageOperation =
+  "prepare" | "consume" | "pending" | "inputs" | "access" | "config-list" | "browser";
+
+function selectedImageInvocation(
+  operation: SelectedImageOperation,
+  root: string,
+  environment: NodeJS.ProcessEnv,
+  browserArgs: string[] = [],
+  actor?: { groups: number[] },
+): { args: string[]; name: string; envFile: string; nodeTemp?: string } {
+  if (!selectedImageHost() || process.platform !== "linux" || process.arch !== "x64")
+    fail("selected image operations require the native Linux x64 host controller");
+  const architecture = containerArchitecture(
+    process.platform,
+    process.arch,
+    checkedOutput(["uname", "-m"], root),
+  );
+  if (
+    architecture !== "x86_64" ||
+    (process.env.DOCKER_DEFAULT_PLATFORM !== undefined &&
+      process.env.DOCKER_DEFAULT_PLATFORM !== "linux/amd64")
+  )
+    fail("selected image requires the physical native x64 daemon");
+  qualifyContainerDaemon(
+    dockerEndpoint(root),
+    checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
+    architecture,
+  );
+  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
+  const temp = realpathSync(process.env.RUNNER_TEMP ?? fail("RUNNER_TEMP required")),
+    output = join(temp, "fvoci-selected-current"),
+    owner = process.getuid?.(),
+    uid = actor ? 1000 : owner,
+    gid = actor ? 1000 : process.getgid?.();
+  if (
+    !uid ||
+    !gid ||
+    process.env.FVOCI_SELECTED_CI_OUTPUT !== output ||
+    realpathSync(root) !== root
+  )
+    fail("selected image requires the exact owned output and source paths");
+  if (statSync(output).uid !== owner || lstatSync(output).isSymbolicLink())
+    fail("selected image output owner changed");
+  const sdk = containerImage(
+    process.env.FVOCI_WEB_CONTAINER_IMAGE ?? "",
+    process.env.FVOCI_WEB_CONTAINER_SDK_SHA256 ?? "",
+    false,
+    process.env,
+  );
+  if (sdk.image !== CI_WEB_IMAGE || sdk.sdk !== CI_WEB_SDK_SHA256.x86_64)
+    fail("selected image differs from the published native SDK");
+  const metadata = checkedOutput(
+    [
+      "docker",
+      "image",
+      "inspect",
+      "--format",
+      '{{.Id}} {{.Os}} {{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}',
+      sdk.image,
+    ],
+    root,
+  );
+  const imageSource = qualifyImageSource(
+    root,
+    metadata,
+    sdk,
+    architecture,
+    checkedOutput(["git", "rev-parse", "HEAD"], root),
+  );
+  if (imageSource !== process.env.FVOCI_WEB_CONTAINER_IMAGE_SOURCE)
+    fail("selected image source changed");
+  if (statfsSync(output).bavail * statfsSync(output).bsize < 20_000_000_000)
+    fail("selected image requires the existing 20GB disk floor");
+  const privateDir = join(output, "tmp");
+  const privateFacts = statSync(privateDir);
+  if (
+    lstatSync(privateDir).isSymbolicLink() ||
+    privateFacts.uid !== owner ||
+    (privateFacts.mode & 0o777) !== 0o700
+  )
+    fail("selected image private temporary directory required");
+  const name = "fvoci-selected-tool-" + randomBytes(16).toString("hex"),
+    envFile = join(privateDir, name + ".env");
+  const variables: NodeJS.ProcessEnv = {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(
+        ([key]) =>
+          /^(?:CI|GITHUB_(?:ACTIONS|SHA|REPOSITORY|RUN_ID|RUN_ATTEMPT|JOB|OUTPUT)|RUNNER_TEMP|LANG|LC_ALL|CARGO_(?:BUILD_JOBS|INCREMENTAL|PROFILE_DEV_DEBUG|PROFILE_TEST_DEBUG)|FVOCI_E2E_PENDING|FVOCI_E2E_PROFILE)$/.test(
+            key,
+          ) ||
+          (["pending", "browser"].includes(operation) &&
+            /^(?:FVOCI_(?!TEST_TURSO|LIBSQL)[A-Z0-9_]+|BUN_RUNTIME_TRANSPILER_CACHE_PATH|PLAYWRIGHT_[A-Z0-9_]+|TEST_DATABASE_URL|DATABASE_[A-Z0-9_]+|MEILI_[A-Z0-9_]+|PASSWORD_PEPPER_[A-Z0-9_]+|ENCRYPTION_[A-Z0-9_]+|SMTP_[A-Z0-9_]+|GROUP_LABEL|NET_[A-Z0-9_]+|RUST_LOG)$/.test(
+              key,
+            )),
+      ),
+    ),
+    ...Object.fromEntries(SELECTED_IMAGE_ENV.map((key) => [key, process.env[key]])),
+    FVOCI_SELECTED_IMAGE_WORKLOAD: "1",
+    ROOT: root,
+    HOME: join(output, "home"),
+    TMPDIR: actor ? "/tmp" : privateDir,
+    BUN_INSTALL_CACHE_DIR: "/tmp/fvoci-bun-install-cache",
+    CARGO_HOME: join(temp, "fvoci-image-cargo"),
+    PLAYWRIGHT_BROWSERS_PATH: join(output, "browser"),
+  };
+  // Compiler PATH comes from the admitted image, not the host environment.
+  const imageEnvironment: unknown = JSON.parse(
+    checkedOutput(
+      ["docker", "image", "inspect", "--format", "{{json .Config.Env}}", sdk.image],
+      root,
+    ),
+  );
+  if (!Array.isArray(imageEnvironment)) fail("selected image environment missing");
+  const imageEntries: unknown[] = imageEnvironment;
+  const imagePath = imageEntries.find(
+    (value: unknown) => typeof value === "string" && value.startsWith("PATH="),
+  );
+  if (typeof imagePath !== "string") fail("selected image PATH missing");
+  variables.PATH = join(output, "tools") + ":" + imagePath.slice(5);
+  if (!["prepare", "consume", "pending"].includes(operation)) delete variables.GITHUB_OUTPUT;
+  delete variables.JEST_WORKER_ID;
+  const withheld = new Set([
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "FVOCI_WEB_CONTAINER_LOCAL_IMAGE",
+    "FVOCI_WEB_CONTAINER_LOCAL",
+  ]);
+  const entries = Object.entries(variables).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined && !withheld.has(entry[0]),
+  );
+  if (
+    entries.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\r\n\0]/.test(value))
+  )
+    fail("selected image environment cannot be encoded privately");
+  if (operation === "browser") {
+    const cli = join(root, "node_modules/playwright/cli.js");
+    if (
+      browserArgs[0] !== join(output, "tools/bun") ||
+      browserArgs[1] !== "--no-install" ||
+      browserArgs[2] !== cli ||
+      browserArgs[3] !== "test"
+    )
+      fail("selected image accepts only the admitted Playwright entrypoint");
+  } else if (browserArgs.length) fail("selected operation does not accept commands");
+  const args = [
+    "docker",
+    "run",
+    "--pull=never",
+    "--platform",
+    "linux/amd64",
+    "--init",
+    "--name",
+    name,
+    "--user",
+    `${String(uid)}:${String(gid)}`,
+    "--cpus=2",
+    "--memory=16g",
+    "--memory-swap=16g",
+    "--pids-limit=1024",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--network=host",
+    "--env-file",
+    envFile,
+    "--workdir",
+    operation === "browser" ? join(root, "apps/web") : root,
+    "--interactive",
+  ];
+  for (const group of actor?.groups ?? (uid === 1000 ? (process.getgroups?.() ?? []) : [gid])) {
+    if (group === 0) fail("selected image refuses privileged supplementary groups");
+    if (group !== gid) args.push("--group-add", String(group));
+  }
+  const mounts = [root, output, join(temp, "fvoci-sqlite"), join(temp, "fvoci-image-cargo")];
+  if (["prepare", "consume"].includes(operation)) {
+    if (process.env.FVOCI_WEB_BUILD_HANDOFF !== join(temp, "fvoci-web-build-handoff"))
+      fail("selected packet canonical path required");
+    mounts.push(process.env.FVOCI_WEB_BUILD_HANDOFF);
+  }
+  if (variables.GITHUB_OUTPUT) {
+    const path = realpathSync(variables.GITHUB_OUTPUT);
+    assert.ok(below(path, temp), "owned CI output must remain within runner temp");
+    if (!lstatSync(path).isFile() || statSync(path).uid !== owner)
+      fail("owned CI output file required");
+    mounts.push(path);
+  }
+  for (const path of mounts) {
+    if (path.includes(",") || path === "/" || path === "/var/run")
+      fail("selected bind path refused");
+    if (realpathSync(path) !== path || lstatSync(path).isSymbolicLink())
+      fail("selected bind must be physical");
+    const readonly =
+      (path === root && !["prepare", "consume"].includes(operation)) ||
+      (path === process.env.FVOCI_WEB_BUILD_HANDOFF && operation === "consume") ||
+      (path === join(temp, "fvoci-image-cargo") && !["prepare", "consume"].includes(operation));
+    args.push("--mount", `type=bind,source=${path},target=${path}${readonly ? ",readonly" : ""}`);
+  }
+  selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now());
+  // Bun's node shims and package-cache version indexes contain symlinks.
+  // Keep both on owned tool /tmp outside output; TMPDIR/evidence stay put.
+  // The later actor owns output but only traverses RUNNER_TEMP; /var/tmp also
+  // permits that actor's private allocation without widening parent access.
+  const nodeTemp = actor ? undefined : mkdtempSync("/var/tmp/fvoci-selected-tool.");
+  if (nodeTemp) args.push("--mount", `type=bind,source=${nodeTemp},target=/tmp`);
+  else args.push("--tmpfs", "/tmp:rw,mode=0700,uid=1000,gid=1000");
+  args.push(
+    sdk.image,
+    ...(operation === "browser"
+      ? browserArgs
+      : [
+          "bun",
+          "--no-env-file",
+          join(root, "tools/web-e2e/run-web-e2e.ts"),
+          "selected-image-phase",
+          root,
+          operation,
+        ]),
+  );
+  try {
+    writeFileSync(envFile, entries.map(([key, value]) => `${key}=${value}\n`).join(""), {
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    rmSync(envFile, { force: true });
+    if (nodeTemp) rmSync(nodeTemp, { recursive: true });
+    throw error;
+  }
+  return { args, name, envFile, nodeTemp };
+}
+
+export function finishToolImage(name: string, code: number) {
+  const inspected = Bun.spawnSync(
+    [
+      "docker",
+      "inspect",
+      "--format",
+      "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+      name,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (inspected.exitCode !== 0) return { code: code || 1, inspected, removeExit: -1 };
+  const state = inspected.stdout.toString().trim();
+  if (state !== `false ${String(code)} false`) code ||= 1;
+  if (!state.startsWith("false ")) {
+    Bun.spawnSync(["docker", "stop", "--time", "10", name], { stdout: "pipe", stderr: "pipe" });
+    code ||= 1;
+  }
+  const removed = Bun.spawnSync(["docker", "rm", "-v", name], { stdout: "pipe", stderr: "pipe" });
+  if (removed.exitCode !== 0) code ||= 1;
+  return { code, inspected, removeExit: removed.exitCode };
+}
+
+export async function selectedImageResult(
+  operation: SelectedImageOperation,
+  root: string,
+  options: CommandOptions = {},
+  browserArgs: string[] = [],
+  actor?: { groups: number[] },
+): Promise<Completed> {
+  const cancellation = new AbortController();
+  let cancelled = 0;
+  const interrupt = () => {
+    cancelled ||= 130;
+    cancellation.abort(new RuntimeExit(cancelled));
+  };
+  const terminate = () => {
+    cancelled ||= 143;
+    cancellation.abort(new RuntimeExit(cancelled));
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  let result: Completed | undefined,
+    failure: unknown,
+    retirementCode = 1,
+    retirementPending = false,
+    temporaryRemovable = true;
+  let invocation: ReturnType<typeof selectedImageInvocation> | undefined;
+  try {
+    invocation = selectedImageInvocation(
+      operation,
+      root,
+      options.env ?? process.env,
+      browserArgs,
+      actor,
+    );
+    if (options.log && !existsSync(options.log)) closeSync(openSync(options.log, "wx", 0o600));
+    const deadline = AbortSignal.timeout(
+      selectedImageBudget(process.env.FVOCI_SELECTED_IMAGE_DEADLINE, Date.now()),
+    );
+    const signal = AbortSignal.any([
+      cancellation.signal,
+      deadline,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const fd = options.log ? openSync(options.log, "w", 0o600) : undefined;
+    try {
+      const materialize = ["prepare", "consume"].includes(operation),
+        browserSource = join(
+          process.env.FVOCI_SELECTED_CI_OUTPUT ?? fail("selected output required"),
+          "browser-source",
+        ),
+        started = performance.now();
+      const commands = materialize
+        ? [
+            invocation.args.map((arg, at) => (at === 1 ? "create" : arg)),
+            ["docker", "cp", invocation.name + ":/opt/playwright/.", browserSource],
+            invocation.args,
+          ]
+        : [invocation.args];
+      if (materialize) mkdirSync(browserSource, { mode: 0o700 });
+      for (const [at, args] of commands.entries()) {
+        if (!materialize || at !== 1) {
+          retirementPending = true;
+          temporaryRemovable = false;
+        }
+        const child = spawnSelectedCommand(
+          args,
+          process.env,
+          fd ?? "pipe",
+          fd ?? "pipe",
+          signal,
+          options.input,
+        );
+        const bytes = async (stream: typeof child.stdout) => {
+          if (typeof stream === "number") fail("selected image stream missing");
+          return await new Response(stream).arrayBuffer();
+        };
+        const [stdout, stderr, exit] = await Promise.allSettled([
+          fd === undefined ? bytes(child.stdout) : Promise.resolve(new ArrayBuffer(0)),
+          fd === undefined ? bytes(child.stderr) : Promise.resolve(new ArrayBuffer(0)),
+          child.exited,
+        ]);
+        signal.throwIfAborted();
+        if (
+          stdout.status === "rejected" ||
+          stderr.status === "rejected" ||
+          exit.status === "rejected"
+        ) {
+          const failed = [stdout, stderr, exit].find((value) => value.status === "rejected");
+          if (failed?.status === "rejected" && failed.reason instanceof Error) throw failed.reason;
+          fail("selected image stream or exit collection failed");
+        }
+        const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+        result = {
+          returncode: observedExit({
+            exitCode: exit.value,
+            signalCode: child.signalCode ?? undefined,
+          }),
+          stdout: decoder.decode(stdout.value),
+          stderr: decoder.decode(stderr.value),
+        };
+        if (result.returncode !== 0) break;
+        if (materialize && at === 1) {
+          retirementPending = false;
+          const closed = finishToolImage(invocation.name, 0);
+          temporaryRemovable = closed.removeExit === 0;
+          if (closed.code !== 0) throw new RuntimeExit(closed.code);
+          let bytes = 0;
+          for (const path of [browserSource, ...files(browserSource, true)]) {
+            const facts = lstatSync(path);
+            assert.ok(facts.uid === uid() && facts.gid === gid() && !facts.isSymbolicLink());
+            if (facts.isFile()) bytes += facts.size;
+          }
+          assert.equal(statSync(browserSource).mode & 0o777, 0o700);
+          process.stderr.write(
+            "selected-image browser_materialization elapsed_seconds=" +
+              ((performance.now() - started) / 1000).toFixed(3) +
+              " bytes=" +
+              String(bytes) +
+              " exit=0\n",
+          );
+        }
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (invocation) {
+      if (result?.returncode && !options.log) {
+        try {
+          writeFileSync(
+            join(dirname(invocation.envFile), invocation.name + ".private.log"),
+            result.stderr,
+            { flag: "wx", mode: 0o600 },
+          );
+        } catch {
+          process.stderr.write("selected image private failure capture failed\n");
+        }
+        if (operation === "inputs")
+          try {
+            for (const line of driverFailureDiagnostics(result.stderr))
+              process.stderr.write(line + "\n");
+          } catch {
+            // Keep the original image exit and mandatory retirement.
+          }
+      }
+      retirementCode = result?.returncode ?? (cancelled || 1);
+      try {
+        if (retirementPending) {
+          const closed = finishToolImage(invocation.name, retirementCode);
+          retirementCode = closed.code;
+          temporaryRemovable = closed.removeExit === 0;
+        }
+      } catch {
+        retirementCode ||= 1;
+        process.stderr.write("selected image retirement unconfirmed\n");
+      }
+      try {
+        rmSync(invocation.envFile, { force: true });
+      } catch {
+        retirementCode ||= 1;
+        process.stderr.write("selected image private environment removal failed\n");
+      }
+      if (temporaryRemovable && invocation.nodeTemp)
+        try {
+          rmSync(invocation.nodeTemp, { recursive: true });
+        } catch {
+          retirementCode ||= 1;
+          process.stderr.write("selected image private node temporary removal failed\n");
+        }
+    }
+    try {
+      if (options.log && existsSync(options.log)) chmodSync(options.log, 0o600);
+    } catch {
+      retirementCode ||= 1;
+      process.stderr.write("selected image private log mode unconfirmed\n");
+    }
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
+  }
+  if (cancelled && result === undefined) throw new RuntimeExit(cancelled);
+  if (failure instanceof Error) throw failure;
+  if (failure !== undefined) fail("selected image operation threw an unsupported failure");
+  if (!result) fail("selected image child exit missing");
+  if (retirementCode && options.required !== false)
+    fail(
+      `owned command failed exit=${String(retirementCode)}; executable=docker; selected=${operation}`,
+    );
+  return { ...result, returncode: retirementCode };
+}
+
+// Existing full Inputs shape, checked by the same inputCheck in the actual
+// compiler namespace. No compile receipt is regenerated.
+export async function selectedImageInputs(before: Inputs, root: string): Promise<Inputs> {
+  const result = await selectedImageResult("inputs", root, { input: JSON.stringify(before) });
+  return JSON.parse(result.stdout) as Inputs;
+}
+
+export async function selectedImageAccess(
+  request: { groups: number[]; files: Record<string, number> },
+  root: string,
+  actor = false,
+) {
+  return selectedImageResult(
+    "access",
+    root,
+    { input: JSON.stringify(request) },
+    [],
+    actor ? { groups: request.groups } : undefined,
+  );
+}
+
+export async function selectedImageConfigList(root: string): Promise<number> {
+  return (await selectedImageResult("config-list", root, { required: false })).returncode;
+}
+
+export async function selectedImageBrowser(
+  args: string[],
+  options: CommandOptions,
+  root: string,
+): Promise<Completed> {
+  return selectedImageResult("browser", root, options, args);
+}
+
+export function containerImage(
+  image: string,
+  sdk: string,
+  local: boolean,
+  env: NodeJS.ProcessEnv,
+): { image: string; sdk: string; local: boolean } {
+  if (!/^[a-f0-9]{64}$/.test(sdk)) fail("an explicit sealed SQLite SDK SHA-256 is required");
+  if (
+    !(
+      local ? /^sha256:[a-f0-9]{64}$/ : /^ghcr\.io\/aisflow\/fvoci-ci-web@sha256:[a-f0-9]{64}$/
+    ).test(image) ||
+    (local && (env.CI !== undefined || Object.keys(env).some((key) => key.startsWith("GITHUB_"))))
+  )
+    fail("registry image digest required; local engine IDs require explicit non-CI local SDK mode");
+  return { image, sdk, local };
+}
+
+export class RuntimeExit extends Error {
+  constructor(readonly status: number) {
+    super("web e2e command failed");
+  }
+}
+
+export function dockerEndpoint(root: string): string {
+  let endpoint: unknown = process.env.DOCKER_HOST;
+  if (process.env.DOCKER_CONTEXT || !endpoint) {
+    const json = checkedOutput(
+      [
+        "docker",
+        "context",
+        "inspect",
+        "--format",
+        "{{json .Endpoints.docker.Host}}",
+        process.env.DOCKER_CONTEXT || checkedOutput(["docker", "context", "show"], root),
+      ],
+      root,
+    );
+    try {
+      endpoint = JSON.parse(json);
+    } catch {
+      fail("invalid Docker endpoint metadata");
+    }
+  }
+  if (typeof endpoint !== "string") fail("a local Docker endpoint is required");
+  return endpoint;
+}
+
+export function checkedOutput(argv: string[], cwd: string): string {
+  const result = Bun.spawnSync(argv, { cwd, env: process.env, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0 || result.signalCode) fail("container browser prerequisite failed");
+  return result.stdout.toString().trim();
+}
+
+export function containerArchitecture(
+  system: string,
+  runtime: string,
+  kernel: string,
+  darwinArm?: string,
+): NativeArchitecture {
+  if (system !== "linux" && system !== "darwin")
+    fail("a Linux or Darwin Docker client is required");
+  if (system === "darwin" && darwinArm !== "0" && darwinArm !== "1")
+    fail("physical Darwin architecture is required");
+  const physical = nativeArchitecture(
+    system === "darwin" ? (darwinArm === "1" ? "arm64" : "x64") : kernel,
+  );
+  if (nativeArchitecture(runtime) !== physical || nativeArchitecture(kernel) !== physical)
+    fail("translated Docker clients are unsupported");
+  return physical;
+}
+
+export function qualifyContainerDaemon(
+  endpoint: string,
+  info: string,
+  arch: NativeArchitecture,
+): void {
+  if (!/^unix:\/\/\/[^\s?#\0]+$/.test(endpoint)) fail("a local Unix Docker endpoint is required");
+  const match = /^linux (\S+)$/.exec(info);
+  if (!match || nativeArchitecture(match[1] as string) !== arch)
+    fail("Docker requires a native Linux daemon matching the physical client architecture");
+}
+
+export function containerImageSource(
+  metadata: string,
+  sdk: { image: string; local: boolean },
+  arch: NativeArchitecture,
+): string {
+  const match = /^(sha256:[a-f0-9]{64}) linux (\S+) ([a-f0-9]{40}) (.+)$/.exec(metadata);
+  if (!match || nativeArchitecture(match[2] as string) !== arch)
+    fail("the pinned native ci-web image must match the client and daemon");
+  let digests: unknown;
+  try {
+    digests = JSON.parse(match[4] as string);
+  } catch {
+    fail("invalid image digest metadata");
+  }
+  if (sdk.local ? match[1] !== sdk.image : !Array.isArray(digests) || !digests.includes(sdk.image))
+    fail("the actual immutable image identity is required");
+  return match[3] as string;
+}
+
+export function qualifyImageSource(
+  root: string,
+  metadata: string,
+  sdk: { image: string; sdk: string; local: boolean },
+  arch: NativeArchitecture,
+  current: string,
+): string {
+  const imageSource = containerImageSource(metadata, sdk, arch);
+  if (![imageSource, current].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
+    fail("exact image and consumer source revisions required");
+  const published = !sdk.local && sdk.image === CI_WEB_IMAGE;
+  if (published && (imageSource !== CI_WEB_IMAGE_SOURCE || sdk.sdk !== CI_WEB_SDK_SHA256[arch]))
+    fail("the selected publication source and native SDK seal must match its pinned image");
+  checkedOutput(
+    [
+      "git",
+      "diff",
+      "--quiet",
+      imageSource,
+      current,
+      "--",
+      // The selected immutable publication contains its own qualified recipe.
+      // Future recipe edits cannot change it; all copied/compiler inputs below
+      // must still match. Overrides retain full current-recipe qualification.
+      ...(published ? [] : ["docker/ci-base/Dockerfile"]),
+      "xtask/src",
+      "xtask/Cargo.toml",
+      "xtask/Cargo.lock",
+      ":(glob)xtask/*.tsv",
+      "tests/support/official_sqld.rs",
+      "rust-toolchain.toml",
+      ".bun-version",
+    ],
+    root,
+  );
+  return imageSource;
+}
+
+/** A refusal: the CLI prints the message to stderr and exits 1. */
+export class CheckError extends Error {}
+
+export function fail(message: string): never {
+  throw new CheckError(message);
 }
