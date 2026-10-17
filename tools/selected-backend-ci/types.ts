@@ -206,6 +206,8 @@ export interface LocalConsumerGrant extends LocalGrant {
 }
 export interface LocalRuntimeAccess {
   preparation_sha256: string;
+  preparation_uid: number;
+  preparation_gid: number;
   runtime_sha256: string;
   runId: string;
   dispatchId: string;

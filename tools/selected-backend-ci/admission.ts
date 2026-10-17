@@ -111,7 +111,13 @@ export function localAllocation(
           access.preflight.missing === 0,
       );
       assert.ok(deepEquals(groups(), access.groups));
-      assert.ok(deepEquals(access.local_allocation, runtimePairBinding(grant)));
+      assert.ok(
+        deepEquals(access.local_allocation, {
+          ...runtimePairBinding(grant),
+          preparation_uid: access.runner_uid,
+          preparation_gid: access.runner_gid,
+        }),
+      );
     }
   }
   return grant;
@@ -259,7 +265,9 @@ export function runtimeAllocationEnvironment(grant: LocalGrant): Record<string, 
     FVOCI_LOCAL_PREPARATION_SHA256: env("FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256"),
   };
 }
-export function runtimePairBinding(grant: LocalGrant): LocalRuntimeAccess {
+export function runtimePairBinding(
+  grant: LocalGrant,
+): Omit<LocalRuntimeAccess, "preparation_uid" | "preparation_gid"> {
   const preparation = env("FVOCI_LOCAL_PREPARATION_SHA256");
   assert.match(preparation, /^[a-f0-9]{64}$/);
   return {
@@ -303,7 +311,11 @@ export function qualifyRuntimePair(text: string): LocalRuntimeAccess {
   ] as const)
     assert.equal(preparation[key], actor[key]);
   assert.ok(deepEquals(preparation.registrationHashes, actor.registrationHashes));
-  return runtimePairBinding(actor);
+  return {
+    ...runtimePairBinding(actor),
+    preparation_uid: preparation.uid,
+    preparation_gid: preparation.gid,
+  };
 }
 export function selectedActor(mode = "run"): readonly [number, number] {
   if (process.env.FVOCI_SELECTED_EXECUTION_MODE === "orca-local")
