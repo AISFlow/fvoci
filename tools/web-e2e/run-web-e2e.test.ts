@@ -254,7 +254,8 @@ if(mode==="permissions")console.log((process.getgroups?.()??[]).sort((a,b)=>a-b)
         "\n" +
         String.raw`
 const fs=require("node:fs"),a=process.argv.slice(2),e=process.env;
-if(a[0]==="info")console.log("linux amd64");
+if(a[0]==="pull"){}
+else if(a[0]==="info")console.log("linux amd64");
 else if(a[0]==="image"&&a[1]==="inspect")console.log(a[3]==="{{json .Config.Env}}"?JSON.stringify(["PATH=/usr/local/bin:/usr/bin:/bin"]):"sha256:"+"b".repeat(64)+" linux amd64 "+e.FIXTURE_SOURCE+" "+JSON.stringify([e.FIXTURE_PIN]));
 else if(a[0]==="inspect")console.log("false "+(e.FIXTURE_MODE===e.FIXTURE_LAST_PHASE+"-fail"?19:0)+" false");
 else if(a[0]==="rm"){}

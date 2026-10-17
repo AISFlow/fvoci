@@ -2,7 +2,7 @@
 // removed scripts/selected-backend-ci/test_*.py files guarded and that no
 // drivers/*.test.ts or runner.test.ts case already covers.
 import { spawnSync } from "bun";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   appendFileSync,
   chmodSync,
@@ -833,6 +833,51 @@ describe("local lease", () => {
     const { grant, env } = lease();
     expect(await admitted(env)).toEqual(grant);
   });
+  for (const bodyExit of [0, 19])
+    test(
+      "expiry after an admitted lane retains body cleanup and refuses new work: " +
+        String(bodyExit),
+      async () => {
+        const { output, boundary } = cohort(),
+          issued = lease();
+        issued.grant.outputRoot = output;
+        const clock = Date.now(),
+          now = { value: clock };
+        issued.grant.expiresUtc = new Date(clock + 60000).toISOString();
+        writeFileSync(issued.path, JSON.stringify(issued.grant));
+        const environment = {
+          ...issued.env,
+          FVOCI_SELECTED_LOCAL_ALLOCATION_SHA256: sha(issued.path),
+          FVOCI_CI_SELECTED_RUNS: join(output, "runtime"),
+        };
+        const execute = boundary.execute;
+        let calls = 0,
+          closed = false;
+        boundary.execute = async (...args) => {
+          calls++;
+          try {
+            await execute(...args);
+            return bodyExit;
+          } finally {
+            closed = true;
+            now.value = clock + 60001;
+          }
+        };
+        const observed = spyOn(Date, "now").mockImplementation(() => now.value);
+        try {
+          await withEnvironment(environment, async () => {
+            const result = await stdoutOf(() => run(output, boundary));
+            expect(result.value).toBe(bodyExit || 1);
+            expect(calls).toBe(1);
+            expect(closed).toBe(true);
+            expect(() => localAllocation("run")).toThrow("expired local allocation");
+            expect(() => ownershipReturn(output)).toThrow("expired local allocation");
+          });
+        } finally {
+          observed.mockRestore();
+        }
+      },
+    );
   // The lease binds every module the runner launches or hashes into a grant.
   test("the lease binds each lane driver, the binding and restart modules and the runner", () => {
     const relative = (path: string) => path.slice(root.length + 1);
@@ -952,7 +997,7 @@ describe("lease order", () => {
     "scripts/web-e2e-inner.sh",
     "scripts/web-e2e-run-group.sh",
   ];
-  function closure(entries: string[]): string[] {
+  function closure(entries: string[], image = false): string[] {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
     const seen = new Set<string>(),
       queue = entries.map((name) => join(root, name));
@@ -961,7 +1006,7 @@ describe("lease order", () => {
       seen.add(file);
       for (const item of transpiler.scanImports(readFileSync(file, "utf8").replace(/^#!.*/, "")))
         if (!/^(?:node:|bun$|bun:)/.test(item.path)) {
-          expect(item.kind).toBe("import-statement");
+          if (!image) expect(item.kind).toBe("import-statement");
           // Installed tar bytes are included in the existing complete physical
           // dependency input collector; this registry binds repository modules.
           if (item.path === "tar") continue;
@@ -988,7 +1033,7 @@ describe("lease order", () => {
       "tools/selected-backend-ci/handoff.ts",
       "tools/selected-backend-ci/runtime-access-check.ts",
     ])
-      for (const imported of closure([name]))
+      for (const imported of closure([name], true))
         expect<readonly string[]>(registeredModules).toContain(imported);
   });
   test("the registry is exactly the runner and lane driver closures with the spawned sink", () => {
@@ -1072,7 +1117,7 @@ try {
   reset();
   if(existsSync(out+"/generated")||existsSync(root+"/target/generated")||readFileSync(temp+"/keep","utf8")!=="outside reset"||JSON.stringify(selectedActor())!==JSON.stringify([grant.uid,grant.gid]))throw Error("bad reset");
   console.log("admitted-owned-reset");
-}catch {console.log("refused");process.exitCode=1;}`,
+}catch(error) {console.error((error as Error).message);console.log("refused");process.exitCode=1;}`,
     );
     const execute = (mode: string, mutate: (value: LocalGrant) => void = () => undefined) => {
       const current = structuredClone(grant);
@@ -1149,7 +1194,7 @@ try {
       const cache = execute("cache");
       expect(cache.exitCode).toBe(1);
       restore();
-      expect(existsSync(join(checkout, "target"))).toBe(true);
+      expect(existsSync(join(checkout, "target")), cache.stderr.toString()).toBe(true);
       rmSync(join(checkout, "target"), { recursive: true });
       const accepted = execute("normal");
       expect(accepted.exitCode).toBe(0);

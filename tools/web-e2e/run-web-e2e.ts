@@ -319,12 +319,11 @@ async function selectedContainerEntry(root: string, argv: string[]): Promise<num
     checkedOutput(["docker", "info", "--format", "{{.OSType}} {{.Architecture}}"], root),
     architecture,
   );
-  if (!local)
-    await stage(
-      "selected-image-fetch",
-      ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
-      root,
-    );
+  await stage(
+    "selected-image-fetch",
+    ["docker", "pull", "--platform", "linux/amd64", CI_WEB_IMAGE],
+    root,
+  );
   const sdk = containerImage(CI_WEB_IMAGE, CI_WEB_SDK_SHA256.x86_64, false, process.env);
   const imageSource = containerImageSource(
     checkedOutput(

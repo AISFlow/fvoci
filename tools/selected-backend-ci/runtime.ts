@@ -718,6 +718,7 @@ export async function run(
   process.on("SIGINT", interrupt);
   try {
     for (const [lane, flow] of runs) {
+      if (local) localAllocation("run");
       const runRoot = join(runtime, "root-current-" + lane + "-" + randomBytes(6).toString("hex")),
         driver = laneDriver(lane);
       const manifest: Record<string, unknown> = {

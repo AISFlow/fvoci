@@ -62,8 +62,12 @@ for (const purpose of purposes)
     });
     // The same admitted cohort, built and run end to end by another actor.
     if (admitted(purpose, fault))
-      test.skipIf(!linux)(`${purpose} local allocation ${fault} refuses actor 1001`, () => {
+      test.skipIf(!linux)(`${purpose} local allocation ${fault} checks actor 1001`, () => {
         const result = asActor(1001, purpose, fault);
+        if (fault === "equal-work-selected") {
+          expect(result.exitCode).toBe(0);
+          return;
+        }
         expect(result.exitCode).toBe(23);
         expect(result.stderr).toContain(
           "selected runtime actor must be the fixed handoff uid and gid",

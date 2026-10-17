@@ -769,7 +769,8 @@ producer/consumer packet as CI:
 FVOCI_E2E_PENDING=1 scripts/run-web-e2e.sh --with-selected-backends
 ```
 
-It requires an existing ROOT-issued `orca-local` allocation for this exact
+It pulls the same immutable published image as CI and requires an existing
+ROOT-issued `orca-local` allocation for this exact
 source/tree, worktree, task, dispatch, terminal, registered modules, stage
 commands, actor and expiry. The grant file and its SHA-256 are passed through
 the existing allocation environment; the runner never creates authority or
