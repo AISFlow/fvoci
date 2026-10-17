@@ -862,8 +862,8 @@ for (const path of ["target", "crates/collab-engine/target"])
   test(`negative: Web build writers collide on the ${path} cache key`, () => {
     const workflow = load("web");
     const rootSave = oneStep(
-      job(workflow, "collaboration-build"),
-      (step) => (step.uses ?? "").startsWith("actions/cache/save@") && step.with?.path === "target",
+      job(workflow, "web-checks"),
+      (step) => (step.uses ?? "").startsWith("actions/cache@") && step.with?.path === "target",
     );
     const ordinary = path === "target" ? rootSave : structuredClone(rootSave);
     const selected = structuredClone(ordinary);
