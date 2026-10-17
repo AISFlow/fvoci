@@ -1484,6 +1484,9 @@ test("independent local actor allocation keeps the caller grant private and clos
   for (const name of registeredModules) {
     mkdirSync(dirname(join(checkout, name)), { recursive: true });
     copyFileSync(join(root, name), join(checkout, name));
+    // A fresh Git checkout uses canonical executable/non-executable modes,
+    // rather than private modes left on files in an author's old worktree.
+    chmodSync(join(checkout, name), statSync(join(root, name)).mode & 0o111 ? 0o755 : 0o644);
   }
   const git = (...args: string[]) => {
     const result = spawnSync(
@@ -1573,7 +1576,7 @@ try {
  rmSync(${JSON.stringify(join(output, "runtime-access-stage.json"))});
  assert.throws(()=>localAllocation("owner-return"));
  console.log("paired-private-expired-closure");
-} catch(error) { const line=/admission\\.ts:([0-9]+):/.exec((error as Error).stack??"")?.[1]??"0"; const git=Bun.spawnSync(["git","-c","safe.directory="+grant.worktree,"diff","--quiet","HEAD"],{cwd:grant.worktree}); const detail=git.stderr.toString(); console.error("fixture_check="+check+" admission_line="+line+" git_exit="+git.exitCode+" index_lock="+Number(detail.includes("index.lock"))+" permission="+Number(detail.includes("Permission denied"))+" index="+Number(detail.includes("index"))+" objects="+Number(detail.includes("objects"))+" config="+Number(detail.includes("config"))+" attributes="+Number(detail.includes("attributes"))+" ignore="+Number(detail.includes("ignore"))); console.log("refused"); process.exitCode=1; }`,
+} catch { console.error("fixture_check="+check); console.log("refused"); process.exitCode=1; }`,
   );
   const environment = {
     PATH: "/usr/bin:/bin",
