@@ -1,6 +1,6 @@
 {
   "private": true,
-  "packageManager": "bun@1.4.3",
+  "packageManager": "bun@1.4.4",
   "workspaces": [
     "apps/web",
     "packages/editor",
@@ -69,7 +69,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@types/bun": "1.4.2",
+    "@types/bun": "1.4.4",
     "@typescript-eslint/parser": "8.71.1",
     "eslint": "10.12.0",
     "eslint-config-prettier": "10.1.8",
