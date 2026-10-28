@@ -16,7 +16,7 @@
   "dependencies": {
     "@fvoci/editor": "workspace:*",
     "@fvoci/i18n": "workspace:*",
-    "@hocuspocus/provider": "4.7.0",
+    "@hocuspocus/provider": "4.8.0",
     "@nuxt/ui": "4.11.3",
     "@office-kit/pptx": "0.24.1",
     "@office-kit/pptx-preview": "0.15.0",
