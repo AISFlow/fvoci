@@ -48,7 +48,7 @@
         "zod": "4.6.6",
       },
       "devDependencies": {
-        "@iconify-json/lucide": "1.2.142",
+        "@iconify-json/lucide": "1.2.149",
         "@playwright/test": "1.64.0",
         "@types/node": "^26.6.5",
         "@vitejs/plugin-vue": "6.0.10",
@@ -132,6 +132,7 @@
       },
     },
   },
+  "trustedDependencies": [],
   "patchedDependencies": {
     "@tiptap/y-tiptap@3.0.9": "patches/@tiptap%2Fy-tiptap@3.0.9.patch",
     "@volar/typescript@2.4.28": "patches/@volar%2Ftypescript@2.4.28.patch",
@@ -310,7 +311,7 @@
 
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
-    "@iconify-json/lucide": ["@iconify-json/lucide@1.2.142", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-vEGX5X52/l77jRMcmxXk3PiEebldDUs8WFdM8X3Evq1S9p5F+o0VZhx8sqaQsmFEB9Ukp5ND5Q/0g2kQ/LF+rQ=="],
+    "@iconify-json/lucide": ["@iconify-json/lucide@1.2.149", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-5NG9YdbtRS03hG1A+EIE6nLhhdAYsf0mKu1ZRi6kLMlCG8DxmDsRM6DAhwlNMLiSiQKFbHpKTJ2VddZdwUkUyw=="],
 
     "@iconify/collections": ["@iconify/collections@1.0.743", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-9r/ASVTd1A2yWXhBLZxKKo30L5hECLkE0dlJdw0n+L1xvPFXI/2P9EdkCu0QMuuUNENi6jYTjlhgNZEpqkfy1Q=="],
 
