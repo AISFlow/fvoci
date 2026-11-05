@@ -126,7 +126,7 @@ docx-rs = { version = "=0.4.22", default-features = false }
 # Untrusted native archives are read with it, docx-rs's stored package is
 # re-deflated with it, and PPTX is written with it (tests read with it too).
 # docx-rs 0.4.22 still links its own zip 8.6. MIT.
-zip = { version = "=9.0.2", default-features = false, features = ["deflate"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
 # Tiptap -> PDF (source @react-pdf/renderer), written only in the rlimited
 # `--internal-markdown` child (`tiptap-to-pdf`): krilla writes the PDF and
 # subsets the embedded Noto fonts, rustybuzz shapes each run, and
