@@ -8,8 +8,8 @@
     "probe": "node probe.mjs"
   },
   "dependencies": {
-    "@hocuspocus/common": "4.7.0",
-    "@hocuspocus/provider": "4.7.0",
+    "@hocuspocus/common": "4.8.0",
+    "@hocuspocus/provider": "4.8.0",
     "@tiptap/core": "3.31.4",
     "@tiptap/pm": "3.31.4",
     "@tiptap/starter-kit": "3.31.4",
