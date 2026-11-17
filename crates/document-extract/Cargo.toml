@@ -42,4 +42,4 @@ rhwp = { path = ".vendor-src/rhwp", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-zip = { version = "8.5", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
