@@ -23,7 +23,7 @@ sha3 = "=0.12.0"
 # catalog; the encoding feature is off because workflow files are UTF-8.
 tar = { version = "=0.4.46", default-features = false }
 yaml-rust2 = { version = "=0.13.0", default-features = false }
-zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # SHA3-256 of the 9 MiB amalgamation and DEFLATE decoding stay fast in the
 # debug build that the scripts/prepare-sqlite-*.sh entry points use.

@@ -21,4 +21,4 @@ serde_json = "1"
 # than its patched source. small-client keeps the 32-bit updateV1 client ids that
 # 0.23.5 read and Yjs 13.6.33 writes; state-vector ids above u32 now truncate.
 yrs = { version = "=0.28.0", default-features = false, features = ["small-client"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
